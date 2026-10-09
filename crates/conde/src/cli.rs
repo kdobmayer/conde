@@ -188,8 +188,9 @@ enum Cmd {
     },
     /// Load a kond board into the conde store: `conde import --from <kond data dir>`
     /// (e.g. ~/.local/share/kond or a snapshot of it). Idempotent; --dry-run only reports.
-    /// Re-runs are supported only before cutover writes: a channel that already holds
-    /// conde messages is refused, and a membership removed in conde is re-added by a re-run.
+    /// Re-runs are supported only before cutover writes: a channel the import would add posts
+    /// to that already holds conde messages is refused, and a membership removed in conde is
+    /// re-added by a re-run. Validation compares the sha256 of every body and attachment.
     /// The board is DATABASE_URL (Postgres) when set, else the local SQLite file. Where USER
     /// is not set (a container job), --owner and --host are both required.
     Import {
@@ -203,6 +204,9 @@ enum Cmd {
         /// machine's; required without USER).
         #[arg(long)]
         host: Option<String>,
+        /// The snapshot's file count; a directory with another count is refused before reading.
+        #[arg(long, value_name = "N")]
+        expect_files: Option<usize>,
     },
     /// MCP server for this session's agent on stdin/stdout (Claude Code and Codex spawn it).
     Mcp,
@@ -351,10 +355,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         _ => {}
     }
-    if let Cmd::Import { dry_run, owner, host } = &cli.cmd {
+    if let Cmd::Import { dry_run, owner, host, expect_files } = &cli.cmd {
         // `--from` is the global flag here: the kond data directory to import.
         let dir = cli.from.as_deref().ok_or_else(|| anyhow!("conde import needs --from <kond data dir>"))?;
-        return crate::import::main(Path::new(dir), *dry_run, owner.as_deref(), host.as_deref());
+        return crate::import::main(Path::new(dir), *dry_run, owner.as_deref(), host.as_deref(), *expect_files);
     }
     let mut session = Session {
         client: Client::connect(&paths::socket_path())?,

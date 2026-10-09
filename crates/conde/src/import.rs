@@ -26,7 +26,6 @@ use crate::store::{Channel, ImportState, ImportedAgent, Mode, NewMessage, Store,
 use crate::util::{iso_from_ms, is_ulid, new_ulid, now_ms, sha256_hex};
 
 const KNOWN_HEADERS: [&str; 7] = ["From", "To", "Date", "In-Reply-To", "Attachment", "Reaction", "Reaction-Remove"];
-const BODY_SAMPLE: usize = 50;
 
 pub struct Options {
     /// The kond data root (`registry/`, `board/`, `state/`, `profiles/`).
@@ -42,6 +41,8 @@ pub struct Options {
     pub live_claude: Option<HashSet<String>>,
     /// Progress lines on stdout (scan and write, every 1000 messages).
     pub progress: bool,
+    /// The snapshot's file count: a directory with another count is refused before anything.
+    pub expect_files: Option<usize>,
 }
 
 const PROGRESS_EVERY: usize = 1000;
@@ -848,38 +849,48 @@ fn validate(store: &dyn Store, plan: &Plan, opts: &Options, source: Counts) -> a
         v.lines.push("counts: every source row of every table is in conde".to_string());
     }
 
-    let ids: Vec<&String> = plan.src.messages.keys().collect();
-    let step = ids.len().div_ceil(BODY_SAMPLE).max(1);
-    let (mut sampled, mut equal) = (0, 0);
-    for id in ids.iter().step_by(step) {
-        let m = &plan.src.messages[*id];
-        sampled += 1;
+    // Every body and every attachment by sha256: the source file re-read now against the stored bytes.
+    let mut body_hashes = Vec::with_capacity(plan.src.messages.len());
+    let (mut equal, mut checked, mut matched) = (0, 0, 0);
+    for (id, m) in &plan.src.messages {
         let on_disk = fs::read(&m.path).ok().and_then(|raw| String::from_utf8(raw).ok()).map(|raw| MailMessage::parse(&raw).body);
-        let stored = conn.message_by_id(id)?.map(|m| m.text);
-        match (on_disk, stored) {
-            (Some(a), Some(b)) if a.as_bytes() == b.as_bytes() => equal += 1,
+        let stored = conn.message_by_id(id)?.map(|m| sha256_hex(m.text.as_bytes()));
+        match (on_disk.map(|b| sha256_hex(b.as_bytes())), stored) {
+            (Some(a), Some(b)) if a == b => {
+                equal += 1;
+                body_hashes.push((id.clone(), b));
+            }
             (None, _) => v.problems.push(format!("body {id}: source file unreadable at validation")),
             (_, None) => v.problems.push(format!("body {id}: not in conde")),
-            _ => v.problems.push(format!("body {id}: differs from {}", m.path.display())),
+            _ => v.problems.push(format!("body {id}: sha256 differs from {}", m.path.display())),
         }
-    }
-    v.lines.push(format!("bodies: {sampled} sampled, {equal} byte-equal to the source file"));
-
-    let (mut checked, mut sized) = (0, 0);
-    for (id, m) in &plan.src.messages {
+        let stored_atts = conn.attachment_list(id)?;
         for a in &m.attachments {
             let Ok((rel, _)) = &a.file else { continue };
             checked += 1;
-            let on_disk = attachment_size(&opts.from, rel).ok().map(|n| n as i64);
-            let stored = conn.attachment_sizes(id, &a.filename)?;
-            match (on_disk, stored) {
-                (Some(n), Some((size, len))) if size == n && len == n => sized += 1,
-                (_, None) => v.problems.push(format!("attachment {id}/{}: not in conde", a.filename)),
-                _ => v.problems.push(format!("attachment {id}/{}: size differs from {}", a.filename, rel.display())),
+            let Ok(want) = read_attachment(&opts.from, rel).map(|b| sha256_hex(&b)) else {
+                v.problems.push(format!("attachment {id}/{}: source file unreadable at validation", a.filename));
+                continue;
+            };
+            let named: Vec<_> = stored_atts.iter().filter(|s| s.filename == a.filename).collect();
+            if named.is_empty() {
+                v.problems.push(format!("attachment {id}/{}: not in conde", a.filename));
+                continue;
+            }
+            let mut equal = false;
+            for meta in named {
+                equal |= conn.attachment(&meta.id)?.is_some_and(|s| sha256_hex(&s.bytes) == want);
+            }
+            if equal {
+                matched += 1;
+            } else {
+                v.problems.push(format!("attachment {id}/{}: sha256 differs from {}", a.filename, rel.display()));
             }
         }
     }
-    v.lines.push(format!("attachments: {checked} size-checked, {sized} match the source file"));
+    v.lines.push(format!("bodies: {equal} of {} sha256-equal to the source file", plan.src.messages.len()));
+    v.lines.push(format!("bodies digest: {}", rows_digest(body_hashes.iter().map(|(i, h)| (i.as_str(), h.as_str())))));
+    v.lines.push(format!("attachments: {matched} of {checked} sha256-equal to the source file"));
 
     let uid = ex.user_id.unwrap_or(-1);
     let (mut cursors, mut cursors_ok) = (0, 0);
@@ -922,6 +933,12 @@ pub fn run(opts: &Options) -> anyhow::Result<Report> {
         .with_context(|| format!("invalid host id '{}'", opts.host))?;
     if !opts.from.join("board").is_dir() && !opts.from.join("registry").is_dir() {
         bail!("{} is not a kond data directory (no board/ or registry/)", opts.from.display());
+    }
+    if let Some(want) = opts.expect_files {
+        let have = count_files(&opts.from)?;
+        if have != want {
+            bail!("{} holds {have} files, the snapshot {want}: not the snapshot; nothing read", opts.from.display());
+        }
     }
 
     let mut scanner =
@@ -972,20 +989,97 @@ pub fn run(opts: &Options) -> anyhow::Result<Report> {
     Ok(report)
 }
 
-/// Channels the import would merge into that already hold messages not from
+/// Channels the import would add posts to that already hold messages not from
 /// this source. Imported history gets later commit sequences than those
-/// posts, so converting a kond cursor would mark them read: refused.
+/// posts, so converting a kond cursor would mark them read: refused. A channel
+/// whose source posts are all present already gains no sequence and is not
+/// refused (a re-run after later posts, such as the history copy of the v2 switch).
 fn channels_with_native_posts(tx: &dyn Tx, plan: &Plan) -> StoreResult<Vec<String>> {
     let mut out = Vec::new();
-    for name in plan.chans.values() {
+    for (kond, name) in &plan.chans {
         let Some(channel_id) = tx.channel_id_by_name(name)? else { continue };
         let ids = tx.channel_message_ids(&channel_id)?;
+        let present: HashSet<&String> = ids.iter().collect();
+        let to = To::Channel(kond.clone());
+        if !plan.src.messages.iter().any(|(id, m)| m.to == to && !present.contains(id)) {
+            continue;
+        }
         let native = ids.iter().filter(|id| !plan.src.messages.contains_key(*id)).count();
         if native > 0 {
             out.push(format!(
                 "#{name}: holds {native} conde message(s) not from this source; importing would mark them read"
             ));
         }
+    }
+    Ok(out)
+}
+
+/// Regular files under `root`, no symlink followed (`find root -type f | wc -l`).
+pub fn count_files(root: &Path) -> anyhow::Result<usize> {
+    let mut n = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let e = e?;
+            let t = e.file_type()?;
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if t.is_file() {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// sha256 over `id sha256` lines sorted by id and joined by '\n': one value for a set of rows,
+/// comparable between the importer's report and the history manifest.
+pub fn rows_digest<'a>(rows: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let mut lines: Vec<String> = rows.into_iter().map(|(id, h)| format!("{id} {h}")).collect();
+    lines.sort();
+    sha256_hex(lines.join("\n").as_bytes())
+}
+
+/// A kond snapshot as the importer reads it: the messages it imports with the sha256 of each
+/// body and attachment, and the conde names of its agents and channels.
+#[derive(Debug, Default)]
+pub struct Snapshot {
+    pub messages: BTreeMap<String, SnapshotMessage>,
+    pub agents: BTreeSet<String>,
+    pub channels: BTreeSet<String>,
+    pub parse_errors: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct SnapshotMessage {
+    pub body_sha256: String,
+    /// (filename, sha256) of each attachment the import stores.
+    pub attachments: Vec<(String, String)>,
+}
+
+pub fn snapshot(root: &Path) -> anyhow::Result<Snapshot> {
+    if !root.join("board").is_dir() && !root.join("registry").is_dir() {
+        bail!("{} is not a kond data directory (no board/ or registry/)", root.display());
+    }
+    let mut scanner = Scanner { root, progress: false, files: 0, src: Source::default(), symlinks: HashSet::new() };
+    scanner.scan();
+    let plan = plan(scanner.src, "snapshot", &iso_from_ms(now_ms()));
+    let mut out = Snapshot {
+        agents: plan.names.values().cloned().collect(),
+        channels: plan.chans.values().cloned().collect(),
+        parse_errors: plan.src.parse_errors.clone(),
+        ..Snapshot::default()
+    };
+    for (id, m) in &plan.src.messages {
+        let attachments = m
+            .attachments
+            .iter()
+            .filter_map(|a| {
+                let (rel, _) = a.file.as_ref().ok()?;
+                Some((a.filename.clone(), sha256_hex(&read_attachment(root, rel).ok()?)))
+            })
+            .collect();
+        out.messages.insert(id.clone(), SnapshotMessage { body_sha256: sha256_hex(m.body.as_bytes()), attachments });
     }
     Ok(out)
 }
@@ -1220,7 +1314,13 @@ fn live_claude_sessions() -> Option<HashSet<String>> {
 
 /// `conde import`: owner and host from the flags (see `owner_and_host`),
 /// Claude liveness from the local sessions registry when there is one.
-pub fn main(from: &Path, dry_run: bool, owner: Option<&str>, host: Option<&str>) -> anyhow::Result<i32> {
+pub fn main(
+    from: &Path,
+    dry_run: bool,
+    owner: Option<&str>,
+    host: Option<&str>,
+    expect_files: Option<usize>,
+) -> anyhow::Result<i32> {
     let (owner, host) = owner_and_host(owner, host, std::env::var("USER").ok().filter(|u| !u.is_empty()))?;
     let data_dir = crate::paths::data_dir();
     let opts = Options {
@@ -1232,6 +1332,7 @@ pub fn main(from: &Path, dry_run: bool, owner: Option<&str>, host: Option<&str>)
         dry_run,
         live_claude: live_claude_sessions(),
         progress: true,
+        expect_files,
     };
     if !dry_run && opts.database_url.is_none() {
         use std::os::unix::fs::DirBuilderExt;

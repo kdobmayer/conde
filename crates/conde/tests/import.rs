@@ -155,6 +155,7 @@ fn options(from: &Path, db: &Path, dry_run: bool) -> Options {
         dry_run,
         live_claude: Some(HashSet::from([LIVE.to_string()])),
         progress: false,
+        expect_files: None,
     }
 }
 
@@ -218,8 +219,8 @@ fn imports_every_record_type_and_reruns_as_a_no_op() {
     assert_clean(&report);
     assert_eq!(report.added, EXPECTED, "{report}");
     let text = report.to_string();
-    assert!(text.contains("bodies: 5 sampled, 5 byte-equal"), "{text}");
-    assert!(text.contains("attachments: 1 size-checked, 1 match"), "{text}");
+    assert!(text.contains("bodies: 5 of 5 sha256-equal to the source file"), "{text}");
+    assert!(text.contains("attachments: 1 of 1 sha256-equal to the source file"), "{text}");
     assert!(text.contains("cursors: 3 checked, 3 at or past"), "{text}");
 
     let conn = Connection::open(&db).unwrap();
@@ -847,7 +848,7 @@ fn container_job_imports_a_read_only_snapshot_without_a_login_user() {
 
     let (ok, out, err) = job(&explicit);
     assert!(ok, "{out}{err}");
-    assert!(out.contains("result: OK") && out.contains("bodies: 5 sampled, 5 byte-equal"), "{out}");
+    assert!(out.contains("result: OK") && out.contains("bodies: 5 of 5 sha256-equal"), "{out}");
     assert!(out.contains("import: committed; validating"), "{out}");
     assert_eq!(fs::read_dir(&cwd).unwrap().count(), 0, "the import wrote into the working directory");
     assert_eq!(fingerprint(&kond), before, "the snapshot is only read");
@@ -884,4 +885,81 @@ fn import_prints_progress_every_1000_messages() {
         assert!(stdout.contains(line), "missing '{line}' in:\n{stdout}");
     }
     assert!(stdout.find("import: committed").unwrap() < stdout.find("result: OK").unwrap());
+}
+
+/// H2 validation is by sha256 of every body and attachment: a stored byte changed after the
+/// import, at the same size, is found by the re-run's validation.
+#[test]
+fn validation_compares_every_body_and_attachment_by_sha256() {
+    let tmp = TempDir::new("sha");
+    let kond = tmp.0.join("kond");
+    build_fixture(&kond);
+    let db = tmp.0.join("conde.db");
+    let first = run(&options(&kond, &db, false)).unwrap();
+    assert_clean(&first);
+    let digest = first.to_string().lines().find(|l| l.contains("bodies digest: ")).map(str::to_string);
+    assert!(digest.is_some(), "{first}");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE messages SET text = 'hellO' || substr(text, 6) WHERE message_id = ?1", [id(1)]).unwrap();
+    let mut flipped = BLOB.to_vec();
+    flipped[0] ^= 1;
+    conn.execute("UPDATE attachments SET bytes = ?1 WHERE message_id = ?2", rusqlite::params![flipped, id(1)]).unwrap();
+    drop(conn);
+    let again = run(&options(&kond, &db, false)).unwrap();
+    assert!(!again.ok(), "{again}");
+    let problems = &again.validation.as_ref().unwrap().problems;
+    assert!(problems.iter().any(|p| p.starts_with(&format!("body {}: sha256 differs", id(1)))), "{problems:?}");
+    assert!(problems.iter().any(|p| p.starts_with(&format!("attachment {}/blob.bin: sha256 differs", id(1)))), "{problems:?}");
+    assert!(again.to_string().contains("bodies: 4 of 5 sha256-equal"), "{again}");
+}
+
+fn file_count(root: &Path) -> usize {
+    fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .map(|e| if e.file_type().unwrap().is_dir() { file_count(&e.path()) } else { 1 })
+        .sum()
+}
+
+#[test]
+fn a_directory_with_another_file_count_than_the_snapshot_is_refused() {
+    let tmp = TempDir::new("count");
+    let kond = tmp.0.join("kond");
+    build_fixture(&kond);
+    let db = tmp.0.join("conde.db");
+    let n = file_count(&kond);
+    let err = run(&Options { expect_files: Some(n + 1), ..options(&kond, &db, false) }).unwrap_err().to_string();
+    assert!(err.contains(&format!("holds {n} files, the snapshot {}", n + 1)), "{err}");
+    assert!(!db.exists(), "nothing read, nothing written");
+    assert_clean(&run(&Options { expect_files: Some(n), ..options(&kond, &db, false) }).unwrap());
+}
+
+/// A channel whose kond posts are all on the board already is not refused for later posts:
+/// the re-run adds no post there, so no cursor can pass the later ones.
+#[test]
+fn a_rerun_after_later_posts_in_an_imported_channel_is_not_refused() {
+    let tmp = TempDir::new("later-posts");
+    let kond = tmp.0.join("kond");
+    build_fixture(&kond);
+    let db = tmp.0.join("conde.db");
+    assert_clean(&run(&options(&kond, &db, false)).unwrap());
+    let (d, p) = native(&db);
+    let posted = call(&d, &p, &format!("claude:{LIVE}"), "message.send", json!({"to": {"channel": "#team"}, "text": "later"}));
+    let unread = |d: &Dispatcher| {
+        call(d, &p, "human:tester", "inbox.list", json!({}))["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["message_id"] == posted["message_id"])
+    };
+    assert!(unread(&d));
+    drop(d);
+    let before = table_counts(&db);
+    let report = run(&options(&kond, &db, false)).unwrap();
+    assert_clean(&report);
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    assert_eq!(report.added, Counts::default());
+    assert_eq!(table_counts(&db), before);
+    let (d, _) = native(&db);
+    assert!(unread(&d), "the later post stays unread");
 }

@@ -1,6 +1,8 @@
-//! Cloud mode end to end on 127.0.0.1: an in-process `conde` server over a
-//! temp board, and bridges as real `conde daemon --v1-bridge` processes (the v1 bridge), each
-//! with its own host id, enrolled through `conde enroll`.
+//! The shared board end to end on 127.0.0.1: an in-process `conde` server over a temp board,
+//! and hosts as real `conde daemon` processes, each with its own host id, enrolled through
+//! `conde enroll`, switched to v2 through `conde boards --migrate`, its agents published by
+//! `conde publish`. One host stays on v1 (`conde daemon --v1-bridge`) to show that v1 and
+//! v2 hosts keep exchanging messages.
 
 mod support;
 #[path = "pg/mod.rs"]
@@ -69,17 +71,45 @@ impl Cloud {
         key
     }
 
-    /// Enroll `h` and start its bridge daemon.
-    fn bridge(&self, h: &mut Host, log: &str, sock: &std::path::Path, extra: &[&str]) -> u32 {
-        let url = self.url();
-        let mut args = vec!["--v1-bridge", url.as_str()];
-        args.extend_from_slice(extra);
-        h.daemon(log, sock, &args)
+    /// `conde enroll` with a fresh key: `boards/shared.json`, pinned to the account.
+    fn enroll(&self, h: &Host) {
+        let key = self.key(&h.user, &h.host);
+        let out = h.conde(None, &[], &["enroll", "--server", &self.url(), "--host", &h.host, "--key-stdin"], Some(&key));
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(&key), "the key is never echoed");
+        assert_eq!(conde::credentials::mode(&h.root.join("config/conde/boards/shared.json")), Some(0o600));
     }
 
-    /// The v1 credential the v1 cloud daemon (`daemon --server`) reads; `conde enroll` writes
-    /// v2 board files (`boards/<alias>.json`, tests/cli_wiring.rs).
-    fn enroll(&self, h: &Host) {
+    /// Start `h`'s daemon on `sock` and switch the host to v2 (nothing bound yet, so nothing
+    /// to review); returns the daemon's pid once its board connection is up. The switch and
+    /// publication are the human's: a test running under an agent harness cannot derive the
+    /// human from its own process tree, so these go to the daemon socket as the human, as
+    /// `conde setup` and `conde publish` send them.
+    fn join(&self, h: &mut Host, log: &str, sock: &std::path::Path, extra: &[&str]) -> u32 {
+        let pid = h.daemon(log, sock, extra);
+        let m = human_call(h, sock, "host.migrate_v2", json!({"publish": []}));
+        assert!(m["bindings"].is_array(), "{m}\n{}", h.log(log));
+        wait_for("the shared board connected", || {
+            let d = h.conde(None, &[("CONDE_SOCK", sock.to_str().unwrap())], &["doctor"], None);
+            String::from_utf8_lossy(&d.stdout).contains("ok      shared: connected").then_some(())
+        });
+        pid
+    }
+
+    /// Publish `name` on the shared board (the human).
+    fn publish(&self, h: &Host, sock: &std::path::Path, name: &str) {
+        let r = human_call(h, sock, "mailbox.publish", json!({"agent": name, "name": name}));
+        assert_eq!((r["state"].as_str(), r["name"].as_str()), (Some("published"), Some(name)), "{r}");
+    }
+
+    /// The v1 bridge of a host that is not migrated (`conde daemon --v1-bridge`).
+    fn bridge_v1(&self, h: &mut Host, log: &str, sock: &std::path::Path) -> u32 {
+        let url = self.url();
+        h.daemon(log, sock, &["--v1-bridge", url.as_str()])
+    }
+
+    /// The v1 credential the v1 bridge reads.
+    fn enroll_v1(&self, h: &Host) {
         let key = self.key(&h.user, &h.host);
         let path = h.root.join("config/conde/credentials");
         let creds = conde::credentials::Credentials { server: self.url(), host_id: h.host.clone(), key };
@@ -100,12 +130,32 @@ impl Cloud {
     }
 }
 
+/// One request to `h`'s daemon as its human, on the shared board.
+fn human_call(h: &Host, sock: &std::path::Path, op: &str, body: serde_json::Value) -> serde_json::Value {
+    let mut req = conde::protocol::Request::new(conde::util::new_ulid(), op, body);
+    req.actor = Some(format!("human:{}", h.user));
+    req.idempotency_key = Some(conde::util::new_ulid());
+    req.board = Some("shared".into());
+    let resp = conde::client::Client::connect(sock).unwrap().call(&req).unwrap();
+    assert!(resp.ok, "{op}: {:?}", resp.error);
+    resp.result.unwrap()
+}
+
 fn test_config() -> ServerConfig {
     ServerConfig { poll_interval: Duration::from_millis(100), ..ServerConfig::default() }
 }
 
 fn queued_id(out: &str) -> String {
     out.strip_prefix("queued ").and_then(|s| s.split(' ').next()).expect(out).to_string()
+}
+
+
+/// The delivery state the sender's `conde sent` shows for `id`, once it is `state`.
+fn wait_sent(h: &Host, harness: &str, env: &[(&str, &str)], id: &str, state: &str) -> String {
+    wait_for(&format!("delivery {state} of {id}"), || {
+        let out = h.ok(Some(harness), env, &["sent", "--board", "shared"]);
+        out.lines().find(|l| l.contains(id) && l.contains(&format!("delivery: {state}"))).map(str::to_string)
+    })
 }
 
 #[test]
@@ -117,131 +167,143 @@ fn two_hosts_exchange_a_dm_through_the_server() {
     cloud.enroll(&a);
     cloud.enroll(&b);
     let (sa, sb) = (a.sock(), b.sock());
-    cloud.bridge(&mut a, "bridge.log", &sa, &[]);
-    cloud.bridge(&mut b, "bridge.log", &sb, &[]);
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    cloud.join(&mut b, "daemon.log", &sb, &[]);
 
-    // registration, identity and names are the server's, host stamped from the key
-    assert_eq!(a.ok(Some("codex"), ALICE, &["register", "alice"]), "registered ann/alice on the local board (codex:t-alice@host-a)\n");
-    assert_eq!(b.ok(Some("claude"), CAROL, &["register", "carol"]), "registered ben/carol on the local board (claude:s-carol@host-b)\n");
+    // names are registered on the local board; publication puts them on the shared one
+    let out = a.ok(Some("codex"), ALICE, &["register", "alice"]);
+    assert!(out.starts_with("registered ann/alice on the local board (codex:t-alice@host-a)"), "{out}");
+    b.ok(Some("claude"), CAROL, &["register", "carol"]);
     let out = b.conde(Some("claude"), CAROL, &["register", "ann/alice"], None);
     assert!(String::from_utf8_lossy(&out.stderr).contains("not in your namespace"), "{out:?}");
+    let out = a.conde(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "too early"], None);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("alice is not published on shared"), "{out:?}");
+    cloud.publish(&a, &sa, "alice");
+    cloud.publish(&b, &sb, "carol");
+    // after enrollment and publication, the server binds mailboxes only, never a session
+    let bound = cloud.d.with_conn(|tx| tx.agents_on_host("host-b")).unwrap();
+    assert!(!format!("{bound:?}").contains("s-carol"), "{bound:?}");
 
     carol.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "ben/carol", "hello across hosts"]));
+    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "hello across hosts"]));
+    assert!(id.starts_with("shared:"), "{id}");
     let f = carol.wait_frames(&id, 1);
-    assert!(f[0].text.contains(&format!("conde: new message {id} from ann/alice")), "{}", f[0].text);
-    assert!(!f[0].raw.contains("from-mode"));
-    a.wait_delivery("codex", ALICE, &id, "delivered");
+    assert!(
+        f[0].text.contains(&format!("\nconde [shared]: new message {id} from ann/alice. Read it with: conde read {id}\n")),
+        "{}",
+        f[0].text
+    );
+    wait_sent(&a, "codex", ALICE, &id, "delivered");
     let read = b.ok(Some("claude"), CAROL, &["read", &id]);
     assert!(read.contains("From: ann/alice\nTo: ben/carol\n") && read.ends_with("\nhello across hosts\n"), "{read}");
-    assert!(a.sent_line("codex", ALICE, &id).contains(&format!("{id}  ben/carol  read 20")));
 
-    // doctor on a bridge host: the server's checks plus the bridge's own
-    // (exit 1: this codex caller has no app-server socket, which doctor flags)
-    let out = a.conde(Some("codex"), ALICE, &["doctor"], None);
-    let doctor = String::from_utf8_lossy(&out.stdout).to_string();
-    assert_eq!(out.status.code(), Some(1), "{doctor}");
-    assert!(doctor.contains("ISSUE   codex: no app-server control socket"), "{doctor}");
-    assert!(doctor.contains("ok      bridge: connected to ws://"), "{doctor}");
-    assert!(doctor.contains("credentials: ") && doctor.contains("mode 600"), "{doctor}");
+    // the reply inherits the shared board from the id
+    let reply = queued_id(&b.ok(Some("claude"), CAROL, &["send", "ann/alice", "back", "--reply-to", &id]));
+    assert!(reply.starts_with("shared:"), "{reply}");
+
+    // doctor on a v2 host: the local board, the shared connection, the delivery slots
+    let doctor = String::from_utf8_lossy(&a.conde(Some("codex"), ALICE, &["doctor"], None).stdout).to_string();
+    assert!(doctor.contains("ok      shared: connected to ws://"), "{doctor}");
+    assert!(doctor.contains("credentials: ") && doctor.contains("boards/shared.json mode 600"), "{doctor}");
     assert!(doctor.contains("ok      database: ok"), "{doctor}");
-    // the remote API has no --from override and no bridge ops
-    let out = a.conde(None, &[], &["--from", "alice", "whoami"], None);
-    assert!(!out.status.success());
+    assert!(doctor.contains("delivery shared: "), "{doctor}");
 
-    // a revoked key cannot connect again
+    // a revoked key stops the board connection only; the local board keeps working
     let revoked = cloud.d.with_tx(|c| conde::ops::hosts::revoke(c, Some("host-a"), None, "now")).unwrap();
     assert_eq!(revoked.len(), 1);
-    use conde_remote::Authenticator;
-    let creds = conde::credentials::load(&a.root.join("config/conde/credentials")).unwrap();
-    assert!(conde::cloud::Board::new(cloud.d.clone()).authenticate(&creds.key).is_none());
+    wait_for("the connection stopped", || {
+        let d = String::from_utf8_lossy(&a.conde(None, &[], &["doctor"], None).stdout).to_string();
+        d.contains("shared: stopped: the board rejected this host's credential").then_some(())
+    });
+    a.ok(Some("codex"), ALICE, &["send", "alice", "still local"]);
 }
 
 #[test]
-fn restarted_bridge_fences_the_old_instance_and_resends_once() {
+fn a_restarted_daemon_is_a_new_instance_and_resends_once() {
     let cloud = Cloud::start(test_config());
     let mut a = Host::new("ann", "host-a");
     let mut b = Host::new("ben", "host-b");
     let carol = FakeClaude::start(&b, "s-carol");
     cloud.enroll(&a);
     cloud.enroll(&b);
-    let sa = a.sock();
-    cloud.bridge(&mut a, "bridge.log", &sa, &[]);
-    let old_sock = b.root.join("run/old.sock");
-    let old = cloud.bridge(&mut b, "old.log", &old_sock, &[]);
+    let (sa, sb) = (a.sock(), b.sock());
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    let old = cloud.join(&mut b, "old.log", &sb, &[]);
     a.ok(Some("codex"), ALICE, &["register", "alice"]);
-    b.ok_at(&old_sock, Some("claude"), CAROL, &["register", "carol"]);
+    b.ok(Some("claude"), CAROL, &["register", "carol"]);
+    cloud.publish(&a, &sa, "alice");
+    cloud.publish(&b, &sb, "carol");
 
     // first frame: held at the recipient (mid-flight); the re-sent frame: delivered
     carol.plan(vec![vec![(ms(0), "held", json!({}))], vec![(ms(0), "delivered", json!({}))]]);
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "ben/carol", "survive a restart"]));
-    a.wait_delivery("codex", ALICE, &id, "held");
+    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "survive a restart"]));
+    wait_sent(&a, "codex", ALICE, &id, "held");
 
-    // a new bridge instance for host-b takes over while the old one still runs
-    let new_sock = b.root.join("run/new.sock");
-    let new = cloud.bridge(&mut b, "new.log", &new_sock, &[]);
-    let status = b.wait_exit(old);
-    assert!(!status.success());
-    assert!(b.log("old.log").contains("fenced"), "{}", b.log("old.log"));
-    assert!(!old_sock.exists(), "the fenced daemon removed its socket");
-
+    // the process ends; the next one is a new bridge instance and the hold is re-attempted
+    b.terminate(old);
+    b.daemon("new.log", &sb, &[]);
     let f = carol.wait_frames(&id, 2);
-    assert_ne!(f[0].msg_id, f[1].msg_id);
-    assert!(f[1].from.ends_with(&format!("/cc/{new}.sock")), "re-sent by the new instance: {}", f[1].from);
-    a.wait_delivery("codex", ALICE, &id, "delivered");
+    assert_ne!(f[0].msg_id, f[1].msg_id, "a new token, never the board's attempt id");
+    wait_sent(&a, "codex", ALICE, &id, "delivered");
     std::thread::sleep(ms(1500));
     assert_eq!(carol.frames_for(&id).len(), 2, "re-sent exactly once");
-    let attempts = cloud.attempts(&id);
+    let attempts = cloud.attempts(id.trim_start_matches("shared:"));
     assert_eq!(attempts.len(), 2, "{attempts:?}");
-    assert_eq!((attempts[0].1.as_str(), attempts[0].2.as_deref()), ("abandoned", Some("bridge instance gone")));
+    assert_eq!(attempts[0].1, "abandoned");
     assert_eq!(attempts[1].1, "delivered");
     assert_ne!(attempts[0].0, attempts[1].0);
 }
 
 #[test]
-fn an_idle_bridge_stays_connected_through_pings() {
+fn a_second_daemon_with_the_hosts_key_fences_only_the_board_connection() {
+    let cloud = Cloud::start(test_config());
+    let mut a = Host::new("ann", "host-a");
+    cloud.enroll(&a);
+    let sa = a.sock();
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    a.ok(Some("codex"), ALICE, &["register", "alice"]);
+    // another daemon of the same host (its own socket and board file) takes the connection over
+    let other_sock = a.root.join("run/other.sock");
+    a.daemon("other.log", &other_sock, &[]);
+    wait_for("the first connection fenced", || {
+        let d = String::from_utf8_lossy(&a.conde(None, &[], &["doctor"], None).stdout).to_string();
+        d.contains("shared: stopped: fenced by a newer bridge").then_some(())
+    });
+    // the first daemon still serves its local board
+    a.ok(Some("codex"), ALICE, &["send", "alice", "local after the fence"]);
+    assert!(a.ok(Some("codex"), ALICE, &["inbox", "--board", "local"]).contains("local after the fence"));
+}
+
+#[test]
+fn an_idle_connection_stays_up_through_pings() {
     let ping = Duration::from_millis(300);
     let cloud = Cloud::start(ServerConfig { ping_interval: ping, max_missed_pongs: 2, ..test_config() });
     let mut a = Host::new("ann", "host-a");
     cloud.enroll(&a);
     let sa = a.sock();
-    // The bridge drops a connection that is silent for 1 s; only pings arrive.
-    cloud.bridge(&mut a, "bridge.log", &sa, &["--idle-timeout", "1"]);
-    let first = a.ok(None, &[], &["doctor"]);
-    assert!(first.contains("bridge: connected"), "{first}");
+    // The board connection drops after 1 s of silence; only pings arrive.
+    cloud.join(&mut a, "daemon.log", &sa, &["--idle-timeout", "1"]);
     // A second daemon on the same socket refuses before it ever says hello.
     let file = std::fs::File::create(a.root.join("second.log")).unwrap();
-    let second = a.env(&mut std::process::Command::new(BIN)).args(["daemon", "--v1-bridge", &cloud.url()]).stderr(file).status();
+    let second = a.env(&mut std::process::Command::new(BIN)).args(["daemon"]).stderr(file).status();
     assert!(!second.unwrap().success());
     assert!(a.log("second.log").contains("another conde daemon is listening"), "{}", a.log("second.log"));
     std::thread::sleep(ping * 7);
     let doctor = a.ok(None, &[], &["doctor"]);
-    assert!(doctor.contains("1 connection(s) since start"), "{doctor}\n{}", a.log("bridge.log"));
-    assert!(!a.log("bridge.log").contains("connection lost"), "{}", a.log("bridge.log"));
+    assert!(doctor.contains("1 connection(s) since start"), "{doctor}\n{}", a.log("daemon.log"));
+    assert!(!a.log("daemon.log").contains("connection lost"), "{}", a.log("daemon.log"));
 }
 
 #[test]
-fn enrollment_is_bound_to_its_server_and_admin_is_human_only() {
+fn admin_is_human_only_and_healthz_answers() {
     let cloud = Cloud::start(test_config());
-    let mut a = Host::new("ann", "host-a");
-    cloud.enroll(&a);
-    // a different server never gets this host's key
-    let file = std::fs::File::create(a.root.join("other.log")).unwrap();
-    let out = a
-        .env(&mut std::process::Command::new(BIN))
-        .args(["daemon", "--v1-bridge", "ws://127.0.0.2:9"])
-        .stderr(file)
-        .status()
-        .unwrap();
-    assert!(!out.success());
-    assert!(a.log("other.log").contains("was enrolled with"), "{}", a.log("other.log"));
+    let a = Host::new("ann", "host-a");
     // an agent's shell cannot mint keys
     let out = a.conde(Some("codex"), ALICE, &["admin", "key", "list", "--data", "/nonexistent"], None);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("human only"));
     // healthz answers from the store
-    let rt = &cloud.rt;
-    let body = rt.block_on(async {
+    let body = cloud.rt.block_on(async {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut s = tokio::net::TcpStream::connect(cloud.addr).await.unwrap();
         s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").await.unwrap();
@@ -250,11 +312,10 @@ fn enrollment_is_bound_to_its_server_and_admin_is_human_only() {
         raw
     });
     assert!(body.starts_with("HTTP/1.1 200"), "{body}");
-    let _ = &mut a;
 }
 
 #[test]
-fn a_session_stop_reported_by_endpoints_abandons_its_hold() {
+fn a_session_that_stops_gives_its_hold_back_to_the_board() {
     let cloud = Cloud::start(test_config());
     cloud.d.set_retry_ms(500);
     let mut a = Host::new("ann", "host-a");
@@ -263,32 +324,64 @@ fn a_session_stop_reported_by_endpoints_abandons_its_hold() {
     cloud.enroll(&a);
     cloud.enroll(&b);
     let (sa, sb) = (a.sock(), b.sock());
-    cloud.bridge(&mut a, "bridge.log", &sa, &[]);
-    cloud.bridge(&mut b, "bridge.log", &sb, &[]);
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    cloud.join(&mut b, "daemon.log", &sb, &[]);
     a.ok(Some("codex"), ALICE, &["register", "alice"]);
     b.ok(Some("claude"), CAROL, &["register", "carol"]);
+    cloud.publish(&a, &sa, "alice");
+    cloud.publish(&b, &sb, "carol");
     carol.plan(vec![vec![(ms(0), "held", json!({}))]]);
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "ben/carol", "held, then the session ends"]));
-    a.wait_delivery("codex", ALICE, &id, "held");
+    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "held, then the session ends"]));
+    wait_sent(&a, "codex", ALICE, &id, "held");
 
-    // The session ends: the bridge's next rescan sends an endpoints diff, the
-    // server abandons the hold, and the re-attempt finds no session.
+    // The session ends: the hold is abandoned (recipient offline, no session detail on the
+    // wire) and the re-attempt finds no session.
     let session_file = b.root.join(format!("claude/sessions/{}.json", std::process::id()));
     let saved = std::fs::read(&session_file).unwrap();
     std::fs::remove_file(&session_file).unwrap();
-    a.wait_delivery("codex", ALICE, &id, "retrying after failed (no live Claude session s-carol)");
-    let attempts = cloud.attempts(&id);
-    assert_eq!((attempts[0].1.as_str(), attempts[0].2.as_deref()), ("abandoned", Some("recipient session gone")));
+    wait_sent(&a, "codex", ALICE, &id, "retrying after failed (recipient offline)");
+    let attempts = cloud.attempts(id.trim_start_matches("shared:"));
+    assert_eq!((attempts[0].1.as_str(), attempts[0].2.as_deref()), ("abandoned", Some("recipient offline")));
     // It comes back: the retry reaches it.
     std::fs::write(&session_file, saved).unwrap();
     carol.wait_frames(&id, 2);
-    a.wait_delivery("codex", ALICE, &id, "notified");
+    wait_sent(&a, "codex", ALICE, &id, "notified");
+}
+
+/// A host that has not migrated keeps its v1 bridge (`--v1-bridge`, its names on the server)
+/// and exchanges messages with a migrated host's published agent, both ways.
+#[test]
+fn a_v1_host_and_a_v2_host_exchange_messages() {
+    let cloud = Cloud::start(test_config());
+    let mut a = Host::new("ann", "host-a");
+    let mut b = Host::new("ben", "host-b");
+    let carol = FakeClaude::start(&b, "s-carol");
+    let dave = FakeClaude::start(&a, "s-dave");
+    cloud.enroll_v1(&a);
+    cloud.enroll(&b);
+    let (sa, sb) = (a.sock(), b.sock());
+    cloud.bridge_v1(&mut a, "bridge.log", &sa);
+    cloud.join(&mut b, "daemon.log", &sb, &[]);
+    let out = a.ok(Some("claude"), &[("CLAUDE_CODE_SESSION_ID", "s-dave")], &["register", "dave"]);
+    assert!(out.contains("ann/dave"), "{out}");
+    b.ok(Some("claude"), CAROL, &["register", "carol"]);
+    cloud.publish(&b, &sb, "carol");
+
+    carol.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
+    let to_v2 = queued_id(&a.ok(Some("claude"), &[("CLAUDE_CODE_SESSION_ID", "s-dave")], &["send", "ben/carol", "from v1"]));
+    let f = carol.wait_frames(&format!("shared:{to_v2}"), 1);
+    assert!(f[0].text.contains("from ann/dave"), "{}", f[0].text);
+
+    dave.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
+    let to_v1 = queued_id(&b.ok(Some("claude"), CAROL, &["send", "--board", "shared", "ann/dave", "from v2"]));
+    let f = dave.wait_frames(to_v1.trim_start_matches("shared:"), 1);
+    assert!(f[0].text.contains("\nconde: new message "), "the v1 bridge injects the board's text: {}", f[0].text);
 }
 
 /// Two server replicas on one Postgres board (CONDE_TEST_PG): a message sent
-/// through one reaches a bridge connected to the other by LISTEN/NOTIFY (the
-/// poll is far too slow to explain it), and a bridge instance fenced through
-/// one replica is closed by the other.
+/// through one reaches a host connected to the other by LISTEN/NOTIFY (the
+/// poll is far too slow to explain it), and an instance fenced through one
+/// replica is closed by the other.
 #[test]
 fn replicas_wake_and_fence_each_other() {
     let Some(db) = pg::fresh_database() else {
@@ -302,28 +395,32 @@ fn replicas_wake_and_fence_each_other() {
     let carol = FakeClaude::start(&b, "s-carol");
     two.enroll(&a);
     one.enroll(&b);
-    let sa = a.sock();
-    two.bridge(&mut a, "bridge.log", &sa, &[]);
-    let old_sock = b.root.join("run/old.sock");
-    let old = one.bridge(&mut b, "old.log", &old_sock, &[]);
+    let (sa, sb) = (a.sock(), b.sock());
+    two.join(&mut a, "daemon.log", &sa, &[]);
+    one.join(&mut b, "daemon.log", &sb, &[]);
     a.ok(Some("codex"), ALICE, &["register", "alice"]);
-    b.ok_at(&old_sock, Some("claude"), CAROL, &["register", "carol"]);
+    b.ok(Some("claude"), CAROL, &["register", "carol"]);
+    two.publish(&a, &sa, "alice");
+    one.publish(&b, &sb, "carol");
     std::thread::sleep(ms(500));
 
     carol.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
     let sent = std::time::Instant::now();
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "ben/carol", "across replicas"]));
+    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "across replicas"]));
     carol.wait_frames(&id, 1);
     assert!(sent.elapsed() < Duration::from_secs(10), "woken, not polled: {:?}", sent.elapsed());
-    a.wait_delivery("codex", ALICE, &id, "delivered");
+    wait_sent(&a, "codex", ALICE, &id, "delivered");
 
-    // host-b's bridge moves to replica two; replica one closes the old instance
-    two.enroll(&b);
-    let new_sock = b.root.join("run/new.sock");
-    two.bridge(&mut b, "new.log", &new_sock, &[]);
-    let status = b.wait_exit(old);
-    assert!(!status.success());
-    assert!(b.log("old.log").contains("fenced"), "{}", b.log("old.log"));
+    // a second daemon of host-b on replica two; replica one closes the first instance
+    let other_sock = b.root.join("run/other.sock");
+    let mut cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(b.root.join("config/conde/boards/shared.json")).unwrap()).unwrap();
+    cfg["server"] = json!(two.url());
+    std::fs::write(b.root.join("config/conde/boards/shared.json"), cfg.to_string()).unwrap();
+    b.daemon("other.log", &other_sock, &[]);
+    wait_for("the first instance fenced", || {
+        let d = String::from_utf8_lossy(&b.conde(None, &[], &["doctor"], None).stdout).to_string();
+        d.contains("shared: stopped: fenced by a newer bridge").then_some(())
+    });
 }
 
 /// `conde server` on Postgres (CONDE_TEST_PG): ready on /healthz, and SIGTERM

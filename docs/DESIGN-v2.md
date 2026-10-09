@@ -420,18 +420,26 @@ Each line closes a question the sections above left open; the gate tests in
   The v1 bridge stays in the binary as the hidden `conde daemon --v1-bridge <url>` (never
   started by `conde setup`) until `CONDE_MIN_PROTO=2`, because the v1 cloud suite and G8's v1
   host need a v1 bridge to exist.
-- **When a board connects**: only once its `migrate` op is `done` locally; before that no hello
-  is sent and `doctor` says `not migrated`. The v1 `conde/credentials` file moves to
-  `boards/<name>.json` (name and account from `board.info` over `/v1/rpc`, no hello) at the first
-  start that reaches the board.
+- **When a board connects**: once its `migrate` op is `done` locally, or once `board.info`
+  reports the host `mailbox_only` (a re-enrollment after `conde boards --forget`; the daemon
+  records the migration as done and connects). Before that no hello is sent, `doctor` says
+  `not migrated`, and the daemon asks `board.info` over `/v1/rpc` in the background. When
+  `conde setup` has not moved the v1 `conde/credentials` file, the daemon moves it to
+  `boards/<board.info name>.json` (account from `board.info`) with the `boards` helpers.
 - **Default board**: the alias in `$XDG_CONFIG_HOME/conde/default-board`; absent means `local`.
-- **CLI/MCP to the daemon**: the request frame's `board` field carries `--board`; the daemon
-  answers `daemon.publish`, `daemon.unpublish`, `daemon.boards`, `daemon.forget`,
-  `daemon.migrate_preview` and `daemon.migrate` itself (`protocol::v2::daemon_op`).
+- **CLI/MCP to the daemon** (the surface lane's contract, `surface.rs`): the request's `board`
+  field carries `--board`; the daemon answers itself `board.list`, `board.forget`,
+  `mailbox.publish {agent, name, take?}`, `mailbox.unpublish {agent}`, and, for a board not
+  migrated yet too, `board.info`, `host.migrate_preview` and `host.migrate_v2 {publish}` (the
+  manifest plus `conflicts: [{name, address}]`; a switch the board did not answer is an error
+  naming the pending op). Publication, the switch and `board.forget` need the human's actor;
+  an agent may unpublish itself. `whoami`, `register` and `rename` carry
+  `publications: [{board, name, state}]` (and `boards`), `doctor` carries
+  `origins: [{origin, slots_used, slots, queued}]`; the board errors use the surface's wording.
 - **Ids in shared results**: the daemon prefixes every `message_id`, `reply_to` and
   `attachment_id` of a shared board's result with `<alias>:` and labels the result and its rows
-  with `board`. A local miss of a name reads `no agent registered as 'x' on the local board;
-  shared boards are addressed with --board <name>`.
+  with `board`. A local miss of a name reads `no agent 'x' on the local board; shared boards are
+  addressed with --board <name>`.
 - **Directory reads** (`agent.list`, `agent.resolve`, `profile.get`, `channel.list`,
   `channel.members`) on a shared board need no publication; they are sent without an actor.
   The human's actor is `human:<board owner>@<board host>` and needs the human's own

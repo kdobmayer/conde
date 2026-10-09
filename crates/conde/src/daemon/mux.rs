@@ -56,6 +56,9 @@ pub struct Tuning {
     pub idle_timeout: Option<Duration>,
     /// The board clients' outcome ack timeout (`None`: the client's default).
     pub outcome_ack_timeout: Option<Duration>,
+    /// The board clients' delay before resending an outcome the board asked to retry
+    /// (`None`: the client's default backoff).
+    pub outcome_resend: Option<Duration>,
 }
 
 impl Default for Tuning {
@@ -71,6 +74,7 @@ impl Default for Tuning {
             backoff_max: None,
             idle_timeout: None,
             outcome_ack_timeout: None,
+            outcome_resend: None,
         }
     }
 }

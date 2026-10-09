@@ -144,6 +144,10 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
     if let Some(t) = tuning.outcome_ack_timeout {
         config.outcome_ack_timeout = t;
     }
+    if let Some(t) = tuning.outcome_resend {
+        config.outcome_resend_min = t;
+        config.outcome_resend_max = t;
+    }
     if let Some(n) = tuning.max_unacked_outcomes {
         config.max_unacked_outcomes = n;
     }
@@ -162,7 +166,7 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
                 reconcile(&core, &alias, &r.mailboxes, None);
                 core.mux.reconciled(&alias);
             }
-            Inbound::Notify(n) => core.mux.push(&alias, n),
+            Inbound::Notify(n) => core.mux.push(&alias, *n),
         }
     });
     tracing::info!(board = conn.alias, server = cfg.server, host = cfg.host_id, instance = client.bridge_instance(), "board connection starting");
@@ -386,9 +390,7 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
             .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
             Ok("unpublished".into())
         }
-        (BoardOpKind::Unpublish, OpOutcome::Refused(code, message))
-            if matches!(code, ErrorCode::Conflict | ErrorCode::NotFound) =>
-        {
+        (BoardOpKind::Unpublish, OpOutcome::Refused(ErrorCode::Conflict | ErrorCode::NotFound, message)) => {
             // The mailbox moved (or is gone) meanwhile: the local row goes, the new route stays.
             core.local_tx(|tx| {
                 tx.delete_publication(alias, &agent)?;

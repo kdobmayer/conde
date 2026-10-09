@@ -1218,3 +1218,279 @@ fn aggregate_views_merge_and_narrow() {
     assert_eq!(row.map(|r| (r["unconfirmed"].clone(), r["text"].clone())), Some((json!(true), json!("late read"))), "{read}");
     assert!(read["boards"].as_array().unwrap().iter().any(|b| b["board"] == "dakai" && b["unconfirmed"] == true), "{read}");
 }
+
+// --- against the real shared board (the V1 server, SQLite or CONDE_TEST_PG) ------------
+
+#[path = "pg/mod.rs"]
+mod pg;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use conde_remote::{
+    Admission, Authenticator, Dispatcher as RemoteDispatcher, FenceResult, Hello, NotificationSource, Outcome, Polled,
+    Recorded, SourceEvent,
+};
+
+/// The server's outbox, with a switch that stops it recording outcomes (each is answered
+/// `retry`, so the attempt keeps counting against the window): a stalled board.
+struct Stall {
+    board: Arc<conde::cloud::Board>,
+    stalled: Arc<AtomicBool>,
+}
+
+impl NotificationSource for Stall {
+    fn pending_for_host(&self, host_id: &str, bridge_instance: &str) -> Vec<Notify> {
+        self.board.pending_for_host(host_id, bridge_instance)
+    }
+    fn poll(&self, host_id: &str, bridge_instance: &str) -> Polled {
+        self.board.poll(host_id, bridge_instance)
+    }
+    fn record_outcome(&self, host_id: &str, bridge_instance: &str, outcome: &Outcome) -> Recorded {
+        if self.stalled.load(Ordering::SeqCst) {
+            return Recorded::Retry("stalled".into());
+        }
+        self.board.record_outcome(host_id, bridge_instance, outcome)
+    }
+    fn fence(&self, host_id: &str, bridge_instance: &str) -> FenceResult {
+        self.board.fence(host_id, bridge_instance)
+    }
+    fn admit(&self, host_id: &str, hello: &Hello) -> Admission {
+        self.board.admit(host_id, hello)
+    }
+    fn poll_window(&self, host_id: &str, bridge_instance: &str, window: u32) -> Polled {
+        self.board.poll_window(host_id, bridge_instance, window)
+    }
+    fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) {
+        self.board.endpoints(host_id, bridge_instance, endpoints)
+    }
+    fn events(&self) -> Option<tokio::sync::broadcast::Receiver<SourceEvent>> {
+        self.board.events()
+    }
+    fn heartbeat(&self, host_id: &str, bridge_instance: &str) {
+        self.board.heartbeat(host_id, bridge_instance)
+    }
+}
+
+struct RealBoard {
+    rt: tokio::runtime::Runtime,
+    d: Arc<conde::dispatch::Dispatcher>,
+    addr: std::net::SocketAddr,
+    stalled: Arc<AtomicBool>,
+    _dir: tempfile::TempDir,
+}
+
+impl RealBoard {
+    fn start() -> RealBoard {
+        let dir = tempfile::tempdir().unwrap();
+        let d = Arc::new(match pg::fresh_database() {
+            Some(url) => conde::dispatch::Dispatcher::connect(&url, conde::store::postgres::PgOpen::SERVER).unwrap(),
+            None => conde::dispatch::Dispatcher::open(&dir.path().join("board.db")).unwrap(),
+        });
+        d.set_retry_ms(300);
+        d.share("dakai");
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let stalled = Arc::new(AtomicBool::new(false));
+        let board = Arc::new(conde::cloud::Board::new(d.clone()));
+        let source = Arc::new(Stall { board: board.clone(), stalled: stalled.clone() });
+        let config = conde_remote::ServerConfig { poll_interval: Duration::from_millis(50), ..conde_remote::ServerConfig::default() };
+        let auth: Arc<dyn Authenticator> = board.clone();
+        let dispatcher: Arc<dyn RemoteDispatcher> = board;
+        let handle = rt.block_on(conde_remote::start("127.0.0.1:0".parse().unwrap(), config, auth, dispatcher, source)).unwrap();
+        let addr = handle.local_addr();
+        std::mem::forget(handle); // runs until the runtime drops
+        RealBoard { rt, d, addr, stalled, _dir: dir }
+    }
+
+    fn url(&self) -> String {
+        format!("ws://{}", self.addr)
+    }
+
+    fn stall(&self, on: bool) {
+        self.stalled.store(on, Ordering::SeqCst);
+    }
+
+    /// A host key for `user` on `host`, as `conde admin key create` mints it.
+    fn key(&self, user: &str, host: &str) -> String {
+        let key = format!("conde_test_{}", new_ulid());
+        let digest = conde_remote::token_digest(&key);
+        self.d.with_tx(|c| conde::ops::hosts::insert_key(c, user, host, &digest, "test", "2026-10-09T00:00:00.000Z")).unwrap();
+        key
+    }
+
+    /// The attempts of a message on the board (status, reason, instance), oldest first.
+    fn attempts(&self, message_id: &str) -> Vec<(String, Option<String>, String)> {
+        let prefix = format!("{}.", bare(message_id));
+        self.d
+            .with_conn(|tx| tx.attempts())
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.notification_id.starts_with(&prefix))
+            .map(|a| (a.status, a.reason, a.bridge_instance))
+            .collect()
+    }
+
+    fn dispatching(&self, instance: &str) -> usize {
+        self.d.with_conn(|tx| tx.attempts()).unwrap().into_iter().filter(|a| a.bridge_instance == instance && a.status == "dispatching").count()
+    }
+}
+
+impl Drop for RealBoard {
+    fn drop(&mut self) {
+        let _ = &self.rt;
+    }
+}
+
+impl Host {
+    /// Enrolled with the real board under `dakai`, migrated with nothing to publish, connected.
+    fn join_real(&mut self, board: &RealBoard) {
+        let key = board.key(&self.user, &self.host);
+        boards::store(
+            &boards::path_in(&self.config(), "dakai"),
+            "dakai",
+            &BoardConfig { server: board.url(), host_id: self.host.clone(), owner: self.user.clone(), key },
+        )
+        .unwrap();
+        self.start();
+        self.ok(&self.human(), op::HOST_MIGRATE_V2, json!({"publish": []}), Some("dakai"));
+        wait_for("the real board connection", || (self.status() == "connected").then_some(()));
+    }
+
+    /// The board's delivery state of a message this host sent there.
+    fn delivery(&self, actor: &str, id: &str) -> Option<String> {
+        let r = self.ok(actor, "receipt.list", json!({}), Some("dakai"));
+        r["receipts"].as_array()?.iter().find(|x| x["message_id"] == json!(id)).and_then(|x| x["delivery"].as_str().map(str::to_string))
+    }
+}
+
+fn real_host(board: &RealBoard, user: &str, host: &str, name: &str, session: &str, tuning: Tuning) -> (Host, String) {
+    let mut h = Host::tuned(user, host, tuning);
+    h.join_real(board);
+    let actor = h.claude(name, session);
+    let p = h.publish(name);
+    assert_eq!(p["state"], "published", "{p}");
+    (h, actor)
+}
+
+/// Two hosts through the real server: a teammate's DM reaches the published agent with a
+/// qualified id, the reply stays on the board, and both receipts settle delivered; Codex is
+/// reached on injection (fleet "reached" counts delivered for mailbox rows).
+#[test]
+fn integrated_two_hosts_exchange_through_the_real_board() {
+    let board = RealBoard::start();
+    let (a, worker) = real_host(&board, "kdobmayer", "homepc", "worker", "s-worker", fast());
+    let (b, relay) = real_host(&board, "balazs", "box-b", "relay", "s-relay", fast());
+    a.codex("coder", "t-coder");
+    a.publish("coder");
+
+    let ping = id_of(&b.send(&relay, "kdobmayer/worker", "ping", Some("dakai")).unwrap());
+    assert!(ping.starts_with("dakai:"), "{ping}");
+    let p = a.harness.wait_pushes(bare(&ping), 1).remove(0);
+    assert_eq!(p.text, format!("conde [dakai]: new message {ping} from balazs/relay. Read it with: conde read {ping}"));
+    a.harness.receipt(&p.token, ReceiptStatus::Delivered);
+    wait_for("ping delivered", || b.delivery(&relay, &ping).filter(|d| d.contains("delivered")));
+    let read = a.ok(&worker, "message.read", json!({"id": ping}), None);
+    assert_eq!(read["messages"][0]["text"], "ping");
+
+    let pong = id_of(&a.ok(&worker, "message.send", json!({"to": {"agent": "balazs/relay"}, "text": "pong", "reply_to": ping}), None));
+    assert!(pong.starts_with("dakai:"));
+    let p = b.harness.wait_pushes(bare(&pong), 1).remove(0);
+    b.harness.receipt(&p.token, ReceiptStatus::Delivered);
+    wait_for("pong delivered", || a.delivery(&worker, &pong).filter(|d| d.contains("delivered")));
+
+    let c = id_of(&b.send(&relay, "kdobmayer/coder", "to codex", Some("dakai")).unwrap());
+    wait_for("codex reached", || b.delivery(&relay, &c).filter(|d| d.contains("delivered")));
+    assert_eq!(board.attempts(&c).iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), ["delivered"]);
+}
+
+/// G11 on the real board: it stops recording outcomes; ten notifications are due; the window
+/// bounds what is pushed and retained, a late receipt waits in the outcome map while the book
+/// is full, local delivery keeps its latency, and recording again settles everything without
+/// a restart.
+#[test]
+fn integrated_g11_a_stalled_board_only_keeps_its_window_full() {
+    let tuning = Tuning { window: 4, max_unacked_outcomes: Some(4), outcome_resend: Some(Duration::from_millis(200)), ..fast() };
+    let board = RealBoard::start();
+    let (a, worker) = real_host(&board, "kdobmayer", "homepc", "worker", "s-worker", tuning);
+    let reviewer = a.claude("reviewer", "s-reviewer");
+    let (b, relay) = real_host(&board, "balazs", "box-b", "relay", "s-relay", fast());
+    let instance = a.core().board_instance("dakai").unwrap();
+
+    board.stall(true);
+    let msgs: Vec<String> = (0..10).map(|i| id_of(&b.send(&relay, "kdobmayer/worker", &format!("m{i}"), Some("dakai")).unwrap())).collect();
+    let pushed = |h: &Host| msgs.iter().filter(|m| !h.harness.pushes_of(bare(m)).is_empty()).count();
+    wait_for("the window pushed", || (pushed(&a) == 4).then_some(()));
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(pushed(&a), 4, "nothing beyond the window");
+    assert_eq!(board.dispatching(&instance), 4);
+
+    let first = msgs.iter().find_map(|m| a.harness.pushes_of(bare(m)).first().cloned()).unwrap();
+    a.harness.receipt(&first.token, ReceiptStatus::Held);
+    std::thread::sleep(Duration::from_millis(200));
+    a.harness.receipt(&first.token, ReceiptStatus::Delivered);
+    wait_for("the late receipt retained", || (slots(&a, "dakai").outcomes >= 1).then_some(()));
+    let s = slots(&a, "dakai");
+    assert!(s.queued <= 4 && s.used <= 4, "{s:?}");
+    assert!(a.doctor().contains("book 4"), "{}", a.doctor());
+
+    let t = Instant::now();
+    let local = id_of(&a.send(&reviewer, "worker", "local during the stall", None).unwrap());
+    a.harness.wait_pushes(&local, 1);
+    assert!(t.elapsed() < Duration::from_millis(800), "local push took {:?}", t.elapsed());
+
+    board.stall(false);
+    a.harness.st().auto = Some(ReceiptStatus::Delivered);
+    for m in &msgs {
+        for p in a.harness.pushes_of(bare(m)) {
+            if p.token != first.token {
+                a.harness.receipt(&p.token, ReceiptStatus::Delivered);
+            }
+        }
+    }
+    for m in &msgs {
+        wait_for(&format!("{m} delivered"), || b.delivery(&relay, m).filter(|d| d.contains("delivered")));
+        assert_eq!(a.harness.pushes_of(bare(m)).len(), 1, "{m} pushed once");
+    }
+    let late = msgs.iter().find(|m| a.harness.pushes_of(bare(m)).iter().any(|p| p.token == first.token)).unwrap();
+    assert!(board.attempts(late).iter().any(|x| x.0 == "delivered"), "{:?}", board.attempts(late));
+    let _ = worker;
+}
+
+/// G11b on the real board (R = 2): a held attempt keeps its slot and mapping, Codex traffic
+/// continues beyond R, the origin pauses at R while local delivery continues, and the late
+/// terminal receipt resumes it without a restart.
+#[test]
+fn integrated_g11b_a_held_attempt_pauses_only_its_origin() {
+    let tuning = Tuning { receipt_budget: 2, window: 8, ..fast() };
+    let board = RealBoard::start();
+    let (a, worker) = real_host(&board, "kdobmayer", "homepc", "worker", "s-worker", tuning);
+    a.codex("coder", "t-coder");
+    a.publish("coder");
+    a.claude("reviewer", "s-reviewer");
+    let (b, relay) = real_host(&board, "balazs", "box-b", "relay", "s-relay", fast());
+
+    let held = id_of(&b.send(&relay, "kdobmayer/worker", "held", Some("dakai")).unwrap());
+    let p_held = a.harness.wait_pushes(bare(&held), 1).remove(0);
+    wait_for("accepted", || b.delivery(&relay, &held).filter(|d| !d.contains("pending") && !d.contains("dispatching")));
+    a.harness.receipt(&p_held.token, ReceiptStatus::Held);
+    wait_for("held", || b.delivery(&relay, &held).filter(|d| d.contains("held")));
+
+    for i in 0..5 {
+        let m = id_of(&b.send(&relay, "kdobmayer/coder", &format!("codex {i}"), Some("dakai")).unwrap());
+        wait_for("codex reach", || b.delivery(&relay, &m).filter(|d| d.contains("delivered")));
+    }
+    let open = id_of(&b.send(&relay, "kdobmayer/worker", "open", Some("dakai")).unwrap());
+    let p_open = a.harness.wait_pushes(bare(&open), 1).remove(0);
+    wait_for("both slots used", || (slots(&a, "dakai").used == 2).then_some(()));
+    let waiting = id_of(&b.send(&relay, "kdobmayer/coder", "waits", Some("dakai")).unwrap());
+    wait_for("the job queued", || (slots(&a, "dakai").queued == 1).then_some(()));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(a.harness.pushes_of(bare(&waiting)).is_empty(), "the origin pauses at R");
+
+    let local = id_of(&a.send(&worker, "reviewer", "local continues", None).unwrap());
+    a.harness.wait_pushes(&local, 1);
+    assert!(a.harness.mapped(&p_held.token) && a.harness.mapped(&p_open.token), "no unresolved mapping is evicted");
+
+    a.harness.receipt(&p_held.token, ReceiptStatus::Delivered);
+    wait_for("the late receipt settled", || b.delivery(&relay, &held).filter(|d| d.contains("delivered")));
+    wait_for("the origin resumes", || b.delivery(&relay, &waiting).filter(|d| d.contains("delivered")));
+}

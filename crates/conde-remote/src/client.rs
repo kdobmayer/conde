@@ -99,7 +99,7 @@ impl BridgeConfig {
 pub enum Inbound {
     /// A new connection's hello was sent; every later event belongs to it.
     Connected,
-    Notify(Notify),
+    Notify(Box<Notify>),
     /// This host's full mailbox route set (v2).
     Routes(Routes),
 }
@@ -302,7 +302,7 @@ impl BridgeClient {
     {
         Self::start_events(config, move |event| {
             if let Inbound::Notify(n) = event {
-                on_notify(n)
+                on_notify(*n)
             }
         })
     }
@@ -870,7 +870,7 @@ fn handle_frame(
     match kind.as_str() {
         "notify" => match serde_json::from_value::<Notify>(value) {
             Ok(n) => {
-                if seen.insert(&n.attempt_id) && notify_tx.send(Inbound::Notify(n)).is_err() {
+                if seen.insert(&n.attempt_id) && notify_tx.send(Inbound::Notify(Box::new(n))).is_err() {
                     tracing::error!("notify handler thread is gone");
                 }
             }

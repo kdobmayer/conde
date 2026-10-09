@@ -182,7 +182,8 @@ pub struct Frame {
 impl Frame {
     /// The conde message id the notification points at.
     pub fn message_id(&self) -> Option<String> {
-        let rest = self.text.split("conde: new message ").nth(1)?;
+        // v1 `conde: new message <id>`, v2 `conde [<board>]: new message <board>:<id>`
+        let rest = self.text.split("new message ").nth(1)?;
         Some(rest.split_whitespace().next()?.to_string())
     }
 }

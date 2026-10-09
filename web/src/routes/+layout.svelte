@@ -4,6 +4,7 @@
 	import { board, start, short, threadHref } from '#lib/board.svelte.ts';
 	import { stamp } from '#lib/time.ts';
 	import UserMenu from '#lib/UserMenu.svelte';
+	import Mark from '#lib/Mark.svelte';
 
 	let { children } = $props();
 	let failed = $state('');
@@ -24,7 +25,7 @@
 
 <div class="shell" class:home>
 	<header class="top">
-		<a class="brand" href="#/">conde</a>
+		<a class="brand" href="#/"><Mark />conde</a>
 		<span class="link-state" class:live={board.live} title={board.live ? 'Live updates' : 'Reconnecting; refreshing every 15 s'}>
 			{board.live ? 'live' : 'reconnecting'}
 		</span>
@@ -109,6 +110,9 @@
 		letter-spacing: 0.01em;
 		color: inherit;
 		text-decoration: none;
+	}
+	.brand :global(.mark) {
+		margin-right: 6px;
 	}
 	.link-state {
 		font-size: 12px;

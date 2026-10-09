@@ -954,8 +954,8 @@ fn apply_migration(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &
         Err(why) => {
             writeln!(
                 out,
-                "boards: {alias}: the switch did not complete ({why}); the daemon resumes the recorded operation when \
-                 {alias} answers, and conde doctor shows it"
+                "boards: {alias}: the switch did not complete ({why}); the recorded operation resumes with \
+                 conde boards --migrate {alias} or at the next daemon start, and conde doctor shows it"
             )?;
             return Ok(false);
         }
@@ -971,6 +971,16 @@ fn apply_migration(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &
             "boards: {alias}: {} kept its local binding (a live session holds it); its former address {} is in conde doctor",
             c["name"].as_str().unwrap_or_default(),
             c["address"].as_str().unwrap_or_default()
+        )?;
+    }
+    for m in r["moved"].as_array().into_iter().flatten() {
+        writeln!(
+            out,
+            "boards: {alias}: session {} moved from the local name {} to {}; {} keeps its messages, unbound",
+            m["address"].as_str().unwrap_or_default(),
+            m["name"].as_str().unwrap_or_default(),
+            m["to"].as_str().unwrap_or_default(),
+            m["name"].as_str().unwrap_or_default()
         )?;
     }
     Ok(true)

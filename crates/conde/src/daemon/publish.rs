@@ -10,7 +10,7 @@ use super::board::{self, BoardConn, OpOutcome, Status};
 use super::{Core, Refusal};
 use crate::address::{Address, Kind, normalize_name};
 use crate::boards;
-use crate::protocol::v2::{LOCAL_BOARD, Manifest, MigrateBody, PublishBody, UnpublishBody, op};
+use crate::protocol::v2::{LOCAL_BOARD, Manifest, ManifestRow, MigrateBody, PublishBody, UnpublishBody, op};
 use crate::protocol::{ErrorCode, Request};
 use crate::store::Tx;
 use crate::store::local::{BoardOp, BoardOpKind, BoardOpState, LocalTx, Publication, PublicationState};
@@ -327,6 +327,7 @@ fn migrated(core: &Arc<Core>, conn: &Arc<BoardConn>, op_id: &str) -> Result<Valu
         out = json!({"bindings": []});
     }
     out["conflicts"] = stored["conflicts"].clone();
+    out["moved"] = stored["moved"].clone();
     out["board"] = json!(conn.alias);
     out["op_id"] = json!(op_id);
     Ok(out)
@@ -334,11 +335,23 @@ fn migrated(core: &Arc<Core>, conn: &Arc<BoardConn>, op_id: &str) -> Result<Valu
 
 /// `board.info` (alias in the envelope): the board's answer over HTTPS, before or after the
 /// migration. A board that reports this host `mailbox_only` counts as migrated here too (a
-/// re-enrollment after `conde boards --forget`), and its connection starts.
+/// re-enrollment after `conde boards --forget`), and its connection starts; a local migrate op
+/// still pending (an answer lost, or an apply refused) is finished first.
 pub async fn board_info(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     let conn = board_of(core, req)?;
     let info = board::fetch_info(&conn, core.mux.tuning.call_timeout).await.map_err(|why| refuse(ErrorCode::Internal, why))?;
     if info.mailbox_only {
+        let pending = core
+            .local_tx(|tx| Ok(tx.migrate_op(&conn.alias)?))
+            .map_err(internal)?
+            .filter(|o| o.state == BoardOpState::Pending);
+        if let Some(op) = pending {
+            let outcome = board::send_op(&conn, &op, core.mux.tuning.call_timeout).await;
+            if let OpOutcome::Pending(why) = &outcome {
+                return Err(refuse(ErrorCode::Internal, format!("{}: the switch is pending (op {}): {why}", conn.alias, op.op_id)));
+            }
+            board::finish_op(core, &conn, &op, outcome)?;
+        }
         board::adopt_migrated(core, &conn).map_err(internal)?;
     }
     serde_json::to_value(&info).map_err(|e| refuse(ErrorCode::Internal, e.to_string()))
@@ -347,6 +360,9 @@ pub async fn board_info(core: &Arc<Core>, req: &Request) -> Result<Value, Refusa
 /// The local apply of a migration manifest, in one transaction (idempotent): every former
 /// binding is registered locally at its address with its pin, unless the local name is bound
 /// to another live session (a conflict, kept and listed); published rows become publications.
+/// A session that holds another local name gives it up when that name is neither pinned,
+/// published nor in the manifest (its row and history stay, unbound; listed as moved);
+/// otherwise the apply refuses before any write, naming the command that frees the session.
 pub fn apply_manifest(core: &Core, conn: &BoardConn, op: &BoardOp, result: &Value) -> Result<String, Refusal> {
     let manifest: Manifest = serde_json::from_value(result.clone())
         .map_err(|e| refuse(ErrorCode::Internal, format!("{}: the migration answer is not a manifest: {e}", conn.alias)))?;
@@ -355,30 +371,95 @@ pub fn apply_manifest(core: &Core, conn: &BoardConn, op: &BoardOp, result: &Valu
     let owner = core.principal.user_id;
     let now = iso_from_ms(now_ms());
     let live = |a: &Address| core.live(a);
+    let rows: Vec<(String, Option<Address>, &ManifestRow)> = manifest
+        .bindings
+        .iter()
+        .filter_map(|row| {
+            let name = normalize_name(&row.name)?;
+            let former = Address::parse_v1(&row.address, &host).ok().map(|a| Address::new(a.kind, &a.target, &host));
+            Some((name, former, row))
+        })
+        .collect();
     let applied = core.local_tx(|tx| {
         // Only for the board's own pending op: a forgotten board's late answer applies nothing.
         if conn.forgotten.load(std::sync::atomic::Ordering::SeqCst)
             || tx.op(&op.op_id)?.is_none_or(|o| o.state != BoardOpState::Pending)
         {
-            return Ok(false);
+            return Ok(Ok(false));
         }
+        // Where each manifest name ends: its former address, or its current binding when that
+        // is another live session (a conflict).
         let mut conflicts = Vec::new();
-        for row in &manifest.bindings {
-            let Some(name) = normalize_name(&row.name) else { continue };
-            let former = Address::parse_v1(&row.address, &host).ok().map(|a| Address::new(a.kind, &a.target, &host));
-            let agent = match tx.agent_by_name(owner, &name)? {
+        let mut ends: Vec<(String, Option<Address>)> = Vec::new();
+        for (name, former, _) in &rows {
+            let current = tx.agent_by_name(owner, name)?.and_then(|a| a.address);
+            ends.push((name.clone(), match (&current, former) {
+                (Some(c), Some(f)) if c != f && live(c) => {
+                    conflicts.push(json!({"name": name, "address": f.to_string(), "local": c.to_string()}));
+                    current
+                }
+                (_, Some(f)) => Some(f.clone()),
+                _ => current,
+            }));
+        }
+        // Another local name at a session a manifest name ends at: moved off when free to go,
+        // else the whole apply is refused.
+        let publications = tx.publications(None)?;
+        let mut moved = Vec::new();
+        let mut blocked = Vec::new();
+        for (name, end) in &ends {
+            let Some(at) = end else { continue };
+            for other in tx.agents_at_address(owner, at)? {
+                if other.name == *name || moved.iter().any(|(id, _): &(String, Value)| *id == other.id) {
+                    continue;
+                }
+                let listed = ends.iter().find(|(n, _)| *n == other.name);
+                if listed.is_some_and(|(_, e)| e.as_ref() != Some(at)) {
+                    continue; // a manifest name that moves elsewhere itself
+                }
+                let published: Vec<&str> =
+                    publications.iter().filter(|p| p.agent_id == other.id).map(|p| p.board.as_str()).collect();
+                let why = if other.pinned.is_some() {
+                    Some("pinned".to_string())
+                } else if !published.is_empty() {
+                    Some(format!("published on {}", published.join(", ")))
+                } else if listed.is_some() {
+                    Some(format!("also a name of this host on {alias}"))
+                } else {
+                    None
+                };
+                match why {
+                    None => moved.push((other.id.clone(), json!({"name": other.name, "to": name, "address": at.to_string()}))),
+                    Some(why) => {
+                        let unpin = if other.pinned.is_some() { format!("conde unpin {} && ", other.name) } else { String::new() };
+                        blocked.push(format!(
+                            "session {at} already holds the local name {} ({why}), where {alias} had {name}; free it with: \
+                             {unpin}conde unregister {} --if-address {at}",
+                            other.name, other.name
+                        ));
+                    }
+                }
+            }
+        }
+        if !blocked.is_empty() {
+            return Ok(Err(refuse(
+                ErrorCode::Conflict,
+                format!("{alias}: the switch is not applied on this host (nothing changed here): {}", blocked.join("; ")),
+            )));
+        }
+        for (id, _) in &moved {
+            tx.set_binding(id, None)?;
+        }
+        for ((name, _, row), (_, end)) in rows.iter().zip(&ends) {
+            let agent = match tx.agent_by_name(owner, name)? {
                 Some(a) => a,
                 None => {
-                    tx.insert_agent(&new_ulid(), owner, &name)?;
-                    tx.agent_by_name(owner, &name)?.ok_or_else(|| anyhow::anyhow!("agent {name} not created"))?
+                    tx.insert_agent(&new_ulid(), owner, name)?;
+                    tx.agent_by_name(owner, name)?.ok_or_else(|| anyhow::anyhow!("agent {name} not created"))?
                 }
             };
-            match (&agent.address, &former) {
-                (Some(current), Some(f)) if current != f && live(current) => {
-                    conflicts.push(json!({"name": name, "address": f.to_string(), "local": current.to_string()}));
-                }
-                (current, Some(f)) if current.as_ref() != Some(f) => tx.set_binding(&agent.id, Some(f))?,
-                _ => {}
+            if agent.address != *end {
+                tx.set_binding(&agent.id, end.as_ref())?;
             }
             if agent.pinned.is_none()
                 && let Some(pin) = &row.pin
@@ -402,10 +483,11 @@ pub fn apply_manifest(core: &Core, conn: &BoardConn, op: &BoardOp, result: &Valu
                 }
             }
         }
-        let stored = json!({"manifest": result, "conflicts": conflicts});
+        let moved: Vec<Value> = moved.into_iter().map(|(_, m)| m).collect();
+        let stored = json!({"manifest": result, "conflicts": conflicts, "moved": moved});
         tx.finish_op(&op.op_id, BoardOpState::Done, Some(&stored), &now)?;
-        Ok(true)
+        Ok(Ok(true))
     })
-    .map_err(internal)?;
+    .map_err(internal)??;
     Ok(if applied { "migrated" } else { "forgotten" }.into())
 }

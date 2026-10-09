@@ -679,6 +679,11 @@ Per host, driven by `conde setup` (or `conde boards --migrate <alias>`):
    - on a conflict, a local row bound to a different live session (possible on homepc after the
      H2/H3 restore) keeps its local binding and is listed by `doctor`; an unbound or not-live local
      row takes the manifest address;
+   - a session that already holds another local name (homepc's desk held its kond-era name)
+     gives that name up when it is not pinned, not published and not in the manifest: the row and
+     its history stay, unbound, and setup prints the move; otherwise the apply refuses before any
+     write with the exact `conde unregister <name> --if-address <address>` that frees the session,
+     the op stays pending, and `conde boards --migrate <alias>` finishes it;
    - write the publications;
    - mark the op `done`.
 6. The daemon opens the WebSocket with a v2 hello. `doctor` prints the published set and any

@@ -607,7 +607,8 @@ fn manifest(published: &[&str]) -> Value {
         json!({"agent_id": id, "name": name, "address": addr, "pin": null, "published": p})
     };
     json!({"bindings": [row("01DESK", "desk", "claude:5f2c@box"), row("01LANE", "lane.v0", "codex:th-7@box")],
-           "conflicts": [{"name": "lane.v0", "address": "codex:th-7@box"}]})
+           "conflicts": [{"name": "lane.v0", "address": "codex:th-7@box"}],
+           "moved": [{"name": "desk.kond", "to": "desk", "address": "claude:5f2c@box"}]})
 }
 
 fn enrolled(env: &Env) {
@@ -649,6 +650,7 @@ fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
         "  no messages with another owner's agents (1): lane.v0\n",
         "boards: dakai: switched to v2; published: desk; on this host's local board only: 1 names\n",
         "boards: dakai: lane.v0 kept its local binding (a live session holds it); its former address codex:th-7@box is in conde doctor\n",
+        "boards: dakai: session claude:5f2c@box moved from the local name desk.kond to desk; desk.kond keeps its messages, unbound\n",
         "boards: default board for names and channels: dakai\n",
     ] {
         assert!(out.contains(line), "missing {line:?} in\n{out}");

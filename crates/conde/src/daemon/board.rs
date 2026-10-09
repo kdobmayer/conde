@@ -612,8 +612,9 @@ pub async fn resume_migration(core: Arc<Core>, conn: Arc<BoardConn>, op: BoardOp
                 delay = (delay * 2).min(Duration::from_secs(60));
             }
             other => {
-                if finish_op(&core, &conn, &op, other).is_ok() {
-                    start(&core, &conn);
+                match finish_op(&core, &conn, &op, other) {
+                    Ok(_) => start(&core, &conn),
+                    Err((_, why)) => tracing::warn!(board = conn.alias, "migration not applied: {why}"),
                 }
                 return;
             }
@@ -637,14 +638,19 @@ pub async fn fetch_info(conn: &BoardConn, wait: Duration) -> Result<BoardInfo, S
 }
 
 /// The board says this host is migrated, but no local migrate op is done (the local record was
-/// lost, or the alias was forgotten and enrolled again): record it done and connect.
+/// lost, or the alias was forgotten and enrolled again): record it done and connect. A pending
+/// local op is left to finish first: connecting before its local apply would skip it.
 pub fn adopt_migrated(core: &Arc<Core>, conn: &Arc<BoardConn>) -> anyhow::Result<()> {
     if conn.status() != Status::NotMigrated {
         return Ok(());
     }
     let now = iso_from_ms(now_ms());
-    core.local_tx(|tx| {
-        if tx.migrate_op(&conn.alias)?.is_none() {
+    let pending = core.local_tx(|tx| {
+        let op = tx.migrate_op(&conn.alias)?;
+        if op.as_ref().is_some_and(|o| o.state == BoardOpState::Pending) {
+            return Ok(true);
+        }
+        if op.is_none() {
             tx.insert_op(&BoardOp {
                 op_id: crate::util::new_ulid(),
                 board: conn.alias.clone(),
@@ -657,8 +663,12 @@ pub fn adopt_migrated(core: &Arc<Core>, conn: &Arc<BoardConn>) -> anyhow::Result
                 updated_at: now.clone(),
             })?;
         }
-        Ok(())
+        Ok(false)
     })?;
+    if pending {
+        tracing::warn!(board = conn.alias, "the board reports this host migrated; the local apply is still pending");
+        return Ok(());
+    }
     tracing::info!(board = conn.alias, "the board reports this host migrated: connecting");
     start(core, conn);
     Ok(())
@@ -832,6 +842,79 @@ mod tests {
         // The real HTTP request or startup resume worker still owns this Arc and op.
         let _late = finish_op(&core, &conn, &migration, OpOutcome::Done(answer, None));
         assert_eq!(state(&core, &agent), None, "board.forget must prevent its outstanding migration from recreating exposure");
+    }
+
+    /// A pending migration whose manifest publishes `desk` at Claude session `s-desk`, with
+    /// this host's kond-era name `desk.kond` already bound to that session.
+    fn desk_collision(core: &Core) -> (BoardOp, Value, crate::address::Address, String) {
+        use crate::address::{Address, Kind};
+        let at = Address::new(Kind::Claude, "s-desk", &core.principal.host);
+        let old = crate::util::new_ulid();
+        core.local_tx(|tx| {
+            tx.insert_agent(&old, core.principal.user_id, "desk.kond")?;
+            tx.set_binding(&old, Some(&at))?;
+            Ok(())
+        })
+        .unwrap();
+        let mut migration = op("01MIGRATEDESK", BoardOpKind::Migrate, "", json!({"publish": ["01REMOTEDESK"]}));
+        migration.agent_id = None;
+        begin(core, &migration, None, None);
+        let answer = json!({"bindings": [{
+            "agent_id": "01REMOTEDESK", "name": "desk", "address": format!("claude:s-desk@{}", core.principal.host),
+            "pin": null, "published": {"mailbox_id": "01DESKMAILBOX", "route_generation": 2}
+        }]});
+        (migration, answer, at, old)
+    }
+
+    fn names_at(core: &Core, at: &crate::address::Address) -> Vec<String> {
+        core.local_tx(|tx| Ok(tx.agents_at_address(core.principal.user_id, at)?)).unwrap().into_iter().map(|a| a.name).collect()
+    }
+
+    #[test]
+    fn migration_moves_the_session_off_an_unpinned_unpublished_local_name() {
+        let (_dir, _rt, core, conn, _) = setup();
+        let (migration, answer, at, old) = desk_collision(&core);
+        assert_eq!(finish_op(&core, &conn, &migration, OpOutcome::Done(answer, None)), Ok("migrated".into()));
+        assert_eq!(names_at(&core, &at), ["desk"], "one name per session, so whoami answers");
+        let kept = core.local_tx(|tx| Ok(tx.agent_by_id(&old)?)).unwrap().expect("the old name's row and history stay");
+        assert_eq!((kept.name.as_str(), kept.address), ("desk.kond", None));
+        let stored = core.local_tx(|tx| Ok(tx.op(&migration.op_id)?)).unwrap().unwrap().result.unwrap();
+        assert_eq!(stored["moved"], json!([{"name": "desk.kond", "to": "desk", "address": at.to_string()}]));
+    }
+
+    #[test]
+    fn migration_refuses_before_any_write_when_the_sessions_name_is_pinned_or_published() {
+        for case in ["pinned", "published"] {
+            let (_dir, _rt, core, conn, _) = setup();
+            let (migration, answer, at, old) = desk_collision(&core);
+            core.local_tx(|tx| {
+                if case == "pinned" {
+                    tx.set_pin(&old, Some(&at.to_string()))?;
+                } else {
+                    tx.insert_publication(&Publication { agent_id: old.clone(), shared_name: "desk.kond".into(), mailbox_id: Some("01OLDMB".into()), route_generation: Some(1), state: PublicationState::Published, ..publishing(&old) })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            let (code, why) = finish_op(&core, &conn, &migration, OpOutcome::Done(answer, None)).unwrap_err();
+            assert_eq!(code, ErrorCode::Conflict, "{case}");
+            assert!(why.contains(&format!("conde unregister desk.kond --if-address {at}")), "{case}: {why}");
+            assert_eq!(why.contains("conde unpin desk.kond"), case == "pinned", "{case}: {why}");
+            let op = core.local_tx(|tx| Ok(tx.op(&migration.op_id)?)).unwrap().unwrap();
+            assert_eq!(op.state, BoardOpState::Pending, "{case}: resumable after the human frees the session");
+            assert_eq!(names_at(&core, &at), ["desk.kond"], "{case}: nothing written");
+            assert!(core.local_tx(|tx| Ok(tx.agent_by_name(core.principal.user_id, "desk")?)).unwrap().is_none(), "{case}");
+        }
+    }
+
+    #[test]
+    fn a_board_that_reports_the_switch_does_not_connect_past_a_pending_local_apply() {
+        let (_dir, _rt, core, conn, _) = setup();
+        let (migration, _, _, _) = desk_collision(&core);
+        adopt_migrated(&core, &conn).unwrap();
+        assert_eq!(conn.status(), Status::NotMigrated);
+        let op = core.local_tx(|tx| Ok(tx.migrate_op("dakai")?)).unwrap().unwrap();
+        assert_eq!((op.op_id, op.state), (migration.op_id, BoardOpState::Pending));
     }
 
     #[test]

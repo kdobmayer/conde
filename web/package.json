@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "vite dev",
     "build": "svelte-kit sync && vite build",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "4.0.0",

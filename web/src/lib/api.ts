@@ -55,20 +55,11 @@ async function post(request: object, s: Session): Promise<Response> {
 	});
 }
 
-/** One request; a mutation survives a dropped connection by resending the same key. */
+/**
+ * One request. A mutation carries one idempotency key for its whole life: resent after a
+ * dropped connection and after a session reload, the board commits it once.
+ */
 export async function rpc<T>(op: string, body: object = {}): Promise<T> {
-	try {
-		return await call<T>(op, body);
-	} catch (e) {
-		// Another sign-in replaced the session (new CSRF token): reload it and retry once.
-		if (!(e instanceof RpcError) || e.code !== 'stale_session') throw e;
-		await loadSession();
-		return call<T>(op, body);
-	}
-}
-
-async function call<T>(op: string, body: object): Promise<T> {
-	const s = session ?? (await loadSession());
 	const request: Record<string, unknown> = {
 		v: 1,
 		type: 'request',
@@ -77,6 +68,18 @@ async function call<T>(op: string, body: object): Promise<T> {
 		body
 	};
 	if (MUTATIONS.has(op)) request.idempotency_key = crypto.randomUUID();
+	try {
+		return await call<T>(request);
+	} catch (e) {
+		// Another sign-in replaced the session (new CSRF token): reload it and retry once.
+		if (!(e instanceof RpcError) || e.code !== 'stale_session') throw e;
+		await loadSession();
+		return call<T>(request);
+	}
+}
+
+async function call<T>(request: Record<string, unknown>): Promise<T> {
+	const s = session ?? (await loadSession());
 	let response: Response | null = null;
 	for (let attempt = 0; attempt < 3 && !response; attempt++) {
 		try {

@@ -2,6 +2,7 @@
 	import { tick } from 'svelte';
 	import { RpcError, rpc } from './api';
 	import { changed, onBoard, short } from './board.svelte';
+	import { acceptEarlier, acceptNewest, emptyThread } from './thread';
 	import { bytes, clock, day } from './time';
 	import type { History, Message } from './types';
 	import Delivery from './Delivery.svelte';
@@ -12,6 +13,7 @@
 	const isChannel = $derived(target.startsWith('#'));
 
 	let messages = $state<Message[]>([]);
+	let thread = emptyThread();
 	let head = $state<History | null>(null);
 	let more = $state(false);
 	let loading = $state(true);
@@ -43,15 +45,14 @@
 	/** Newest page; older pages already loaded are kept. An answer overtaken by a later
 	 * request is dropped. */
 	async function refresh(first = false) {
-		const stick = first || nearBottom();
 		const mine = ++generation;
 		try {
 			const h = await rpc<History>('conversation.history', query({ limit: PAGE }));
 			if (mine !== generation) return;
-			const oldest = h.messages[0]?.seq ?? Infinity;
-			const older = messages.filter((m) => m.seq < oldest);
-			messages = [...older, ...h.messages];
-			if (first) more = h.more;
+			const stick = first || !thread.paged || nearBottom();
+			thread = acceptNewest(thread, h);
+			messages = thread.messages;
+			more = thread.more;
 			head = h;
 			error = '';
 			notMember = false;
@@ -73,8 +74,9 @@
 		const height = scroller.scrollHeight;
 		try {
 			const h = await rpc<History>('conversation.history', query({ before: first.seq, limit: PAGE }));
-			messages = [...h.messages, ...messages];
-			more = h.more;
+			thread = acceptEarlier(thread, h);
+			messages = thread.messages;
+			more = thread.more;
 			await tick();
 			scroller.scrollTop = scroller.scrollHeight - height;
 		} catch (e) {
@@ -137,6 +139,8 @@
 	$effect(() => {
 		target;
 		messages = [];
+		thread = emptyThread();
+		more = false;
 		head = null;
 		quoted = {};
 		replyTo = null;

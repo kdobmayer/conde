@@ -54,6 +54,7 @@ pub static OPS: &[OpSpec] = &[
     op!("owner.history", web::history, query),
     op!("owner.message", web::message, query),
     op!("owner.attachment", web::attachment, query),
+    op!("owner.search", web::search, query),
     op!("fleet.list", web::fleet, query),
     op!("doctor", misc::doctor, query),
     op!("board.info", mailbox::board_info, query),

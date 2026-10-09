@@ -39,20 +39,30 @@ pub const BOARD_FORGET: &str = "board.forget";
 pub enum Surface {
     Cli,
     Mcp,
+    /// The remote MCP endpoint: one shared board, so no board column, plain ids, no board hints.
+    Remote,
 }
 
 impl Surface {
     fn flag(self) -> &'static str {
         match self {
             Surface::Cli => "--board",
-            Surface::Mcp => "the board argument",
+            Surface::Mcp | Surface::Remote => "the board argument",
         }
     }
 
     fn with_board(self, board: &str) -> String {
         match self {
             Surface::Cli => format!("--board {board}"),
-            Surface::Mcp => format!("board=\"{board}\""),
+            Surface::Mcp | Surface::Remote => format!("board=\"{board}\""),
+        }
+    }
+
+    /// The board column of a listing row (none on the remote surface).
+    fn column(self, board: &str) -> String {
+        match self {
+            Surface::Remote => String::new(),
+            _ => format!("{board}\t"),
         }
     }
 }
@@ -210,7 +220,7 @@ fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
     // a cursor is a number, or a time search's `<seq>@<time>` token (quoted for MCP)
     let cursor = |v: &Value| match v {
         Value::Number(n) => n.as_i64().map(|n| n.to_string()),
-        Value::String(t) if surface == Surface::Mcp => Some(format!("\"{t}\"")),
+        Value::String(t) if surface != Surface::Cli => Some(format!("\"{t}\"")),
         Value::String(t) => Some(t.clone()),
         _ => None,
     };
@@ -221,6 +231,7 @@ fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
         (Surface::Cli, _, Some(b)) => format!("conde {tool} --board {b} --after {n}"),
         (Surface::Mcp, _, None) => format!("call {tool} with after={n}"),
         (Surface::Mcp, _, Some(b)) => format!("call {tool} with board=\"{b}\" after={n}"),
+        (Surface::Remote, _, _) => format!("call {tool} with after={n}"),
     };
     if shared_parts(r) {
         let parts = r["boards"].as_array().cloned().unwrap_or_default();
@@ -256,7 +267,8 @@ pub fn inbox(r: &Value, surface: Surface) -> Out {
         let board = board_of(i, requested);
         let _ = writeln!(
             out.text,
-            "{board}\t{}\t{}\t{}\t{}\t{}",
+            "{}{}\t{}\t{}\t{}\t{}",
+            surface.column(board),
             s(&i["kind"]),
             qualify(board, s(&i["message_id"])),
             s(&i["from"]),
@@ -309,7 +321,7 @@ pub fn read(r: &Value, surface: Surface) -> Out {
     if r["more"].as_bool() == Some(true) {
         out.note(match surface {
             Surface::Cli => "(more unread: run conde read again)",
-            Surface::Mcp => "(more unread: call read again)",
+            Surface::Mcp | Surface::Remote => "(more unread: call read again)",
         });
     }
     out
@@ -336,22 +348,34 @@ pub fn message(out: &mut String, m: &Value, fallback: &str, surface: Surface) {
         let recover = match (surface, m["recover"].as_str()) {
             (Surface::Cli, Some(cmd)) => cmd.to_string(),
             (Surface::Cli, None) => format!("conde read {id}"),
-            (Surface::Mcp, _) => format!("call read with target=\"{id}\""),
+            (Surface::Mcp | Surface::Remote, _) => format!("call read with target=\"{id}\""),
         };
         let _ = writeln!(out, "Unconfirmed: {board} did not confirm this read; below is only a preview. The whole message: {recover}");
     }
     for a in m["attachments"].as_array().into_iter().flatten() {
-        let _ = writeln!(
-            out,
-            "Attachment: {} ({} bytes; conde attachment {})",
-            s(&a["filename"]),
-            a["size"],
-            qualify(board, s(&a["attachment_id"]))
-        );
+        let _ = match surface {
+            Surface::Remote => writeln!(out, "Attachment: {} ({} bytes)", s(&a["filename"]), a["size"]),
+            _ => writeln!(
+                out,
+                "Attachment: {} ({} bytes; conde attachment {})",
+                s(&a["filename"]),
+                a["size"],
+                qualify(board, s(&a["attachment_id"]))
+            ),
+        };
     }
     for r in m["reactions"].as_array().into_iter().flatten() {
         let by: Vec<&str> = r["by"].as_array().into_iter().flatten().map(s).collect();
         let _ = writeln!(out, "Reaction: {} {}", s(&r["emoji"]), by.join(", "));
+    }
+    let delivery: Vec<String> = m["delivery"]["recipients"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|d| format!("{} {}", s(&d["recipient"]), s(&d["state"])))
+        .collect();
+    if !delivery.is_empty() {
+        let _ = writeln!(out, "Delivery: {}", delivery.join(", "));
     }
     out.push('\n');
     out.push_str(s(&m["text"]));
@@ -369,7 +393,8 @@ pub fn search(r: &Value, surface: Surface) -> Out {
         let date: String = s(&h["date"]).chars().take(16).collect();
         let _ = writeln!(
             out.text,
-            "{board}\t{}\t{}\t{}\t{date}\t{}",
+            "{}{}\t{}\t{}\t{date}\t{}",
+            surface.column(board),
             s(&h["place"]),
             qualify(board, s(&h["message_id"])),
             s(&h["from"]),
@@ -411,6 +436,11 @@ pub fn sent(r: &Value, surface: Surface) -> Out {
 /// `agents`: a local row shows its address; a shared directory row shows kind, host and
 /// availability, never a target.
 pub fn agents(r: &Value) -> Out {
+    agents_as(r, Surface::Cli)
+}
+
+/// [`agents`] on a given surface (the remote one has no board column).
+pub fn agents_as(r: &Value, surface: Surface) -> Out {
     let requested = result_board(r);
     let mut out = Out::default();
     let rows = r["agents"].as_array().cloned().unwrap_or_default();
@@ -426,10 +456,55 @@ pub fn agents(r: &Value) -> Out {
             Some(false) => "\tunavailable",
             None => "",
         };
-        let _ = writeln!(out.text, "{board}\t{}\t{place}{avail}{display}", s(&a["name"]));
+        let _ = writeln!(out.text, "{}{}\t{place}{avail}{display}", surface.column(board), s(&a["name"]));
     }
     if rows.is_empty() {
         out.note("(registry empty)");
+    }
+    out
+}
+
+/// `owner.list` (the remote `agents mine=true`): each of the owner's agents with its DM
+/// partners and channels, last activity and unread counts.
+pub fn owner_list(r: &Value) -> String {
+    let mut out = String::new();
+    let agents = r["agents"].as_array().cloned().unwrap_or_default();
+    for a in &agents {
+        let kind = a["kind"].as_str().unwrap_or("unbound");
+        let _ = writeln!(out, "{} ({kind})", s(&a["name"]));
+        for t in a["dms"].as_array().into_iter().flatten() {
+            let _ = writeln!(out, "  dm {}\tlast {}\tunread {}", s(&t["with"]), s(&t["last_at"]), t["unread"]);
+        }
+        for c in a["channels"].as_array().into_iter().flatten() {
+            let _ = writeln!(out, "  {}\tlast {}\tunread {}", s(&c["channel"]), s(&c["last_at"]), c["unread"]);
+        }
+    }
+    if agents.is_empty() {
+        out.push_str("(you have no agents on this board)");
+    }
+    out
+}
+
+/// `owner.history` (the remote `read agent=`): one conversation of an owner's agent, oldest
+/// first, with the hint that pages back.
+pub fn history(r: &Value, agent: &str, target: &str) -> String {
+    let mut out = String::new();
+    let head = match r["channel"].as_str() {
+        Some(channel) => format!("--- {} in {channel}", s(&r["agent"])),
+        None => format!("--- {} with {}", s(&r["agent"]), s(&r["with"])),
+    };
+    let _ = writeln!(out, "{head}");
+    let messages = r["messages"].as_array().cloned().unwrap_or_default();
+    for m in &messages {
+        message(&mut out, m, LOCAL_BOARD, Surface::Remote);
+    }
+    if messages.is_empty() {
+        out.push_str("(no messages)\n");
+    }
+    if r["more"] == true
+        && let Some(first) = messages.first().and_then(|m| m["seq"].as_i64())
+    {
+        let _ = writeln!(out, "(older: call read with agent=\"{agent}\" target=\"{target}\" before={first})");
     }
     out
 }

@@ -148,6 +148,11 @@ impl conde_remote::Dispatcher for Board {
             "error": {"code": "internal", "message": e.to_string()}}))
     }
 
+    /// A remote MCP request as the grant's user (docs/REMOTE-MCP.md).
+    fn mcp(&self, caller: &conde_remote::McpCaller, request: Value) -> Value {
+        crate::mcp_remote::serve(&self.d, caller, &request)
+    }
+
     fn healthy(&self) -> bool {
         self.d.healthy()
     }

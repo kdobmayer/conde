@@ -146,6 +146,45 @@ CREATE TABLE IF NOT EXISTS web_tokens(
     created_at INTEGER NOT NULL,
     PRIMARY KEY (kind, digest)
 );
+-- Remote MCP (docs/REMOTE-MCP.md §3; shared board only, empty on a local board).
+CREATE TABLE IF NOT EXISTS mcp_grants(
+    grant_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(user_id),
+    client_id TEXT NOT NULL,
+    client_host TEXT NOT NULL,
+    client_name TEXT,
+    resource TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS mcp_grants_by_user ON mcp_grants(user_id);
+CREATE TABLE IF NOT EXISTS mcp_tokens(
+    token_digest TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL REFERENCES mcp_grants(grant_id) ON DELETE CASCADE,
+    audience TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mcp_tokens_by_grant ON mcp_tokens(grant_id);
+CREATE TABLE IF NOT EXISTS mcp_refresh(
+    digest TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL REFERENCES mcp_grants(grant_id) ON DELETE CASCADE,
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS mcp_refresh_by_grant ON mcp_refresh(grant_id);
+CREATE TABLE IF NOT EXISTS mcp_codes(
+    code_digest TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(user_id),
+    client_id TEXT NOT NULL,
+    client_name TEXT,
+    redirect_uri TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 -- Local board only (DESIGN-v2.md §4): publications of local agents on shared boards, and
 -- one operation record per remote mutation, written before the first remote call.
 CREATE TABLE IF NOT EXISTS publications(

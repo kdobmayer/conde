@@ -6,15 +6,15 @@
 use std::sync::Arc;
 
 use conde_remote::web::{
-    AdminKey, BindUser, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits, LoginTxn, Minted,
-    SessionRecord, WebResult, WebStore, WebStoreError, WebUser,
+    AdminKey, BindUser, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits, LoginTxn, McpAccess, McpCode,
+    McpGrant, McpHuman, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore, WebStoreError, WebUser,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::dispatch::Dispatcher;
 use crate::ops::hosts::key_id;
-use crate::store::{CredentialRow, StoreError, Tx, UserRow, WebSessionRow};
+use crate::store::{CredentialRow, McpCodeRow, McpGrantRow, StoreError, Tx, UserRow, WebSessionRow};
 use crate::util::iso_from_ms;
 
 const LOGIN: &str = "login";
@@ -57,6 +57,32 @@ fn iso(secs: i64) -> String {
 
 fn web_user(u: UserRow) -> WebUser {
     WebUser { user_id: u.user_id, name: u.name, disabled: u.disabled }
+}
+
+fn grant(g: McpGrantRow) -> McpGrant {
+    McpGrant {
+        grant_id: g.grant_id,
+        user_id: g.user_id,
+        client_id: g.client_id,
+        client_host: g.client_host,
+        client_name: g.client_name,
+        resource: g.resource,
+        created_at: g.created_at,
+        last_used_at: g.last_used_at,
+        expires_at: g.expires_at,
+        revoked_at: g.revoked_at,
+    }
+}
+
+/// A grant's last use is written at most this often (seconds).
+const TOUCH_EVERY: i64 = 60;
+
+/// Stores a token pair of the grant, each capped at the grant's end; the access token's expiry.
+fn store_tokens(t: &dyn Tx, g: &McpGrantRow, tokens: &McpTokens, now: i64) -> Result<i64, StoreError> {
+    let access_expires_at = (now + tokens.access_ttl).min(g.expires_at);
+    t.insert_mcp_token(&tokens.access_digest, &g.grant_id, &g.resource, access_expires_at)?;
+    t.insert_mcp_refresh(&tokens.refresh_digest, &g.grant_id, now, (now + tokens.refresh_ttl).min(g.expires_at))?;
+    Ok(access_expires_at)
 }
 
 fn host_key(t: &dyn Tx, c: CredentialRow) -> Result<HostKey, StoreError> {
@@ -281,5 +307,129 @@ impl WebStore for WebBoard {
             Some(u) => Ok(Some(t.set_user_disabled(u.user_id, disabled)?)),
             None => Ok(None),
         })
+    }
+
+    fn insert_mcp_code(&self, code_digest: &str, c: &McpCode) -> WebResult<()> {
+        let row = McpCodeRow {
+            user_id: c.user_id,
+            client_id: c.client_id.clone(),
+            client_name: c.client_name.clone(),
+            redirect_uri: c.redirect_uri.clone(),
+            challenge: c.challenge.clone(),
+            resource: c.resource.clone(),
+            created_at: c.created_at,
+        };
+        self.write(|t| Ok(t.insert_mcp_code(code_digest, &row)?))
+    }
+
+    fn take_mcp_code(&self, code_digest: &str) -> WebResult<Option<McpCode>> {
+        Ok(self.write(|t| Ok(t.take_mcp_code(code_digest)?))?.map(|c| McpCode {
+            user_id: c.user_id,
+            client_id: c.client_id,
+            client_name: c.client_name,
+            redirect_uri: c.redirect_uri,
+            challenge: c.challenge,
+            resource: c.resource,
+            created_at: c.created_at,
+        }))
+    }
+
+    fn create_mcp_grant(&self, g: &McpGrant, tokens: &McpTokens, now: i64) -> WebResult<Option<i64>> {
+        let row = McpGrantRow {
+            grant_id: g.grant_id.clone(),
+            user_id: g.user_id,
+            client_id: g.client_id.clone(),
+            client_host: g.client_host.clone(),
+            client_name: g.client_name.clone(),
+            resource: g.resource.clone(),
+            created_at: g.created_at,
+            last_used_at: g.last_used_at,
+            expires_at: g.expires_at,
+            revoked_at: None,
+        };
+        self.write(|t| {
+            if t.user_by_id(row.user_id)?.is_none_or(|u| u.disabled) {
+                return Ok(None);
+            }
+            t.insert_mcp_grant(&row)?;
+            Ok(Some(store_tokens(t, &row, tokens, now)?))
+        })
+    }
+
+    fn mcp_access(&self, token_digest: &str, now: i64) -> WebResult<Option<McpAccess>> {
+        let found = self.read(|t| {
+            let Some((grant_id, audience, expires_at)) = t.mcp_token(token_digest)? else { return Ok(None) };
+            let Some(g) = t.mcp_grant(&grant_id)? else { return Ok(None) };
+            let Some(user) = t.user_by_id(g.user_id)? else { return Ok(None) };
+            Ok(Some(McpAccess { grant: grant(g), user: user.name, disabled: user.disabled, audience, expires_at }))
+        })?;
+        if let Some(a) = &found
+            && a.grant.revoked_at.is_none()
+            && a.grant.last_used_at.is_none_or(|at| now - at >= TOUCH_EVERY)
+        {
+            let id = a.grant.grant_id.clone();
+            self.write(|t| Ok(t.touch_mcp_grant(&id, now)?))?;
+        }
+        Ok(found)
+    }
+
+    fn refresh_mcp_grant(
+        &self,
+        refresh_digest: &str,
+        client_id: &str,
+        tokens: &McpTokens,
+        now: i64,
+    ) -> WebResult<McpRefreshed> {
+        self.write(|t| {
+            let Some(r) = t.mcp_refresh(refresh_digest)? else { return Ok(McpRefreshed::Invalid) };
+            let Some(g) = t.mcp_grant(&r.grant_id)? else { return Ok(McpRefreshed::Invalid) };
+            if g.client_id != client_id {
+                return Ok(McpRefreshed::Invalid);
+            }
+            if r.consumed_at.is_some() {
+                t.revoke_mcp_grant(&g.grant_id, now)?;
+                return Ok(McpRefreshed::Reused { grant: grant(g) });
+            }
+            let disabled = t.user_by_id(g.user_id)?.is_none_or(|u| u.disabled);
+            if g.revoked_at.is_some() || g.expires_at <= now || r.expires_at <= now || disabled {
+                return Ok(McpRefreshed::Invalid);
+            }
+            // Consumed by a concurrent rotation since the read: the family is spent all the same.
+            if !t.consume_mcp_refresh(refresh_digest, now)? {
+                t.revoke_mcp_grant(&g.grant_id, now)?;
+                return Ok(McpRefreshed::Reused { grant: grant(g) });
+            }
+            let access_expires_at = store_tokens(t, &g, tokens, now)?;
+            Ok(McpRefreshed::Rotated { grant: grant(g), access_expires_at })
+        })
+    }
+
+    fn mcp_grants(&self, user_id: i64, now: i64) -> WebResult<Vec<McpGrant>> {
+        Ok(self
+            .read(|t| t.mcp_grants_of(user_id))?
+            .into_iter()
+            .filter(|g| g.revoked_at.is_none() && g.expires_at > now)
+            .map(grant)
+            .collect())
+    }
+
+    fn revoke_mcp_grant(&self, user_id: i64, grant_id: &str, now: i64) -> WebResult<bool> {
+        self.write(|t| match t.mcp_grant(grant_id)? {
+            Some(g) if g.user_id == user_id => Ok(t.revoke_mcp_grant(grant_id, now)?),
+            _ => Ok(false),
+        })
+    }
+
+    fn mcp_human(&self, user_id: i64) -> WebResult<McpHuman> {
+        let board = self.d.shared_name().unwrap_or("this board").to_string();
+        let found = self.read(|t| crate::mcp_remote::human_row(t, user_id, &board))?;
+        Ok(match found {
+            Ok(a) => McpHuman::One(a.canonical()),
+            Err(why) => McpHuman::Refused(why),
+        })
+    }
+
+    fn purge_mcp(&self, now: i64, code_ttl: i64) -> WebResult<()> {
+        self.write(|t| Ok(t.purge_mcp(now, code_ttl)?))
     }
 }

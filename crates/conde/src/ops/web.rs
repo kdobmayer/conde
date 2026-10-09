@@ -7,6 +7,7 @@
 //! - `owner.history`: one of those conversations in full, paged, with per-message delivery
 //!   state for messages the owner's agents sent (every recipient) or received (theirs).
 //! - `owner.message`, `owner.attachment`: one message or attachment under the same rule.
+//! - `owner.search`: `search` over the same rule (the remote MCP's search).
 //! - `fleet.list`: every bound agent with host bridge state; delivery health for own agents.
 
 use std::collections::{BTreeMap, HashMap};
@@ -124,6 +125,16 @@ pub fn message(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let mut v = messages::view(ctx.db, &m)?;
     v["delivery"] = delivery(ctx, &m)?;
     Ok(json!({"message": v}))
+}
+
+/// `owner.search {pattern, target?, after?}`: a regex over what the owner's agents can read,
+/// optionally one `#channel` or the DMs with one partner, oldest first, paged as `search`.
+pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    browser_only(ctx)?;
+    let owner = ctx.p.user_id;
+    messages::search_in(ctx, body, |after, scope| {
+        Ok(ctx.db.owner_search_scan(owner, after, scope, messages::SEARCH_BATCH)?)
+    })
 }
 
 /// `owner.attachment`: one attachment of a message an agent of the owner can read.

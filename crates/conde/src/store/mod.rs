@@ -339,6 +339,43 @@ pub struct WebSessionRow {
     pub last_seen: i64,
 }
 
+/// A remote MCP grant: one hosted client's consented access for a user (unix seconds).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpGrantRow {
+    pub grant_id: String,
+    pub user_id: i64,
+    pub client_id: String,
+    pub client_host: String,
+    pub client_name: Option<String>,
+    /// The resource (MCP endpoint URL) the grant was consented for: its tokens' audience.
+    pub resource: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+/// A one-time authorization code, keyed by its digest (unix seconds).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpCodeRow {
+    pub user_id: i64,
+    pub client_id: String,
+    pub client_name: Option<String>,
+    pub redirect_uri: String,
+    pub challenge: String,
+    pub resource: String,
+    pub created_at: i64,
+}
+
+/// One refresh token of a grant's family; `consumed_at` is set when it was rotated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpRefreshRow {
+    pub grant_id: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub consumed_at: Option<i64>,
+}
+
 /// An attempt a new bridge instance or a rebind outdated, with what its notification is for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaleAttempt {
@@ -663,6 +700,32 @@ pub trait Tx {
     fn touch_bridge(&self, instance: &str, at: &str) -> StoreResult<bool>;
     /// Announces a board change ([`topics`]) to the browsers on commit.
     fn announce(&self, topics: u8);
+    /// Like [`Tx::search_scan`] over what the owner's agents can read (the
+    /// [`Tx::owner_message`] rule), after `after`, oldest first.
+    fn owner_search_scan(&self, owner_id: i64, after: i64, scope: SearchScope, limit: i64) -> StoreResult<Vec<Message>>;
+
+    // remote MCP (docs/REMOTE-MCP.md §3)
+    fn insert_mcp_code(&self, code_digest: &str, c: &McpCodeRow) -> StoreResult<()>;
+    /// Returns and deletes the code.
+    fn take_mcp_code(&self, code_digest: &str) -> StoreResult<Option<McpCodeRow>>;
+    fn insert_mcp_grant(&self, g: &McpGrantRow) -> StoreResult<()>;
+    fn insert_mcp_token(&self, token_digest: &str, grant_id: &str, audience: &str, expires_at: i64) -> StoreResult<()>;
+    fn insert_mcp_refresh(&self, digest: &str, grant_id: &str, issued_at: i64, expires_at: i64) -> StoreResult<()>;
+    fn mcp_grant(&self, grant_id: &str) -> StoreResult<Option<McpGrantRow>>;
+    /// The access token's (grant_id, audience, expires_at).
+    fn mcp_token(&self, token_digest: &str) -> StoreResult<Option<(String, String, i64)>>;
+    fn mcp_refresh(&self, digest: &str) -> StoreResult<Option<McpRefreshRow>>;
+    /// Marks an unconsumed refresh token consumed; false when it already was (or is unknown).
+    fn consume_mcp_refresh(&self, digest: &str, at: i64) -> StoreResult<bool>;
+    fn touch_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<()>;
+    /// Ends a live grant: sets revoked_at and deletes its access and refresh tokens. False when
+    /// the grant was not live.
+    fn revoke_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<bool>;
+    /// The user's grants, newest first.
+    fn mcp_grants_of(&self, user_id: i64) -> StoreResult<Vec<McpGrantRow>>;
+    /// Deletes codes older than `code_ttl`, expired tokens, and grants expired or revoked
+    /// (with their tokens).
+    fn purge_mcp(&self, now: i64, code_ttl: i64) -> StoreResult<()>;
 
     // import
     fn import_state(&self, owner: &str) -> StoreResult<ImportState>;

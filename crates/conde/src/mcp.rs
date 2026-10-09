@@ -3,6 +3,8 @@
 //! `_meta["io.modelcontextprotocol/protocolVersion"]` is served statelessly;
 //! an `initialize` handshake selects legacy (2025-11-25 and earlier) semantics
 //! for the rest of the process, which is what Claude Code and Codex speak today.
+//! The JSON-RPC core ([`handle`]) also serves the remote endpoint's tools
+//! ([`crate::mcp_remote`]), where the era comes with each HTTP request.
 //!
 //! Identity is never taken from tool arguments. The actor is derived exactly as
 //! the CLI derives it, from the harness markers this process inherited and its
@@ -24,21 +26,15 @@ use crate::protocol::{ErrorCode, MAX_ATTACHMENT, Request};
 use crate::surface::{self, Surface};
 use crate::util::new_ulid;
 
-/// Served statelessly with per-request `_meta`.
-pub const MODERN_VERSIONS: &[&str] = &["2026-07-28"];
-/// Accepted through an `initialize` handshake (first is the fallback offer).
-pub const LEGACY_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+pub use conde_remote::mcp_protocol::{LEGACY_VERSIONS, MODERN_VERSIONS};
+use conde_remote::mcp_protocol::{
+    INVALID_PARAMS, INVALID_REQUEST, META_VERSION, METHOD_NOT_FOUND, PARSE_ERROR, UNSUPPORTED_PROTOCOL_VERSION,
+    supported_versions,
+};
 
-const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const LIST_TTL_MS: u64 = 3_600_000;
-
-const PARSE_ERROR: i64 = -32700;
-const INVALID_REQUEST: i64 = -32600;
-const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_PARAMS: i64 = -32602;
-const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
 const INSTRUCTIONS: &str = "conde is a durable message board for AI agents (Claude Code sessions, Codex threads) \
 and their humans. Every machine has a local board, and nothing on it leaves the machine; teammates' agents are \
@@ -62,10 +58,6 @@ default board; a message id carries its own board (dakai:01M...) and a bare id i
 const NOT_AN_AGENT: &str = "cannot determine identity: conde mcp acts only for a Claude Code session or a Codex \
 thread, and this MCP client identified neither (no CLAUDE_CODE_SESSION_ID in its environment, no Codex threadId in \
 the request); refusing to act as the human";
-
-fn supported_versions() -> Vec<&'static str> {
-    MODERN_VERSIONS.iter().chain(LEGACY_VERSIONS).copied().collect()
-}
 
 fn server_info() -> Value {
     json!({"name": "conde", "version": env!("CARGO_PKG_VERSION")})
@@ -117,11 +109,39 @@ fn codex_thread(meta: &Value) -> Option<String> {
     ok.then(|| id.to_string())
 }
 
+/// A tool set the JSON-RPC core serves: the stdio one (as a session) or the remote one (as the
+/// signed-in human).
+pub(crate) trait Tools {
+    fn defs(&self) -> &'static [ToolDef];
+    fn instructions(&self) -> &'static str;
+    /// One tool with its arguments; `meta` is the call's `_meta`.
+    fn run(&self, name: &str, args: &Map<String, Value>, meta: Option<&Value>) -> anyhow::Result<String>;
+}
+
 pub struct Server {
-    socket: PathBuf,
-    identity: Identity,
+    tools: StdioTools,
     /// Set by `initialize`: the negotiated legacy revision.
     legacy: Option<String>,
+}
+
+struct StdioTools {
+    socket: PathBuf,
+    identity: Identity,
+}
+
+impl Tools for StdioTools {
+    fn defs(&self) -> &'static [ToolDef] {
+        TOOLS
+    }
+
+    fn instructions(&self) -> &'static str {
+        INSTRUCTIONS
+    }
+
+    fn run(&self, name: &str, args: &Map<String, Value>, meta: Option<&Value>) -> anyhow::Result<String> {
+        let actor = self.identity.actor(meta);
+        run_tool(&self.socket, &actor, name, args)
+    }
 }
 
 enum Era {
@@ -129,7 +149,7 @@ enum Era {
     Legacy,
 }
 
-struct RpcError {
+pub(crate) struct RpcError {
     code: i64,
     message: String,
     data: Option<Value>,
@@ -141,7 +161,7 @@ fn rpc_error(code: i64, message: impl Into<String>) -> RpcError {
 
 impl Server {
     pub fn new(socket: PathBuf, identity: Identity) -> Server {
-        Server { socket, identity, legacy: None }
+        Server { tools: StdioTools { socket, identity }, legacy: None }
     }
 
     /// Serve newline-delimited JSON-RPC until EOF on `input`.
@@ -174,113 +194,114 @@ impl Server {
     }
 
     pub fn handle(&mut self, msg: &Value) -> Option<Value> {
-        let id = msg.get("id").cloned();
-        let Some(method) = msg.get("method").and_then(Value::as_str) else {
-            // a response from the client, or garbage without an id: nothing to answer
-            return id.filter(|_| msg.get("result").is_none() && msg.get("error").is_none()).map(|id| {
-                error_response(&id, rpc_error(INVALID_REQUEST, "invalid request: no method"))
-            });
-        };
-        let id = id?; // notifications (initialized, cancelled) need no answer
-        let params = msg.get("params").cloned().unwrap_or(Value::Null);
-        Some(match self.dispatch(method, &params) {
-            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err(e) => error_response(&id, e),
-        })
+        handle(&self.tools, &mut self.legacy, msg)
     }
+}
 
-    fn era(&self, params: &Value) -> Result<Era, RpcError> {
-        match params["_meta"].get(META_VERSION) {
-            Some(v) => {
-                let requested = v.as_str().unwrap_or_default();
-                if !supported_versions().contains(&requested) {
-                    Err(RpcError {
-                        code: UNSUPPORTED_PROTOCOL_VERSION,
-                        message: "Unsupported protocol version".into(),
-                        data: Some(json!({"supported": supported_versions(), "requested": v})),
-                    })
-                } else if !params["_meta"][META_CLIENT_CAPABILITIES].is_object() {
-                    Err(rpc_error(
-                        INVALID_PARAMS,
-                        format!("missing required params._meta[\"{META_CLIENT_CAPABILITIES}\"] (an object; {{}} declares none)"),
-                    ))
-                } else {
-                    Ok(Era::Modern)
-                }
+/// The JSON-RPC core: one message to at most one reply. `legacy` is the legacy revision in force
+/// (stdio: negotiated by `initialize` and kept; HTTP: the request's header, or None).
+pub(crate) fn handle(tools: &dyn Tools, legacy: &mut Option<String>, msg: &Value) -> Option<Value> {
+    let id = msg.get("id").cloned();
+    let Some(method) = msg.get("method").and_then(Value::as_str) else {
+        // a response from the client, or garbage without an id: nothing to answer
+        return id.filter(|_| msg.get("result").is_none() && msg.get("error").is_none()).map(|id| {
+            error_response(&id, rpc_error(INVALID_REQUEST, "invalid request: no method"))
+        });
+    };
+    let id = id?; // notifications (initialized, cancelled) need no answer
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    Some(match dispatch(tools, legacy, method, &params) {
+        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        Err(e) => error_response(&id, e),
+    })
+}
+
+fn era(legacy: &Option<String>, params: &Value) -> Result<Era, RpcError> {
+    match params["_meta"].get(META_VERSION) {
+        Some(v) => {
+            let requested = v.as_str().unwrap_or_default();
+            if !supported_versions().contains(&requested) {
+                Err(RpcError {
+                    code: UNSUPPORTED_PROTOCOL_VERSION,
+                    message: "Unsupported protocol version".into(),
+                    data: Some(json!({"supported": supported_versions(), "requested": v})),
+                })
+            } else if !params["_meta"][META_CLIENT_CAPABILITIES].is_object() {
+                Err(rpc_error(
+                    INVALID_PARAMS,
+                    format!("missing required params._meta[\"{META_CLIENT_CAPABILITIES}\"] (an object; {{}} declares none)"),
+                ))
+            } else {
+                Ok(Era::Modern)
             }
-            None if self.legacy.is_some() => Ok(Era::Legacy),
-            None => Err(RpcError {
-                code: INVALID_PARAMS,
-                message: format!(
-                    "missing params._meta[\"{META_VERSION}\"] and no initialize handshake; supported versions: {}",
-                    supported_versions().join(", ")
-                ),
-                data: Some(json!({"supported": supported_versions()})),
-            }),
         }
+        None if legacy.is_some() => Ok(Era::Legacy),
+        None => Err(RpcError {
+            code: INVALID_PARAMS,
+            message: format!(
+                "missing params._meta[\"{META_VERSION}\"] and no initialize handshake; supported versions: {}",
+                supported_versions().join(", ")
+            ),
+            data: Some(json!({"supported": supported_versions()})),
+        }),
     }
+}
 
-    fn dispatch(&mut self, method: &str, params: &Value) -> Result<Value, RpcError> {
-        if method == "initialize" {
-            let requested = params["protocolVersion"].as_str().unwrap_or_default();
-            let version = LEGACY_VERSIONS.iter().find(|v| **v == requested).unwrap_or(&LEGACY_VERSIONS[0]);
-            self.legacy = Some(version.to_string());
-            return Ok(json!({
-                "protocolVersion": version,
-                "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": server_info(),
-                "instructions": INSTRUCTIONS,
-            }));
-        }
-        let era = self.era(params)?;
-        let mut result = match (method, &era) {
-            ("server/discover", _) => json!({
-                "supportedVersions": supported_versions(),
-                "capabilities": {"tools": {"listChanged": false}},
-                "instructions": INSTRUCTIONS,
-                "ttlMs": LIST_TTL_MS,
-                "cacheScope": "public",
-            }),
-            ("tools/list", Era::Modern) => {
-                json!({"tools": tools(), "ttlMs": LIST_TTL_MS, "cacheScope": "public"})
-            }
-            ("tools/list", Era::Legacy) => json!({"tools": tools()}),
-            ("tools/call", _) => self.call_tool(params)?,
-            ("ping", Era::Legacy) => json!({}),
-            _ => return Err(rpc_error(METHOD_NOT_FOUND, format!("method not found: {method}"))),
-        };
-        if let (Era::Modern, Value::Object(obj)) = (era, &mut result) {
-            obj.insert("resultType".into(), json!("complete"));
-            obj.insert("_meta".into(), json!({ META_SERVER_INFO: server_info() }));
-        }
-        Ok(result)
+fn dispatch(tools: &dyn Tools, legacy: &mut Option<String>, method: &str, params: &Value) -> Result<Value, RpcError> {
+    if method == "initialize" {
+        let requested = params["protocolVersion"].as_str().unwrap_or_default();
+        let version = LEGACY_VERSIONS.iter().find(|v| **v == requested).unwrap_or(&LEGACY_VERSIONS[0]);
+        *legacy = Some(version.to_string());
+        return Ok(json!({
+            "protocolVersion": version,
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": server_info(),
+            "instructions": tools.instructions(),
+        }));
     }
+    let era = era(legacy, params)?;
+    let mut result = match (method, &era) {
+        ("server/discover", _) => json!({
+            "supportedVersions": supported_versions(),
+            "capabilities": {"tools": {"listChanged": false}},
+            "instructions": tools.instructions(),
+            "ttlMs": LIST_TTL_MS,
+            "cacheScope": "public",
+        }),
+        ("tools/list", Era::Modern) => {
+            json!({"tools": tool_list(tools.defs()), "ttlMs": LIST_TTL_MS, "cacheScope": "public"})
+        }
+        ("tools/list", Era::Legacy) => json!({"tools": tool_list(tools.defs())}),
+        ("tools/call", _) => call_tool(tools, params)?,
+        ("ping", Era::Legacy) => json!({}),
+        _ => return Err(rpc_error(METHOD_NOT_FOUND, format!("method not found: {method}"))),
+    };
+    if let (Era::Modern, Value::Object(obj)) = (era, &mut result) {
+        obj.insert("resultType".into(), json!("complete"));
+        obj.insert("_meta".into(), json!({ META_SERVER_INFO: server_info() }));
+    }
+    Ok(result)
+}
 
-    fn call_tool(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = params["name"].as_str().unwrap_or_default();
-        if !TOOLS.iter().any(|t| t.name == name) {
-            return Err(rpc_error(INVALID_PARAMS, format!("unknown tool: {name}")));
-        }
-        let args = match &params["arguments"] {
-            Value::Null => Map::new(),
-            Value::Object(m) => m.clone(),
-            _ => return Ok(tool_result(Err(anyhow!("arguments must be an object")))),
-        };
-        let actor = self.identity.actor(params.get("_meta"));
-        Ok(tool_result(run_tool(&self.socket, &actor, name, &args)))
+fn call_tool(tools: &dyn Tools, params: &Value) -> Result<Value, RpcError> {
+    let name = params["name"].as_str().unwrap_or_default();
+    if !tools.defs().iter().any(|t| t.name == name) {
+        return Err(rpc_error(INVALID_PARAMS, format!("unknown tool: {name}")));
     }
+    let args = match &params["arguments"] {
+        Value::Null => Map::new(),
+        Value::Object(m) => m.clone(),
+        _ => return Ok(tool_result(Err(anyhow!("arguments must be an object")))),
+    };
+    Ok(tool_result(tools.run(name, &args, params.get("_meta"))))
 }
 
 fn error_response(id: &Value, e: RpcError) -> Value {
-    let mut error = json!({"code": e.code, "message": e.message});
-    if let Some(data) = e.data {
-        error["data"] = data;
-    }
-    json!({"jsonrpc": "2.0", "id": id, "error": error})
+    conde_remote::mcp_protocol::error_response(id, e.code, &e.message, e.data)
 }
 
 /// Tool failures go back inside the result so the model can see and correct them.
-fn tool_result(r: anyhow::Result<String>) -> Value {
+pub(crate) fn tool_result(r: anyhow::Result<String>) -> Value {
     let (text, is_error) = match r {
         Ok(t) if t.is_empty() => ("(ok)".to_string(), false),
         Ok(t) => (t, false),
@@ -296,13 +317,13 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct ToolDef {
-    name: &'static str,
-    title: &'static str,
-    description: &'static str,
-    read_only: bool,
+pub(crate) struct ToolDef {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub read_only: bool,
     /// (property, JSON type, description, required)
-    props: &'static [(&'static str, &'static str, &'static str, bool)],
+    pub props: &'static [(&'static str, &'static str, &'static str, bool)],
 }
 
 static TOOLS: &[ToolDef] = &[
@@ -426,9 +447,8 @@ Reactions never notify anyone.",
     },
 ];
 
-fn tools() -> Vec<Value> {
-    TOOLS
-        .iter()
+pub(crate) fn tool_list(defs: &[ToolDef]) -> Vec<Value> {
+    defs.iter()
         .map(|t| {
             let mut properties = Map::new();
             let mut required = Vec::new();
@@ -481,7 +501,7 @@ fn call(socket: &Path, actor: &Result<String, String>, board: Option<&str>, op: 
     }
 }
 
-fn arg_str<'a>(args: &'a Map<String, Value>, key: &str) -> anyhow::Result<Option<&'a str>> {
+pub(crate) fn arg_str<'a>(args: &'a Map<String, Value>, key: &str) -> anyhow::Result<Option<&'a str>> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s)),
@@ -489,11 +509,11 @@ fn arg_str<'a>(args: &'a Map<String, Value>, key: &str) -> anyhow::Result<Option
     }
 }
 
-fn req_str<'a>(args: &'a Map<String, Value>, key: &str) -> anyhow::Result<&'a str> {
+pub(crate) fn req_str<'a>(args: &'a Map<String, Value>, key: &str) -> anyhow::Result<&'a str> {
     arg_str(args, key)?.ok_or_else(|| anyhow!("missing required argument '{key}'"))
 }
 
-fn arg_int(args: &Map<String, Value>, key: &str) -> anyhow::Result<Option<i64>> {
+pub(crate) fn arg_int(args: &Map<String, Value>, key: &str) -> anyhow::Result<Option<i64>> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => v.as_i64().map(Some).ok_or_else(|| anyhow!("argument '{key}' must be an integer")),
@@ -501,7 +521,7 @@ fn arg_int(args: &Map<String, Value>, key: &str) -> anyhow::Result<Option<i64>> 
 }
 
 /// search's `after`, by the CLI's rule: a cursor (a number, or its digits) or a time.
-fn arg_after(args: &Map<String, Value>) -> anyhow::Result<Option<Value>> {
+pub(crate) fn arg_after(args: &Map<String, Value>) -> anyhow::Result<Option<Value>> {
     let after = match args.get("after") {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::String(s)) => crate::util::parse_after(s).map_err(|e| anyhow!("argument 'after': {e}"))?,
@@ -510,7 +530,7 @@ fn arg_after(args: &Map<String, Value>) -> anyhow::Result<Option<Value>> {
     Ok(Some(after.wire()))
 }
 
-const AFTER_HELP: &str = "continue after this cursor (what a previous page printed after after=), or show only messages dated \
+pub(crate) const AFTER_HELP: &str = "continue after this cursor (what a previous page printed after after=), or show only messages dated \
 after this time: RFC 3339 (2026-10-09T14:30:00Z, 2026-10-09T16:30:00+02:00), conde's own dates \
 (2026-10-09T14:30:00.000Z) or the minute listings print (2026-10-09T14:30); a time without a zone is UTC";
 

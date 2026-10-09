@@ -315,12 +315,21 @@ pub fn reaction_set(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 }
 
 /// Messages a search reads per store round trip.
-const SEARCH_BATCH: i64 = 500;
+pub(crate) const SEARCH_BATCH: i64 = 500;
 
 /// Case-insensitive regex over what the caller can see (joined channels and
 /// own DMs), optionally narrowed to one channel or DM partner.
 pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
+    search_in(ctx, body, |after, scope| Ok(ctx.db.search_scan(&me.id, after, scope, SEARCH_BATCH)?))
+}
+
+/// The search loop over `scan` (a batch of what the caller may see after a cursor, in scope).
+pub(crate) fn search_in(
+    ctx: &Ctx,
+    body: &Value,
+    scan: impl Fn(i64, SearchScope) -> OpResult<Vec<MsgRow>>,
+) -> OpResult<Value> {
     let pattern = str_param(body, "pattern")?;
     let rx = RegexBuilder::new(pattern)
         .case_insensitive(true)
@@ -347,7 +356,7 @@ pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let mut next = None;
     let mut cursor = after;
     'scan: loop {
-        let batch = ctx.db.search_scan(&me.id, cursor, scope, SEARCH_BATCH)?;
+        let batch = scan(cursor, scope)?;
         for m in &batch {
             cursor = m.seq;
             // a message whose date does not parse is not known to be later

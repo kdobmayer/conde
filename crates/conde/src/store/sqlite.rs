@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, pa
 
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
+    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
     PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes, WebSessionRow, address_of,
 };
 use crate::address::Address;
@@ -228,6 +228,24 @@ const MSG_SELECT: &str = "SELECT m.commit_seq, m.message_id, m.sender_agent_id, 
     JOIN agents s ON s.agent_id = m.sender_agent_id JOIN users su ON su.user_id = s.owner_id
     LEFT JOIN agents r ON r.agent_id = m.recipient_agent_id LEFT JOIN users ru ON ru.user_id = r.owner_id
     LEFT JOIN channels c ON c.channel_id = m.channel_id";
+
+const MCP_GRANT_SELECT: &str = "SELECT grant_id, user_id, client_id, client_host, client_name, resource, created_at,
+    last_used_at, expires_at, revoked_at FROM mcp_grants";
+
+fn mcp_grant_row(r: &Row) -> rusqlite::Result<McpGrantRow> {
+    Ok(McpGrantRow {
+        grant_id: r.get(0)?,
+        user_id: r.get(1)?,
+        client_id: r.get(2)?,
+        client_host: r.get(3)?,
+        client_name: r.get(4)?,
+        resource: r.get(5)?,
+        created_at: r.get(6)?,
+        last_used_at: r.get(7)?,
+        expires_at: r.get(8)?,
+        revoked_at: r.get(9)?,
+    })
+}
 
 fn msg_row(r: &Row) -> rusqlite::Result<Message> {
     Ok(Message {
@@ -1393,6 +1411,139 @@ impl Tx for SqliteTx<'_> {
             params![owner_id, message_id],
             msg_row,
         )
+    }
+
+    fn owner_search_scan(&self, owner_id: i64, after: i64, scope: SearchScope, limit: i64) -> StoreResult<Vec<Message>> {
+        let owned = "((m.channel_id IS NULL AND (s.owner_id = ?1 OR r.owner_id = ?1))
+            OR (m.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM memberships x
+                JOIN agents o ON o.agent_id = x.agent_id WHERE x.channel_id = m.channel_id AND o.owner_id = ?1)))";
+        let (filter, arg) = match scope {
+            SearchScope::All => ("?4 IS NULL", None),
+            SearchScope::Channel(name) => ("c.name_lower = ?4", Some(name)),
+            SearchScope::Partner(id) => {
+                ("m.channel_id IS NULL AND (m.sender_agent_id = ?4 OR m.recipient_agent_id = ?4)", Some(id))
+            }
+        };
+        self.msgs(
+            &format!("m.commit_seq > ?2 AND {owned} AND {filter} ORDER BY m.commit_seq LIMIT ?3"),
+            params![owner_id, after, limit, arg],
+        )
+    }
+
+    fn insert_mcp_code(&self, code_digest: &str, c: &McpCodeRow) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO mcp_codes(code_digest, user_id, client_id, client_name, redirect_uri, challenge, resource, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![code_digest, c.user_id, c.client_id, c.client_name, c.redirect_uri, c.challenge, c.resource, c.created_at],
+        )?;
+        Ok(())
+    }
+
+    fn take_mcp_code(&self, code_digest: &str) -> StoreResult<Option<McpCodeRow>> {
+        self.opt(
+            "DELETE FROM mcp_codes WHERE code_digest = ?1
+             RETURNING user_id, client_id, client_name, redirect_uri, challenge, resource, created_at",
+            [code_digest],
+            |r| {
+                Ok(McpCodeRow {
+                    user_id: r.get(0)?,
+                    client_id: r.get(1)?,
+                    client_name: r.get(2)?,
+                    redirect_uri: r.get(3)?,
+                    challenge: r.get(4)?,
+                    resource: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            },
+        )
+    }
+
+    fn insert_mcp_grant(&self, g: &McpGrantRow) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO mcp_grants(grant_id, user_id, client_id, client_host, client_name, resource, created_at,
+                                    last_used_at, expires_at, revoked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                g.grant_id, g.user_id, g.client_id, g.client_host, g.client_name, g.resource, g.created_at,
+                g.last_used_at, g.expires_at, g.revoked_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn insert_mcp_token(&self, token_digest: &str, grant_id: &str, audience: &str, expires_at: i64) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO mcp_tokens(token_digest, grant_id, audience, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![token_digest, grant_id, audience, expires_at],
+        )?;
+        Ok(())
+    }
+
+    fn insert_mcp_refresh(&self, digest: &str, grant_id: &str, issued_at: i64, expires_at: i64) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO mcp_refresh(digest, grant_id, issued_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![digest, grant_id, issued_at, expires_at],
+        )?;
+        Ok(())
+    }
+
+    fn mcp_grant(&self, grant_id: &str) -> StoreResult<Option<McpGrantRow>> {
+        self.opt(&format!("{MCP_GRANT_SELECT} WHERE grant_id = ?1"), [grant_id], mcp_grant_row)
+    }
+
+    fn mcp_token(&self, token_digest: &str) -> StoreResult<Option<(String, String, i64)>> {
+        self.opt(
+            "SELECT grant_id, audience, expires_at FROM mcp_tokens WHERE token_digest = ?1",
+            [token_digest],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+    }
+
+    fn mcp_refresh(&self, digest: &str) -> StoreResult<Option<McpRefreshRow>> {
+        self.opt(
+            "SELECT grant_id, issued_at, expires_at, consumed_at FROM mcp_refresh WHERE digest = ?1",
+            [digest],
+            |r| Ok(McpRefreshRow { grant_id: r.get(0)?, issued_at: r.get(1)?, expires_at: r.get(2)?, consumed_at: r.get(3)? }),
+        )
+    }
+
+    fn consume_mcp_refresh(&self, digest: &str, at: i64) -> StoreResult<bool> {
+        let n = self.exec(
+            "UPDATE mcp_refresh SET consumed_at = ?2 WHERE digest = ?1 AND consumed_at IS NULL",
+            params![digest, at],
+        )?;
+        Ok(n == 1)
+    }
+
+    fn touch_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<()> {
+        self.exec("UPDATE mcp_grants SET last_used_at = ?2 WHERE grant_id = ?1", params![grant_id, at])?;
+        Ok(())
+    }
+
+    fn revoke_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<bool> {
+        let n = self.exec(
+            "UPDATE mcp_grants SET revoked_at = ?2 WHERE grant_id = ?1 AND revoked_at IS NULL",
+            params![grant_id, at],
+        )?;
+        self.exec("DELETE FROM mcp_tokens WHERE grant_id = ?1", [grant_id])?;
+        self.exec("DELETE FROM mcp_refresh WHERE grant_id = ?1", [grant_id])?;
+        Ok(n == 1)
+    }
+
+    fn mcp_grants_of(&self, user_id: i64) -> StoreResult<Vec<McpGrantRow>> {
+        self.rows(
+            &format!("{MCP_GRANT_SELECT} WHERE user_id = ?1 ORDER BY created_at DESC, grant_id"),
+            [user_id],
+            mcp_grant_row,
+        )
+    }
+
+    fn purge_mcp(&self, now: i64, code_ttl: i64) -> StoreResult<()> {
+        self.exec("DELETE FROM mcp_codes WHERE created_at < ?1 - ?2", params![now, code_ttl])?;
+        self.exec("DELETE FROM mcp_tokens WHERE expires_at < ?1", [now])?;
+        self.exec("DELETE FROM mcp_refresh WHERE expires_at < ?1", [now])?;
+        self.exec("DELETE FROM mcp_grants WHERE expires_at < ?1 OR revoked_at IS NOT NULL", [now])?;
+        Ok(())
     }
 
     fn deliveries(&self, message_id: &str) -> StoreResult<Vec<Delivery>> {

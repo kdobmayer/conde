@@ -2,7 +2,7 @@
 //! session socket (receipts come back to one long-lived reply socket), Codex
 //! over the app-server (falling back to `codex queue`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,8 +14,6 @@ use conde_transport::{
 use crate::address::{Address, Kind};
 use crate::notify::{Notifier, NotifyOutcome, Receipt, ReceiptStatus};
 
-/// How many sent frames keep their msg_id -> attempt mapping for late receipts.
-const REMEMBERED: usize = 65_536;
 /// After a send, how long a pass waits for an immediate receipt (held,
 /// refused) before the provisional acceptance stands; later receipts revise it.
 pub const RECEIPT_WAIT: Duration = Duration::from_millis(300);
@@ -24,8 +22,8 @@ pub struct HarnessNotifier {
     claude_config: Option<PathBuf>,
     /// One reply identity per recipients' socket directory, for the process lifetime.
     senders: HashMap<PathBuf, ClaudeSender>,
+    /// msg_id -> attempt, for late receipts; released only by [`Notifier::forget`].
     attempts: HashMap<String, String>,
-    order: VecDeque<String>,
     receipt_wait: Duration,
     sent_since_poll: bool,
 }
@@ -37,7 +35,6 @@ impl HarnessNotifier {
             claude_config,
             senders: HashMap::new(),
             attempts: HashMap::new(),
-            order: VecDeque::new(),
             receipt_wait: RECEIPT_WAIT,
             sent_since_poll: false,
         }
@@ -53,14 +50,12 @@ impl HarnessNotifier {
     }
 
     fn remember(&mut self, msg_id: String, attempt_id: &str) {
-        if self.attempts.insert(msg_id.clone(), attempt_id.to_string()).is_none() {
-            self.order.push_back(msg_id);
-            if self.order.len() > REMEMBERED
-                && let Some(old) = self.order.pop_front()
-            {
-                self.attempts.remove(&old);
-            }
-        }
+        self.attempts.insert(msg_id, attempt_id.to_string());
+    }
+
+    /// Receipt mappings currently held (doctor, tests).
+    pub fn mappings(&self) -> usize {
+        self.attempts.len()
     }
 
     fn claude(&mut self, session_id: &str, text: &str, attempt_id: &str) -> NotifyOutcome {
@@ -120,6 +115,10 @@ impl Notifier for HarnessNotifier {
             tracing::warn!(%address, attempt = attempt_id, "notify failed: {why}");
         }
         outcome
+    }
+
+    fn forget(&mut self, attempt_id: &str) {
+        self.attempts.remove(&msg_id_for(attempt_id));
     }
 
     fn poll_receipts(&mut self) -> Vec<Receipt> {
@@ -206,4 +205,23 @@ pub fn doctor_checks(notifier: &HarnessNotifier, actor: Option<&str>) -> Vec<(bo
         None => out.push((!is("codex"), "codex: cannot locate the codex home (CODEX_HOME and HOME unset)".to_string())),
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mapping_is_released_only_by_forget() {
+        let mut n = HarnessNotifier::new(Some(std::env::temp_dir().join("conde-no-claude")));
+        // Beyond the 65536 entries v1 kept before evicting the oldest, whatever its state.
+        for i in 0..70_000 {
+            n.remember(msg_id_for(&format!("t{i}")), &format!("t{i}"));
+        }
+        assert_eq!(n.mappings(), 70_000);
+        assert_eq!(n.attempts.get(&msg_id_for("t0")).map(String::as_str), Some("t0"));
+        n.forget("t0");
+        assert_eq!(n.mappings(), 69_999);
+        assert!(!n.attempts.contains_key(&msg_id_for("t0")));
+    }
 }

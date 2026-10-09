@@ -72,6 +72,20 @@ impl SqliteStore {
     fn with(conn: Connection) -> SqliteStore {
         SqliteStore { conn: Mutex::new(conn), signal: PendingSignal::default() }
     }
+
+    /// A write transaction that also reaches the local board's own tables
+    /// ([`super::local::LocalTx`]); commit it with [`Tx::commit`].
+    pub fn begin_local(&self) -> StoreResult<Box<SqliteTx<'_>>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(Box::new(SqliteTx {
+            conn,
+            signal: &self.signal,
+            open: Cell::new(true),
+            failed: Cell::new(false),
+            wakes: RefCell::default(),
+        }))
+    }
 }
 
 fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -246,8 +260,13 @@ fn one_col<A: FromSql>(r: &Row) -> rusqlite::Result<A> {
 }
 
 impl SqliteTx<'_> {
+    /// The connection, inside this transaction (the local tables' statements).
+    pub(crate) fn raw(&self) -> &Connection {
+        &self.conn
+    }
+
     /// A failed statement poisons the transaction, as it does on Postgres.
-    fn guard<T>(&self, r: rusqlite::Result<T>) -> StoreResult<T> {
+    pub(crate) fn guard<T>(&self, r: rusqlite::Result<T>) -> StoreResult<T> {
         r.map_err(|e| {
             self.failed.set(true);
             e.into()

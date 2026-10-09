@@ -1,5 +1,5 @@
 //! Cloud mode end to end on 127.0.0.1: an in-process `conde` server over a
-//! temp board, and bridges as real `conde daemon --server` processes, each
+//! temp board, and bridges as real `conde daemon --v1-bridge` processes (the v1 bridge), each
 //! with its own host id, enrolled through `conde enroll`.
 
 mod support;
@@ -72,7 +72,7 @@ impl Cloud {
     /// Enroll `h` and start its bridge daemon.
     fn bridge(&self, h: &mut Host, log: &str, sock: &std::path::Path, extra: &[&str]) -> u32 {
         let url = self.url();
-        let mut args = vec!["--server", url.as_str()];
+        let mut args = vec!["--v1-bridge", url.as_str()];
         args.extend_from_slice(extra);
         h.daemon(log, sock, &args)
     }
@@ -211,7 +211,7 @@ fn an_idle_bridge_stays_connected_through_pings() {
     assert!(first.contains("bridge: connected"), "{first}");
     // A second daemon on the same socket refuses before it ever says hello.
     let file = std::fs::File::create(a.root.join("second.log")).unwrap();
-    let second = a.env(&mut std::process::Command::new(BIN)).args(["daemon", "--server", &cloud.url()]).stderr(file).status();
+    let second = a.env(&mut std::process::Command::new(BIN)).args(["daemon", "--v1-bridge", &cloud.url()]).stderr(file).status();
     assert!(!second.unwrap().success());
     assert!(a.log("second.log").contains("another conde daemon is listening"), "{}", a.log("second.log"));
     std::thread::sleep(ping * 7);
@@ -229,7 +229,7 @@ fn enrollment_is_bound_to_its_server_and_admin_is_human_only() {
     let file = std::fs::File::create(a.root.join("other.log")).unwrap();
     let out = a
         .env(&mut std::process::Command::new(BIN))
-        .args(["daemon", "--server", "ws://127.0.0.2:9"])
+        .args(["daemon", "--v1-bridge", "ws://127.0.0.2:9"])
         .stderr(file)
         .status()
         .unwrap();

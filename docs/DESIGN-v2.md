@@ -411,6 +411,67 @@ session or thread id is reported. The server abandons holds on a mailbox that le
 `gone_claude_holds`, extended to the mailbox kind). A replacement behind an unchanged mailbox is
 handled locally, as above.
 
+### Resolved while building the daemon (lane V2, 2026-10-09)
+
+Each line closes a question the sections above left open; the gate tests in
+`crates/conde/tests/v2_daemon.rs` hold them.
+
+- **The v1 bridge**: `conde daemon` never sends a v1 hello and ignores `--server` with a warning.
+  The v1 bridge stays in the binary as the hidden `conde daemon --v1-bridge <url>` (never
+  started by `conde setup`) until `CONDE_MIN_PROTO=2`, because the v1 cloud suite and G8's v1
+  host need a v1 bridge to exist.
+- **When a board connects**: only once its `migrate` op is `done` locally; before that no hello
+  is sent and `doctor` says `not migrated`. The v1 `conde/credentials` file moves to
+  `boards/<name>.json` (name and account from `board.info` over `/v1/rpc`, no hello) at the first
+  start that reaches the board.
+- **Default board**: the alias in `$XDG_CONFIG_HOME/conde/default-board`; absent means `local`.
+- **CLI/MCP to the daemon**: the request frame's `board` field carries `--board`; the daemon
+  answers `daemon.publish`, `daemon.unpublish`, `daemon.boards`, `daemon.forget`,
+  `daemon.migrate_preview` and `daemon.migrate` itself (`protocol::v2::daemon_op`).
+- **Ids in shared results**: the daemon prefixes every `message_id`, `reply_to` and
+  `attachment_id` of a shared board's result with `<alias>:` and labels the result and its rows
+  with `board`. A local miss of a name reads `no agent registered as 'x' on the local board;
+  shared boards are addressed with --board <name>`.
+- **Directory reads** (`agent.list`, `agent.resolve`, `profile.get`, `channel.list`,
+  `channel.members`) on a shared board need no publication; they are sent without an actor.
+  The human's actor is `human:<board owner>@<board host>` and needs the human's own
+  publication.
+- **Aggregate paging**: `after` applies to the local part; each board's part carries its own
+  `next_cursor` in `boards`; a board is paged with `--board <alias> --after N`.
+- **Aggregate read** (`read` with no target): a board's part is two calls inside the 2 s bound,
+  `inbox.list` and then `message.read`. If the second does not answer in time, the part shows
+  the listed messages with `"unconfirmed": true` (read them with `conde read dakai:<id>`), so a
+  read applied on the board after the cut is never silently lost; a board whose listing does not
+  answer is unavailable and nothing is marked read there.
+- **Admission by generation**: a notify older than the publication's generation is `refused`; a
+  newer one (routes not applied yet) is `failed` with `recipient unavailable`, retried after the
+  board's backoff.
+- **Notifies beyond the window** (a board pushing more than W unresolved): settled `failed` with
+  `transport error`, so the board retries them and the queue keeps its bound.
+- **Release of a slot**: Claude's acceptance holds its slot until a terminal receipt (or an
+  `abandoned`) is in the book. A Codex `delivered`, a Codex `held` (queued; no receipt can follow,
+  the board settles it on the read) and every `failed` release theirs once the book takes them.
+  Locally, a Codex result releases at once; a Claude acceptance whose session is gone releases
+  without a report (the local board keeps v1's `notified`); a local hold on a gone session is
+  reported `abandoned` (`recipient session gone`), as v1 does.
+- **A revoked route with attempts in flight**: at the next rescan the daemon reports each
+  unresolved attempt of a mailbox it no longer routes as `abandoned` with `recipient
+  unavailable`, which frees its slot.
+- **Board ops' refusals**: a refused publish deletes the `publishing` row and fails the op; an
+  unpublish refused with `conflict` or `not_found` means the mailbox moved (row deleted, op
+  `done`); any other refusal restores the row to `published` and fails the op. `mailbox.*` and
+  `host.migrate_*` are sent without an actor (the host credential is the scope).
+- **Reconciliation from `mailbox.mine`** leaves rows changed after the snapshot was requested.
+
+Server behaviours the daemon relies on (V1):
+- an outcome reported for an attempt whose route generation is no longer its mailbox's (a
+  takeover or an unpublish raced the report) never ends the notification: the attempt is
+  settled `abandoned` and re-attempted at the current route (G14, G15);
+- `board.info`, `host.migrate_preview` and `host.migrate_v2` answer over `/v1/rpc` before any
+  hello; `host.migrate_v2` on a host that is already `mailbox_only` answers with the current
+  bindings (a re-enrollment after `conde boards --forget`);
+- the `routes` frame on connect is optional for the daemon (it reconciles with `mailbox.mine`).
+
 ## 6. Server changes (shared board)
 
 - `board.info` -> `{name, owner, host, mailbox_only}`. `name` comes from `CONDE_BOARD_NAME` (set to

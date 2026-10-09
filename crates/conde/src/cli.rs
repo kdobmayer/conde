@@ -168,9 +168,12 @@ enum Cmd {
         /// One bridge pass, then exit (local mode).
         #[arg(long)]
         once: bool,
-        /// Cloud mode: the conde server (wss://host); needs `conde enroll` first.
-        #[arg(long, value_name = "URL")]
+        /// Accepted and ignored (v1 service units pass it); boards come from conde/boards/.
+        #[arg(long, value_name = "URL", hide = true)]
         server: Option<String>,
+        /// The v1 bridge to a conde server, for hosts that are not migrated (tests of mixed boards).
+        #[arg(long, value_name = "URL", hide = true)]
+        v1_bridge: Option<String>,
         /// Seconds before a failed or expired notification is retried (local mode).
         #[arg(long, hide = true)]
         retry_backoff: Option<f64>,
@@ -435,18 +438,17 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
     };
     match cli.cmd {
-        Cmd::Daemon { interval, once, server, retry_backoff, idle_timeout } => {
+        Cmd::Daemon { interval, once, server, v1_bridge, retry_backoff, idle_timeout } => {
             no_board("daemon", "")?;
             tracing_subscriber::fmt().with_writer(std::io::stderr).with_target(false).init();
-            daemon::run(daemon::Options {
-                data_dir: paths::data_dir(),
-                socket: paths::socket_path(),
-                interval: Duration::from_secs_f64(interval.max(0.05)),
-                once,
-                server,
-                retry_backoff: retry_backoff.map(secs),
-                idle_timeout: idle_timeout.map(secs),
-            })?;
+            let mut opts = daemon::Options::new(paths::data_dir(), paths::socket_path());
+            opts.interval = Duration::from_secs_f64(interval.max(0.05));
+            opts.once = once;
+            opts.server = server;
+            opts.v1_bridge = v1_bridge;
+            opts.retry_backoff = retry_backoff.map(secs);
+            opts.idle_timeout = idle_timeout.map(secs);
+            daemon::run(opts)?;
             return Ok(0);
         }
         Cmd::Server { listen, data } => {

@@ -16,7 +16,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HOST_MISMATCH};
 use crate::server::MAX_FRAME_BYTES;
-use crate::{Endpoint, Hello, Notify, Outcome, PROTO_V1};
+use crate::{Endpoint, Hello, Notify, Outcome, PROTO_V1, Routes};
 
 /// An outcome's reason is cut to this many bytes, so a diagnostic can never make it too large.
 pub const MAX_REASON_BYTES: usize = 4096;
@@ -56,6 +56,11 @@ pub struct BridgeConfig {
     pub max_unacked_outcomes: usize,
     pub max_unacked_bytes: usize,
     pub max_frame_bytes: usize,
+    /// The bridge protocol the hello declares: [`PROTO_V1`] (harness endpoints) or
+    /// [`crate::PROTO_V2`] (mailbox endpoints, with `window`).
+    pub proto: u32,
+    /// The admission window a v2 hello declares; `None` on v1.
+    pub window: Option<u32>,
 }
 
 impl BridgeConfig {
@@ -82,8 +87,21 @@ impl BridgeConfig {
             max_unacked_outcomes: 10_000,
             max_unacked_bytes: 8 * 1024 * 1024,
             max_frame_bytes: MAX_FRAME_BYTES,
+            proto: PROTO_V1,
+            window: None,
         }
     }
+}
+
+/// What the server sent, in frame order, as the event callback of
+/// [`BridgeClient::start_events`] receives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Inbound {
+    /// A new connection's hello was sent; every later event belongs to it.
+    Connected,
+    Notify(Notify),
+    /// This host's full mailbox route set (v2).
+    Routes(Routes),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +143,46 @@ pub enum CallError {
     /// budget). Permanent: reporting it again is refused the same way.
     #[error("outcome frame of {bytes} bytes exceeds the {limit}-byte limit")]
     TooLarge { bytes: usize, limit: usize },
+    /// An HTTP request ([`rpc`]) did not get a response object.
+    #[error("{0}")]
+    Transport(String),
+}
+
+/// One request object over `POST <rpc_url>` (`https://host/v1/rpc`) with the host
+/// credential, outside any bridge connection, so no hello is sent: what a daemon asks a
+/// board before it may connect (board info, the migration preview and apply). `v`, `type`
+/// and a `request_id` are filled in. A rejected credential is
+/// [`CallError::Stopped`]`(`[`StopReason::Unauthorized`]`)`.
+pub async fn rpc(rpc_url: &str, token: &str, request: Value, timeout: Duration) -> Result<Value, CallError> {
+    let Value::Object(mut obj) = request else {
+        return Err(CallError::BadRequest);
+    };
+    obj.entry("request_id").or_insert_with(|| json!(format!("{:032x}", rand::random::<u128>())));
+    obj.insert("v".into(), json!(protocol::VERSION));
+    obj.insert("type".into(), json!("request"));
+    let client = reqwest::Client::builder()
+        .tls_backend_preconfigured((*tls_config()).clone())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+        .map_err(|e| CallError::Transport(format!("http client: {e}")))?;
+    let response = client
+        .post(rpc_url)
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(Value::Object(obj).to_string())
+        .send()
+        .await
+        .map_err(|e| CallError::Transport(format!("{rpc_url}: {e}")))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(CallError::Stopped(StopReason::Unauthorized));
+    }
+    let status = response.status();
+    let bytes = response.bytes().await.map_err(|e| CallError::Transport(format!("{rpc_url}: {e}")))?;
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(v @ Value::Object(_)) => Ok(v),
+        _ => Err(CallError::Transport(format!("{rpc_url}: HTTP {status} without a response object"))),
+    }
 }
 
 /// Cuts a reason to [`MAX_REASON_BYTES`] on a character boundary, marking the cut.
@@ -238,9 +296,23 @@ impl BridgeClient {
     /// notifications still queued for the callback are dropped unrun. A callback already
     /// running completes; its `report` is refused, so its outcome never reaches the server
     /// and the attempt stays unsettled there.
-    pub fn start<F>(config: BridgeConfig, on_notify: F) -> Self
+    pub fn start<F>(config: BridgeConfig, mut on_notify: F) -> Self
     where
         F: FnMut(Notify) + Send + 'static,
+    {
+        Self::start_events(config, move |event| {
+            if let Inbound::Notify(n) = event {
+                on_notify(n)
+            }
+        })
+    }
+
+    /// Like [`start`](Self::start), but the callback sees every [`Inbound`] event in frame
+    /// order: each connection's start, its notifies and its `routes` frames. An attempt is
+    /// marked seen before its notify reaches the callback, and the mark survives reconnects.
+    pub fn start_events<F>(config: BridgeConfig, on_event: F) -> Self
+    where
+        F: FnMut(Inbound) + Send + 'static,
     {
         let instance = config
             .bridge_instance
@@ -265,17 +337,17 @@ impl BridgeClient {
             ),
             outcome_wake: tokio::sync::Notify::new(),
         });
-        let (notify_tx, notify_rx) = std::sync::mpsc::channel::<Notify>();
-        let mut on_notify = on_notify;
+        let (notify_tx, notify_rx) = std::sync::mpsc::channel::<Inbound>();
+        let mut on_event = on_event;
         let gate = inner.clone();
         std::thread::Builder::new()
             .name("conde-bridge-notify".into())
             .spawn(move || {
-                for n in notify_rx {
+                for event in notify_rx {
                     if gate.stop_reason().is_some() {
                         break;
                     }
-                    on_notify(n);
+                    on_event(event);
                 }
             })
             .expect("spawn notify thread");
@@ -548,7 +620,7 @@ enum SessionEnd {
 async fn supervise(
     inner: Arc<Inner>,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
-    notify_tx: std::sync::mpsc::Sender<Notify>,
+    notify_tx: std::sync::mpsc::Sender<Inbound>,
 ) {
     let cfg = inner.config.clone();
     let mut shutdown = inner.shutdown.subscribe();
@@ -606,7 +678,7 @@ async fn session(
     inner: &Inner,
     ws: Ws,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
-    notify_tx: &std::sync::mpsc::Sender<Notify>,
+    notify_tx: &std::sync::mpsc::Sender<Inbound>,
     seen: &mut Seen,
     shutdown: &mut watch::Receiver<bool>,
 ) -> SessionEnd {
@@ -638,7 +710,7 @@ async fn run_session(
     tx: &mut futures_util::stream::SplitSink<Ws, Message>,
     rx: &mut futures_util::stream::SplitStream<Ws>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
-    notify_tx: &std::sync::mpsc::Sender<Notify>,
+    notify_tx: &std::sync::mpsc::Sender<Inbound>,
     seen: &mut Seen,
     shutdown: &mut watch::Receiver<bool>,
     inflight: &mut HashSet<String>,
@@ -658,12 +730,15 @@ async fn run_session(
             host_id: cfg.host_id.clone(),
             bridge_instance: inner.instance.clone(),
             endpoints: announced.iter().cloned().collect(),
-            proto: PROTO_V1,
-            window: None,
+            proto: cfg.proto,
+            window: cfg.window,
         },
     );
     if let Err(e) = tx.send(Message::text(hello)).await {
         return lost(e);
+    }
+    if notify_tx.send(Inbound::Connected).is_err() {
+        tracing::error!("notify handler thread is gone");
     }
     // Nothing is in flight on a new connection: every retained outcome is due again.
     {
@@ -781,7 +856,7 @@ fn due_outcomes(
 fn handle_frame(
     inner: &Inner,
     text: &str,
-    notify_tx: &std::sync::mpsc::Sender<Notify>,
+    notify_tx: &std::sync::mpsc::Sender<Inbound>,
     seen: &mut Seen,
     inflight: &mut HashSet<String>,
 ) -> Option<SessionEnd> {
@@ -795,11 +870,19 @@ fn handle_frame(
     match kind.as_str() {
         "notify" => match serde_json::from_value::<Notify>(value) {
             Ok(n) => {
-                if seen.insert(&n.attempt_id) && notify_tx.send(n).is_err() {
+                if seen.insert(&n.attempt_id) && notify_tx.send(Inbound::Notify(n)).is_err() {
                     tracing::error!("notify handler thread is gone");
                 }
             }
             Err(e) => tracing::warn!(error = %e, "bad notify frame"),
+        },
+        "routes" => match serde_json::from_value::<Routes>(value) {
+            Ok(r) => {
+                if notify_tx.send(Inbound::Routes(r)).is_err() {
+                    tracing::error!("notify handler thread is gone");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "bad routes frame"),
         },
         "outcome_ack" => {
             let attempt = value

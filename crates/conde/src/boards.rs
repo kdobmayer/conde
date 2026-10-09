@@ -218,6 +218,58 @@ pub fn board_info(server: &str, key: &str) -> anyhow::Result<BoardInfo> {
     serde_json::from_value(answer["result"].clone()).map_err(|e| anyhow!("{server} answered board.info without its fields: {e}"))
 }
 
+// --- the same files under an explicit config directory (the daemon, in-process tests) ----
+
+/// `<config>/boards/<alias>.json`.
+pub fn path_in(config: &Path, alias: &str) -> PathBuf {
+    config.join("boards").join(format!("{alias}.json"))
+}
+
+/// The v1 single credential, `<config>/credentials`.
+pub fn legacy_path(config: &Path) -> PathBuf {
+    config.join("credentials")
+}
+
+/// Every board file under `config`, by alias; a file that cannot be read keeps its error.
+pub fn load_all(config: &Path) -> Vec<(String, anyhow::Result<BoardConfig>)> {
+    enrolled_in(&config.join("boards"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|alias| {
+            let cfg = load(&path_in(config, &alias));
+            (alias, cfg)
+        })
+        .collect()
+}
+
+/// The default board under `config`; `local` when unset or unreadable.
+pub fn default_in(config: &Path) -> String {
+    read_default(&config.join("default-board")).unwrap_or_else(|_| LOCAL_BOARD.into())
+}
+
+/// Deletes `<config>/boards/<alias>.json`; whether it existed. Never touches the server.
+pub fn forget_in(config: &Path, alias: &str) -> anyhow::Result<bool> {
+    let path = path_in(config, alias);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+/// Moves the v1 credential to `<config>/boards/<alias>.json`, pinned to `owner` (the daemon's
+/// fallback when `conde setup` has not moved it); the v1 file goes once the board file is written.
+pub fn adopt_legacy(config: &Path, alias: &str, owner: &str) -> anyhow::Result<PathBuf> {
+    check_shared_alias(alias)?;
+    let legacy = legacy_path(config);
+    let creds = credentials::load(&legacy)?;
+    let path = path_in(config, alias);
+    let cfg = BoardConfig { server: creds.server, host_id: creds.host_id, owner: owner.to_string(), key: creds.key };
+    store(&path, alias, &cfg)?;
+    std::fs::remove_file(&legacy).with_context(|| format!("removing {}", legacy.display()))?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

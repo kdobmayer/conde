@@ -58,9 +58,17 @@ pub struct Receipt {
     pub status: ReceiptStatus,
 }
 
+/// `attempt_id` is the key the notifier maps receipts back by: in the v2 daemon a locally
+/// minted delivery token, never a board's attempt id. A mapping lives until [`forget`]
+/// releases it; nothing evicts it.
+///
+/// [`forget`]: Notifier::forget
 pub trait Notifier {
     fn notify(&mut self, address: &Address, text: &str, attempt_id: &str) -> NotifyOutcome;
     fn poll_receipts(&mut self) -> Vec<Receipt>;
+    /// Releases the receipt mapping of `attempt_id`: its later receipts are no longer
+    /// reported. Called once the attempt is resolved.
+    fn forget(&mut self, _attempt_id: &str) {}
     /// Whether the recipient incarnation still exists; a hold on a gone
     /// session is abandoned and re-attempted. Transports that cannot tell
     /// keep the default.

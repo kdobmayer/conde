@@ -23,6 +23,23 @@ pub mod op {
     pub const HOST_MIGRATE_V2: &str = "host.migrate_v2";
 }
 
+/// Ops the daemon answers itself from the local board and its board connections (CLI to
+/// the daemon only; none of them is forwarded as such). Bodies and results in DESIGN-v2.md §7.
+pub mod daemon_op {
+    /// `{agent, board, as?, take?}`, human only -> `{board, agent, shared_name, state, op_id, mailbox_id?, route_generation?}`.
+    pub const PUBLISH: &str = "daemon.publish";
+    /// `{agent, board}`, the human or the agent itself -> `{board, agent, state, op_id}`.
+    pub const UNPUBLISH: &str = "daemon.unpublish";
+    /// `{}` -> `{boards: [..]}`: the local board and every enrolled board with its state.
+    pub const BOARDS: &str = "daemon.boards";
+    /// `{board}`, human only: deletes the alias's file, publications and ops; never touches the server.
+    pub const FORGET: &str = "daemon.forget";
+    /// `{board}`, human only -> the board's `host.migrate_preview` result.
+    pub const MIGRATE_PREVIEW: &str = "daemon.migrate_preview";
+    /// `{board, publish: [agent_id]}`, human only -> `{bindings, conflicts}` after the local apply.
+    pub const MIGRATE: &str = "daemon.migrate";
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }

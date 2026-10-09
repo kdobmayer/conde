@@ -40,7 +40,7 @@ ulid = "3.0.0"
 [dev-dependencies]
 # hooks: tests inject storage faults with the progress handler and authorizer
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
-axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query", "form"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query", "form", "ws"] }
 futures-util = "0.3.34"
 rand = "0.10.3"
 rand_core06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }

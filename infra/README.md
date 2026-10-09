@@ -9,7 +9,7 @@ secrets are write-only into the vault, the Entra client secret is created by han
 | piece | name | note |
 |---|---|---|
 | environment | cae-conde | workload profiles (Consumption), on vnet-conde 10.141.0.0/16 |
-| server | ca-conde | public HTTPS + WebSocket ingress, https://conde.nativeai.space (managed cert), 1 replica, 0.5 vCPU / 1 GiB |
+| server | ca-conde | public HTTPS + WebSocket ingress, https://conde.nativeai.space (managed cert), 2 replicas, 0.5 vCPU / 1 GiB each |
 | database | psql-conde, db `conde` | Flexible Server PG 18 B1ms, private endpoint only, 7-day backups |
 | vault | kv-conde | database-url, db-password (Terraform's own, never by hand), admin-key, entra-client-secret |
 | identity | id-conde | AcrPull on crnative, Key Vault Secrets User |
@@ -66,6 +66,6 @@ removes job, share and account after the cutover).
 ## Known limits
 
 - Container Apps ingress cuts idle connections around 240 s: the server pings WebSockets every 30 s.
-- One replica today; going to two needs the app stateless (it is designed so) and `replicas = 2`.
+- Two replicas (`replicas = 2` in conde.auto.tfvars) since 2026-10-09, after a lost Consumption replica was a nine-minute outage; the store is built for several replicas (LISTEN/NOTIFY fan-out, advisory-locked migrations).
 - Certificate: bound once by hand after the first apply (`az containerapp hostname bind ... --validation-method
   CNAME`); Terraform ignores the certificate attributes afterwards.

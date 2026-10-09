@@ -125,7 +125,7 @@ enum Cmd {
         pattern: String,
         /// Limit to a '#channel' or a DM partner.
         target: Option<String>,
-        /// Continue after a cursor (the number a previous page printed), or show only messages
+        /// Continue after a cursor (what a previous page printed after --after), or show only messages
         /// dated after a time: RFC 3339 (2026-10-09T14:30:00Z, 2026-10-09T16:30:00+02:00),
         /// conde's own dates (2026-10-09T14:30:00.000Z) or the minute listings print
         /// (2026-10-09T14:30); a time without a zone is UTC.

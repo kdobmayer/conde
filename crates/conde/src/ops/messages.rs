@@ -327,13 +327,9 @@ pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         .size_limit(1 << 20)
         .build()
         .map_err(|e| bad_request(format!("bad pattern: {e}")))?;
-    let (after, since) = match body.get("after") {
-        None | Some(Value::Null) => (0, None),
-        Some(Value::String(s)) => match parse_after(s).map_err(bad_request)? {
-            After::Cursor(n) => (n, None),
-            After::Time(t) => (0, Some(t)),
-        },
-        Some(_) => (opt_i64(body, "after")?.unwrap_or(0), None),
+    let After { cursor: after, time: since } = match body.get("after") {
+        Some(Value::String(s)) => parse_after(s).map_err(bad_request)?,
+        _ => After::cursor(opt_i64(body, "after")?.unwrap_or(0)),
     };
     let (channel, partner);
     let scope = match opt_str(body, "target")? {
@@ -360,7 +356,8 @@ pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             }
             let Some(line) = m.text.lines().find(|l| rx.is_match(l)) else { continue };
             if hits.len() == PAGE {
-                next = hits.last().and_then(|h: &Value| h["seq"].as_i64());
+                // a time search continues with its cutoff: `<seq>@<time>`
+                next = hits.last().and_then(|h: &Value| h["seq"].as_i64()).map(|seq| After { cursor: seq, time: since }.wire());
                 break 'scan;
             }
             hits.push(json!({"place": m.place(), "message_id": m.id, "seq": m.seq, "from": m.sender,

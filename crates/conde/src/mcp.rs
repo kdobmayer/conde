@@ -505,12 +505,12 @@ fn arg_after(args: &Map<String, Value>) -> anyhow::Result<Option<Value>> {
     let after = match args.get("after") {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::String(s)) => crate::util::parse_after(s).map_err(|e| anyhow!("argument 'after': {e}"))?,
-        Some(v) => crate::util::After::Cursor(v.as_i64().ok_or_else(|| anyhow!("argument 'after' must be a cursor or a time"))?),
+        Some(v) => crate::util::After::cursor(v.as_i64().ok_or_else(|| anyhow!("argument 'after' must be a cursor or a time"))?),
     };
     Ok(Some(after.wire()))
 }
 
-const AFTER_HELP: &str = "continue after this cursor (the number a previous page printed), or show only messages dated \
+const AFTER_HELP: &str = "continue after this cursor (what a previous page printed after after=), or show only messages dated \
 after this time: RFC 3339 (2026-10-09T14:30:00Z, 2026-10-09T16:30:00+02:00), conde's own dates \
 (2026-10-09T14:30:00.000Z) or the minute listings print (2026-10-09T14:30); a time without a zone is UTC";
 

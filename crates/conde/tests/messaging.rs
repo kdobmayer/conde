@@ -184,3 +184,36 @@ fn replies_reference_visible_messages() {
     let err = b.call(CAROL, "message.send", json!({"to": {"agent": "alice"}, "text": "a", "reply_to": mid})).unwrap_err();
     assert_eq!(err.0, ErrorCode::NotFound);
 }
+
+/// Astra's probe: a time search keeps its cutoff through the continuation it prints, though
+/// copied history appends older dates after newer ones; a plain number pages as before.
+#[test]
+fn review_time_filter_survives_cursor_continuation_with_copied_history() {
+    let b = Board::sqlite();
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    let sender = b.agent_id("alice");
+    let recipient = b.agent_id("bob");
+    b.d.with_tx(|tx| {
+        for n in 0..conde::protocol::PAGE + 2 {
+            let old = n == conde::protocol::PAGE;
+            tx.insert_message(&conde::store::NewMessage {
+                id: &conde::util::new_ulid(), sender_id: &sender, recipient_id: Some(&recipient), channel_id: None,
+                text: if old { "needle copied older message" } else { "needle qualifying message" }, reply_to: None,
+                created_at: if old { "2020-01-01T00:00:00.000Z" } else { "2026-10-09T00:00:00.000Z" },
+            })?;
+        }
+        Ok(())
+    }).unwrap();
+    let first = b.ok(BOB, "search", json!({"pattern":"needle", "after":"2026-01-01T00:00:00Z"}));
+    assert_eq!(first["hits"].as_array().unwrap().len(), conde::protocol::PAGE);
+    let cursor = first["next_cursor"].clone();
+    let next = b.ok(BOB, "search", json!({"pattern":"needle", "after":cursor}));
+    let lines: Vec<_> = next["hits"].as_array().unwrap().iter().map(|m| m["line"].as_str().unwrap()).collect();
+    assert_eq!(lines, ["needle qualifying message"], "documented continuation must keep the time predicate");
+    // the plain number still pages by order alone
+    let seq = first["hits"][conde::protocol::PAGE - 1]["seq"].as_i64().unwrap();
+    let plain = b.ok(BOB, "search", json!({"pattern":"needle", "after": seq}));
+    assert_eq!(plain["hits"].as_array().unwrap().len(), 2, "{plain}");
+    assert!(plain["next_cursor"].is_null(), "{plain}");
+}

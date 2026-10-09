@@ -207,7 +207,14 @@ fn shared_parts(r: &Value) -> bool {
 
 /// The paging hints: `after` pages one board, so an aggregate view names each part's board.
 fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
-    let hint = |board: Option<&str>, n: i64| match (surface, tool, board) {
+    // a cursor is a number, or a time search's `<seq>@<time>` token (quoted for MCP)
+    let cursor = |v: &Value| match v {
+        Value::Number(n) => n.as_i64().map(|n| n.to_string()),
+        Value::String(t) if surface == Surface::Mcp => Some(format!("\"{t}\"")),
+        Value::String(t) => Some(t.clone()),
+        _ => None,
+    };
+    let hint = |board: Option<&str>, n: String| match (surface, tool, board) {
         (Surface::Cli, "search", None) => format!("add --after {n}"),
         (Surface::Cli, "search", Some(b)) => format!("add --board {b} --after {n}"),
         (Surface::Cli, _, None) => format!("conde {tool} --after {n}"),
@@ -219,17 +226,17 @@ fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
         let parts = r["boards"].as_array().cloned().unwrap_or_default();
         // a daemon that lists the local part carries its cursor there
         if !parts.iter().any(|p| s(&p["board"]) == LOCAL_BOARD && p.get("next_cursor").is_some())
-            && let Some(n) = r["next_cursor"].as_i64()
+            && let Some(n) = cursor(&r["next_cursor"])
         {
             out.note(format!("(more on local: {})", hint(Some(LOCAL_BOARD), n)));
         }
         for part in &parts {
-            if let Some(n) = part["next_cursor"].as_i64() {
+            if let Some(n) = cursor(&part["next_cursor"]) {
                 let b = s(&part["board"]);
                 out.note(format!("(more on {b}: {})", hint(Some(b), n)));
             }
         }
-    } else if let Some(n) = r["next_cursor"].as_i64() {
+    } else if let Some(n) = cursor(&r["next_cursor"]) {
         let b = result_board(r);
         out.note(format!("(more: {})", hint((b != LOCAL_BOARD).then_some(b), n)));
     }
@@ -579,6 +586,14 @@ mod tests {
             "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "next_cursor": 200}]});
         assert!(sent(&result, Surface::Cli).joined().contains("conde sent --board dakai --after 200"));
         assert!(sent(&result, Surface::Mcp).joined().contains("call sent with board=\"dakai\" after=200"));
+    }
+
+    #[test]
+    fn a_time_search_continuation_is_printed_whole() {
+        let r = json!({"hits": [], "next_cursor": "205@2026-01-01T00:00:00.000Z"});
+        assert!(search(&r, Surface::Cli).joined().contains("(more: add --after 205@2026-01-01T00:00:00.000Z)"));
+        assert!(search(&r, Surface::Mcp).joined().contains("(more: call search with after=\"205@2026-01-01T00:00:00.000Z\")"));
+        assert!(search(&json!({"hits": [], "next_cursor": 7}), Surface::Mcp).joined().contains("call search with after=7"));
     }
 
     #[test]

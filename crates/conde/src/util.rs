@@ -102,36 +102,47 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Where a listing starts: after a cursor (the number a previous page printed), or after a
-/// time (messages dated later).
+/// Where a listing starts: after a cursor (`seq`), keeping only messages dated after a time
+/// when one is given. A time search continues with both, as the token `<seq>@<time>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum After {
-    Cursor(i64),
-    Time(i64),
+pub struct After {
+    pub cursor: i64,
+    pub time: Option<i64>,
 }
 
 impl After {
-    /// The request field: a cursor as a number (as every daemon takes it), a time as conde's date.
+    pub fn cursor(cursor: i64) -> After {
+        After { cursor, time: None }
+    }
+
+    /// The request field and the printed continuation: a plain cursor as a number (as every
+    /// daemon takes it), a time alone as conde's date, both as `<seq>@<date>`.
     pub fn wire(self) -> serde_json::Value {
-        match self {
-            After::Cursor(n) => n.into(),
-            After::Time(t) => iso_from_ms(t).into(),
+        match self.time {
+            None => self.cursor.into(),
+            Some(t) if self.cursor == 0 => iso_from_ms(t).into(),
+            Some(t) => format!("{}@{}", self.cursor, iso_from_ms(t)).into(),
         }
     }
 }
 
 /// The accepted `after` forms, for help texts and refusals.
-pub const AFTER_FORMS: &str = "a cursor (the number a previous page printed) or a time: RFC 3339 \
+pub const AFTER_FORMS: &str = "a cursor (what a previous page printed after --after) or a time: RFC 3339 \
 (2026-10-09T14:30:00Z, 2026-10-09T16:30:00+02:00), conde's own dates (2026-10-09T14:30:00.000Z), \
 or the minute listings print (2026-10-09T14:30); a time without a zone is UTC";
 
 /// The one `after` rule of the CLI, the MCP tool and the daemon.
 pub fn parse_after(s: &str) -> Result<After, String> {
     let s = s.trim();
+    let bad = || format!("'{s}' is not {AFTER_FORMS}");
     if let Ok(n) = s.parse::<i64>() {
-        return Ok(After::Cursor(n));
+        return Ok(After::cursor(n));
     }
-    ms_from_iso(s).map(After::Time).ok_or_else(|| format!("'{s}' is not {AFTER_FORMS}"))
+    if let Some((n, t)) = s.split_once('@') {
+        let cursor = n.parse::<i64>().map_err(|_| bad())?;
+        return ms_from_iso(t).map(|t| After { cursor, time: Some(t) }).ok_or_else(bad);
+    }
+    ms_from_iso(s).map(|t| After { cursor: 0, time: Some(t) }).ok_or_else(bad)
 }
 
 // Howard Hinnant's days -> civil date algorithm.
@@ -290,9 +301,18 @@ mod tests {
 
     #[test]
     fn after_is_a_cursor_or_a_time() {
-        assert_eq!(parse_after("42"), Ok(After::Cursor(42)));
-        assert_eq!(parse_after(" 0 "), Ok(After::Cursor(0)));
-        assert_eq!(parse_after("1970-01-01T00:00:01Z"), Ok(After::Time(1000)));
+        assert_eq!(parse_after("42"), Ok(After::cursor(42)));
+        assert_eq!(parse_after(" 0 "), Ok(After::cursor(0)));
+        let time = After { cursor: 0, time: Some(1000) };
+        assert_eq!(parse_after("1970-01-01T00:00:01Z"), Ok(time));
+        assert_eq!(time.wire(), "1970-01-01T00:00:01.000Z");
+        let token = After { cursor: 205, time: Some(1000) };
+        assert_eq!(token.wire(), "205@1970-01-01T00:00:01.000Z");
+        assert_eq!(parse_after("205@1970-01-01T00:00:01.000Z"), Ok(token));
+        assert_eq!(After::cursor(7).wire(), 7);
+        for bad in ["x@1970-01-01T00:00:01Z", "205@yesterday", "205@"] {
+            assert!(parse_after(bad).is_err(), "{bad}");
+        }
         let e = parse_after("yesterday").unwrap_err();
         assert!(e.starts_with("'yesterday' is not a cursor") && e.contains("RFC 3339"), "{e}");
     }

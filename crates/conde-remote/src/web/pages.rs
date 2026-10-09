@@ -1,5 +1,6 @@
 //! Server-rendered pages: askama templates (auto-escaped), one stylesheet, and one script
-//! (the copy button) allowed by a per-response CSP nonce.
+//! (the copy button) allowed by a per-response CSP nonce. The favicons and the header mark come
+//! from the embedded web app.
 
 use askama::Template;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -15,6 +16,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-appl
 header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}
 header form{margin:0}
 .brand{font-weight:600;color:inherit;text-decoration:none;margin-right:auto}
+.brand .mark{display:inline-block;vertical-align:-2px;margin-right:6px}
 .who{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 main{max-width:880px;margin:0 auto;padding:24px 16px}
 h1{font-size:22px;font-weight:600;margin:0 0 12px}
@@ -53,11 +55,14 @@ pub(crate) struct Header<'a> {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} · conde</title>
+<link rel="icon" href="/app/favicon-light-32.png" sizes="32x32" type="image/png" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/app/favicon-dark-32.png" sizes="32x32" type="image/png" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/app/favicon.svg" type="image/svg+xml">
 <style>{{ css|safe }}</style>
 </head>
 <body>
 <header>
-<a class="brand" href="/keys">conde</a>
+<a class="brand" href="/keys">{{ mark|safe }}conde</a>
 {% if let Some(h) = header %}<span class="who">{{ h.display }}</span>
 <form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{ h.csrf }}"><button class="quiet">Sign out</button></form>{% endif %}
 </header>
@@ -72,6 +77,7 @@ pub(crate) struct Header<'a> {
 struct Layout<'a> {
     title: &'a str,
     css: &'a str,
+    mark: &'a str,
     header: Option<Header<'a>>,
     body: &'a str,
     nonce: Option<&'a str>,
@@ -179,6 +185,7 @@ fn page(
     let html = render(&Layout {
         title,
         css: CSS,
+        mark: super::app::mark_svg(),
         header,
         body,
         nonce: nonce.as_deref(),

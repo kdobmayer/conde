@@ -355,6 +355,8 @@ pub async fn start(
         .route("/dist/{file}", get(dist_file))
         .route("/readme", get(readme_html))
         .route("/readme.md", get(readme_md))
+        .route("/favicon.ico", get(crate::web::app::favicon))
+        .route("/app/{*path}", get(crate::web::app::asset))
         .route("/v1/rpc", post(rpc))
         .route("/v1/bridge", get(bridge))
         .layer(DefaultBodyLimit::max(body_limit))

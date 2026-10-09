@@ -230,8 +230,20 @@ async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>)
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CACHE_CONTROL], "no-cache");
     }
-    // The keys page stays where it was, linked from the app's user menu.
-    assert_eq!(b.get(&ui.env.url("/keys")).await.0, StatusCode::OK);
+    // The keys page stays where it was, linked from the app's user menu, with the app's icons.
+    let (status, _, keys) = b.get(&ui.env.url("/keys")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(keys.contains(r#"<link rel="icon" href="/app/favicon.svg" type="image/svg+xml">"#), "{keys}");
+    let icon = b.step.get(ui.env.url("/favicon.ico")).send().await.unwrap();
+    if conde_remote::web::app_embedded() {
+        assert!(keys.contains(r#"<a class="brand" href="/keys"><svg "#), "{keys}");
+        assert_eq!(icon.status(), StatusCode::OK);
+        assert_eq!(icon.headers()[header::CONTENT_TYPE], "image/png");
+        let r = b.step.get(ui.env.url("/app/favicon.svg")).send().await.unwrap();
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/svg+xml");
+    } else {
+        assert_eq!(icon.status(), StatusCode::NOT_FOUND);
+    }
     ui.server.shutdown().await.unwrap();
 }
 

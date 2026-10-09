@@ -75,11 +75,11 @@ pub(crate) struct AppState {
 }
 
 /// The app's routes (`POST /v1/rpc` stays with the server, which hands a request without a
-/// bearer token to [`rpc`]).
+/// bearer token to [`rpc`]; the server serves [`asset`] and [`favicon`] on every setup, since
+/// its own pages use the icons).
 pub(crate) fn routes(app: AppState) -> Router {
     Router::new()
         .route("/", get(root))
-        .route("/app/{*path}", get(asset))
         .route("/v1/session", get(session_info))
         .route("/v1/attachments/{id}", get(attachment))
         .route("/v1/events", get(events))
@@ -343,7 +343,7 @@ async fn root(State(app): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 /// `GET /app/{*path}`: one file of the build; hashed files are cached for good.
-async fn asset(Path(path): Path<String>) -> Response {
+pub(crate) async fn asset(Path(path): Path<String>) -> Response {
     let Some(file) = Assets::get(&format!("app/{path}")) else {
         return (StatusCode::NOT_FOUND, [no_store()], "not found\n").into_response();
     };
@@ -469,6 +469,32 @@ async fn run_events(
             },
         }
     }
+}
+
+/// The conde mark as inline SVG for the server's own pages (the web app's `mark.svg`, drawn
+/// with the pages' colour tokens); empty when the binary was built without the web app.
+pub(crate) fn mark_svg() -> &'static str {
+    static MARK: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        Assets::get("app/mark.svg")
+            .map(|f| String::from_utf8_lossy(&f.data).trim().to_string())
+            .unwrap_or_default()
+    });
+    &MARK
+}
+
+/// `GET /favicon.ico`: the light 32 px PNG, for clients that ask for the icon by that name.
+pub(crate) async fn favicon() -> Response {
+    let Some(file) = Assets::get("app/favicon-light-32.png") else {
+        return (StatusCode::NOT_FOUND, [no_store()], "not found\n").into_response();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("image/png")),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+        ],
+        file.data.into_owned(),
+    )
+        .into_response()
 }
 
 /// Whether this binary carries the built web app.

@@ -445,6 +445,31 @@ v1 and v2 hosts coexist without special code: a v1 host's rows keep harness addr
 gets harness endpoints; a v2 host's rows are mailboxes. When every enrolled host has migrated,
 `CONDE_MIN_PROTO=2` refuses v1 hellos.
 
+Settled while building this section (lane V1):
+- The hello's protocol must match the host, checked in the fence's own transaction: a v1 hello from
+  a migrated host, a v2 hello from a host not migrated, and any hello under `CONDE_MIN_PROTO` are
+  refused with `bad_hello` (final for a v1 bridge). `mailbox.*` from a host not migrated is
+  `forbidden`. A fresh host therefore runs `host.migrate_v2 {publish: []}` before its first v2 hello.
+- The `routes` frame rides the claim: a v2 `bridge.claim` returns the host's routes from the same
+  snapshot, every binding change wakes the old and the new host, and the server sends `routes`
+  before any notify whenever they changed (always on connect). Routes, like `mailbox.mine`, list
+  every mailbox and every published human name bound to the host.
+- The window: new claims stop at `W` minus the instance's `dispatching` attempts; every open attempt
+  (`dispatching` or `held`) is offered again on each connection whatever the window.
+- On a v2 connection an outcome outside the closed statuses and reasons is acked `rejected` and not
+  recorded; `bridge.report` from a migrated host refuses it too. A held attempt whose mailbox leaves
+  the endpoint set is abandoned with reason `recipient offline`.
+- Preview source: a message counts as imported when the board created no notification for it and it
+  is dated before a notified message committed earlier (the importer creates none and writes kond's
+  dates; traffic sent here is dated at its commit). Evidence is ordered by via, counterpart, source.
+- Non-disclosure covers `message.send`, `agent.resolve`, `channel.invite` (`recipient unavailable:
+  <owner/name>`) and `profile.get` (another owner's unbound row reads as unknown). A shared board
+  refuses a send to any unbound name, the sender's own included (v1 queued it).
+- `fleet.list` keeps its keys with `address` and `pinned` null; `agent.list`, `agent.resolve` and
+  `profile.get` drop them. `mailbox.publish` joins `#lobby` on a row's first binding, as register
+  does, and clears a pin. `host.migrate_v2` clears the pin of every manifest row.
+- `board.info` carries no board id (section 4: not needed while one shared board exists).
+
 ## 7. CLI and MCP surface
 
 New: `conde publish <agent> --board <alias> [--as <name>] [--take]`, `conde unpublish <agent>

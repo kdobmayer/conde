@@ -1108,6 +1108,9 @@ pub fn agent_activity(root: &Path) -> anyhow::Result<Vec<AgentActivity>> {
         })
         .collect();
     let plan = plan(src, "snapshot", &iso_from_ms(now_ms()));
+    if !plan.src.parse_errors.is_empty() {
+        bail!("{} has {} parse errors in its registry:\n  {}", root.display(), plan.src.parse_errors.len(), plan.src.parse_errors.join("\n  "));
+    }
     let mut out: Vec<AgentActivity> = plan
         .names
         .iter()

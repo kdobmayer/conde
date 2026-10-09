@@ -788,8 +788,8 @@ impl Inventory {
             "The recipe is docs/SWITCH-v2-history.md. H2 imports a fresh snapshot of the kond directory taken at the\n\
              switch, minus the owner's pruned names; its class (a) part is the {a_n} rows above, so with no name\n\
              pruned its bodies digest is `{a}`. H3 restores the class (b) rows that the purge of the shared board\n\
-             saved (checked against the hashes above; the rest of class (b) stays on the shared board) and, with\n\
-             `--after-freeze`, the owner's DMs saved there that are newer than commit_seq {freeze}.\n",
+             saved (checked against the hashes above), reads back the class (b) rows kept there between kept\n\
+             names, and restores the owner's saved DMs newer than commit_seq {freeze}; any other row stops it.\n",
             a_n = self.count(Class::Imported),
             a = self.class_digest(Class::Imported),
             freeze = self.x.freeze_seq,
@@ -799,7 +799,7 @@ impl Inventory {
             let rows = self.ids(c);
             let _ = writeln!(s, "\n## Class {} rows ({})\n", c.title(), rows.len());
             if c == Class::OwnerInternal {
-                s.push_str("For the owner's review: H3 copies exactly these rows to the local board, and H4 retires them from\ncentral after the copy validates. Privacy is not inferred from membership alone.\n\n");
+                s.push_str("For the owner's review: H3 restores the ones the purge saved and verifies the rest on the shared\nboard; H4 retires them from central after the copy validates. Privacy is not inferred from\nmembership alone.\n\n");
             } else {
                 s.push_str("These stay on central (H4 does not touch them).\n\n");
             }
@@ -1034,7 +1034,10 @@ fn csv_records(raw: &str) -> anyhow::Result<Vec<Vec<Option<String>>>> {
         }
     }
     if in_quotes {
-        bail!("a quoted field is not closed");
+        bail!("a quoted field is not closed: the file is truncated");
+    }
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        bail!("the last record is not ended by a line break: the file is truncated");
     }
     if started {
         push_field(&mut rec, &mut field, &mut quoted);
@@ -1124,6 +1127,8 @@ pub struct CopyReport {
     pub saved: usize,
     /// Saved rows of the manifest's class (a): on the local board by the H2 import.
     pub saved_imported: usize,
+    /// Of those, rows of a pruned name: absent from the local board.
+    pub skipped_imported: usize,
     pub saved_frozen: usize,
     pub saved_newer: usize,
     /// Restored by this copy: frozen class (b) and newer rows.
@@ -1153,8 +1158,13 @@ impl std::fmt::Display for CopyReport {
         writeln!(f, "conde history copy")?;
         writeln!(
             f,
-            "  saved messages: {} = class (a) {} (restored by the import) + frozen class (b) {} + newer than the freeze {}",
-            self.saved, self.saved_imported, self.saved_frozen, self.saved_newer
+            "  saved messages: {} = class (a) {} (on the local board by the import {}, skipped by the prune list {}) + frozen class (b) {} + newer than the freeze {}",
+            self.saved,
+            self.saved_imported,
+            self.saved_imported - self.skipped_imported,
+            self.skipped_imported,
+            self.saved_frozen,
+            self.saved_newer
         )?;
         writeln!(
             f,
@@ -1216,8 +1226,19 @@ fn stated_counts(dir: &Path) -> anyhow::Result<BTreeMap<String, usize>> {
 
 /// The saved rows are the purge's whole output: every table file holds the count counts.txt
 /// states, and agents.csv names exactly the agents preview.txt lists as gone.
-fn check_source(dir: &Path, problems: &mut Vec<String>) -> anyhow::Result<()> {
+/// Whether every record could be read; false stops the copy before anything else.
+fn check_source(dir: &Path, problems: &mut Vec<String>) -> anyhow::Result<bool> {
     let stated = stated_counts(dir)?;
+    let before = problems.len();
+    for t in stated.keys().filter(|t| dir.join(format!("{t}.csv")).exists()) {
+        match csv_table(dir, t) {
+            Ok(rows) => check_records(t, &rows, problems),
+            Err(e) => problems.push(format!("{t}.csv: {e:#}")),
+        }
+    }
+    if problems.len() > before {
+        return Ok(false);
+    }
     for t in SAVED_TABLES {
         if !stated.contains_key(t) {
             problems.push(format!("counts.txt states no count for {t}"));
@@ -1249,7 +1270,81 @@ fn check_source(dir: &Path, problems: &mut Vec<String>) -> anyhow::Result<()> {
             only(&listed, &saved)
         ));
     }
-    Ok(())
+    Ok(true)
+}
+
+/// A conde timestamp: `YYYY-MM-DDTHH:MM:SS.mmmZ`.
+fn is_stamp(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 24
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 => *c == b':',
+            19 => *c == b'.',
+            23 => *c == b'Z',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// Every field of every record typed: ids are ULIDs, times are conde timestamps, numbers parse,
+/// bytea decodes to its stated size. A malformed record refuses the whole source.
+fn check_records(table: &str, rows: &[HashMap<String, Option<String>>], problems: &mut Vec<String>) {
+    let ulid = |v: &Option<String>| v.as_deref().is_some_and(crate::util::is_ulid);
+    let opt_ulid = |v: &Option<String>| v.is_none() || ulid(v);
+    let stamp = |v: &Option<String>| v.as_deref().is_some_and(is_stamp);
+    let int = |v: &Option<String>| v.as_deref().is_some_and(|s| s.parse::<i64>().is_ok());
+    let text = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
+    let get = |r: &HashMap<String, Option<String>>, k: &str| r.get(k).cloned().flatten();
+    for (i, r) in rows.iter().enumerate() {
+        let mut bad: Vec<&str> = Vec::new();
+        let mut need = |ok: bool, field: &'static str| {
+            if !ok {
+                bad.push(field);
+            }
+        };
+        match table {
+            "agents" => {
+                need(ulid(&get(r, "agent_id")), "agent_id");
+                need(int(&get(r, "owner_id")), "owner_id");
+                need(text(&get(r, "name_lower")), "name_lower");
+            }
+            "messages" => {
+                need(int(&get(r, "commit_seq")), "commit_seq");
+                need(ulid(&get(r, "message_id")), "message_id");
+                need(ulid(&get(r, "sender_agent_id")), "sender_agent_id");
+                let (rcpt, chan) = (get(r, "recipient_agent_id"), get(r, "channel_id"));
+                need(opt_ulid(&rcpt) && opt_ulid(&chan) && (rcpt.is_none() != chan.is_none()), "recipient_agent_id/channel_id");
+                need(r.get("text").is_some_and(Option::is_some), "text");
+                need(get(r, "reply_to").is_none() || text(&get(r, "reply_to")), "reply_to");
+                need(stamp(&get(r, "created_at")), "created_at");
+            }
+            "attachments" => {
+                need(ulid(&get(r, "attachment_id")), "attachment_id");
+                need(ulid(&get(r, "message_id")), "message_id");
+                need(text(&get(r, "filename")), "filename");
+                let size = get(r, "size").and_then(|s| s.parse::<usize>().ok());
+                let len = get(r, "bytes").and_then(|b| bytea(&b).ok()).map(|b| b.len());
+                need(size.is_some() && size == len, "bytes/size");
+            }
+            "reactions" => {
+                need(ulid(&get(r, "message_id")), "message_id");
+                need(ulid(&get(r, "actor_id")), "actor_id");
+                need(text(&get(r, "emoji")), "emoji");
+                need(matches!(get(r, "present").as_deref(), Some("t" | "f")), "present");
+            }
+            "dm_read" => {
+                need(ulid(&get(r, "message_id")), "message_id");
+                need(ulid(&get(r, "agent_id")), "agent_id");
+                need(stamp(&get(r, "read_at")), "read_at");
+            }
+            _ => {}
+        }
+        if !bad.is_empty() {
+            let id = ["message_id", "agent_id", "attachment_id"].iter().find_map(|k| get(r, k)).unwrap_or_default();
+            problems.push(format!("{table}.csv record {} ({id}): malformed {}", i + 1, bad.join(", ")));
+        }
+    }
 }
 
 /// Every saved message with its parties as the owner's names; attachments, read state and
@@ -1411,8 +1506,10 @@ pub fn copy(opts: &CopyOptions) -> anyhow::Result<CopyReport> {
     if !opts.db.exists() {
         bail!("{} does not exist: the H2 import restores the local board first", opts.db.display());
     }
-    // 1. The source is the purge's whole output.
-    check_source(&opts.from_csv, &mut report.problems)?;
+    // 1. The source is the purge's whole output, every record well formed.
+    if !check_source(&opts.from_csv, &mut report.problems)? {
+        return Ok(report);
+    }
     let (saved, gone) = read_saved(&manifest, &opts.from_csv, &mut report)?;
     report.saved = saved.len();
 
@@ -1429,7 +1526,9 @@ pub fn copy(opts: &CopyOptions) -> anyhow::Result<CopyReport> {
                 if by_id[s.id.as_str()].sha256 != sha256_hex(s.text.as_bytes()) {
                     report.problems.push(format!("{}: a saved class (a) row whose body differs from the manifest", s.id));
                 }
-                imported_rows.push((s.id.clone(), pruned(&s.from) || pruned(&s.to)));
+                let skipped = pruned(&s.from) || pruned(&s.to);
+                report.skipped_imported += usize::from(skipped);
+                imported_rows.push((s.id.clone(), skipped));
                 continue;
             }
             Some(Class::Shared) => {

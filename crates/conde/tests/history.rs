@@ -514,7 +514,7 @@ fn copy_from_the_saved_rows_accounts_for_every_row_and_validates_by_hashes() {
     assert_eq!(report.agents_created, vec!["desk".to_string()]);
     let text = report.to_string();
     for line in [
-        "saved messages: 4 = class (a) 1 (restored by the import) + frozen class (b) 2 + newer than the freeze 1",
+        "saved messages: 4 = class (a) 1 (on the local board by the import 1, skipped by the prune list 0) + frozen class (b) 2 + newer than the freeze 1",
         "class (b) in the manifest: 3 = restored 2 + skipped 0 + retained on the shared board 1",
         "ids: 3 of 3 on the local board",
         "bodies: 3 of 3 sha256-equal",
@@ -623,7 +623,8 @@ fn copy_refuses_a_hash_mismatch_and_a_channel_post_writing_nothing() {
     assert_eq!(table_counts(&s.local), before);
 
     // A channel post among the saved rows: the copy restores DMs only.
-    fs::write(&messages, format!("{pristine}999,{},x,,channel-id,post,,2026-10-09T00:00:00.000Z\n", new_ulid())).unwrap();
+    let lead = history::read_csv(&fs::read_to_string(s.csv.join("agents.csv")).unwrap()).unwrap()[1][0].clone().unwrap();
+    fs::write(&messages, format!("{pristine}999,{},{lead},,{},post,,2026-10-09T00:00:00.000Z\n", new_ulid(), new_ulid())).unwrap();
     let report = history::copy(&copy_opts(&s, false)).unwrap();
     assert!(!report.written && report.problems.iter().any(|p| p.contains("DMs only")), "{report}");
     assert_eq!(table_counts(&s.local), before);
@@ -689,4 +690,48 @@ fn inventory_and_prune_list_refuse_a_snapshot_with_parse_errors() {
     let out = run(&["history".as_ref(), "prune-candidates".as_ref(), "--snapshot".as_ref(), kond.as_os_str(), "--out".as_ref(), list.as_os_str()]);
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("2 parse errors"));
     assert!(!list.exists(), "no prune list written");
+}
+
+/// Astra's probe: the last ten bytes of messages.csv cut off, counts.txt and preview.txt intact.
+/// The row count still matches, so only a strict read of every record refuses it.
+#[test]
+fn review_truncated_newer_metadata_must_be_refused() {
+    let s = switch("truncated-newer-metadata");
+    let p = s.csv.join("messages.csv");
+    let raw = fs::read_to_string(&p).unwrap();
+    let before_rows = history::read_csv(&raw).unwrap();
+    assert_eq!(before_rows.last().unwrap()[1].as_deref(), Some(s.later.as_str()));
+    fs::write(&p, &raw[..raw.len() - 10]).unwrap();
+    let before = table_counts(&s.local);
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
+    assert!(!report.ok() && !report.written, "truncated post-freeze metadata silently accepted: {report}");
+    assert!(report.problems.iter().any(|p| p.contains("messages.csv") && p.contains("line break")), "{report}");
+    assert_eq!(table_counts(&s.local), before);
+    // A complete last record with a malformed field is refused as well.
+    fs::write(&p, raw.replace(".000Z\n", "Z\n").replacen(&s.later, "not-a-ulid", 1)).unwrap();
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains("not-a-ulid")), "{report}");
+}
+
+/// prune-candidates reads the registry and pins too: an address it cannot parse refuses the list.
+#[test]
+fn prune_list_refuses_a_registry_parse_error() {
+    let tmp = TempDir::new("prune-registry");
+    let kond = tmp.0.join("kond");
+    kond_fixture(&kond);
+    fs::write(kond.join("registry/lead"), "not-an-address\n").unwrap();
+    let err = format!("{:#}", import::agent_activity(&kond).unwrap_err());
+    assert!(err.contains("parse error") && err.contains("not-an-address"), "{err}");
+}
+
+/// A pruned name's class (a) rows among the saved rows are reported as skipped by the prune list.
+#[test]
+fn saved_class_a_rows_of_a_pruned_name_are_reported_as_skipped() {
+    let s = switch_with("csv-prune-label", &["worker"]);
+    let opts = CopyOptions { skip_agents: ["worker".to_string()].into(), ..copy_opts(&s, false) };
+    let report = history::copy(&opts).unwrap();
+    assert!(report.ok(), "{report}");
+    assert_eq!((report.saved_imported, report.skipped_imported), (1, 1), "{report}");
+    let text = report.to_string();
+    assert!(text.contains("class (a) 1 (on the local board by the import 0, skipped by the prune list 1)"), "{text}");
 }

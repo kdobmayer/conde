@@ -156,6 +156,7 @@ fn options(from: &Path, db: &Path, dry_run: bool) -> Options {
         live_claude: Some(HashSet::from([LIVE.to_string()])),
         progress: false,
         expect_files: None,
+        skip_agents: Default::default(),
     }
 }
 
@@ -962,4 +963,83 @@ fn a_rerun_after_later_posts_in_an_imported_channel_is_not_refused() {
     assert_eq!(table_counts(&db), before);
     let (d, _) = native(&db);
     assert!(unread(&d), "the later post stays unread");
+}
+
+/// The owner's prune list: the struck names stay out with every message they sent or received,
+/// their memberships and their reactions; validation covers the imported set only.
+#[test]
+fn skipped_agents_stay_out_with_their_rows_and_the_rest_validates() {
+    let tmp = TempDir::new("skip");
+    let kond = tmp.0.join("kond");
+    build_fixture(&kond);
+    let db = tmp.0.join("conde.db");
+    let skip: std::collections::BTreeSet<String> = ["old.worker".to_string(), "cx.worker".to_string()].into();
+    let report = run(&Options { skip_agents: skip.clone(), ..options(&kond, &db, false) }).unwrap();
+    assert_clean(&report);
+    let skipped = report.skipped.clone().unwrap();
+    assert_eq!(skipped.agents, vec!["cx.worker".to_string(), "old.worker".to_string()]);
+    assert_eq!((skipped.messages, skipped.attachments, skipped.memberships, skipped.reactions), (1, 0, 1, 2));
+    assert_eq!(
+        report.added,
+        Counts { agents: 4, channels: 1, messages: 4, attachments: 1, memberships: 2, dm_read: 1, reactions: 2 },
+        "{report}"
+    );
+    assert!(report.to_string().contains("skipped by --skip-agents (2 names): 1 messages"), "{report}");
+    let conn = Connection::open(&db).unwrap();
+    let names: i64 = q(&conn, "SELECT COUNT(*) FROM agents WHERE name_lower IN ('old.worker', 'cx.worker')", []);
+    let dm: i64 = q(&conn, "SELECT COUNT(*) FROM messages WHERE message_id = ?1", [id(3)]);
+    assert_eq!((names, dm), (0, 0));
+    drop(conn);
+    let again = run(&Options { skip_agents: skip, ..options(&kond, &db, false) }).unwrap();
+    assert_clean(&again);
+    assert_eq!(again.added, Counts::default());
+
+    let typo: std::collections::BTreeSet<String> = ["old.workr".to_string()].into();
+    let err = run(&Options { skip_agents: typo, ..options(&kond, &tmp.0.join("x.db"), true) }).unwrap_err().to_string();
+    assert!(err.contains("old.workr"), "{err}");
+}
+
+#[test]
+fn prune_candidates_list_every_name_by_last_activity_oldest_first() {
+    let tmp = TempDir::new("prune");
+    let kond = tmp.0.join("kond");
+    build_fixture(&kond);
+    let rows = conde::import::agent_activity(&kond).unwrap();
+    let names: Vec<&str> = rows.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(&names[..4], ["cx.worker", "weird+name", "krisz", "lead.claude"], "{rows:?}");
+    let by = |n: &str| rows.iter().find(|a| a.name == n).unwrap().clone();
+    assert_eq!((by("krisz").messages, by("krisz").registered.as_deref()), (3, Some("human")));
+    assert_eq!(by("krisz").last_activity.as_deref(), Some("2025-01-01T00:01:07.000Z"));
+    assert_eq!(by("weird+name").conde_name, "weird-name-2");
+    assert!(by("lead.claude").pinned);
+    for silent in ["old.worker", "weird name"] {
+        let a = by(silent);
+        assert!(a.messages == 0 && a.from_registration && a.last_activity.is_some(), "{a:?}");
+    }
+    let tsv = conde::history::prune_tsv(&rows);
+    assert!(tsv.starts_with("name\tconde_name\tlast_activity\tsource\tmessages\tregistered\tpinned\ncx.worker\t"), "{tsv}");
+}
+
+/// The frozen copy of the cutover snapshot (H-pre): its import validates by hashes to the
+/// manifest's class (a) digest. Skipped where the copy is absent.
+#[test]
+fn frozen_snapshot_copy_validates_to_the_class_a_digest() {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let frozen = home.join(".cache/conde-snapshot-final");
+    if !frozen.join("board").is_dir() {
+        eprintln!("skipped: no frozen snapshot at {}", frozen.display());
+        return;
+    }
+    let tmp = TempDir::new("frozen");
+    let mut opts = options(&frozen, &tmp.0.join("conde.db"), false);
+    opts.owner = "kdobmayer".into();
+    opts.host = "homepc".into();
+    opts.live_claude = None;
+    opts.expect_files = Some(59220);
+    let report = run(&opts).unwrap();
+    assert_clean(&report);
+    let text = report.to_string();
+    assert!(text.contains("bodies: 18626 of 18626 sha256-equal"), "{text}");
+    assert!(text.contains("attachments: 3160 of 3160 sha256-equal"), "{text}");
+    assert!(text.contains("bodies digest: 8683bb9184af8241c03078e664357f85ba187765f148fb26d0025156eb97e6de"), "{text}");
 }

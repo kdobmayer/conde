@@ -8,9 +8,11 @@
 //!   every sender ever and every current member is the owner's;
 //! - (c) shared: everything else.
 //!
-//! H3 `conde history copy`: copies the manifest's class (b) rows by their frozen ids from the
-//! central board (`history.copy`) into the local board the H2 import restored, in one SQLite
-//! transaction, and validates them by hashes.
+//! H3 `conde history copy`: copies the manifest's class (b) rows (and, on request, the owner's
+//! later DMs) from the rows the central purge saved (one Postgres CSV per table) into the local
+//! board the H2 import restored, in one SQLite transaction, and validates them by hashes.
+//!
+//! `conde history prune-candidates`: the owner's prune list of a kond snapshot.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -18,14 +20,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::import::{Snapshot, rows_digest};
-use crate::protocol::{Request, Response};
 use crate::store::sqlite::SqliteStore;
-use crate::store::{Channel, ImportedAgent, Mode, NewMessage, Store, Tx};
+use crate::store::{ImportedAgent, Mode, NewMessage, Store, Tx};
 use crate::util::{new_ulid, sha256_hex};
 
 /// The extraction query (Postgres), run read-only in one snapshot with `conde.owner` set.
@@ -338,16 +337,9 @@ pub struct Inventory {
     pub snapshot_differs: Vec<String>,
     pub snapshot_messages: usize,
     pub snapshot_parse_errors: Vec<String>,
-    /// The snapshot directory and its file count, for the restore commands.
-    pub snapshot_dir: PathBuf,
-    pub snapshot_files: usize,
 }
 
 pub fn classify(x: Extract, snap: &Snapshot) -> Inventory {
-    classify_at(x, snap, Path::new("<snapshot>"), 0)
-}
-
-pub fn classify_at(x: Extract, snap: &Snapshot, snapshot_dir: &Path, snapshot_files: usize) -> Inventory {
     let owner = x.owner.clone();
     let owner_of = |agent: &str| x.agents.get(agent).map(|a| a.owner.as_str()).unwrap_or("");
     // A channel is owner-internal when every sender ever and every current member is the owner's.
@@ -480,8 +472,6 @@ pub fn classify_at(x: Extract, snap: &Snapshot, snapshot_dir: &Path, snapshot_fi
     Inventory {
         snapshot_messages: snap.messages.len(),
         snapshot_parse_errors: snap.parse_errors.clone(),
-        snapshot_dir: snapshot_dir.to_path_buf(),
-        snapshot_files,
         x,
         class,
         names,
@@ -795,28 +785,17 @@ impl Inventory {
             );
         }
 
-        let host = match self.x.hosts.iter().filter(|(_, active)| *active).collect::<Vec<_>>().as_slice() {
-            [(h, _)] => h.clone(),
-            _ => "<the kond machine's host id>".to_string(),
-        };
-        s.push_str("\n## Restore on the switch (H2 + H3) and the final freeze\n\n");
+        s.push_str("\n## Restore on the switch (H2 + H3)\n\n");
         let _ = writeln!(
             s,
-            "This list is frozen at commit_seq {freeze}. Class (b) traffic needs one of {o}'s hosts, so the final freeze\n\
-             is taken again after the switch stops the daemon on `{host}`: the same extraction, then `conde history\n\
-             inventory`; rows above commit_seq {freeze} are the delta for review. The restore then runs into the new,\n\
-             empty local board with the daemon stopped; on any failure the file is discarded and both steps rerun.\n\n\
-             1. H2: `conde import --from {dir} --expect-files {files} --owner {o} --host {host}`. Its validation must\n   \
-             end `result: OK`, with every body and attachment sha256-equal to the snapshot and `bodies digest:\n   \
-             {a}` (class (a) above).\n\
-             2. H3: `conde history copy --manifest <this file without .md>` (the board must serve `history.copy`).\n   \
-             It must end `result: OK`, with every frozen id present, bodies, attachments, reply-to and read state\n   \
-             equal, and `bodies digest: {b}` (class (b) above).\n",
-            freeze = self.x.freeze_seq,
-            dir = self.snapshot_dir.display(),
-            files = self.snapshot_files,
+            "The recipe is docs/SWITCH-v2-history.md. H2 imports a fresh snapshot of the kond directory taken at the\n\
+             switch, minus the owner's pruned names; its class (a) part is the {a_n} rows above, so with no name\n\
+             pruned its bodies digest is `{a}`. H3 restores the class (b) rows that the purge of the shared board\n\
+             saved (checked against the hashes above; the rest of class (b) stays on the shared board) and, with\n\
+             `--after-freeze`, the owner's DMs saved there that are newer than commit_seq {freeze}.\n",
+            a_n = self.count(Class::Imported),
             a = self.class_digest(Class::Imported),
-            b = self.class_digest(Class::OwnerInternal),
+            freeze = self.x.freeze_seq,
         );
 
         for c in [Class::OwnerInternal, Class::Shared] {
@@ -892,8 +871,7 @@ pub fn inventory_main(extract: &Path, snapshot: &Path, out: &Path, source: &str)
     let raw = fs::read_to_string(extract).with_context(|| format!("reading {}", extract.display()))?;
     let x = parse_extract(&raw).with_context(|| format!("checking {}", extract.display()))?;
     let snap = crate::import::snapshot(snapshot)?;
-    let files = crate::import::count_files(snapshot)?;
-    let inv = classify_at(x, &snap, snapshot, files);
+    let inv = classify(x, &snap);
     let paths = write_manifest(&inv, out, source)?;
     println!(
         "classified {} messages at commit_seq {}: (a) {}, (b) {}, (c) {}",
@@ -935,7 +913,11 @@ pub struct ManifestRow {
 #[derive(Debug, Default)]
 pub struct Manifest {
     pub owner: String,
+    /// The board's max commit_seq at the freeze.
+    pub freeze_seq: i64,
     pub rows: Vec<ManifestRow>,
+    /// Agent id on the frozen board -> name, for the owner's agents.
+    pub agent_names: HashMap<String, String>,
 }
 
 impl Manifest {
@@ -956,6 +938,12 @@ pub fn read_manifest(stem: &Path) -> anyhow::Result<Manifest> {
         .find_map(|l| l.strip_prefix("# owner: "))
         .ok_or_else(|| anyhow!("{} has no owner line", messages.display()))?
         .to_string();
+    let freeze_seq = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("# freeze: commit_seq "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| anyhow!("{} has no freeze line", messages.display()))?;
     let mut atts: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let raw_atts = fs::read_to_string(&attachments).with_context(|| format!("reading {}", attachments.display()))?;
     for f in data_lines(&raw_atts) {
@@ -990,39 +978,151 @@ pub fn read_manifest(stem: &Path) -> anyhow::Result<Manifest> {
     if let Some(id) = atts.keys().next() {
         bail!("{}: attachment of message {id}, which the messages file does not list", attachments.display());
     }
-    Ok(Manifest { owner, rows })
+    let [_, _, _, names] = manifest_paths(stem);
+    let mut agent_names = HashMap::new();
+    let raw_names = fs::read_to_string(&names).with_context(|| format!("reading {}", names.display()))?;
+    for f in data_lines(&raw_names) {
+        if f.len() < 2 {
+            bail!("{}: a line has {} fields", names.display(), f.len());
+        }
+        agent_names.insert(f[1].clone(), f[0].clone());
+    }
+    Ok(Manifest { owner, freeze_seq, rows, agent_names })
 }
 
-// --- H3: the copy -------------------------------------------------------------------------
+// --- H3: the copy from the purge's saved rows ---------------------------------------------
 
-/// A row as `history.copy` returns it, checked against the manifest.
+/// The records of a Postgres `COPY ... (FORMAT csv, HEADER)` file: an unquoted empty field is
+/// NULL (None), a quoted one an empty string.
+pub fn read_csv(raw: &str) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    csv_records(raw)
+}
+
+fn csv_records(raw: &str) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    let mut out = Vec::new();
+    let mut rec: Vec<Option<String>> = Vec::new();
+    let mut field = String::new();
+    let (mut quoted, mut in_quotes, mut started) = (false, false, false);
+    let mut chars = raw.chars().peekable();
+    let push_field = |rec: &mut Vec<Option<String>>, field: &mut String, quoted: &mut bool| {
+        rec.push(if field.is_empty() && !*quoted { None } else { Some(std::mem::take(field)) });
+        *quoted = false;
+    };
+    while let Some(c) = chars.next() {
+        started = true;
+        if in_quotes {
+            match c {
+                '"' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    field.push('"');
+                }
+                '"' => in_quotes = false,
+                _ => field.push(c),
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_quotes = true;
+                quoted = true;
+            }
+            ',' => push_field(&mut rec, &mut field, &mut quoted),
+            '\n' => {
+                push_field(&mut rec, &mut field, &mut quoted);
+                out.push(std::mem::take(&mut rec));
+                started = false;
+            }
+            '\r' if chars.peek() == Some(&'\n') => {}
+            _ => field.push(c),
+        }
+    }
+    if in_quotes {
+        bail!("a quoted field is not closed");
+    }
+    if started {
+        push_field(&mut rec, &mut field, &mut quoted);
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+/// The rows of one table file, as column name -> value maps.
+fn csv_table(dir: &Path, table: &str) -> anyhow::Result<Vec<HashMap<String, Option<String>>>> {
+    let path = dir.join(format!("{table}.csv"));
+    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let mut records = csv_records(&raw).with_context(|| format!("parsing {}", path.display()))?.into_iter();
+    let header: Vec<String> = records
+        .next()
+        .ok_or_else(|| anyhow!("{} has no header", path.display()))?
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect();
+    records
+        .map(|r| {
+            if r.len() != header.len() {
+                bail!("{}: a record has {} fields, the header {}", path.display(), r.len(), header.len());
+            }
+            Ok(header.iter().cloned().zip(r).collect())
+        })
+        .collect()
+}
+
+fn col(row: &HashMap<String, Option<String>>, name: &str) -> Option<String> {
+    row.get(name).cloned().flatten()
+}
+
+/// A bytea in COPY text form (`\x` + hex).
+fn bytea(hex: &str) -> anyhow::Result<Vec<u8>> {
+    let h = hex.strip_prefix("\\x").ok_or_else(|| anyhow!("bytea without \\x"))?;
+    if h.len() % 2 != 0 {
+        bail!("odd bytea length");
+    }
+    (0..h.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).map_err(|e| anyhow!("bytea: {e}")))
+        .collect()
+}
+
+/// A message of the saved rows, with the parties resolved to the owner's names.
 #[derive(Debug)]
-struct Fetched {
-    row: ManifestRow,
+struct Saved {
+    id: String,
+    seq: i64,
+    from: String,
+    to: String,
     text: String,
+    reply_to: Option<String>,
+    created_at: String,
     attachments: Vec<(String, Vec<u8>)>,
-    /// DM: the recipient's read_at.
     read_at: Option<String>,
-    /// Channel post: member name -> read on central.
-    members: Vec<(String, bool)>,
     /// (emoji, actor name)
     reactions: Vec<(String, String)>,
+    /// In the manifest's class (b), so checked against its frozen hashes.
+    frozen: bool,
 }
 
 pub struct CopyOptions {
     pub manifest: PathBuf,
+    /// The directory of the purge's saved rows (one CSV per table).
+    pub from_csv: PathBuf,
     pub db: PathBuf,
-    pub server: String,
-    pub key: String,
+    /// Also copy the saved owner-internal rows newer than the manifest's freeze.
+    pub after_freeze: bool,
+    /// Names whose rows stay out (the importer's prune list).
+    pub skip_agents: BTreeSet<String>,
     pub dry_run: bool,
 }
 
 #[derive(Debug, Default)]
 pub struct CopyReport {
-    pub rows: usize,
+    pub frozen: usize,
+    pub after_freeze: Vec<String>,
     pub attachments: usize,
+    /// Class (b) ids not in the saved rows: still on the shared board.
+    pub on_central: usize,
+    pub skipped: Vec<String>,
     pub agents_created: Vec<String>,
-    pub channels_created: Vec<String>,
+    pub notes: Vec<String>,
     pub problems: Vec<String>,
     pub lines: Vec<String>,
     pub written: bool,
@@ -1036,9 +1136,20 @@ impl CopyReport {
 
 impl std::fmt::Display for CopyReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "conde history copy: {} class (b) rows, {} attachments", self.rows, self.attachments)?;
+        writeln!(
+            f,
+            "conde history copy: {} frozen class (b) rows and {} newer rows from the saved rows, {} attachments",
+            self.frozen,
+            self.after_freeze.len(),
+            self.attachments
+        )?;
+        writeln!(f, "  class (b) rows still on the shared board (not copied): {}", self.on_central)?;
+        writeln!(f, "  newer than the freeze: {}", list_or_none(&self.after_freeze))?;
+        writeln!(f, "  skipped (a party is pruned): {}", list_or_none(&self.skipped))?;
         writeln!(f, "  local agents created (unbound): {}", list_or_none(&self.agents_created))?;
-        writeln!(f, "  local channels created: {}", list_or_none(&self.channels_created))?;
+        for n in &self.notes {
+            writeln!(f, "  note: {n}")?;
+        }
         for l in &self.lines {
             writeln!(f, "  {l}")?;
         }
@@ -1050,132 +1161,133 @@ impl std::fmt::Display for CopyReport {
     }
 }
 
-const BATCH: usize = 20;
-
-fn rpc(server: &str, key: &str, ids: &[String]) -> anyhow::Result<Vec<Value>> {
-    let url = crate::credentials::rpc_url(server)?;
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    rt.block_on(async {
-        let client = reqwest::Client::builder()
-            .tls_backend_preconfigured(crate::login::tls()?)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
-        let mut out = Vec::new();
-        for chunk in ids.chunks(BATCH) {
-            let req = Request::new(new_ulid(), "history.copy", json!({"ids": chunk}));
-            let resp = client.post(&url).bearer_auth(key).json(&req).send().await.context("calling history.copy")?;
-            let status = resp.status();
-            let resp: Response = resp.json().await.with_context(|| format!("history.copy answered {status}"))?;
-            if !resp.ok {
-                let e = resp.error.map(|e| e.message).unwrap_or_else(|| status.to_string());
-                bail!("history.copy refused: {e}");
-            }
-            let rows = resp.result.and_then(|r| r.get("messages").cloned()).and_then(|m| m.as_array().cloned());
-            out.extend(rows.ok_or_else(|| anyhow!("history.copy answer has no messages"))?);
-        }
-        Ok(out)
-    })
-}
-
 /// The name part of `owner/name`, when the owner is `owner`.
 fn own_name<'a>(qualified: &'a str, owner: &str) -> Option<&'a str> {
     qualified.strip_prefix(owner).and_then(|r| r.strip_prefix('/'))
 }
 
-fn check_fetched(v: &Value, want: &ManifestRow, owner: &str, problems: &mut Vec<String>) -> Fetched {
-    let id = &want.id;
-    let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
-    let text = s("text").unwrap_or_default();
-    let to = match (s("channel"), s("to")) {
-        (Some(c), _) => format!("#{c}"),
-        (None, Some(r)) => r,
-        _ => String::new(),
-    };
-    let sha = sha256_hex(text.as_bytes());
-    if sha != want.sha256 || s("sha256").as_deref() != Some(sha.as_str()) {
+/// Read the saved rows and select what the copy restores: the manifest's class (b) ids found
+/// there, and with `after_freeze` every saved DM newer than the freeze; both parties must be the
+/// owner's (every agent of `agents.csv` is, and the kept ones are named by the manifest).
+fn read_saved(m: &Manifest, opts: &CopyOptions, report: &mut CopyReport) -> anyhow::Result<Vec<Saved>> {
+    let dir = &opts.from_csv;
+    let owner = &m.owner;
+    let mut names: HashMap<String, String> = m.agent_names.clone();
+    let mut owner_ids = BTreeSet::new();
+    for a in csv_table(dir, "agents")? {
+        let (Some(id), Some(name)) = (col(&a, "agent_id"), col(&a, "name_lower")) else { bail!("agents.csv: a row without id or name") };
+        owner_ids.insert(col(&a, "owner_id").unwrap_or_default());
+        names.insert(id, name);
+    }
+    if owner_ids.len() > 1 {
+        bail!("agents.csv holds agents of {} owners; the saved rows are one owner's", owner_ids.len());
+    }
+    let frozen: HashMap<&str, &ManifestRow> =
+        m.class(Class::OwnerInternal).into_iter().map(|r| (r.id.as_str(), r)).collect();
+    let listed: BTreeSet<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
+    let mut out = Vec::new();
+    let mut seen_frozen = BTreeSet::new();
+    for r in csv_table(dir, "messages")? {
+        let id = col(&r, "message_id").ok_or_else(|| anyhow!("messages.csv: a row without id"))?;
+        let seq: i64 = col(&r, "commit_seq").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let is_frozen = frozen.contains_key(id.as_str());
+        let newer = opts.after_freeze && seq > m.freeze_seq && !listed.contains(id.as_str());
+        if !is_frozen && !newer {
+            continue;
+        }
+        if col(&r, "channel_id").is_some() {
+            report.problems.push(format!("{id}: a channel post among the saved rows; the copy restores DMs only"));
+            continue;
+        }
+        let party = |k: &str| col(&r, k).and_then(|a| names.get(&a).cloned());
+        let (Some(from), Some(to)) = (party("sender_agent_id"), party("recipient_agent_id")) else {
+            report.problems.push(format!("{id}: a party is not one of {owner}'s agents"));
+            continue;
+        };
+        if opts.skip_agents.contains(&from) || opts.skip_agents.contains(&to) {
+            if is_frozen {
+                seen_frozen.insert(id.clone());
+            }
+            report.skipped.push(id);
+            continue;
+        }
+        if is_frozen {
+            seen_frozen.insert(id.clone());
+        } else {
+            report.after_freeze.push(id.clone());
+        }
+        out.push(Saved {
+            id,
+            seq,
+            from: format!("{owner}/{from}"),
+            to: format!("{owner}/{to}"),
+            text: col(&r, "text").unwrap_or_default(),
+            reply_to: col(&r, "reply_to"),
+            created_at: col(&r, "created_at").unwrap_or_default(),
+            attachments: Vec::new(),
+            read_at: None,
+            reactions: Vec::new(),
+            frozen: is_frozen,
+        });
+    }
+    report.on_central = frozen.len() - seen_frozen.len();
+    report.frozen = out.iter().filter(|s| s.frozen).count();
+    let index: HashMap<String, usize> = out.iter().enumerate().map(|(i, s)| (s.id.clone(), i)).collect();
+    for a in csv_table(dir, "attachments")? {
+        let Some(i) = col(&a, "message_id").and_then(|m| index.get(&m).copied()) else { continue };
+        let bytes = bytea(&col(&a, "bytes").unwrap_or_default())?;
+        out[i].attachments.push((col(&a, "filename").unwrap_or_default(), bytes));
+    }
+    for d in csv_table(dir, "dm_read")? {
+        let Some(i) = col(&d, "message_id").and_then(|m| index.get(&m).copied()) else { continue };
+        let reader = col(&d, "agent_id").and_then(|a| names.get(&a).cloned()).map(|n| format!("{owner}/{n}"));
+        if reader.as_deref() == Some(out[i].to.as_str()) {
+            out[i].read_at = col(&d, "read_at");
+        }
+    }
+    for x in csv_table(dir, "reactions")? {
+        let Some(i) = col(&x, "message_id").and_then(|m| index.get(&m).copied()) else { continue };
+        if col(&x, "present").as_deref() != Some("t") {
+            continue;
+        }
+        match col(&x, "actor_id").and_then(|a| names.get(&a).cloned()) {
+            Some(actor) => out[i].reactions.push((col(&x, "emoji").unwrap_or_default(), format!("{owner}/{actor}"))),
+            None => report.problems.push(format!("{}: a reaction by an agent that is not {owner}'s", out[i].id)),
+        }
+    }
+    out.sort_by_key(|s| s.seq);
+    report.attachments = out.iter().map(|s| s.attachments.len()).sum();
+    Ok(out)
+}
+
+/// A frozen row against its manifest line: parties, date, reply-to, body and attachment hashes.
+fn check_frozen(s: &Saved, want: &ManifestRow, problems: &mut Vec<String>) {
+    let id = &s.id;
+    let sha = sha256_hex(s.text.as_bytes());
+    if sha != want.sha256 {
         problems.push(format!("{id}: body sha256 {sha}, the manifest {}", want.sha256));
     }
     for (what, got, exp) in [
-        ("sender", s("from").unwrap_or_default(), want.from.clone()),
-        ("recipient", to, want.to.clone()),
-        ("date", s("created_at").unwrap_or_default(), want.created_at.clone()),
-        ("reply-to", s("reply_to").unwrap_or_default(), want.reply_to.clone().unwrap_or_default()),
+        ("sender", s.from.clone(), want.from.clone()),
+        ("recipient", s.to.clone(), want.to.clone()),
+        ("date", s.created_at.clone(), want.created_at.clone()),
+        ("reply-to", s.reply_to.clone().unwrap_or_default(), want.reply_to.clone().unwrap_or_default()),
     ] {
         if got != exp {
-            problems.push(format!("{id}: {what} is {got} on the board, {exp} in the manifest"));
+            problems.push(format!("{id}: {what} is {got} in the saved rows, {exp} in the manifest"));
         }
     }
-    let mut attachments = Vec::new();
-    let mut hashes = Vec::new();
-    for a in v.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default() {
-        let name = a["filename"].as_str().unwrap_or_default().to_string();
-        let Ok(bytes) = B64.decode(a["data"].as_str().unwrap_or_default()) else {
-            problems.push(format!("{id}: attachment {name} is not base64"));
-            continue;
-        };
-        hashes.push((name.clone(), sha256_hex(&bytes)));
-        attachments.push((name, bytes));
-    }
+    let mut hashes: Vec<(String, String)> = s.attachments.iter().map(|(n, b)| (n.clone(), sha256_hex(b))).collect();
     hashes.sort();
     if hashes != want.attachments {
         problems.push(format!("{id}: attachments {hashes:?} differ from the manifest's {:?}", want.attachments));
     }
-    let mut members = Vec::new();
-    for m in v["read"]["members"].as_array().cloned().unwrap_or_default() {
-        members.push((m["name"].as_str().unwrap_or_default().to_string(), m["read"].as_bool().unwrap_or(false)));
-    }
-    let reactions: Vec<(String, String)> = v["reactions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|r| (r["emoji"].as_str().unwrap_or_default().to_string(), r["by"].as_str().unwrap_or_default().to_string()))
-        .collect();
-    let parties = std::iter::once(want.from.as_str())
-        .chain((!want.to.starts_with('#')).then_some(want.to.as_str()))
-        .chain(members.iter().map(|(n, _)| n.as_str()))
-        .chain(reactions.iter().map(|(_, by)| by.as_str()));
-    for p in parties {
-        if own_name(p, owner).is_none() {
-            problems.push(format!("{id}: {p} is not {owner}'s; a class (b) row has the owner's parties only"));
-        }
-    }
-    let read_at = v["read"]["read_at"].as_str().map(str::to_string);
-    Fetched { row: want.clone(), text, attachments, read_at, members, reactions }
 }
 
-/// DM conversation key (unordered pair) or channel.
-fn conversation(r: &ManifestRow) -> (String, String) {
-    if r.to.starts_with('#') {
-        (r.to.clone(), String::new())
-    } else if r.from <= r.to {
-        (r.from.clone(), r.to.clone())
-    } else {
-        (r.to.clone(), r.from.clone())
-    }
-}
-
-/// The newest local message of a conversation (local names), as (created_at, id).
-fn newest_local(tx: &dyn Tx, user_id: i64, conv: &(String, String), owner: &str) -> anyhow::Result<Option<(String, String)>> {
+/// The newest local DM between two of the owner's names, as (created_at, id).
+fn newest_local(tx: &dyn Tx, user_id: i64, a: &str, b: &str) -> anyhow::Result<Option<(String, String)>> {
+    let (Some(a), Some(b)) = (tx.agent_by_name(user_id, a)?, tx.agent_by_name(user_id, b)?) else { return Ok(None) };
     let mut newest: Option<(String, String)> = None;
-    let mut see = |m: crate::store::Message| {
-        if newest.as_ref().is_none_or(|(at, _)| m.created_at > *at) {
-            newest = Some((m.created_at, m.id));
-        }
-    };
-    if let Some(channel) = conv.0.strip_prefix('#') {
-        let Some(cid) = tx.channel_id_by_name(channel)? else { return Ok(None) };
-        for id in tx.channel_message_ids(&cid)? {
-            if let Some(m) = tx.message_by_id(&id)? {
-                see(m);
-            }
-        }
-        return Ok(newest);
-    }
-    let local = |q: &str| own_name(q, owner).map(str::to_string);
-    let (Some(a), Some(b)) = (local(&conv.0), local(&conv.1)) else { return Ok(None) };
-    let (Some(a), Some(b)) = (tx.agent_by_name(user_id, &a)?, tx.agent_by_name(user_id, &b)?) else { return Ok(None) };
     for (from, to) in [(&a, &b), (&b, &a)] {
         let mut after = 0;
         loop {
@@ -1183,7 +1295,9 @@ fn newest_local(tx: &dyn Tx, user_id: i64, conv: &(String, String), owner: &str)
             let Some(last) = page.last() else { break };
             after = last.seq;
             for m in page.into_iter().filter(|m| m.recipient_id.as_deref() == Some(to.id.as_str())) {
-                see(m);
+                if newest.as_ref().is_none_or(|(at, _)| m.created_at > *at) {
+                    newest = Some((m.created_at, m.id));
+                }
             }
         }
     }
@@ -1193,92 +1307,71 @@ fn newest_local(tx: &dyn Tx, user_id: i64, conv: &(String, String), owner: &str)
 pub fn copy(opts: &CopyOptions) -> anyhow::Result<CopyReport> {
     let manifest = read_manifest(&opts.manifest)?;
     let owner = manifest.owner.clone();
-    let mut wanted: Vec<ManifestRow> = manifest.class(Class::OwnerInternal).into_iter().cloned().collect();
-    wanted.sort_by_key(|r| r.seq);
-    let mut report = CopyReport { rows: wanted.len(), ..CopyReport::default() };
-    report.attachments = wanted.iter().map(|r| r.attachments.len()).sum();
+    let mut report = CopyReport::default();
     if !opts.db.exists() {
         bail!("{} does not exist: the H2 import restores the local board first", opts.db.display());
     }
+    let rows = read_saved(&manifest, opts, &mut report)?;
     let store = SqliteStore::open(&opts.db)?;
+    let frozen: HashMap<&str, &ManifestRow> =
+        manifest.class(Class::OwnerInternal).into_iter().map(|r| (r.id.as_str(), r)).collect();
+    for s in rows.iter().filter(|s| s.frozen) {
+        check_frozen(s, frozen[s.id.as_str()], &mut report.problems);
+    }
 
-    // Before any fetch: the local board is the H2 restore, and none of the ids is on it yet.
+    // Against the local board as the H2 import left it: absent ids, resolvable replies, order.
     let user_id = {
         let tx = store.begin(Mode::Read)?;
         let user_id = tx.user_id(&owner)?.ok_or_else(|| {
             anyhow!("{} has no user {owner}: run the H2 import (conde import --owner {owner}) first", opts.db.display())
         })?;
-        for r in &wanted {
-            if tx.message_by_id(&r.id)?.is_some() {
-                report.problems.push(format!("{} is already on the local board (a kond id, or a copy already ran)", r.id));
+        let copied: BTreeSet<&str> = rows.iter().map(|s| s.id.as_str()).collect();
+        let mut newest: BTreeMap<(String, String), Option<(String, String)>> = BTreeMap::new();
+        for s in &rows {
+            if tx.message_by_id(&s.id)?.is_some() {
+                report.problems.push(format!("{} is already on the local board (a kond id, or a copy already ran)", s.id));
+            }
+            if let Some(reply) = &s.reply_to
+                && !copied.contains(reply.as_str())
+                && tx.message_by_id(reply)?.is_none()
+            {
+                report.problems.push(format!("{}: replies to {reply}, which is neither local nor copied", s.id));
+            }
+            let (a, b) = (own_name(&s.from, &owner).unwrap_or_default(), own_name(&s.to, &owner).unwrap_or_default());
+            let key = if a <= b { (a.to_string(), b.to_string()) } else { (b.to_string(), a.to_string()) };
+            if !newest.contains_key(&key) {
+                let n = newest_local(&*tx, user_id, &key.0, &key.1)?;
+                newest.insert(key.clone(), n);
+            }
+            // A DM's read state is its own; an older copied DM is listed after newer local ones.
+            if let Some((at, kond)) = &newest[&key]
+                && s.created_at < *at
+            {
+                report.notes.push(format!(
+                    "{} ({}) is older than {kond} ({at}) between {} and {}: listed after it",
+                    s.id, s.created_at, key.0, key.1
+                ));
             }
         }
         user_id
     };
-    if !report.problems.is_empty() {
-        return Ok(report);
-    }
-
-    let ids: Vec<String> = wanted.iter().map(|r| r.id.clone()).collect();
-    let fetched_raw = if ids.is_empty() { Vec::new() } else { rpc(&opts.server, &opts.key, &ids)? };
-    let mut by_id: HashMap<String, Value> = HashMap::new();
-    for v in fetched_raw {
-        let id = v["message_id"].as_str().unwrap_or_default().to_string();
-        by_id.insert(id, v);
-    }
-    let mut fetched = Vec::new();
-    for r in &wanted {
-        match by_id.get(&r.id) {
-            Some(v) => fetched.push(check_fetched(v, r, &owner, &mut report.problems)),
-            None => report.problems.push(format!("{}: not in the board's answer", r.id)),
-        }
-    }
-
-    // Order and links, against the local board as the H2 import left it.
-    let copied: BTreeSet<&str> = wanted.iter().map(|r| r.id.as_str()).collect();
-    {
-        let tx = store.begin(Mode::Read)?;
-        let mut newest: BTreeMap<(String, String), Option<(String, String)>> = BTreeMap::new();
-        for r in &wanted {
-            let conv = conversation(r);
-            if !newest.contains_key(&conv) {
-                let n = newest_local(&*tx, user_id, &conv, &owner)?;
-                newest.insert(conv.clone(), n);
-            }
-            if let Some((at, kond)) = &newest[&conv]
-                && r.created_at < *at
-            {
-                report.problems.push(format!(
-                    "{} ({}) is older than {kond} ({at}), the newest local message between {} and {}: for decision",
-                    r.id, r.created_at, conv.0, if conv.1.is_empty() { "its members" } else { conv.1.as_str() }
-                ));
-            }
-            if let Some(reply) = &r.reply_to
-                && !copied.contains(reply.as_str())
-                && tx.message_by_id(reply)?.is_none()
-            {
-                report.problems.push(format!("{}: replies to {reply}, which is neither local nor copied", r.id));
-            }
-        }
-    }
     if !report.problems.is_empty() || opts.dry_run {
         if opts.dry_run {
-            report.lines.push("dry run: fetched and checked, nothing written".to_string());
+            report.lines.push("dry run: read and checked, nothing written".to_string());
         }
         return Ok(report);
     }
-
-    apply(&store, user_id, &owner, &fetched, &mut report)?;
+    apply(&store, user_id, &owner, &rows, &mut report)?;
     report.written = true;
-    validate(&store, user_id, &owner, &fetched, &mut report)?;
+    validate(&store, &manifest, &rows, &mut report)?;
     Ok(report)
 }
 
-fn apply(store: &SqliteStore, user_id: i64, owner: &str, rows: &[Fetched], report: &mut CopyReport) -> anyhow::Result<()> {
+fn apply(store: &SqliteStore, user_id: i64, owner: &str, rows: &[Saved], report: &mut CopyReport) -> anyhow::Result<()> {
     let boxed = store.begin(Mode::Write)?;
     let tx = &*boxed;
     let mut agents: HashMap<String, String> = HashMap::new();
-    let mut agent = |tx: &dyn Tx, qualified: &str, report: &mut CopyReport| -> anyhow::Result<String> {
+    let mut agent = |qualified: &str, report: &mut CopyReport| -> anyhow::Result<String> {
         if let Some(id) = agents.get(qualified) {
             return Ok(id.clone());
         }
@@ -1303,153 +1396,171 @@ fn apply(store: &SqliteStore, user_id: i64, owner: &str, rows: &[Fetched], repor
         agents.insert(qualified.to_string(), id.clone());
         Ok(id)
     };
-    for f in rows {
-        let r = &f.row;
-        let sender = agent(tx, &r.from, report)?;
-        let (recipient, channel) = match r.to.strip_prefix('#') {
-            Some(c) => {
-                let id = match tx.channel_id_by_name(c)? {
-                    Some(id) => id,
-                    None => {
-                        let id = new_ulid();
-                        tx.insert_channel(&Channel { id: id.clone(), name: c.to_string(), created_by: sender.clone(), topic: None })?;
-                        report.channels_created.push(format!("#{c}"));
-                        id
-                    }
-                };
-                (None, Some(id))
-            }
-            None => (Some(agent(tx, &r.to, report)?), None),
-        };
+    for s in rows {
+        let sender = agent(&s.from, report)?;
+        let recipient = agent(&s.to, report)?;
         let inserted = tx.insert_message_if_absent(&NewMessage {
-            id: &r.id,
+            id: &s.id,
             sender_id: &sender,
-            recipient_id: recipient.as_deref(),
-            channel_id: channel.as_deref(),
-            text: &f.text,
-            reply_to: r.reply_to.as_deref(),
-            created_at: &r.created_at,
+            recipient_id: Some(&recipient),
+            channel_id: None,
+            text: &s.text,
+            reply_to: s.reply_to.as_deref(),
+            created_at: &s.created_at,
         })?;
         if !inserted {
-            bail!("{} appeared on the local board during the copy", r.id);
+            bail!("{} appeared on the local board during the copy", s.id);
         }
-        for (name, bytes) in &f.attachments {
-            tx.insert_attachment(&new_ulid(), &r.id, name, bytes)?;
+        for (name, bytes) in &s.attachments {
+            tx.insert_attachment(&new_ulid(), &s.id, name, bytes)?;
         }
-        if let (Some(rcpt), Some(at)) = (&recipient, &f.read_at) {
-            tx.mark_dm_read(&r.id, rcpt, at)?;
+        if let Some(at) = &s.read_at {
+            tx.mark_dm_read(&s.id, &recipient, at)?;
         }
-        if let Some(cid) = &channel {
-            let seq = tx.message_by_id(&r.id)?.map(|m| m.seq).unwrap_or(0);
-            for (member, read) in &f.members {
-                let aid = agent(tx, member, report)?;
-                match tx.read_seq(cid, &aid)? {
-                    Some(_) if *read => tx.advance_cursor(cid, &aid, seq)?,
-                    Some(_) => {}
-                    None => tx.insert_membership(cid, &aid, if *read { seq } else { seq - 1 })?,
-                }
-            }
-        }
-        for (emoji, by) in &f.reactions {
-            let aid = agent(tx, by, report)?;
-            tx.insert_reaction_if_absent(&r.id, &aid, emoji, true)?;
+        for (emoji, by) in &s.reactions {
+            let actor = agent(by, report)?;
+            tx.insert_reaction_if_absent(&s.id, &actor, emoji, true)?;
         }
     }
     boxed.commit()?;
     Ok(())
 }
 
-fn validate(store: &SqliteStore, user_id: i64, owner: &str, rows: &[Fetched], report: &mut CopyReport) -> anyhow::Result<()> {
+fn validate(store: &SqliteStore, manifest: &Manifest, rows: &[Saved], report: &mut CopyReport) -> anyhow::Result<()> {
+    let frozen: HashMap<&str, &ManifestRow> =
+        manifest.class(Class::OwnerInternal).into_iter().map(|r| (r.id.as_str(), r)).collect();
     let tx = store.begin(Mode::Read)?;
-    let (mut present, mut bodies, mut atts, mut atts_ok, mut links, mut reads) = (0, 0, 0, 0, 0, 0);
-    for f in rows {
-        let r = &f.row;
-        let Some(m) = tx.message_by_id(&r.id)? else {
-            report.problems.push(format!("{}: not on the local board after the copy", r.id));
+    let (mut present, mut bodies, mut atts, mut atts_ok, mut links, mut reads, mut reacts) = (0, 0, 0, 0, 0, 0, 0);
+    for s in rows {
+        let Some(m) = tx.message_by_id(&s.id)? else {
+            report.problems.push(format!("{}: not on the local board after the copy", s.id));
             continue;
         };
         present += 1;
-        if sha256_hex(m.text.as_bytes()) == r.sha256 {
+        // Frozen rows against the manifest, newer rows against the saved rows.
+        let want_body = frozen.get(s.id.as_str()).map_or_else(|| sha256_hex(s.text.as_bytes()), |r| r.sha256.clone());
+        let mut want_atts: Vec<(String, String)> = match frozen.get(s.id.as_str()) {
+            Some(r) => r.attachments.clone(),
+            None => s.attachments.iter().map(|(n, b)| (n.clone(), sha256_hex(b))).collect(),
+        };
+        want_atts.sort();
+        if sha256_hex(m.text.as_bytes()) == want_body {
             bodies += 1;
         } else {
-            report.problems.push(format!("{}: local body sha256 differs from the manifest", r.id));
+            report.problems.push(format!("{}: local body sha256 differs", s.id));
         }
         let mut local = Vec::new();
-        for meta in tx.attachment_list(&r.id)? {
+        for meta in tx.attachment_list(&s.id)? {
             if let Some(a) = tx.attachment(&meta.id)? {
                 local.push((a.filename, sha256_hex(&a.bytes)));
             }
         }
         local.sort();
-        atts += r.attachments.len();
-        if local == r.attachments {
-            atts_ok += r.attachments.len();
+        atts += want_atts.len();
+        if local == want_atts {
+            atts_ok += want_atts.len();
         } else {
-            report.problems.push(format!("{}: local attachments {local:?} differ from the manifest", r.id));
+            report.problems.push(format!("{}: local attachments {local:?} differ from {want_atts:?}", s.id));
         }
-        match &r.reply_to {
+        match &s.reply_to {
             Some(reply) if tx.message_by_id(reply)?.is_none() => {
-                report.problems.push(format!("{}: reply-to {reply} does not resolve locally", r.id));
+                report.problems.push(format!("{}: reply-to {reply} does not resolve locally", s.id));
             }
             _ => links += 1,
         }
-        let read_ok = match (&m.channel_id, &m.recipient_id) {
-            (Some(c), _) => {
-                let mut ok = true;
-                for (member, read) in &f.members {
-                    let name = own_name(member, owner).unwrap_or_default();
-                    let seq = match tx.agent_by_name(user_id, name)? {
-                        Some(a) => tx.read_seq(c, &a.id)?,
-                        None => None,
-                    };
-                    ok &= seq.is_some_and(|s| (s >= m.seq) == *read);
-                }
-                ok
-            }
-            (None, Some(rcpt)) => tx.dm_read_at(&r.id, rcpt)? == f.read_at,
-            _ => false,
-        };
-        if read_ok {
+        let rcpt = m.recipient_id.clone().unwrap_or_default();
+        if tx.dm_read_at(&s.id, &rcpt)? == s.read_at {
             reads += 1;
         } else {
-            report.problems.push(format!("{}: local read state differs from the board's", r.id));
+            report.problems.push(format!("{}: local read state differs from the saved rows", s.id));
         }
-        let mut local_reactions: Vec<(String, String)> = tx.reactions(&r.id)?;
-        let mut want = f.reactions.clone();
+        let mut local_reactions = tx.reactions(&s.id)?;
+        let mut want = s.reactions.clone();
         local_reactions.sort();
         want.sort();
-        if local_reactions != want {
-            report.problems.push(format!("{}: local reactions {local_reactions:?}, the board's {want:?}", r.id));
+        if local_reactions == want {
+            reacts += 1;
+        } else {
+            report.problems.push(format!("{}: local reactions {local_reactions:?}, saved {want:?}", s.id));
         }
     }
     let n = rows.len();
-    report.lines.push(format!("ids: {present} of {n} frozen class (b) ids on the local board"));
-    report.lines.push(format!("bodies: {bodies} of {n} sha256-equal to the manifest"));
-    report.lines.push(format!("attachments: {atts_ok} of {atts} sha256-equal to the manifest"));
+    let f = rows.iter().filter(|s| s.frozen).count();
+    report.lines.push(format!("ids: {present} of {n} on the local board ({f} frozen, {} newer)", n - f));
+    report.lines.push(format!("bodies: {bodies} of {n} sha256-equal (frozen rows to the manifest, newer rows to the saved rows)"));
+    report.lines.push(format!("attachments: {atts_ok} of {atts} sha256-equal"));
     report.lines.push(format!("reply-to: {links} of {n} resolve locally"));
-    report.lines.push(format!("read state: {reads} of {n} equal to the board's"));
+    report.lines.push(format!("read state: {reads} of {n} equal to the saved rows"));
+    report.lines.push(format!("reactions: {reacts} of {n} equal to the saved rows"));
     report.lines.push(format!(
-        "bodies digest: {}",
-        rows_digest(rows.iter().map(|f| (f.row.id.as_str(), f.row.sha256.as_str())))
+        "frozen bodies digest: {}",
+        rows_digest(rows.iter().filter(|s| s.frozen).map(|s| (s.id.as_str(), frozen[s.id.as_str()].sha256.as_str())))
     ));
     Ok(())
 }
 
-/// `conde history copy`: the H3 copy with the host credential of this machine.
-pub fn copy_main(manifest: &Path, db: Option<PathBuf>, credentials: Option<PathBuf>, dry_run: bool) -> anyhow::Result<i32> {
-    let path = match credentials {
-        Some(p) => p,
-        None => crate::credentials::path()?,
-    };
-    let creds = crate::credentials::load(&path)?;
+/// `conde history copy`: the H3 copy from the purge's saved rows into the local board.
+pub fn copy_main(
+    manifest: &Path,
+    from_csv: &Path,
+    db: Option<PathBuf>,
+    after_freeze: bool,
+    skip_file: Option<&Path>,
+    dry_run: bool,
+) -> anyhow::Result<i32> {
     let opts = CopyOptions {
         manifest: manifest.to_path_buf(),
+        from_csv: from_csv.to_path_buf(),
         db: db.unwrap_or_else(|| crate::paths::data_dir().join("conde.db")),
-        server: creds.server,
-        key: creds.key,
+        after_freeze,
+        skip_agents: match skip_file {
+            Some(p) => crate::import::read_name_list(p)?,
+            None => BTreeSet::new(),
+        },
         dry_run,
     };
     let report = copy(&opts)?;
     print!("{report}");
     Ok(i32::from(!report.ok()))
+}
+
+// --- the prune list -----------------------------------------------------------------------
+
+/// The prune list as TSV: every kond name with its activity, oldest first.
+pub fn prune_tsv(rows: &[crate::import::AgentActivity]) -> String {
+    let mut out = String::from("name\tconde_name\tlast_activity\tsource\tmessages\tregistered\tpinned\n");
+    for a in rows {
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            esc(&a.name),
+            esc(&a.conde_name),
+            a.last_activity.as_deref().unwrap_or("-"),
+            if a.messages > 0 { "message" } else if a.from_registration { "registration" } else { "none" },
+            a.messages,
+            a.registered.as_deref().unwrap_or("no"),
+            if a.pinned { "yes" } else { "no" }
+        );
+    }
+    out
+}
+
+/// `conde history prune-candidates`: the TSV to `out` (or stdout), a short table on stderr.
+pub fn prune_main(snapshot: &Path, out: Option<&Path>) -> anyhow::Result<i32> {
+    let rows = crate::import::agent_activity(snapshot)?;
+    let tsv = prune_tsv(&rows);
+    match out {
+        Some(p) => fs::write(p, &tsv).with_context(|| format!("writing {}", p.display()))?,
+        None => print!("{tsv}"),
+    }
+    let unregistered = rows.iter().filter(|a| a.registered.is_none()).count();
+    let silent = rows.iter().filter(|a| a.messages == 0).count();
+    eprintln!("{} names: {} not in the kond registry, {} without any message", rows.len(), unregistered, silent);
+    eprintln!("oldest last activity first:");
+    eprintln!("  {:<40} {:<11} {:>8}  registered", "name", "last", "messages");
+    for a in &rows {
+        let day = a.last_activity.as_deref().and_then(|d| d.get(..10)).unwrap_or("-");
+        eprintln!("  {:<40} {:<11} {:>8}  {}", a.name, day, a.messages, a.registered.as_deref().unwrap_or("no"));
+    }
+    Ok(0)
 }

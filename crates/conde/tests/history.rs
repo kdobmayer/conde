@@ -1,14 +1,13 @@
-//! The history tools of the v2 switch: the owner-only `history.copy` read, the H1 inventory
-//! (classification by message relationships, the extraction query on Postgres) and the H3 copy
-//! into a local board restored by the H2 import, validated by hashes.
+//! The history tools of the v2 switch: the H1 inventory (classification by message relationships,
+//! the extraction query on Postgres), the H3 copy from the purge's saved rows into a local board
+//! restored by the H2 import, validated by hashes, and the Postgres COPY format it reads.
 
 #[path = "pg/mod.rs"]
 mod pg;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -16,7 +15,6 @@ use conde::dispatch::{Dispatcher, Principal};
 use conde::history::{self, Class, CopyOptions, Extract, XAgent, XAttachment, XMessage};
 use conde::import::{self, Options};
 use conde::protocol::{ErrorCode, Request};
-use conde::store::NewMessage;
 use conde::util::{new_ulid, sha256_hex};
 use serde_json::{Value, json};
 
@@ -89,6 +87,7 @@ fn import_opts(from: &Path, db: &Path, database_url: Option<String>) -> Options 
         live_claude: None,
         progress: false,
         expect_files: None,
+        skip_agents: Default::default(),
     }
 }
 
@@ -142,60 +141,6 @@ fn native_traffic(d: &Dispatcher) -> Native {
     ok(d, &bob, RELAY, "channel.join", json!({"channel": "#mixed"}));
     let c3 = send(d, &p, DESK, "#mixed", "shared post", json!({}));
     Native { b: vec![b1, b2, b3], c: vec![c1, c2, c3] }
-}
-
-// --- history.copy ---------------------------------------------------------------------------
-
-#[test]
-fn history_copy_returns_owner_internal_rows_and_refuses_everything_else() {
-    let tmp = TempDir::new("op");
-    let kond = tmp.0.join("kond");
-    kond_fixture(&kond);
-    let url = pg::fresh_database();
-    let report = import::run(&import_opts(&kond, &tmp.0.join("central.db"), url.clone())).unwrap();
-    assert!(report.ok(), "{report}");
-    let d = match &url {
-        Some(u) => Dispatcher::connect(u, conde::store::postgres::PgOpen::COMMAND).unwrap(),
-        None => Dispatcher::open(&tmp.0.join("central.db")).unwrap(),
-    };
-    let n = native_traffic(&d);
-    let p = d.principal("tester", "testhost", false).unwrap();
-    let copy = |p: &Principal, ids: &[&String]| call(&d, p, LEAD, "history.copy", json!({"ids": ids}));
-
-    let rows = copy(&p, &[&n.b[0], &n.b[2]]).unwrap()["messages"].as_array().unwrap().clone();
-    assert_eq!(rows.len(), 2);
-    let dm = &rows[0];
-    assert_eq!((dm["from"].as_str(), dm["to"].as_str()), (Some("tester/desk"), Some("tester/lead")));
-    assert_eq!(dm["sha256"], sha256_hex(b"native internal"));
-    assert_eq!(dm["attachments"][0]["filename"], "native.bin");
-    assert_eq!(B64.decode(dm["attachments"][0]["data"].as_str().unwrap()).unwrap(), vec![0u8, 1, 2, 255]);
-    assert_eq!(dm["attachments"][0]["sha256"], sha256_hex(&[0, 1, 2, 255]));
-    assert!(dm["read"]["read_at"].as_str().is_some_and(|r| r.starts_with("20")), "{dm}");
-    assert_eq!(dm["reactions"], json!([{"emoji": "\u{1F44D}", "by": "tester/lead"}]));
-    let post = &rows[1];
-    assert_eq!(post["channel"], "team");
-    let members: BTreeMap<String, bool> = post["read"]["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| (m["name"].as_str().unwrap().to_string(), m["read"].as_bool().unwrap()))
-        .collect();
-    // the board's own state: a sender's cursor does not move past its own post
-    assert_eq!(members, BTreeMap::from([("tester/lead".into(), false), ("tester/worker".into(), true)]));
-
-    // A kond (a) id is owner-internal too: the server cannot tell; the copy tool refuses it.
-    assert!(copy(&p, &[&kid(1)]).is_ok());
-    for shared in &n.c {
-        let (code, message) = copy(&p, &[&n.b[0], shared]).unwrap_err();
-        assert_eq!(code, ErrorCode::Forbidden);
-        assert!(message.contains(shared.as_str()) && !message.contains(n.b[0].as_str()), "{message}");
-    }
-    let bob = d.principal("bob", "bobhost", false).unwrap();
-    assert_eq!(call(&d, &bob, RELAY, "history.copy", json!({"ids": [n.b[0]]})).unwrap_err().0, ErrorCode::Forbidden);
-    assert_eq!(copy(&p, &[&new_ulid()]).unwrap_err().0, ErrorCode::NotFound);
-    assert_eq!(copy(&p, &[]).unwrap_err().0, ErrorCode::BadRequest);
-    let bridge = d.bridge_principal(&p);
-    assert_eq!(call(&d, &bridge, LEAD, "history.copy", json!({"ids": [n.b[0]]})).unwrap_err().0, ErrorCode::Forbidden);
 }
 
 // --- H1: classification ---------------------------------------------------------------------
@@ -272,6 +217,7 @@ fn extract_via_store(d: &Dispatcher, owner: &str) -> Extract {
             }
         }
         x.hosts.push(("testhost".into(), true));
+        x.freeze_seq = x.messages.values().map(|m| m.seq).max().unwrap_or(0);
         Ok(x)
     })
     .unwrap()
@@ -392,34 +338,7 @@ fn extraction_query_on_postgres_classifies_and_detects_lost_lines() {
     assert!(history::parse_extract(&format!("{out}{out}")).is_ok(), "a line read back twice counts once");
 }
 
-// --- H3: the copy ---------------------------------------------------------------------------
-
-struct Central {
-    _rt: tokio::runtime::Runtime,
-    d: Arc<Dispatcher>,
-    url: String,
-    key: String,
-}
-
-fn central(tmp: &Path, kond: &Path) -> Central {
-    let url = pg::fresh_database();
-    let db = tmp.join("central.db");
-    assert!(import::run(&import_opts(kond, &db, url.clone())).unwrap().ok());
-    let d = Arc::new(match &url {
-        Some(u) => Dispatcher::connect(u, conde::store::postgres::PgOpen::SERVER).unwrap(),
-        None => Dispatcher::open(&db).unwrap(),
-    });
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let config = conde_remote::ServerConfig::default();
-    let handle = rt.block_on(conde::cloud::start(d.clone(), "127.0.0.1:0".parse().unwrap(), config)).unwrap();
-    let addr = handle.local_addr();
-    std::mem::forget(handle);
-    let key = format!("conde_test_{}", new_ulid());
-    let digest = conde_remote::token_digest(&key);
-    d.with_tx(|c| conde::ops::hosts::insert_key(c, "tester", "testhost", &digest, "test", "2026-10-09T00:00:00.000Z"))
-        .unwrap();
-    Central { _rt: rt, d, url: format!("http://{addr}"), key }
-}
+// --- H3: the copy from the purge's saved rows ----------------------------------------------
 
 fn table_counts(db: &Path) -> Vec<i64> {
     let conn = rusqlite::Connection::open(db).unwrap();
@@ -429,141 +348,215 @@ fn table_counts(db: &Path) -> Vec<i64> {
         .collect()
 }
 
-#[test]
-fn copy_restores_class_b_after_the_import_validated_by_hashes() {
-    let tmp = TempDir::new("copy");
-    let kond = tmp.0.join("kond");
-    kond_fixture(&kond);
-    let c = central(&tmp.0, &kond);
-    let n = native_traffic(&c.d);
-    let inv = history::classify(extract_via_store(&c.d, "tester"), &import::snapshot(&kond).unwrap());
-    let stem = tmp.0.join("manifest");
-    history::write_manifest(&inv, &stem, "test").unwrap();
-
-    // H2: the kond snapshot into a fresh local board.
-    let local = tmp.0.join("local/conde.db");
-    fs::create_dir_all(local.parent().unwrap()).unwrap();
-    let h2 = import::run(&import_opts(&kond, &local, None)).unwrap();
-    assert!(h2.ok(), "{h2}");
-    let opts = |dry_run| CopyOptions { manifest: stem.clone(), db: local.clone(), server: c.url.clone(), key: c.key.clone(), dry_run };
-
-    let before = table_counts(&local);
-    let dry = history::copy(&opts(true)).unwrap();
-    assert!(dry.ok() && !dry.written, "{dry}");
-    assert_eq!(table_counts(&local), before, "a dry run writes nothing");
-
-    let report = history::copy(&opts(false)).unwrap();
-    assert!(report.ok(), "{report}");
-    assert!(report.written);
-    assert_eq!(report.agents_created, vec!["desk".to_string()]);
-    let text = report.to_string();
-    for line in [
-        "ids: 3 of 3 frozen class (b) ids",
-        "bodies: 3 of 3 sha256-equal",
-        "attachments: 1 of 1 sha256-equal",
-        "reply-to: 3 of 3 resolve",
-        "read state: 3 of 3 equal",
-    ] {
-        assert!(text.contains(line), "{line}\n{text}");
+/// A field as Postgres `COPY ... (FORMAT csv)` writes it: NULL unquoted and empty, a value
+/// quoted when it holds a separator, a quote, a line break or is empty.
+fn csv_field(v: Option<&str>) -> String {
+    match v {
+        None => String::new(),
+        Some(s) if s.is_empty() || s.contains([',', '"', '\n', '\r']) => format!("\"{}\"", s.replace('"', "\"\"")),
+        Some(s) => s.to_string(),
     }
-    assert!(text.contains(&format!("bodies digest: {}", inv.class_digest(Class::OwnerInternal))), "{text}");
-
-    // Through the local dispatcher: order, read state, reactions, cursors.
-    let d = Dispatcher::open(&local).unwrap();
-    let p = d.principal("tester", "testhost", true).unwrap();
-    let shown = ok(&d, &p, LEAD, "message.get", json!({"id": n.b[0]}))["message"].clone();
-    assert_eq!(shown["text"], "native internal");
-    assert_eq!(shown["reactions"], json!([{"emoji": "\u{1F44D}", "by": ["tester/lead"]}]));
-    let seq = |id: &str| d.with_conn(|tx| tx.message_by_id(id)).unwrap().unwrap().seq;
-    assert!(seq(&n.b[0]) > seq(&kid(2)) && seq(&n.b[2]) > seq(&n.b[0]), "appended after the kond import, in board order");
-    let unread = ok(&d, &p, WORKER, "inbox.list", json!({}));
-    assert_eq!(unread["items"], json!([]), "worker read the native #team post on central: read here too");
-    for id in &n.c {
-        assert!(d.with_conn(|tx| tx.message_by_id(id)).unwrap().is_none(), "class (c) stays on central");
-    }
-    drop(d);
-
-    // Run again: refused before any fetch, nothing written.
-    let after = table_counts(&local);
-    let again = history::copy(&opts(false)).unwrap();
-    assert!(!again.ok() && !again.written, "{again}");
-    assert_eq!(table_counts(&local), after);
-
-    // The importer re-run over the restored board: the copied #team post does not block it.
-    let rerun = import::run(&import_opts(&kond, &local, None)).unwrap();
-    assert!(rerun.ok() && rerun.refused.is_empty(), "{rerun}");
-    assert_eq!(table_counts(&local), after);
 }
 
-#[test]
-fn copy_refuses_a_hash_mismatch_a_shared_id_and_an_order_inversion_writing_nothing() {
-    let tmp = TempDir::new("copy-refused");
-    let kond = tmp.0.join("kond");
-    kond_fixture(&kond);
-    let c = central(&tmp.0, &kond);
-    let n = native_traffic(&c.d);
-    // A native row between lead and worker dated before the kond DM of that conversation.
-    let old = new_ulid();
-    let p = c.d.principal("tester", "testhost", false).unwrap();
-    c.d.with_tx(|tx| {
-        let lead = tx.agent_by_name(p.user_id, "lead")?.unwrap().id;
-        let worker = tx.agent_by_name(p.user_id, "worker")?.unwrap().id;
-        tx.insert_message(&NewMessage {
-            id: &old,
-            sender_id: &lead,
-            recipient_id: Some(&worker),
-            channel_id: None,
-            text: "dated before kond",
-            reply_to: None,
-            created_at: "2024-12-31T00:00:00.000Z",
-        })?;
+fn csv_file(dir: &Path, table: &str, header: &[&str], rows: Vec<Vec<Option<String>>>) {
+    let mut out = header.join(",") + "\n";
+    for r in rows {
+        out.push_str(&r.iter().map(|f| csv_field(f.as_deref())).collect::<Vec<_>>().join(","));
+        out.push('\n');
+    }
+    fs::write(dir.join(format!("{table}.csv")), out).unwrap();
+}
+
+/// What the purge saved: the agents in `gone` and every DM `ids` names, from the central board.
+fn save_rows(d: &Dispatcher, dir: &Path, gone: &[&str], ids: &[&String]) {
+    fs::create_dir_all(dir).unwrap();
+    d.with_conn(|tx| {
+        let uid = tx.user_id("tester")?.unwrap();
+        let mut agents = Vec::new();
+        for n in gone {
+            let a = tx.agent_by_name(uid, n)?.unwrap();
+            agents.push(vec![Some(a.id), Some(uid.to_string()), Some(a.name)]);
+        }
+        csv_file(dir, "agents", &["agent_id", "owner_id", "name_lower"], agents);
+        let (mut msgs, mut atts, mut reads, mut reacts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for id in ids {
+            let m = tx.message_by_id(id)?.unwrap();
+            let rcpt = m.recipient_id.clone();
+            msgs.push(vec![
+                Some(m.seq.to_string()),
+                Some(m.id.clone()),
+                Some(m.sender_id.clone()),
+                rcpt.clone(),
+                m.channel_id.clone(),
+                Some(m.text.clone()),
+                m.reply_to.clone(),
+                Some(m.created_at.clone()),
+            ]);
+            for meta in tx.attachment_list(id)? {
+                let a = tx.attachment(&meta.id)?.unwrap();
+                let hex: String = a.bytes.iter().map(|b| format!("{b:02x}")).collect();
+                atts.push(vec![Some(meta.id), Some(m.id.clone()), Some(a.filename), Some(format!("\\x{hex}")), Some(a.bytes.len().to_string())]);
+            }
+            if let Some(r) = &rcpt
+                && let Some(at) = tx.dm_read_at(id, r)?
+            {
+                reads.push(vec![Some(m.id.clone()), Some(r.clone()), Some(at)]);
+            }
+            for (emoji, by) in tx.reactions(id)? {
+                let actor = tx.agent_by_name(uid, by.split_once('/').unwrap().1)?.unwrap().id;
+                reacts.push(vec![Some(m.id.clone()), Some(actor), Some(emoji), Some("t".into())]);
+            }
+        }
+        let mh = ["commit_seq", "message_id", "sender_agent_id", "recipient_agent_id", "channel_id", "text", "reply_to", "created_at"];
+        csv_file(dir, "messages", &mh, msgs);
+        csv_file(dir, "attachments", &["attachment_id", "message_id", "filename", "bytes", "size"], atts);
+        csv_file(dir, "dm_read", &["message_id", "agent_id", "read_at"], reads);
+        csv_file(dir, "reactions", &["message_id", "actor_id", "emoji", "present"], reacts);
         Ok(())
     })
     .unwrap();
-    let inv = history::classify(extract_via_store(&c.d, "tester"), &import::snapshot(&kond).unwrap());
-    assert_eq!(inv.class[&old], Class::OwnerInternal);
+}
+
+/// Central with the kond fixture and native traffic, the manifest frozen, then one DM after the
+/// freeze; the purge saved lead and worker with their DMs (desk stays on central).
+struct Switch {
+    _tmp: TempDir,
+    stem: PathBuf,
+    csv: PathBuf,
+    local: PathBuf,
+    kond: PathBuf,
+    n: Native,
+    later: String,
+}
+
+fn switch(tag: &str) -> Switch {
+    let tmp = TempDir::new(tag);
+    let kond = tmp.0.join("kond");
+    kond_fixture(&kond);
+    let central = tmp.0.join("central.db");
+    assert!(import::run(&import_opts(&kond, &central, None)).unwrap().ok());
+    let d = Dispatcher::open(&central).unwrap();
+    let n = native_traffic(&d);
+    let inv = history::classify(extract_via_store(&d, "tester"), &import::snapshot(&kond).unwrap());
     let stem = tmp.0.join("manifest");
     history::write_manifest(&inv, &stem, "test").unwrap();
-    let [_, messages, _, _] = history::manifest_paths(&stem);
-    let pristine = fs::read_to_string(&messages).unwrap();
-
-    let local = tmp.0.join("conde.db");
+    let p = d.principal("tester", "testhost", false).unwrap();
+    let later = send(&d, &p, DESK, "worker", "after the freeze, \"quoted\", with a comma\nand a line", json!({}));
+    let csv = tmp.0.join("purge");
+    save_rows(&d, &csv, &["lead", "worker"], &[&kid(1), &n.b[0], &n.b[1], &later]);
+    let local = tmp.0.join("local/conde.db");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
     assert!(import::run(&import_opts(&kond, &local, None)).unwrap().ok());
-    let before = table_counts(&local);
-    let opts = CopyOptions { manifest: stem.clone(), db: local.clone(), server: c.url.clone(), key: c.key.clone(), dry_run: false };
+    Switch { stem, csv, local, kond, n, later, _tmp: tmp }
+}
 
+fn copy_opts(s: &Switch, after_freeze: bool, dry_run: bool) -> CopyOptions {
+    CopyOptions {
+        manifest: s.stem.clone(),
+        from_csv: s.csv.clone(),
+        db: s.local.clone(),
+        after_freeze,
+        skip_agents: Default::default(),
+        dry_run,
+    }
+}
+
+#[test]
+fn copy_from_the_saved_rows_restores_class_b_validated_by_hashes() {
+    let s = switch("csv");
+    let before = table_counts(&s.local);
+    let dry = history::copy(&copy_opts(&s, true, true)).unwrap();
+    assert!(dry.ok() && !dry.written, "{dry}");
+    assert_eq!(table_counts(&s.local), before, "a dry run writes nothing");
+
+    let report = history::copy(&copy_opts(&s, true, false)).unwrap();
+    assert!(report.ok() && report.written, "{report}");
+    // b1 and b2 from the saved rows; b3 (the #team post) is still on central.
+    assert_eq!((report.frozen, report.on_central), (2, 1), "{report}");
+    assert_eq!(report.after_freeze, vec![s.later.clone()]);
+    assert_eq!(report.agents_created, vec!["desk".to_string()]);
+    let text = report.to_string();
+    for line in ["ids: 3 of 3 on the local board", "bodies: 3 of 3 sha256-equal", "attachments: 1 of 1", "reply-to: 3 of 3", "read state: 3 of 3", "reactions: 3 of 3"] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+
+    let d = Dispatcher::open(&s.local).unwrap();
+    let p = d.principal("tester", "testhost", true).unwrap();
+    let shown = ok(&d, &p, LEAD, "message.get", json!({"id": s.n.b[0]}))["message"].clone();
+    assert_eq!(shown["text"], "native internal");
+    assert_eq!(shown["reactions"], json!([{"emoji": "\u{1F44D}", "by": ["tester/lead"]}]));
+    assert_eq!(shown["attachments"][0]["filename"], "native.bin");
+    let later = ok(&d, &p, WORKER, "message.get", json!({"id": s.later}))["message"].clone();
+    assert_eq!(later["text"], "after the freeze, \"quoted\", with a comma\nand a line");
+    let seq = |id: &str| d.with_conn(|tx| tx.message_by_id(id)).unwrap().unwrap().seq;
+    assert!(seq(&s.n.b[0]) > seq(&kid(2)), "appended after the kond import");
+    drop(d);
+
+    let after = table_counts(&s.local);
+    let again = history::copy(&copy_opts(&s, true, false)).unwrap();
+    assert!(!again.ok() && !again.written, "{again}");
+    assert_eq!(table_counts(&s.local), after);
+    let rerun = import::run(&import_opts(&s.kond, &s.local, None)).unwrap();
+    assert!(rerun.ok() && rerun.refused.is_empty(), "{rerun}");
+}
+
+#[test]
+fn copy_without_after_freeze_takes_the_frozen_ids_only_and_skips_pruned_parties() {
+    let s = switch("csv-frozen");
+    let report = history::copy(&copy_opts(&s, false, false)).unwrap();
+    assert!(report.ok(), "{report}");
+    assert!(report.after_freeze.is_empty());
+    let has = |id: &str| rusqlite::Connection::open(&s.local).unwrap().query_row("SELECT COUNT(*) FROM messages WHERE message_id = ?1", [id], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!((has(&s.n.b[0]), has(&s.later)), (1, 0));
+
+    let s = switch("csv-prune");
+    let opts = CopyOptions { skip_agents: ["worker".to_string()].into(), ..copy_opts(&s, true, false) };
     let report = history::copy(&opts).unwrap();
-    assert!(!report.ok() && !report.written, "{report}");
-    assert!(
-        report.problems.iter().any(|p| p.contains(&old) && p.contains("older than") && p.contains(&kid(1))),
-        "{:?}",
-        report.problems
-    );
-    assert_eq!(table_counts(&local), before);
+    assert!(report.ok(), "{report}");
+    assert_eq!(report.skipped, vec![s.later.clone()]);
+}
 
-    // Without the inverted row: a body hash in the manifest that the board does not have.
-    let without: String = pristine.lines().filter(|l| !l.contains(&old)).map(|l| format!("{l}\n")).collect();
-    let sha = sha256_hex(b"native internal");
-    fs::write(&messages, without.replace(&sha, &sha256_hex(b"something else"))).unwrap();
-    let report = history::copy(&opts).unwrap();
-    assert!(!report.written && report.problems.iter().any(|p| p.contains(&n.b[0]) && p.contains("sha256")), "{report}");
-    assert_eq!(table_counts(&local), before);
+#[test]
+fn copy_refuses_a_hash_mismatch_and_a_channel_post_writing_nothing() {
+    let s = switch("csv-refused");
+    let before = table_counts(&s.local);
+    let messages = s.csv.join("messages.csv");
+    let pristine = fs::read_to_string(&messages).unwrap();
+    fs::write(&messages, pristine.replace("native internal", "native internaL")).unwrap();
+    let report = history::copy(&copy_opts(&s, true, false)).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains(&s.n.b[0]) && p.contains("sha256")), "{report}");
+    assert_eq!(table_counts(&s.local), before);
 
-    // A shared id listed as class (b): the board refuses the read, nothing is written.
-    fs::write(&messages, without.replace(&format!("c\t{}", n.c[0]), &format!("b\t{}", n.c[0]))).unwrap();
-    let err = history::copy(&opts).unwrap_err().to_string();
-    assert!(err.contains("not owner-internal") && err.contains(&n.c[0]), "{err}");
-    assert_eq!(table_counts(&local), before);
+    // The frozen #team post among the saved rows: the copy restores DMs only.
+    fs::write(&messages, format!("{pristine}999,{},x,,channel-id,post,,2026-10-09T00:00:00.000Z\n", s.n.b[2])).unwrap();
+    let report = history::copy(&copy_opts(&s, true, false)).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains(&s.n.b[2]) && p.contains("DMs only")), "{report}");
+    assert_eq!(table_counts(&s.local), before);
 
-    // The kond id listed as class (b): refused locally, before any fetch.
-    fs::write(&messages, without.replace(&format!("a\t{}", kid(1)), &format!("b\t{}", kid(1)))).unwrap();
-    let report = history::copy(&opts).unwrap();
-    assert!(report.problems.iter().any(|p| p.contains(&kid(1)) && p.contains("already on the local board")), "{report}");
-    assert_eq!(table_counts(&local), before);
-
-    // A local board that the import has not restored is refused.
-    let empty = tmp.0.join("empty.db");
+    // A board the import has not restored is refused.
+    fs::write(&messages, pristine).unwrap();
+    let empty = s.local.with_file_name("empty.db");
     drop(Dispatcher::open(&empty).unwrap());
-    let err = history::copy(&CopyOptions { db: empty, ..opts }).unwrap_err().to_string();
+    let err = history::copy(&CopyOptions { db: empty, ..copy_opts(&s, true, false) }).unwrap_err().to_string();
     assert!(err.contains("run the H2 import"), "{err}");
+}
+
+/// Postgres's own COPY CSV (quotes, commas, line breaks, NULL against the empty string, bytea)
+/// reads back exactly.
+#[test]
+fn postgres_copy_csv_reads_back_exactly() {
+    let Some(url) = pg::fresh_database() else {
+        eprintln!("skipped: set CONDE_TEST_PG to read a real COPY");
+        return;
+    };
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client.batch_execute("CREATE TABLE t(a text, b text, c bytea)").unwrap();
+    let tricky = "a \"quoted\", comma\nline\r\nend \u{1F44D}";
+    client.execute("INSERT INTO t VALUES ($1, '', $2), (NULL, 'x', NULL)", &[&tricky, &vec![0u8, 255, 10]]).unwrap();
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut client.copy_out("COPY t TO STDOUT WITH (FORMAT csv, HEADER)").unwrap(), &mut out).unwrap();
+    let rows = history::read_csv(&String::from_utf8(out).unwrap()).unwrap();
+    assert_eq!(rows[0], vec![Some("a".into()), Some("b".into()), Some("c".into())]);
+    assert_eq!(rows[1], vec![Some(tricky.to_string()), Some(String::new()), Some("\\x00ff0a".into())]);
+    assert_eq!(rows[2], vec![None, Some("x".into()), None]);
 }

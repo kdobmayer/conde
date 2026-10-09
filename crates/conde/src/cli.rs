@@ -243,6 +243,10 @@ enum Cmd {
         /// The snapshot's file count; a directory with another count is refused before reading.
         #[arg(long, value_name = "N")]
         expect_files: Option<usize>,
+        /// File of kond names to leave out entirely, one per line (the owner's prune list):
+        /// their messages, attachments, memberships and reactions are not imported.
+        #[arg(long, value_name = "FILE")]
+        skip_agents: Option<PathBuf>,
     },
     /// One-off history tools of the v2 switch (DESIGN-v2 section 10); removed after H4.
     #[command(hide = true)]
@@ -300,21 +304,35 @@ enum HistoryCmd {
         #[arg(long, default_value = "the extraction file")]
         source: String,
     },
-    /// H3: copy the manifest's class (b) rows from the board of this machine's credential into
-    /// the local board the H2 import restored, in one transaction, validated by hashes.
+    /// H3: copy the manifest's class (b) rows from the rows the central purge saved (one CSV per
+    /// table) into the local board the H2 import restored, in one transaction, validated by hashes.
     Copy {
         /// The manifest path given to inventory --out (without the suffixes).
         #[arg(long, value_name = "PATH")]
         manifest: PathBuf,
+        /// The purge's saved rows (agents.csv, messages.csv, attachments.csv, dm_read.csv, reactions.csv).
+        #[arg(long, value_name = "DIR")]
+        from_csv: PathBuf,
         /// The local board (default: the data directory's conde.db).
         #[arg(long, value_name = "FILE")]
         db: Option<PathBuf>,
-        /// The host credential file (default: the enrolled one).
+        /// Also copy the saved DMs newer than the manifest's freeze (checked against the saved rows).
+        #[arg(long)]
+        after_freeze: bool,
+        /// The importer's prune file: rows with a pruned party stay out.
         #[arg(long, value_name = "FILE")]
-        credentials: Option<PathBuf>,
-        /// Fetch and check; write nothing.
+        skip_agents: Option<PathBuf>,
+        /// Read and check; write nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// The owner's prune list of a kond snapshot: every name with its last activity, message
+    /// count and kond registration, oldest first (TSV to --out or stdout, a table on stderr).
+    PruneCandidates {
+        #[arg(long, value_name = "DIR")]
+        snapshot: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
 }
 
@@ -480,9 +498,13 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             no_board("history", "")?;
             return crate::history::inventory_main(&extract, &snapshot, &out, &source);
         }
-        Cmd::History { cmd: HistoryCmd::Copy { manifest, db, credentials, dry_run } } => {
+        Cmd::History { cmd: HistoryCmd::Copy { manifest, from_csv, db, after_freeze, skip_agents, dry_run } } => {
             no_board("history", "")?;
-            return crate::history::copy_main(&manifest, db, credentials, dry_run);
+            return crate::history::copy_main(&manifest, &from_csv, db, after_freeze, skip_agents.as_deref(), dry_run);
+        }
+        Cmd::History { cmd: HistoryCmd::PruneCandidates { snapshot, out } } => {
+            no_board("history", "")?;
+            return crate::history::prune_main(&snapshot, out.as_deref());
         }
         Cmd::Admin { cmd: AdminCmd::Key { cmd } } => {
             no_board("admin", "")?;
@@ -495,11 +517,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         _ => {}
     }
-    if let Cmd::Import { dry_run, owner, host, expect_files } = &cli.cmd {
+    if let Cmd::Import { dry_run, owner, host, expect_files, skip_agents } = &cli.cmd {
         no_board("import", "")?;
         // `--from` is the global flag here: the kond data directory to import.
         let dir = cli.from.as_deref().ok_or_else(|| anyhow!("conde import needs --from <kond data dir>"))?;
-        return crate::import::main(Path::new(dir), *dry_run, owner.as_deref(), host.as_deref(), *expect_files);
+        return crate::import::main(Path::new(dir), *dry_run, owner.as_deref(), host.as_deref(), *expect_files, skip_agents.as_deref());
     }
     // register, unregister, rename, pin and unpin act on the local registry only (§3 rule 3)
     let local_only = match (&cli.cmd, cli.board.as_deref()) {

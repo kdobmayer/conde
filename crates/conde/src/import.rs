@@ -43,6 +43,9 @@ pub struct Options {
     pub progress: bool,
     /// The snapshot's file count: a directory with another count is refused before anything.
     pub expect_files: Option<usize>,
+    /// kond names left out entirely, with every message they sent or received, their channel
+    /// memberships and their reactions (the owner's prune list).
+    pub skip_agents: BTreeSet<String>,
 }
 
 const PROGRESS_EVERY: usize = 1000;
@@ -105,7 +108,19 @@ pub struct Report {
     pub parse_errors: Vec<String>,
     /// Channels that block the import (nothing is written while any is listed).
     pub refused: Vec<String>,
+    /// What `skip_agents` left out.
+    pub skipped: Option<Skipped>,
     pub validation: Option<Validation>,
+}
+
+/// Rows of the source left out by `Options::skip_agents`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Skipped {
+    pub agents: Vec<String>,
+    pub messages: usize,
+    pub attachments: usize,
+    pub memberships: usize,
+    pub reactions: usize,
 }
 
 impl Report {
@@ -121,6 +136,8 @@ impl Report {
 #[derive(Default)]
 struct SrcAgent {
     registry: Option<String>,
+    /// When the registry entry was written (the kond registration time).
+    registered: Option<std::time::SystemTime>,
     pin: Option<String>,
     display: Option<String>,
 }
@@ -299,7 +316,9 @@ impl Scanner<'_> {
         self.dotted_files(&self.root.join("registry"), "", &mut files);
         for (name, path) in files {
             if let Some(text) = self.read_text(&path) {
-                self.src.agents.entry(name).or_default().registry = Some(text.trim().to_string());
+                let agent = self.src.agents.entry(name).or_default();
+                agent.registry = Some(text.trim().to_string());
+                agent.registered = fs::symlink_metadata(&path).and_then(|m| m.modified()).ok();
             }
         }
         for (name, path) in self.entries(&self.root.join("state/registry-pin")) {
@@ -911,6 +930,11 @@ fn validate(store: &dyn Store, plan: &Plan, opts: &Options, source: Counts) -> a
         }
     }
     v.lines.push(format!("cursors: {cursors} checked, {cursors_ok} at or past the kond cursor"));
+    for name in &opts.skip_agents {
+        if conn.agent_by_name(uid, name)?.is_some() {
+            v.problems.push(format!("skipped agent {name} is on the board"));
+        }
+    }
 
     let notified = conn.notifications()?.iter().filter(|n| plan.src.messages.contains_key(&n.message_id)).count();
     if notified > 0 {
@@ -944,6 +968,7 @@ pub fn run(opts: &Options) -> anyhow::Result<Report> {
     let mut scanner =
         Scanner { root: &opts.from, progress: opts.progress, files: 0, src: Source::default(), symlinks: HashSet::new() };
     scanner.scan();
+    let skipped = (!opts.skip_agents.is_empty()).then(|| skip_agents(&mut scanner.src, &opts.skip_agents)).transpose()?;
     let plan = plan(scanner.src, &opts.host, &iso_from_ms(now_ms()));
 
     let label = target_label(opts);
@@ -974,6 +999,7 @@ pub fn run(opts: &Options) -> anyhow::Result<Report> {
     report.added = sub(report.source, report.present);
     describe(&plan, &target, opts, &mut report);
     report.refused = refused;
+    report.skipped = skipped;
 
     if !opts.dry_run && !report.refused.is_empty() {
         report.added = Counts::default();
@@ -987,6 +1013,126 @@ pub fn run(opts: &Options) -> anyhow::Result<Report> {
         report.validation = Some(validate(&*store, &plan, opts, report.source)?);
     }
     Ok(report)
+}
+
+/// Leave the named kond agents out of `src`: their registry facts, every message they sent or
+/// received (with its attachments and read state), their channel memberships and every reaction
+/// by them or on a removed message. A name the snapshot does not know is an error (a typo would
+/// otherwise import what the owner struck).
+fn skip_agents(src: &mut Source, names: &BTreeSet<String>) -> anyhow::Result<Skipped> {
+    let known: BTreeSet<&String> = src
+        .agents
+        .keys()
+        .chain(src.messages.values().flat_map(|m| std::iter::once(&m.from).chain(match &m.to {
+            To::Agent(a) => Some(a),
+            To::Channel(_) => None,
+        })))
+        .chain(src.channels.values().flat_map(|members| members.keys()))
+        .collect();
+    let unknown: Vec<&String> = names.iter().filter(|n| !known.contains(n)).collect();
+    if !unknown.is_empty() {
+        bail!("--skip-agents names no agent of this snapshot: {}", unknown.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", "));
+    }
+    let mut out = Skipped { agents: names.iter().cloned().collect(), ..Skipped::default() };
+    for n in names {
+        src.agents.remove(n);
+    }
+    let gone: Vec<String> = src
+        .messages
+        .iter()
+        .filter(|(_, m)| names.contains(&m.from) || matches!(&m.to, To::Agent(a) if names.contains(a)))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &gone {
+        if let Some(m) = src.messages.remove(id) {
+            out.messages += 1;
+            out.attachments += m.attachments.iter().filter(|a| a.file.is_ok()).count();
+        }
+        src.stamps.remove(id);
+        src.inbox_cur.remove(id);
+    }
+    for members in src.channels.values_mut() {
+        let before = members.len();
+        members.retain(|m, _| !names.contains(m));
+        out.memberships += before - members.len();
+    }
+    let before = src.reactions.len();
+    src.reactions.retain(|(target, actor, _), _| !names.contains(actor) && src.messages.contains_key(target));
+    out.reactions = before - src.reactions.len();
+    Ok(out)
+}
+
+/// One kond name's activity, for the owner's prune list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentActivity {
+    pub name: String,
+    /// The name on the conde board when kond's is invalid there.
+    pub conde_name: String,
+    /// The registry's address kind (`claude`, `codex`, `human`), None when not registered.
+    pub registered: Option<String>,
+    pub pinned: bool,
+    /// DMs sent and received plus channel posts sent.
+    pub messages: usize,
+    /// The latest of those messages' dates, else the registration time; None when neither.
+    pub last_activity: Option<String>,
+    /// Whether `last_activity` is the registration time (no message at all).
+    pub from_registration: bool,
+}
+
+/// Every kond name of the snapshot with its activity, oldest last activity first.
+pub fn agent_activity(root: &Path) -> anyhow::Result<Vec<AgentActivity>> {
+    if !root.join("board").is_dir() && !root.join("registry").is_dir() {
+        bail!("{} is not a kond data directory (no board/ or registry/)", root.display());
+    }
+    let mut scanner = Scanner { root, progress: false, files: 0, src: Source::default(), symlinks: HashSet::new() };
+    scanner.scan();
+    let mut count: HashMap<String, (usize, String)> = HashMap::new();
+    for m in scanner.src.messages.values() {
+        let parties = std::iter::once(&m.from).chain(match &m.to {
+            To::Agent(a) => Some(a),
+            To::Channel(_) => None,
+        });
+        for p in parties {
+            let e = count.entry(p.clone()).or_default();
+            e.0 += 1;
+            if m.date > e.1 {
+                e.1 = m.date.clone();
+            }
+        }
+    }
+    let registry: Vec<(String, Option<String>, bool, Option<String>)> = scanner
+        .src
+        .agents
+        .iter()
+        .map(|(n, a)| {
+            let kind = a.registry.as_deref().and_then(|r| r.split_once(':')).map(|(k, _)| k.to_lowercase());
+            let at = a.registered.map(|t| {
+                iso_from_ms(t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0))
+            });
+            (n.clone(), kind, a.pin.is_some(), at)
+        })
+        .collect();
+    let plan = plan(scanner.src, "snapshot", &iso_from_ms(now_ms()));
+    let mut out: Vec<AgentActivity> = plan
+        .names
+        .iter()
+        .map(|(kond, conde)| {
+            let facts = registry.iter().find(|(n, ..)| n == kond);
+            let (messages, last) = count.get(kond).cloned().unwrap_or_default();
+            let registered_at = facts.and_then(|f| f.3.clone());
+            AgentActivity {
+                name: kond.clone(),
+                conde_name: conde.clone(),
+                registered: facts.and_then(|f| f.1.clone()),
+                pinned: facts.is_some_and(|f| f.2),
+                messages,
+                from_registration: messages == 0 && registered_at.is_some(),
+                last_activity: if messages > 0 { Some(last) } else { registered_at },
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.last_activity, &a.name).cmp(&(&b.last_activity, &b.name)));
+    Ok(out)
 }
 
 /// Channels the import would add posts to that already hold messages not from
@@ -1012,6 +1158,18 @@ fn channels_with_native_posts(tx: &dyn Tx, plan: &Plan) -> StoreResult<Vec<Strin
         }
     }
     Ok(out)
+}
+
+/// Names, one per line (the first tab- or space-separated field; `#` comments and blank lines
+/// ignored), lowercased: the prune file the owner writes from the prune list.
+pub fn read_name_list(path: &Path) -> anyhow::Result<BTreeSet<String>> {
+    let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(raw
+        .lines()
+        .filter_map(|l| l.split(['\t', ' ']).next())
+        .map(|n| n.trim().to_lowercase())
+        .filter(|n| !n.is_empty() && !n.starts_with('#'))
+        .collect())
 }
 
 /// Regular files under `root`, no symlink followed (`find root -type f | wc -l`).
@@ -1264,6 +1422,19 @@ impl fmt::Display for Report {
         let renames: Vec<String> = self.renames.iter().map(|(a, b)| format!("{a} -> {b}")).collect();
         section(f, "names invalid under [a-z0-9_-] (mapping applied)", &renames)?;
         section(f, "parse errors", &self.parse_errors)?;
+        if let Some(s) = &self.skipped {
+            writeln!(f)?;
+            writeln!(
+                f,
+                "skipped by --skip-agents ({} names): {} messages, {} attachments, {} memberships, {} reactions; not imported, not validated",
+                s.agents.len(),
+                s.messages,
+                s.attachments,
+                s.memberships,
+                s.reactions
+            )?;
+            writeln!(f, "  {}", s.agents.join(" "))?;
+        }
         if !self.refused.is_empty() {
             section(f, "REFUSED: channels with native conde messages (re-runs are supported only before cutover writes)", &self.refused)?;
         }
@@ -1320,7 +1491,12 @@ pub fn main(
     owner: Option<&str>,
     host: Option<&str>,
     expect_files: Option<usize>,
+    skip_file: Option<&Path>,
 ) -> anyhow::Result<i32> {
+    let skip_agents = match skip_file {
+        Some(p) => read_name_list(p)?,
+        None => BTreeSet::new(),
+    };
     let (owner, host) = owner_and_host(owner, host, std::env::var("USER").ok().filter(|u| !u.is_empty()))?;
     let data_dir = crate::paths::data_dir();
     let opts = Options {
@@ -1333,6 +1509,7 @@ pub fn main(
         live_claude: live_claude_sessions(),
         progress: true,
         expect_files,
+        skip_agents,
     };
     if !dry_run && opts.database_url.is_none() {
         use std::os::unix::fs::DirBuilderExt;

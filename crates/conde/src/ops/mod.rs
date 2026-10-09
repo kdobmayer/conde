@@ -4,7 +4,6 @@
 pub mod agents;
 pub mod bridge;
 pub mod channels;
-pub mod history;
 pub mod hosts;
 pub mod mailbox;
 pub mod messages;
@@ -56,8 +55,6 @@ pub static OPS: &[OpSpec] = &[
     op!("owner.message", web::message, query),
     op!("owner.attachment", web::attachment, query),
     op!("fleet.list", web::fleet, query),
-    // Temporary (DESIGN-v2 section 10, H3): removed after H4.
-    op!("history.copy", history::copy, query),
     op!("doctor", misc::doctor, query),
     op!("board.info", mailbox::board_info, query),
     op!("mailbox.publish", mailbox::publish, mutation),

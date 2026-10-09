@@ -298,8 +298,12 @@ pub struct AgentHealth {
     pub held: i64,
     /// Notifications still pending or dispatching for a message older than the cutoff.
     pub stuck: i64,
-    /// When the newest attempt reached the recipient (delivered; accepted for Codex).
+    /// When the newest attempt reached the recipient (delivered; accepted for Codex); None when
+    /// none did, or when the ones that did carry no time (recorded before `settled_at` existed
+    /// or by an older server during a roll).
     pub last_reached: Option<String>,
+    /// Whether any attempt ever reached the recipient, whatever its recorded time.
+    pub reached: bool,
 }
 
 /// A host credential as the admin lists it (the digest, never the key).

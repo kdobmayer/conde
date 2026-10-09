@@ -1218,9 +1218,10 @@ impl Tx for SqliteTx<'_> {
         self.opt(
             &format!(
                 "{MSG_SELECT} WHERE m.message_id = ?2 AND (
-                    s.owner_id = ?1 OR r.owner_id = ?1
-                    OR EXISTS (SELECT 1 FROM memberships x JOIN agents o ON o.agent_id = x.agent_id
-                        WHERE x.channel_id = m.channel_id AND o.owner_id = ?1))"
+                    (m.channel_id IS NULL AND (s.owner_id = ?1 OR r.owner_id = ?1))
+                    OR (m.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM memberships x
+                        JOIN agents o ON o.agent_id = x.agent_id
+                        WHERE x.channel_id = m.channel_id AND o.owner_id = ?1)))"
             ),
             params![owner_id, message_id],
             msg_row,
@@ -1280,13 +1281,23 @@ impl Tx for SqliteTx<'_> {
                           AND a.address_kind <> 'human'
                           THEN n.notification_id END),
                     MAX(CASE WHEN t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')
-                        THEN t.settled_at END)
+                        THEN t.settled_at END),
+                    SUM(CASE WHEN t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')
+                        THEN 1 ELSE 0 END) > 0
              FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
              JOIN messages m ON m.message_id = n.message_id
              LEFT JOIN attempts t ON t.notification_id = n.notification_id
              WHERE a.owner_id = ?1 GROUP BY n.recipient_agent_id ORDER BY n.recipient_agent_id",
             params![owner_id, stuck_before],
-            |r| Ok(AgentHealth { agent_id: r.get(0)?, held: r.get(1)?, stuck: r.get(2)?, last_reached: r.get(3)? }),
+            |r| {
+                Ok(AgentHealth {
+                    agent_id: r.get(0)?,
+                    held: r.get(1)?,
+                    stuck: r.get(2)?,
+                    last_reached: r.get(3)?,
+                    reached: r.get(4)?,
+                })
+            },
         )
     }
 

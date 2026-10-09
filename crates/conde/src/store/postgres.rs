@@ -1773,9 +1773,10 @@ impl Tx for PgTx {
             .query_opt(
                 &format!(
                     "{MSG_SELECT} WHERE m.message_id = $2 AND (
-                        s.owner_id = $1 OR r.owner_id = $1
-                        OR EXISTS (SELECT 1 FROM memberships x JOIN agents o ON o.agent_id = x.agent_id
-                            WHERE x.channel_id = m.channel_id AND o.owner_id = $1))"
+                        (m.channel_id IS NULL AND (s.owner_id = $1 OR r.owner_id = $1))
+                        OR (m.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM memberships x
+                            JOIN agents o ON o.agent_id = x.agent_id
+                            WHERE x.channel_id = m.channel_id AND o.owner_id = $1)))"
                 ),
                 &[&owner_id, &message_id],
             )?
@@ -1842,7 +1843,9 @@ impl Tx for PgTx {
                             FILTER (WHERE n.status IN ('pending', 'dispatching') AND m.created_at < $2
                                 AND a.address_kind <> 'human'),
                         MAX(t.settled_at)
-                            FILTER (WHERE t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex'))
+                            FILTER (WHERE t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')),
+                        COUNT(t.attempt_id)
+                            FILTER (WHERE t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')) > 0
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN messages m ON m.message_id = n.message_id
                  LEFT JOIN attempts t ON t.notification_id = n.notification_id
@@ -1850,7 +1853,13 @@ impl Tx for PgTx {
                 &[&owner_id, &stuck_before],
             )?
             .iter()
-            .map(|r| AgentHealth { agent_id: r.get(0), held: r.get(1), stuck: r.get(2), last_reached: r.get(3) })
+            .map(|r| AgentHealth {
+                agent_id: r.get(0),
+                held: r.get(1),
+                stuck: r.get(2),
+                last_reached: r.get(3),
+                reached: r.get(4),
+            })
             .collect())
     }
 

@@ -35,9 +35,9 @@ const HISTORY_PAGE: i64 = 100;
 const FAILED: &[&str] = &["expired", "dropped", "failed", "abandoned", "denied", "refused"];
 
 /// The owner view is the signed-in human's, never an agent's: an agent reads its own
-/// conversations only (DESIGN §3), so a request with an actor or from a real host is refused.
+/// conversations only (DESIGN §3). Only the browser principal passes; an actor never does.
 fn browser_only(ctx: &Ctx) -> OpResult<()> {
-    if ctx.actor.is_some() || ctx.p.host != conde_remote::web::BROWSER_HOST {
+    if !ctx.p.browser || ctx.actor.is_some() {
         return Err(forbidden("the owner view is for the signed-in owner in the browser, not for agents"));
     }
     Ok(())
@@ -262,6 +262,9 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
             "held": own.then(|| h.map_or(0, |h| h.held)),
             "stuck": own.then(|| h.map_or(0, |h| h.stuck)),
             "last_reached": if own { json!(reached) } else { Value::Null },
+            // Reached at a time not recorded (before migration 5, or an older writer): never a
+            // made-up time, and never "never".
+            "ever_reached": own.then(|| h.is_some_and(|h| h.reached)),
             "own": own,
         }));
     }

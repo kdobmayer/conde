@@ -107,6 +107,8 @@ on_both!(
     the_fleet_shows_online_discovery_and_own_delivery_health,
     the_event_socket_says_when_the_board_changed,
     the_browser_host_is_never_minted_as_a_real_host,
+    owner_reads_end_when_the_last_own_member_leaves_a_channel,
+    a_credential_on_the_browser_host_never_reaches_the_owner_view,
     a_connected_bridge_keeps_its_host_online,
 );
 
@@ -630,8 +632,25 @@ async fn the_fleet_shows_online_discovery_and_own_delivery_health(d: Arc<Dispatc
     let w = agent(&f, &worker);
     assert!(w["discovered"].is_string(), "{w}");
     assert_eq!(w["held"], 1, "{w}");
+    assert_eq!(w["ever_reached"], true, "{w}");
+    assert_eq!(agent(&f, &format!("{USER}/helper"))["ever_reached"], false, "never reached: {f}");
     let reached = w["last_reached"].as_str().unwrap().to_string();
     assert!(reached > claimed_at && reached <= reported_at, "{reached} is the receipt's time, after {claimed_at}");
+    // A delivery recorded without a time (before migration 5, or by an older server during a
+    // roll) is reached at an unknown time, never "never reached" and never an invented time.
+    if let Some(sqlite) = ui.d.sqlite() {
+        sqlite.with_connection(|c| c.execute_batch("UPDATE attempts SET settled_at = NULL")).unwrap();
+        let w = agent(&ui.ok(&b, &csrf, "fleet.list", json!({})).await, &worker);
+        assert_eq!((w["ever_reached"].as_bool(), w["last_reached"].is_null()), (Some(true), true), "{w}");
+        let d2 = ui.d.clone();
+        blocking(move || {
+            d2.sqlite().unwrap().with_connection(|c| {
+                c.execute("UPDATE attempts SET settled_at = ?1 WHERE attempt_id = ?2", (&reported_at, &attempts[0]))
+            })
+        })
+        .await
+        .unwrap();
+    }
 
     // Without heartbeats the host drops offline after the TTL; one heartbeat brings it back.
     ui.d.advance_clock(91_000);
@@ -786,6 +805,71 @@ async fn a_connected_bridge_keeps_its_host_online(d: Arc<Dispatcher>) {
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(online(&ui.ok(&b, &csrf, "fleet.list", json!({})).await), true);
     bridge.shutdown();
+    ui.server.shutdown().await.unwrap();
+}
+
+async fn owner_reads_end_when_the_last_own_member_leaves_a_channel(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let posted = ui
+        .op(&c.k, &c.worker, "message.send",
+            json!({"to": {"channel": "#team"}, "text": "my old channel post",
+                   "attachments": [{"filename": "mine.txt", "data": STANDARD.encode("mine")}]}))
+        .await;
+    let before = ui.ok(&b, &csrf, "owner.message", json!({"id": posted["message_id"]})).await;
+    let attachment = before["message"]["attachments"][0]["attachment_id"].as_str().unwrap().to_string();
+    let url = ui.env.url(&format!("/v1/attachments/{attachment}"));
+    assert_eq!(b.step.get(&url).send().await.unwrap().status(), StatusCode::OK);
+    // Worker, the owner's only member of #team, leaves: the channel, its posts (worker's own
+    // included) and their attachments are no longer the owner's to read.
+    ui.op(&c.k, &c.worker, "channel.leave", json!({"channel": "#team"})).await;
+    let (_, h) = ui.rpc(&b, &csrf, "owner.history", json!({"agent": "worker", "channel": "#team"})).await;
+    assert_eq!(h["error"]["code"], "forbidden", "{h}");
+    for id in [&posted["message_id"], &c.team_post["message_id"]] {
+        let (_, m) = ui.rpc(&b, &csrf, "owner.message", json!({"id": id})).await;
+        assert_eq!(m["error"]["code"], "not_found", "{m}");
+    }
+    assert_eq!(b.step.get(&url).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    // DMs are unaffected.
+    ui.ok(&b, &csrf, "owner.message", json!({"id": c.worker_dm["message_id"]})).await;
+    ui.server.shutdown().await.unwrap();
+}
+
+async fn a_credential_on_the_browser_host_never_reaches_the_owner_view(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    ui.browser().await;
+    let c = cast(&ui).await;
+    // A credential on host `web`, as the admin path could mint one before the name was reserved.
+    let token = conde::util::new_ulid();
+    let digest = conde_remote::token_digest(&token);
+    let d2 = ui.d.clone();
+    blocking(move || {
+        d2.with_tx(|tx| {
+            let uid = tx.ensure_user(USER)?;
+            tx.ensure_host("web", uid)?;
+            tx.insert_credential(&digest, uid, "web", "legacy", "2026-10-01T00:00:00.000Z")?;
+            Ok(())
+        })
+        .unwrap()
+    })
+    .await;
+    let r = reqwest::Client::new()
+        .post(ui.env.url("/v1/rpc"))
+        .bearer_auth(&token)
+        .json(&json!({"v": 1, "type": "request", "request_id": "legacy", "op": "owner.history",
+                      "body": {"agent": "worker", "with": "david/scout"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "the reserved host never authenticates");
+    // And a principal on that host is still no browser: the owner view is refused.
+    let mut p = c.k.clone();
+    p.host = "web".into();
+    let d2 = ui.d.clone();
+    let req = Request::new("r", "owner.history", json!({"agent": "worker", "with": "david/scout"}));
+    let resp = blocking(move || d2.dispatch(&p, &req)).await;
+    assert_eq!(resp.error.map(|e| e.code), Some(conde::protocol::ErrorCode::Forbidden));
     ui.server.shutdown().await.unwrap();
 }
 

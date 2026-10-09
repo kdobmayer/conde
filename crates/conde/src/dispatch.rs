@@ -35,6 +35,9 @@ pub struct Principal {
     /// The bridge instance whose connection carried this request (a remote RPC
     /// over a bridge socket): refused once a newer instance fenced it.
     pub bridge_connection: Option<String>,
+    /// A signed-in browser (set only by the server's browser path, never derived from a host
+    /// or a credential): the owner view's reads are for this principal alone.
+    pub browser: bool,
 }
 
 #[derive(Debug, Error)]
@@ -231,6 +234,7 @@ impl Dispatcher {
             local: false,
             bridge_instance: bridge_instance.map(str::to_string),
             bridge_connection: None,
+            browser: false,
         })
     }
 
@@ -244,7 +248,7 @@ impl Dispatcher {
             Ok((user_id, tx.ensure_host(&host, user_id)?))
         })?;
         anyhow::ensure!(owner == user_id, "host '{host}' belongs to another user");
-        Ok(Principal { user_id, user, host, local, bridge_instance: None, bridge_connection: None })
+        Ok(Principal { user_id, user, host, local, bridge_instance: None, bridge_connection: None, browser: false })
     }
 
     /// A bridge principal for the same user and host, with a fresh instance id.

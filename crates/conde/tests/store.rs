@@ -55,6 +55,7 @@ const PG_CASES: &[PgCase] = &[
     ("missed_fence_closes_the_old_connection", missed_fence_closes_the_old_connection),
     ("dropping_a_board_on_an_async_worker", dropping_a_board_on_an_async_worker),
     ("replicas_share_idempotency_and_claims", replicas_share_idempotency_and_claims),
+    ("deliveries_from_before_migration_5_still_count_as_reached", deliveries_from_before_migration_5_still_count_as_reached),
 ];
 
 fn main() {
@@ -80,6 +81,12 @@ fn main() {
     }
     if wanted("sqlite::old_board_file_gains_topics") {
         report.run("sqlite::old_board_file_gains_topics", old_board_file_gains_topics);
+    }
+    if wanted("sqlite::deliveries_without_a_settled_time_still_count_as_reached") {
+        report.run(
+            "sqlite::deliveries_without_a_settled_time_still_count_as_reached",
+            deliveries_without_a_settled_time_still_count_as_reached_sqlite,
+        );
     }
 
     let pg_wanted =
@@ -1099,6 +1106,75 @@ fn channel_topics(s: &dyn Store) {
             tx.channel_summaries().unwrap().into_iter().map(|c| (c.name, c.topic)).collect();
         assert_eq!(topics, vec![("dev".into(), None), ("ops".into(), Some("pager rota".into()))]);
     });
+}
+
+/// Owner 1's agent `a` with one delivered attempt and agent `b` with a delivered one, as SQL.
+const REACH_ROWS: &str = "
+    INSERT INTO users(name) VALUES ('krisz');
+    INSERT INTO agents(agent_id, owner_id, name_lower, address_kind, address_target, host_id)
+        VALUES ('a', 1, 'a', 'claude', 's-a', 'box'), ('b', 1, 'b', 'claude', 's-b', 'box'),
+               ('c', 1, 'c', 'claude', 's-c', 'box');
+    INSERT INTO messages(message_id, sender_agent_id, recipient_agent_id, text, created_at)
+        VALUES ('m1', 'c', 'a', 'x', '2026-10-01T00:00:00.000Z'), ('m2', 'c', 'b', 'y', '2026-10-01T00:00:00.000Z');
+    INSERT INTO notifications(notification_id, message_id, recipient_agent_id, kind, binding_version, status, next_attempt_at)
+        VALUES ('m1.a', 'm1', 'a', 'dm', 1, 'delivered', 0), ('m2.b', 'm2', 'b', 'dm', 1, 'notified', 0);
+    INSERT INTO attempts(attempt_id, notification_id, bridge_instance, target_binding_version, status)
+        VALUES ('t1', 'm1.a', 'i', 1, 'delivered'), ('t2', 'm2.b', 'i', 1, 'accepted');";
+
+/// What agent_health says of `a` (delivered, no time) and `b` (accepted Claude: not reached),
+/// then of `b` after an older writer (`older_write`, raw SQL without `settled_at`) delivers it.
+fn reach_without_time(s: &dyn Store, older_write: impl FnOnce(&str)) {
+    let health = read(s, |tx| tx.agent_health(1, "2026-10-01T00:00:00.000Z").unwrap());
+    let of = |id: &str| health.iter().find(|h| h.agent_id == id).unwrap().clone();
+    assert_eq!((of("a").reached, of("a").last_reached), (true, None), "reached, at a time not recorded");
+    assert_eq!((of("b").reached, of("b").last_reached), (false, None), "never reached");
+    // An older writer during a roll records a delivery without the time: reached, and no
+    // invented timestamp.
+    older_write("UPDATE attempts SET status = 'delivered' WHERE attempt_id = 't2'");
+    let health = read(s, |tx| tx.agent_health(1, "2026-10-01T00:00:00.000Z").unwrap());
+    let b = health.iter().find(|h| h.agent_id == "b").unwrap();
+    assert_eq!((b.reached, b.last_reached.as_deref()), (true, None));
+}
+
+/// SQLite: deliveries recorded before `settled_at` existed (the column added on open) or by an
+/// older writer keep counting as reached, without a time.
+fn deliveries_without_a_settled_time_still_count_as_reached_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    drop(SqliteStore::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE attempts DROP COLUMN settled_at").unwrap();
+    conn.execute_batch(REACH_ROWS).unwrap();
+    drop(conn);
+    let store = SqliteStore::open(&path).unwrap();
+    reach_without_time(&store, |sql| {
+        store.with_connection(|c| c.execute_batch(sql)).unwrap();
+    });
+}
+
+/// Postgres: a board migrated to version 4 with delivered attempts gains `settled_at` (NULL for
+/// them) at the next start; they still count as reached, without a time.
+fn deliveries_from_before_migration_5_still_count_as_reached(c: &Cluster) {
+    let db = c.database();
+    let mut client = c.client(&db);
+    client
+        .batch_execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
+             applied_at TIMESTAMPTZ NOT NULL DEFAULT now());",
+        )
+        .unwrap();
+    for (version, name, sql) in &MIGRATIONS[..4] {
+        client.batch_execute(sql).unwrap();
+        client
+            .execute(
+                "INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+                &[version, name, &conde::util::sha256_hex(sql.as_bytes())],
+            )
+            .unwrap();
+    }
+    client.batch_execute(REACH_ROWS).unwrap();
+    let store = PgStore::connect(&c.url(&db)).unwrap();
+    reach_without_time(&store, |sql| client.batch_execute(sql).unwrap());
 }
 
 /// A board file from before topics: opening it adds the column, data intact.

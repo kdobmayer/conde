@@ -96,6 +96,7 @@ impl Board {
             local: false,
             bridge_instance: instance.map(str::to_string),
             bridge_connection: None,
+            browser: false,
         }))
     }
 
@@ -138,6 +139,7 @@ impl conde_remote::Dispatcher for Board {
                     local: false,
                     bridge_instance: None,
                     bridge_connection: None,
+                    browser: true,
                 };
                 self.d.dispatch(&p, &Request { actor: None, from: None, idempotency_key: None, ..req })
             }
@@ -189,6 +191,9 @@ impl Authenticator for Board {
     fn check(&self, bearer_token: &str) -> Authentication {
         let digest = conde_remote::token_digest(bearer_token);
         match self.d.with_conn(|c| ops::hosts::authenticate(c, &digest)) {
+            // The browser's reserved host is never a host credential, even one minted before
+            // the name was reserved.
+            Ok(Some((_, host_id))) if host_id == conde_remote::web::BROWSER_HOST => Authentication::Invalid,
             Ok(Some((user_id, host_id))) => {
                 Authentication::Valid(RemotePrincipal { user_id: user_id.to_string(), host_id })
             }

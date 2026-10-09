@@ -17,7 +17,7 @@ use conde::boards::{self, BoardConfig};
 use conde::client::Client;
 use conde::daemon::{Options, Running, Tuning};
 use conde::notify::{Notifier, NotifyOutcome, Receipt, ReceiptStatus};
-use conde::protocol::v2::daemon_op;
+use conde::protocol::v2::op;
 use conde::protocol::{ErrorCode, Request};
 use conde::util::new_ulid;
 use conde_remote::{Endpoint, Notify, NotifyFields, NotifyKind};
@@ -275,8 +275,10 @@ impl Host {
 
     /// The one-time migration (nothing to publish) and the connection.
     fn migrate(&self, board: &FakeBoard) {
-        self.ok(&self.human(), daemon_op::MIGRATE, json!({"board": "dakai", "publish": []}), None);
+        self.ok(&self.human(), op::HOST_MIGRATE_V2, json!({"publish": []}), Some("dakai"));
         wait_for("the board connection", || (board.connected(&self.host) && self.status() == "connected").then_some(()));
+        // the connection's own reconciliation request is done before the test counts frames
+        wait_for("mailbox.mine", || board.capture(&self.host).iter().any(|f| f.contains("mailbox.mine")).then_some(()));
     }
 
     fn status(&self) -> String {
@@ -284,7 +286,7 @@ impl Host {
     }
 
     fn publish(&self, name: &str) -> Value {
-        self.ok(&self.human(), daemon_op::PUBLISH, json!({"agent": name, "board": "dakai"}), None)
+        self.ok(&self.human(), op::MAILBOX_PUBLISH, json!({"agent": name, "name": name}), Some("dakai"))
     }
 
     fn send(&self, actor: &str, to: &str, text: &str, board: Option<&str>) -> Reply {
@@ -542,7 +544,7 @@ fn g3_a_local_miss_stays_local() {
     let from = board.capture("homepc").len();
     let e = a.send(&worker, "reviewer", "hi", None).unwrap_err();
     assert_eq!(e.0, ErrorCode::NotFound);
-    assert_eq!(e.1, "no agent registered as 'reviewer' on the local board; shared boards are addressed with --board <name>");
+    assert_eq!(e.1, "no agent 'reviewer' on the local board; shared boards are addressed with --board <name>");
     std::thread::sleep(Duration::from_millis(300));
     let after: Vec<String> = board.capture("homepc").into_iter().skip(from).collect();
     assert!(after.iter().all(|f| !f.contains("reviewer") && !f.contains("\"type\":\"request\"")), "{after:?}");
@@ -745,7 +747,8 @@ fn g7_an_unpublished_agent_sends_nothing() {
     assert_eq!(e.0, ErrorCode::Forbidden);
     assert_eq!(e.1, "worker is not published on dakai. Publication is set by your human: conde publish worker --board dakai");
     std::thread::sleep(Duration::from_millis(200));
-    assert!(requests_since(&board, "homepc", from).is_empty());
+    let sent = requests_since(&board, "homepc", from);
+    assert!(sent.is_empty(), "{sent:?}");
 }
 
 // --- G11 --------------------------------------------------------------------------------
@@ -947,7 +950,7 @@ fn g14_a_takeover_moves_the_queued_job_to_the_new_host() {
     wait_for("the job queued on A", || (slots(&a, "dakai").queued == 1).then_some(()));
     assert!(a.harness.pushes_of(&queued).is_empty());
 
-    let took = b.ok(&b.human(), daemon_op::PUBLISH, json!({"agent": "worker", "board": "dakai", "take": true}), None);
+    let took = b.ok(&b.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker", "take": true}), Some("dakai"));
     assert_eq!(took["state"], "published", "{took}");
     wait_for("A applied the routes frame", || a.doctor().contains("publication removed: worker").then_some(()));
     let at_b = b.harness.wait_pushes(&queued, 1).remove(0);
@@ -974,7 +977,7 @@ fn g15_unpublish_and_republish() {
     let (b, relay) = published_host(&board, "balazs", "box-b", "relay", "s-relay", fast());
     let before = board.mailbox_named("kdobmayer", "worker").unwrap();
 
-    let gone = a.ok(&a.human(), daemon_op::UNPUBLISH, json!({"agent": "worker", "board": "dakai"}), None);
+    let gone = a.ok(&a.human(), op::MAILBOX_UNPUBLISH, json!({"agent": "worker"}), Some("dakai"));
     assert_eq!(gone["state"], "unpublished");
     let e = b.send(&relay, "kdobmayer/worker", "anyone?", Some("dakai")).unwrap_err();
     assert!(e.1.contains("recipient unavailable"), "{e:?}");
@@ -1032,7 +1035,7 @@ fn g16_a_publish_resumes_after_a_crash() {
 
     board.silence("mailbox.publish");
     let pending = a.publish("worker");
-    assert_eq!(pending["state"], "pending", "{pending}");
+    assert_eq!(pending["state"], "publishing", "{pending}");
     let op_id = pending["op_id"].as_str().unwrap().to_string();
 
     let m = board.dm(&relay, "kdobmayer", "worker", "in the gap");
@@ -1041,10 +1044,10 @@ fn g16_a_publish_resumes_after_a_crash() {
     assert_eq!(o.last().unwrap().2.as_deref(), Some("recipient unavailable"), "retried, not refused");
     assert!(board.outcomes_of("homepc", &first.id).iter().all(|o| o.1 != "refused"));
 
-    let second = a.request(&a.human(), daemon_op::PUBLISH, json!({"agent": "worker", "board": "dakai"}), None).unwrap_err();
+    let second = a.request(&a.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker"}), Some("dakai")).unwrap_err();
     assert_eq!(second.0, ErrorCode::Conflict);
     assert!(second.1.contains(&format!("pending publish on dakai (op {op_id})")), "{second:?}");
-    let unpublish = a.request(&a.human(), daemon_op::UNPUBLISH, json!({"agent": "worker", "board": "dakai"}), None).unwrap_err();
+    let unpublish = a.request(&a.human(), op::MAILBOX_UNPUBLISH, json!({"agent": "worker"}), Some("dakai")).unwrap_err();
     assert_eq!(unpublish.0, ErrorCode::Conflict);
     assert!(unpublish.1.contains(&op_id), "{unpublish:?}");
 
@@ -1116,25 +1119,26 @@ fn publication_rules() {
     let board = FakeBoard::start();
     let (a, worker) = published_host(&board, "kdobmayer", "homepc", "worker", "s-worker", fast());
     assert_eq!(a.publish("worker")["unchanged"], true);
-    let other = a.request(&a.human(), daemon_op::PUBLISH, json!({"agent": "worker", "board": "dakai", "as": "other"}), None).unwrap_err();
+    let other = a.request(&a.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "other"}), Some("dakai")).unwrap_err();
     assert_eq!(other, (ErrorCode::Conflict, "worker is published on dakai as worker; unpublish first".to_string()));
-    let by_agent = a.request(&worker, daemon_op::PUBLISH, json!({"agent": "worker", "board": "dakai"}), None).unwrap_err();
+    let by_agent = a.request(&worker, op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker"}), Some("dakai")).unwrap_err();
     assert_eq!(by_agent.0, ErrorCode::Forbidden);
     for (op, verb) in [("agent.register", "register"), ("agent.rename", "rename"), ("agent.pin", "pin"), ("agent.unregister", "unregister")] {
         let e = a.request(&worker, op, json!({"name": "worker"}), Some("dakai")).unwrap_err();
         assert_eq!(e.1, format!("{verb} is local; a shared address is conde publish <name> --board dakai"));
     }
     let lane = a.claude("lane", "s-lane");
-    let p = a.ok(&a.human(), daemon_op::PUBLISH, json!({"agent": "lane", "board": "dakai", "as": "lane-homepc"}), None);
-    assert_eq!(p["shared_name"], "lane-homepc");
+    let p = a.ok(&a.human(), op::MAILBOX_PUBLISH, json!({"agent": "lane", "name": "lane-homepc"}), Some("dakai"));
+    assert_eq!(p["name"], "lane-homepc");
     let who = a.ok(&lane, "agent.whoami", json!({}), None);
     assert_eq!(who["name"], "kdobmayer/lane");
-    assert_eq!(who["published"], json!([{"board": "dakai", "name": "kdobmayer/lane-homepc", "state": "published"}]));
+    assert_eq!(who["publications"], json!([{"board": "dakai", "name": "kdobmayer/lane-homepc", "state": "published"}]));
+    assert_eq!(who["boards"], json!(["dakai"]));
     // the agent may shrink its own exposure
-    assert_eq!(a.ok(&lane, daemon_op::UNPUBLISH, json!({"agent": "lane", "board": "dakai"}), None)["state"], "unpublished");
+    assert_eq!(a.ok(&lane, op::MAILBOX_UNPUBLISH, json!({"agent": "lane"}), Some("dakai"))["state"], "unpublished");
     sql(&a).execute("UPDATE publications SET state = 'unpublishing' WHERE shared_name = 'worker'", []).unwrap();
     let e = a.send(&worker, "balazs/relay", "x", Some("dakai")).unwrap_err();
-    assert_eq!(e.1, "worker's publication on dakai is unpublishing; it is usable once published");
+    assert_eq!(e.1, conde::surface::publication_pending("worker", "dakai", "unpublishing"));
 }
 
 /// The v1 credential file moves to `boards/<board name>.json` with the account the board names;

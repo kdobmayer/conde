@@ -66,13 +66,14 @@ pub fn split_ref(reference: &str) -> (Option<&str>, &str) {
     }
 }
 
-fn unknown_board(alias: &str) -> Refusal {
-    (ErrorCode::NotFound, format!("no board '{alias}' on this host (conde boards lists them)"))
+fn unknown_board(alias: &str, enrolled: &[String]) -> Refusal {
+    (ErrorCode::NotFound, crate::surface::unknown_board(alias, enrolled))
 }
 
 /// Resolves `req` and returns the target with the request as the board must see it: `board`
 /// dropped, and its message reference unqualified.
-pub fn resolve(req: &Request, default_board: &str, known: &dyn Fn(&str) -> bool) -> Result<(Target, Request), Refusal> {
+pub fn resolve(req: &Request, default_board: &str, enrolled: &[String]) -> Result<(Target, Request), Refusal> {
+    let known = |b: &str| enrolled.iter().any(|e| e == b);
     let mut out = req.clone();
     out.board = None;
     let explicit = req.board.as_deref().map(str::trim).filter(|b| !b.is_empty());
@@ -80,7 +81,7 @@ pub fn resolve(req: &Request, default_board: &str, known: &dyn Fn(&str) -> bool)
         && b != LOCAL_BOARD
         && !known(b)
     {
-        return Err(unknown_board(b));
+        return Err(unknown_board(b, enrolled));
     }
     if let Some((_, verb)) = LOCAL_ONLY.iter().find(|(op, _)| *op == req.op) {
         return match explicit {
@@ -107,10 +108,10 @@ pub fn resolve(req: &Request, default_board: &str, known: &dyn Fn(&str) -> bool)
             (Some(q), Some(b)) if b != q => {
                 return Err((
                     ErrorCode::BadRequest,
-                    format!("{raw} is a message on {q}; drop --board, or use --board {q}"),
+                    format!("{raw} is a {q} message; drop --board, or use --board {q}"),
                 ));
             }
-            (Some(q), _) if !known(q) => return Err(unknown_board(q)),
+            (Some(q), _) if !known(q) => return Err(unknown_board(q, enrolled)),
             (Some(q), _) => Target::Board(q.to_string()),
             (None, _) => Target::Local,
         };
@@ -175,12 +176,8 @@ mod tests {
         r
     }
 
-    fn known(b: &str) -> bool {
-        b == "dakai"
-    }
-
     fn target(op: &str, body: Value, board: Option<&str>, default: &str) -> Result<Target, Refusal> {
-        resolve(&req(op, body, board), default, &known).map(|(t, _)| t)
+        resolve(&req(op, body, board), default, &["dakai".to_string()]).map(|(t, _)| t)
     }
 
     #[test]
@@ -196,13 +193,13 @@ mod tests {
 
     #[test]
     fn references_carry_their_board_and_bare_ids_are_local() {
-        let (t, r) = resolve(&req("message.get", json!({"id": "dakai:01MAAA"}), None), "local", &known).unwrap();
+        let (t, r) = resolve(&req("message.get", json!({"id": "dakai:01MAAA"}), None), "local", &["dakai".to_string()]).unwrap();
         assert_eq!(t, Target::Board("dakai".into()));
         assert_eq!(r.body["id"], "01MAAA");
         // a bare id is local whatever the default board
         assert_eq!(target("message.get", json!({"id": "01MAAA"}), None, "dakai"), Ok(Target::Local));
         let reply = json!({"to": {"agent": "x"}, "text": "t", "reply_to": "dakai:01MAAA"});
-        let (t, r) = resolve(&req("message.send", reply, None), "local", &known).unwrap();
+        let (t, r) = resolve(&req("message.send", reply, None), "local", &["dakai".to_string()]).unwrap();
         assert_eq!((t, r.body["reply_to"].as_str()), (Target::Board("dakai".into()), Some("01MAAA")));
         let bare_with_board = target("message.read", json!({"id": "01MAAA"}), Some("dakai"), "local").unwrap_err();
         assert_eq!(bare_with_board.1, "01MAAA is a local message; drop --board, or use the dakai: id");

@@ -27,15 +27,14 @@ fn internal(e: anyhow::Error) -> Refusal {
 /// The board a daemon op names: its body's `board`, else `--board`.
 fn board_of(core: &Core, req: &Request) -> Result<Arc<BoardConn>, Refusal> {
     let alias = req
-        .body
-        .get("board")
-        .and_then(Value::as_str)
-        .or(req.board.as_deref())
+        .board
+        .as_deref()
+        .or(req.body.get("board").and_then(Value::as_str))
         .ok_or_else(|| refuse(ErrorCode::BadRequest, "name the shared board: --board <alias>"))?;
     if alias == LOCAL_BOARD {
         return Err(refuse(ErrorCode::BadRequest, "the local board needs no publication; name a shared board"));
     }
-    core.board(alias).ok_or_else(|| refuse(ErrorCode::NotFound, format!("no board '{alias}' on this host (conde boards lists them)")))
+    core.board(alias).ok_or_else(|| refuse(ErrorCode::NotFound, crate::surface::unknown_board(alias, &core.enrolled())))
 }
 
 /// Publication and the board's configuration are the human's.
@@ -61,6 +60,8 @@ fn usable(conn: &BoardConn) -> Result<(), Refusal> {
 }
 
 fn agent_named(core: &Core, name: &str) -> Result<crate::store::Agent, Refusal> {
+    // `owner/name` in the caller's own namespace, or the bare name
+    let name = name.rsplit('/').next().unwrap_or(name);
     let normalized = normalize_name(name).ok_or_else(|| refuse(ErrorCode::BadRequest, format!("invalid name '{name}'")))?;
     core.local
         .with_conn(|tx| tx.agent_by_name(core.principal.user_id, &normalized))
@@ -83,7 +84,7 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
     let alias = conn.alias.clone();
     let name = req.body.get("agent").and_then(Value::as_str).ok_or_else(|| refuse(ErrorCode::BadRequest, "missing string field 'agent'"))?;
     let agent = agent_named(core, name)?;
-    let shared = match req.body.get("as").and_then(Value::as_str) {
+    let shared = match req.body.get("name").or(req.body.get("as")).and_then(Value::as_str) {
         Some(s) => normalize_name(s).ok_or_else(|| refuse(ErrorCode::BadRequest, format!("invalid name '{s}'")))?,
         None => agent.name.clone(),
     };
@@ -134,13 +135,13 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
         })
         .map_err(internal)??;
     if let Some(p) = existing {
-        return Ok(json!({"board": alias, "agent": agent.name, "shared_name": p.shared_name, "state": "published",
+        return Ok(json!({"board": alias, "agent": agent.name, "name": p.shared_name, "state": "published",
                          "mailbox_id": p.mailbox_id, "route_generation": p.route_generation, "unchanged": true}));
     }
     let outcome = board::send_op(&conn, &op, wait(core)).await;
     let state = board::finish_op(core, &conn, &op, outcome)?;
     let p = board::publication_of(core, &alias, &agent.id);
-    Ok(json!({"board": alias, "agent": agent.name, "shared_name": shared, "state": state, "op_id": op.op_id,
+    Ok(json!({"board": alias, "agent": agent.name, "name": shared, "state": state, "op_id": op.op_id,
               "owner": conn.owner(),
               "mailbox_id": p.as_ref().and_then(|p| p.mailbox_id.clone()),
               "route_generation": p.as_ref().and_then(|p| p.route_generation)}))
@@ -198,7 +199,7 @@ pub async fn unpublish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal
     Ok(json!({"board": alias, "agent": agent.name, "state": state, "op_id": op.op_id}))
 }
 
-/// `daemon.boards {}`: the local board and every enrolled board.
+/// `board.list {}`: the local board and every enrolled board with its live state.
 pub fn list(core: &Core) -> Result<Value, Refusal> {
     let default = core.default_board();
     let pubs = core.local_tx(|tx| Ok(tx.publications(None)?)).map_err(internal)?;
@@ -207,9 +208,14 @@ pub fn list(core: &Core) -> Result<Value, Refusal> {
     let mut rows = vec![json!({"board": LOCAL_BOARD, "path": core.db_path.display().to_string(), "agents": agents,
                                "default": default == LOCAL_BOARD, "state": "local"})];
     for conn in core.boards() {
-        let names = |state: PublicationState| -> Vec<String> {
-            pubs.iter().filter(|p| p.board == conn.alias && p.state == state).map(|p| p.shared_name.clone()).collect()
-        };
+        let published: Vec<Value> = pubs
+            .iter()
+            .filter(|p| p.board == conn.alias)
+            .map(|p| {
+                let agent = core.local.with_conn(|tx| tx.agent_by_id(&p.agent_id)).ok().flatten().map(|a| a.name).unwrap_or_default();
+                json!({"agent": agent, "name": format!("{}/{}", conn.owner(), p.shared_name), "state": p.state.as_str()})
+            })
+            .collect();
         rows.push(json!({
             "board": conn.alias,
             "server": conn.config.as_ref().map(|c| c.server.clone()),
@@ -217,16 +223,14 @@ pub fn list(core: &Core) -> Result<Value, Refusal> {
             "owner": conn.owner(),
             "state": core.board_state(&conn),
             "default": default == conn.alias,
-            "published": names(PublicationState::Published),
-            "publishing": names(PublicationState::Publishing),
-            "unpublishing": names(PublicationState::Unpublishing),
+            "published": published,
             "pending_ops": ops.iter().filter(|o| o.board == conn.alias).map(|o| json!({"op_id": o.op_id, "kind": o.kind.as_str()})).collect::<Vec<_>>(),
         }));
     }
     Ok(json!({"boards": rows}))
 }
 
-/// `daemon.forget {board}`: human only; never touches the server.
+/// `board.forget` (alias in the envelope): human only; never touches the server.
 pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     require_human(core, req, "a board's configuration")?;
     let conn = board_of(core, req)?;
@@ -236,10 +240,10 @@ pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     core.remove_board(&alias);
     let (publications, ops) = core.local_tx(|tx| Ok(tx.forget_board(&alias)?)).map_err(internal)?;
     let file = boards::forget_in(&core.config_dir, &alias).map_err(internal)?;
-    Ok(json!({"board": alias, "file_removed": file, "publications": publications, "ops": ops}))
+    Ok(json!({"board": alias, "file_removed": file, "publications_removed": publications, "ops_removed": ops}))
 }
 
-/// `daemon.migrate_preview {board}`: the board's read-only preview, over HTTPS.
+/// `host.migrate_preview` (alias in the envelope): the board's read-only preview, over HTTPS.
 pub async fn migrate_preview(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     require_human(core, req, "the migration")?;
     let conn = board_of(core, req)?;
@@ -253,8 +257,9 @@ pub async fn migrate_preview(core: &Arc<Core>, req: &Request) -> Result<Value, R
     }
 }
 
-/// `daemon.migrate {board, publish: [agent_id]}`: human only. Writes the op, applies it on the
-/// board over HTTPS, applies the manifest locally, then connects.
+/// `host.migrate_v2 {publish: [agent_id]}` (alias in the envelope): human only. Writes the op,
+/// applies it on the board over HTTPS, applies the manifest locally, then connects. Answers the
+/// manifest with the local conflicts; an op the board did not answer stays pending (an error).
 pub async fn migrate(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     require_human(core, req, "the migration")?;
     let conn = board_of(core, req)?;
@@ -287,18 +292,46 @@ pub async fn migrate(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
         })
         .map_err(internal)?;
     if op.state == BoardOpState::Done {
-        return Ok(json!({"board": alias, "state": "migrated", "op_id": op.op_id, "result": op.result}));
+        return migrated(core, &conn, &op.op_id);
     }
     let outcome = board::send_op(&conn, &op, core.mux.tuning.call_timeout).await;
     if let OpOutcome::Pending(why) = &outcome {
-        return Ok(json!({"board": alias, "state": "pending", "op_id": op.op_id, "why": why}));
+        return Err(refuse(
+            ErrorCode::Internal,
+            format!("{alias}: the switch is pending (op {}): {why}; the daemon resumes it when {alias} answers", op.op_id),
+        ));
     }
     board::finish_op(core, &conn, &op, outcome)?;
+    migrated(core, &conn, &op.op_id)
+}
+
+/// A done migration's answer: the board's manifest, the local conflicts, and the connection
+/// started.
+fn migrated(core: &Arc<Core>, conn: &Arc<BoardConn>, op_id: &str) -> Result<Value, Refusal> {
     if conn.status() == Status::NotMigrated {
-        board::start(core, &conn);
+        board::start(core, conn);
     }
-    let stored = core.local_tx(|tx| Ok(tx.op(&op.op_id)?)).map_err(internal)?;
-    Ok(json!({"board": alias, "state": "migrated", "op_id": op.op_id, "result": stored.and_then(|o| o.result)}))
+    let stored = core.local_tx(|tx| Ok(tx.op(op_id)?)).map_err(internal)?.and_then(|o| o.result).unwrap_or_default();
+    let mut out = stored["manifest"].clone();
+    if !out.is_object() {
+        out = json!({"bindings": []});
+    }
+    out["conflicts"] = stored["conflicts"].clone();
+    out["board"] = json!(conn.alias);
+    out["op_id"] = json!(op_id);
+    Ok(out)
+}
+
+/// `board.info` (alias in the envelope): the board's answer over HTTPS, before or after the
+/// migration. A board that reports this host `mailbox_only` counts as migrated here too (a
+/// re-enrollment after `conde boards --forget`), and its connection starts.
+pub async fn board_info(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
+    let conn = board_of(core, req)?;
+    let info = board::fetch_info(&conn, core.mux.tuning.call_timeout).await.map_err(|why| refuse(ErrorCode::Internal, why))?;
+    if info.mailbox_only {
+        board::adopt_migrated(core, &conn).map_err(internal)?;
+    }
+    serde_json::to_value(&info).map_err(|e| refuse(ErrorCode::Internal, e.to_string()))
 }
 
 /// The local apply of a migration manifest, in one transaction (idempotent): every former
@@ -326,7 +359,7 @@ pub fn apply_manifest(core: &Core, conn: &BoardConn, op: &BoardOp, result: &Valu
             };
             match (&agent.address, &former) {
                 (Some(current), Some(f)) if current != f && live(current) => {
-                    conflicts.push(json!({"name": name, "local": current.to_string(), "manifest": f.to_string()}));
+                    conflicts.push(json!({"name": name, "address": f.to_string(), "local": current.to_string()}));
                 }
                 (current, Some(f)) if current.as_ref() != Some(f) => tx.set_binding(&agent.id, Some(f))?,
                 _ => {}

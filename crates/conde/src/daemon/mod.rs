@@ -37,7 +37,7 @@ use crate::bridge::Bridge;
 use crate::dispatch::{Dispatcher, Principal};
 use crate::harness::{HarnessNotifier, doctor_checks};
 use crate::notify::Notifier;
-use crate::protocol::v2::{BoardPart, LOCAL_BOARD, daemon_op, label};
+use crate::protocol::v2::{BoardPart, LOCAL_BOARD, label, op};
 use crate::protocol::{ErrorCode, MAX_FRAME, Request, Response};
 use crate::server;
 use crate::store::Tx;
@@ -367,7 +367,10 @@ fn open_board(core: &Arc<Core>, alias: &str, config: anyhow::Result<boards::Boar
         Ok(Some(op)) => {
             core.rt.spawn(board::resume_migration(core.clone(), conn, op));
         }
-        Ok(None) => tracing::info!(board = alias, "not migrated: no connection until conde setup confirms it"),
+        Ok(None) => {
+            tracing::info!(board = alias, "not migrated: no connection until conde setup confirms it");
+            core.rt.spawn(board::probe_migrated(Arc::downgrade(core), conn));
+        }
         Err(e) => tracing::error!(board = alias, "cannot read the board's ops: {e:#}"),
     }
 }
@@ -431,10 +434,14 @@ impl Handler for Core {
     }
 }
 
-/// Ops that look a name up on the board they resolved to; a local miss names the boards.
-fn looks_up_names(op: &str, body: &Value) -> bool {
-    matches!(op, "agent.resolve" | "profile.get" | "profile.set" | "channel.invite")
-        || (op == "message.send" && body.pointer("/to/agent").is_some())
+/// The name an op looks up on the board it resolved to; a local miss names the boards.
+fn looks_up_names(op: &str, body: &Value) -> Option<String> {
+    let name = match op {
+        "agent.resolve" | "profile.get" | "profile.set" | "channel.invite" => body.get("name"),
+        "message.send" => body.pointer("/to/agent"),
+        _ => None,
+    };
+    name.and_then(Value::as_str).map(str::to_string)
 }
 
 /// Directory reads a caller may make on a shared board without a publication.
@@ -450,12 +457,13 @@ impl Core {
             Err((code, message)) => Response::err(&id, code, message),
         };
         match req.op.as_str() {
-            daemon_op::PUBLISH => done(publish::publish(&self, &req).await),
-            daemon_op::UNPUBLISH => done(publish::unpublish(&self, &req).await),
-            daemon_op::BOARDS => done(publish::list(&self)),
-            daemon_op::FORGET => done(publish::forget(&self, &req)),
-            daemon_op::MIGRATE_PREVIEW => done(publish::migrate_preview(&self, &req).await),
-            daemon_op::MIGRATE => done(publish::migrate(&self, &req).await),
+            op::MAILBOX_PUBLISH => done(publish::publish(&self, &req).await),
+            op::MAILBOX_UNPUBLISH => done(publish::unpublish(&self, &req).await),
+            crate::surface::BOARD_LIST => done(publish::list(&self)),
+            crate::surface::BOARD_FORGET => done(publish::forget(&self, &req)),
+            op::BOARD_INFO => done(publish::board_info(&self, &req).await),
+            op::HOST_MIGRATE_PREVIEW => done(publish::migrate_preview(&self, &req).await),
+            op::HOST_MIGRATE_V2 => done(publish::migrate(&self, &req).await),
             _ => self.route(req).await,
         }
     }
@@ -463,14 +471,28 @@ impl Core {
     async fn route(self: &Arc<Self>, req: Request) -> Response {
         let id = req.request_id.clone();
         let default = self.default_board();
-        let known = |b: &str| self.board(b).is_some();
-        let (target, req) = match resolve(&req, &default, &known) {
+        let enrolled = self.enrolled();
+        let (target, req) = match resolve(&req, &default, &enrolled) {
             Ok(r) => r,
             Err((code, message)) => return Response::err(&id, code, message),
         };
         match (req.op.as_str(), target) {
             ("doctor", target) => self.doctor(req, target).await,
             ("agent.whoami", Target::Local | Target::Aggregate) => self.whoami(req).await,
+            ("agent.register" | "agent.rename", Target::Local) => {
+                let register = req.op == "agent.register";
+                let mut resp = self.local(req).await;
+                if let Some(result) = resp.result.as_mut() {
+                    let name = result["name"].as_str().unwrap_or_default();
+                    let short = name.rsplit('/').next().unwrap_or(name).to_string();
+                    let agent = self.local.with_conn(|tx| tx.agent_by_name(self.principal.user_id, &short)).ok().flatten();
+                    result["publications"] = Value::Array(agent.map(|a| self.publications_of(&a.id)).unwrap_or_default());
+                    if register {
+                        result["boards"] = json!(enrolled_names(self));
+                    }
+                }
+                resp
+            }
             (_, Target::Local) => self.local(req).await,
             (_, Target::Board(alias)) => self.shared(&alias, req).await,
             (_, Target::Aggregate) => self.aggregate(req).await,
@@ -485,12 +507,13 @@ impl Core {
         let mut resp = tokio::task::spawn_blocking(move || d.dispatch(&p, &req))
             .await
             .unwrap_or_else(|e| Response::err(&id, ErrorCode::Internal, format!("dispatch panicked: {e}")));
-        if names
+        if let Some(name) = names
             && !self.boards().is_empty()
             && let Some(e) = resp.error.as_mut()
             && e.code == ErrorCode::NotFound
+            && e.message.starts_with("no agent")
         {
-            e.message = format!("{} on the local board; shared boards are addressed with --board <name>", e.message);
+            e.message = crate::surface::no_agent(&name, LOCAL_BOARD);
         }
         resp
     }
@@ -516,17 +539,8 @@ impl Core {
                 }))
             }
             _ if directory => Ok(None),
-            Some(p) => Err((
-                ErrorCode::Forbidden,
-                format!("{}'s publication on {alias} is {}; it is usable once published", me.name, p.state.as_str()),
-            )),
-            None => Err((
-                ErrorCode::Forbidden,
-                format!(
-                    "{} is not published on {alias}. Publication is set by your human: conde publish {} --board {alias}",
-                    me.name, me.name
-                ),
-            )),
+            Some(p) => Err((ErrorCode::Forbidden, crate::surface::publication_pending(&me.name, alias, p.state.as_str()))),
+            None => Err((ErrorCode::Forbidden, crate::surface::not_published(&me.name, alias))),
         }
     }
 
@@ -661,25 +675,33 @@ impl Core {
         Response::ok(&id, result)
     }
 
-    /// `whoami`: the local name and address, and the caller's publications (local data).
+    /// `whoami`: the local name and address, the caller's publications and the shared boards
+    /// (local data only).
     async fn whoami(&self, req: Request) -> Response {
         let id = req.request_id.clone();
         let local = self.local(req.clone()).await;
         let Some(mut result) = local.result.clone().filter(|_| local.ok) else { return local };
-        if let Ok(me) = self.local_identity(&req) {
-            let pubs = self.local_tx(|tx| Ok(tx.publications(None)?)).unwrap_or_default();
-            let published: Vec<Value> = pubs
-                .into_iter()
-                .filter(|p| p.agent_id == me.id)
-                .map(|p| {
-                    let owner = self.board(&p.board).map(|c| c.owner()).unwrap_or_default();
-                    json!({"board": p.board, "name": format!("{owner}/{}", p.shared_name), "state": p.state.as_str()})
-                })
-                .collect();
-            result["published"] = Value::Array(published);
-        }
+        let publications = self.local_identity(&req).map(|me| self.publications_of(&me.id)).unwrap_or_default();
+        result["publications"] = Value::Array(publications);
+        result["boards"] = json!(enrolled_names(self));
         label(&mut result, LOCAL_BOARD);
         Response::ok(&id, result)
+    }
+
+    /// One agent's publications: `[{board, name: owner/shared, state}]`.
+    fn publications_of(&self, agent_id: &str) -> Vec<Value> {
+        let pubs = self.local_tx(|tx| Ok(tx.publications(None)?)).unwrap_or_default();
+        pubs.into_iter()
+            .filter(|p| p.agent_id == agent_id)
+            .map(|p| {
+                let owner = self.board(&p.board).map(|c| c.owner()).unwrap_or_default();
+                json!({"board": p.board, "name": format!("{owner}/{}", p.shared_name), "state": p.state.as_str()})
+            })
+            .collect()
+    }
+
+    pub(crate) fn enrolled(&self) -> Vec<String> {
+        self.boards().iter().map(|c| c.alias.clone()).collect()
     }
 
     /// `doctor`: the local board's checks and this host's live checks: each board's
@@ -793,8 +815,19 @@ impl Core {
             add(ok, text);
         }
         let issues = lines.iter().filter(|l| l["ok"] == false).count();
-        Response::ok(&id, json!({"checks": lines, "issues": issues}))
+        let origins: Vec<Value> = self
+            .mux
+            .stats()
+            .into_iter()
+            .filter(|s| only.as_deref().is_none_or(|o| o == s.origin))
+            .map(|s| json!({"origin": s.origin, "slots_used": s.used, "slots": s.budget, "queued": s.queued}))
+            .collect();
+        Response::ok(&id, json!({"checks": lines, "issues": issues, "origins": origins}))
     }
+}
+
+fn enrolled_names(core: &Core) -> Vec<String> {
+    core.enrolled()
 }
 
 /// Forwards a translated request (the caller's `actor`, no `from`, no `board`) to one board

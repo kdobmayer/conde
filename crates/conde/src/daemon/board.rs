@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::Core;
 use crate::boards::BoardConfig;
-use crate::protocol::v2::{Mine, Published, op};
+use crate::protocol::v2::{BoardInfo, Mine, Published, op};
 use crate::protocol::{ErrorCode, Response};
 use crate::store::Tx;
 use crate::store::local::{BoardOp, BoardOpKind, BoardOpState, LocalTx, PublicationState};
@@ -343,9 +343,14 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
     let agent = op.agent_id.clone().unwrap_or_default();
     let now = iso_from_ms(now_ms());
     match (op.kind, outcome) {
-        (_, OpOutcome::Pending(why)) => {
+        (kind, OpOutcome::Pending(why)) => {
             tracing::info!(board = alias, op = op.op_id, "board op pending: {why}");
-            Ok("pending".into())
+            Ok(match kind {
+                BoardOpKind::Publish => "publishing",
+                BoardOpKind::Unpublish => "unpublishing",
+                BoardOpKind::Migrate => "pending",
+            }
+            .into())
         }
         (BoardOpKind::Publish, OpOutcome::Done(result)) => {
             let published: Option<Published> = serde_json::from_value(result.clone()).ok();
@@ -391,7 +396,7 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
                 Ok(())
             })
             .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
-            Ok("moved".into())
+            Ok("unpublished".into())
         }
         (BoardOpKind::Unpublish, OpOutcome::Refused(code, message)) => {
             let mailbox = op.request["mailbox_id"].as_str().unwrap_or_default().to_string();
@@ -442,4 +447,72 @@ pub async fn resume_migration(core: Arc<Core>, conn: Arc<BoardConn>, op: BoardOp
 /// The local agent's publication row on a board, by agent id.
 pub fn publication_of(core: &Core, alias: &str, agent_id: &str) -> Option<crate::store::local::Publication> {
     core.local_tx(|tx| Ok(tx.publication(alias, agent_id)?)).ok().flatten()
+}
+
+/// `board.info` over HTTPS (no hello).
+pub async fn fetch_info(conn: &BoardConn, wait: Duration) -> Result<BoardInfo, String> {
+    let resp = rpc(conn, json!({"op": op::BOARD_INFO, "body": {}}), wait).await?;
+    match (resp.result, resp.error) {
+        (Some(r), None) => serde_json::from_value(r).map_err(|e| format!("{}: board.info: {e}", conn.alias)),
+        (_, Some(e)) => Err(format!("{}: {}", conn.alias, e.message)),
+        _ => Err(format!("{}: board.info: empty response", conn.alias)),
+    }
+}
+
+/// The board says this host is migrated, but no local migrate op is done (the local record was
+/// lost, or the alias was forgotten and enrolled again): record it done and connect.
+pub fn adopt_migrated(core: &Arc<Core>, conn: &Arc<BoardConn>) -> anyhow::Result<()> {
+    if conn.status() != Status::NotMigrated {
+        return Ok(());
+    }
+    let now = iso_from_ms(now_ms());
+    core.local_tx(|tx| {
+        if tx.migrate_op(&conn.alias)?.is_none() {
+            tx.insert_op(&BoardOp {
+                op_id: crate::util::new_ulid(),
+                board: conn.alias.clone(),
+                kind: BoardOpKind::Migrate,
+                agent_id: None,
+                request: json!({"publish": []}),
+                state: BoardOpState::Done,
+                result: Some(json!({"adopted": "board.info: mailbox_only"})),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })?;
+        }
+        Ok(())
+    })?;
+    tracing::info!(board = conn.alias, "the board reports this host migrated: connecting");
+    start(core, conn);
+    Ok(())
+}
+
+/// A board not migrated here: ask it (over HTTPS) whether it already counts this host as
+/// migrated, until it answers.
+pub async fn probe_migrated(core: Weak<Core>, conn: Arc<BoardConn>) {
+    let mut delay = Duration::from_secs(1);
+    // `conde setup` usually migrates right after a (re)start; ask only if it did not.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    loop {
+        let Some(c) = core.upgrade() else { return };
+        if conn.status() != Status::NotMigrated {
+            return;
+        }
+        let wait = c.mux.tuning.call_timeout;
+        drop(c);
+        match fetch_info(&conn, wait).await {
+            Ok(info) => {
+                if info.mailbox_only
+                    && let Some(c) = core.upgrade()
+                    && let Err(e) = adopt_migrated(&c, &conn)
+                {
+                    tracing::error!(board = conn.alias, "cannot record the migration: {e:#}");
+                }
+                return;
+            }
+            Err(why) => tracing::debug!(board = conn.alias, "board.info: {why}"),
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(300));
+    }
 }

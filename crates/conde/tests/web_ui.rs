@@ -94,6 +94,10 @@ macro_rules! on_both {
 }
 
 on_both!(
+    a_name_held_by_an_agent_session_is_never_taken_by_the_browser,
+    two_names_on_one_human_address_both_stay_usable,
+    the_browser_host_is_never_minted_as_a_real_host,
+    a_connected_bridge_keeps_its_host_online,
     the_root_serves_the_app_to_a_signed_in_browser_only,
     browser_rpc_needs_the_session_its_csrf_token_and_this_origin,
     the_browser_acts_as_the_users_existing_human,
@@ -114,6 +118,10 @@ struct Ui {
 }
 
 async fn ui(d: &Arc<Dispatcher>) -> Ui {
+    ui_with(d, ServerConfig::default()).await
+}
+
+async fn ui_with(d: &Arc<Dispatcher>, config: ServerConfig) -> Ui {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let idp = start_idp().await;
     let port = {
@@ -121,14 +129,14 @@ async fn ui(d: &Arc<Dispatcher>) -> Ui {
         probe.local_addr().unwrap().port()
     };
     let base = format!("http://127.0.0.1:{port}");
-    let mut config = WebConfig::entra(TENANT, CLIENT_ID, CLIENT_SECRET, &format!("{base}/auth/callback")).unwrap();
-    config.issuer = idp.issuer.clone();
+    let mut entra = WebConfig::entra(TENANT, CLIENT_ID, CLIENT_SECRET, &format!("{base}/auth/callback")).unwrap();
+    entra.issuer = idp.issuer.clone();
     let store = Arc::new(WebBoard::new(d.clone()));
-    let web = WebSetup { entra: Some(config), admin_key: None, store: store.clone() };
+    let web = WebSetup { entra: Some(entra), admin_key: None, store: store.clone() };
     let server = conde::cloud::start(
         d.clone(),
         format!("127.0.0.1:{port}").parse().unwrap(),
-        ServerConfig { web: Some(web), ..ServerConfig::default() },
+        ServerConfig { web: Some(web), ..config },
     )
     .await
     .unwrap();
@@ -145,11 +153,22 @@ async fn ui(d: &Arc<Dispatcher>) -> Ui {
 impl Ui {
     /// A browser signed in as the provider's current person, with its CSRF token.
     async fn browser(&self) -> (Browser, String) {
+        let (b, csrf) = self.bare_browser().await;
+        // The app's first call: names the human of a user who has none.
+        self.rpc(&b, &csrf, "agent.whoami", json!({})).await;
+        (b, csrf)
+    }
+
+    /// Signed in, with its CSRF token, before the app's first call.
+    async fn bare_browser(&self) -> (Browser, String) {
         let b = Browser::new();
         b.sign_in(&self.env).await;
-        let s: Value = b.follow.get(self.env.url("/v1/session")).send().await.unwrap().json().await.unwrap();
-        let csrf = s["csrf"].as_str().unwrap().to_string();
-        (b, csrf)
+        let s = self.session(&b).await;
+        (b, s["csrf"].as_str().unwrap().to_string())
+    }
+
+    async fn session(&self, b: &Browser) -> Value {
+        b.follow.get(self.env.url("/v1/session")).send().await.unwrap().json().await.unwrap()
     }
 
     /// One browser RPC with the CSRF header and this origin.
@@ -235,16 +254,20 @@ async fn browser_rpc_needs_the_session_its_csrf_token_and_this_origin(d: Arc<Dis
     let r = anon.get(ui.env.url("/v1/session")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
-    let (b, csrf) = ui.browser().await;
-    let s: Value = b.follow.get(ui.env.url("/v1/session")).send().await.unwrap().json().await.unwrap();
+    let (b, csrf) = ui.bare_browser().await;
+    let s = ui.session(&b).await;
     assert_eq!(s["user"], USER);
-    assert_eq!(s["name"], format!("{USER}/{USER}"));
+    assert!(s["name"].is_null(), "a GET names nobody: {s}");
     assert_eq!(s["csrf_header"], "x-csrf-token");
+    ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
+    assert_eq!(ui.session(&b).await["name"], format!("{USER}/{USER}"));
 
     let r = b.step.post(&rpc).json(&request).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "no CSRF token");
     let r = b.step.post(&rpc).header("x-csrf-token", "0".repeat(64)).json(&request).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "a wrong CSRF token");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "stale_session", "the app reloads its session on this code: {v}");
     let r = b
         .step
         .post(&rpc)
@@ -384,8 +407,14 @@ async fn conversations_follow_dm_and_channel_visibility(d: Arc<Dispatcher>) {
     assert_eq!(posts[1]["message_id"], post["message_id"]);
     assert!(h["read_seq"].as_i64().unwrap() < post["seq"].as_i64().unwrap());
 
-    // Reading marks the DM and the channel read; a reply links to its message.
+    // Reading marks the DM and the channel read (and tells the browsers); a reply links to its
+    // message.
+    let mut wakes = ui.d.store().pending().events();
     ui.ok(&b, &csrf, "conversation.read", json!({"with": "worker", "up_to": to_human["seq"]})).await;
+    assert!(next_board(&mut wakes).await, "a read that marks something announces it");
+    let quiet = ui.ok(&b, &csrf, "conversation.read", json!({"with": "worker", "up_to": to_human["seq"]})).await;
+    assert_eq!(quiet["marked"], 0);
+    assert!(!next_board(&mut wakes).await, "a read that marks nothing wakes no browser");
     ui.ok(&b, &csrf, "conversation.read", json!({"channel": "#team", "up_to": i64::MAX})).await;
     let rail = ui.ok(&b, &csrf, "conversation.list", json!({})).await;
     assert_eq!(rail["dms"][0]["unread"], 0, "{rail}");
@@ -427,7 +456,7 @@ async fn delivery_state_shows_the_retry_clock_the_hold_and_the_last_error(d: Arc
     let r = state(&h);
     assert_eq!(r["recipient"], format!("{USER}/worker"));
     assert_eq!(r["state"], "queued", "{r}");
-    assert!(r["retry_at"].is_string(), "{r}");
+    assert!(r["retry_at"].is_null(), "no retry clock before a failure: {r}");
 
     // The host's bridge claims it and the session holds it for approval.
     let bridge = ui.d.bridge_principal(&k);
@@ -463,7 +492,7 @@ async fn delivery_state_shows_the_retry_clock_the_hold_and_the_last_error(d: Arc
     let recipients = h["messages"][0]["delivery"]["recipients"].as_array().unwrap().clone();
     assert_eq!(recipients.len(), 1, "{h}");
     assert_eq!(recipients[0]["recipient"], format!("{USER}/{USER}"));
-    assert_eq!(recipients[0]["state"], "queued");
+    assert_eq!(recipients[0]["state"], "unread", "a human's notification is the unread badge");
     ui.server.shutdown().await.unwrap();
 }
 
@@ -574,6 +603,7 @@ async fn the_fleet_shows_online_discovery_and_own_delivery_health(d: Arc<Dispatc
     ui.d.advance_clock(61_000);
     let f = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
     assert_eq!(agent(&f, &format!("{USER}/worker"))["stuck"], 1, "{f}");
+    assert_eq!(agent(&f, &format!("{USER}/{USER}"))["stuck"], 0, "a human is never stuck: {f}");
     ui.server.shutdown().await.unwrap();
 }
 
@@ -641,6 +671,105 @@ async fn the_event_socket_says_when_the_board_changed(d: Arc<Dispatcher>) {
         }
     }
     ws.send(tungstenite::Message::Close(None)).await.unwrap();
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Whether a board wake arrives within a moment (other wakes skipped).
+async fn next_board(wakes: &mut tokio::sync::broadcast::Receiver<conde::store::Wake>) -> bool {
+    let wait = async {
+        loop {
+            if let Ok(conde::store::Wake::Board(_)) = wakes.recv().await {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(700), wait).await.is_ok()
+}
+
+async fn a_name_held_by_an_agent_session_is_never_taken_by_the_browser(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.bare_browser().await;
+    // A GET names nobody.
+    assert!(ui.session(&b).await["name"].is_null());
+    let d2 = ui.d.clone();
+    let bound = blocking(move || d2.with_conn(|c| c.bound_agents()).unwrap()).await;
+    assert!(bound.is_empty(), "{bound:?}");
+    // The user's own Claude session holds the name the browser would take.
+    let k = ui.principal(USER, "k-host").await;
+    ui.op(&k, "claude:sess-1", "agent.register", json!({"name": USER})).await;
+    let (status, v) = ui.rpc(&b, &csrf, "agent.whoami", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("conde register"), "{v}");
+    let me = ui.op(&k, "claude:sess-1", "agent.whoami", json!({})).await;
+    assert_eq!(me["address"], "claude:sess-1@k-host", "the session keeps its name");
+    ui.server.shutdown().await.unwrap();
+}
+
+async fn two_names_on_one_human_address_both_stay_usable(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.bare_browser().await;
+    let laptop = ui.principal(USER, "laptop").await;
+    ui.op(&laptop, &format!("human:{USER}"), "agent.register", json!({"name": "kd"})).await;
+    ui.op(&laptop, &format!("human:{USER}"), "agent.register", json!({"name": USER})).await;
+    // The terminal's own `whoami` sees two names on one address; the browser acts by name.
+    let me = ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
+    assert_eq!(me["name"], format!("{USER}/{USER}"));
+    let sent = ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "kd"}, "text": "to my other name"})).await;
+    assert_eq!(sent["to"], format!("{USER}/kd"));
+    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "kd"})).await;
+    assert_eq!(h["messages"][0]["from"], format!("{USER}/{USER}"));
+    ui.server.shutdown().await.unwrap();
+}
+
+async fn the_browser_host_is_never_minted_as_a_real_host(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let b = Browser::new();
+    let page = b.sign_in(&ui.env).await;
+    let created = b.create_key(&ui.env, &csrf_of(&page), "web").await;
+    assert!(created.contains("web-2"), "{created}");
+    let d2 = ui.d.clone();
+    let owner = blocking(move || d2.with_conn(|c| c.host_owner("web")).unwrap()).await;
+    assert!(owner.is_none(), "{owner:?}");
+    ui.server.shutdown().await.unwrap();
+}
+
+async fn a_connected_bridge_keeps_its_host_online(d: Arc<Dispatcher>) {
+    let config = ServerConfig { ping_interval: Duration::from_millis(150), ..ServerConfig::default() };
+    let ui = ui_with(&d, config).await;
+    let (b, csrf) = ui.browser().await;
+    let key = format!("conde_test_{}", conde::util::new_ulid());
+    let digest = conde_remote::token_digest(&key);
+    let d2 = ui.d.clone();
+    blocking(move || {
+        d2.with_tx(|c| conde::ops::hosts::insert_key(c, USER, "k-host", &digest, "test", "2026-10-09T00:00:00.000Z"))
+            .unwrap()
+    })
+    .await;
+    let mut cfg = conde_remote::BridgeConfig::new(format!("{}/v1/bridge", ui.env.base.replace("http", "ws")), &key, "k-host");
+    cfg.backoff_min = Duration::from_millis(50);
+    let bridge = conde_remote::BridgeClient::start(cfg, |_| {});
+    let mut state = bridge.subscribe();
+    tokio::time::timeout(Duration::from_secs(10), state.wait_for(|s| *s == conde_remote::BridgeState::Connected))
+        .await
+        .expect("the bridge connects")
+        .unwrap();
+    let online = |f: &Value| f["hosts"].as_array().unwrap().iter().find(|h| h["host"] == "k-host").unwrap()["online"].clone();
+    // The client reports Connected once its hello is out; the server fences right after.
+    let mut up = false;
+    for _ in 0..50 {
+        up = online(&ui.ok(&b, &csrf, "fleet.list", json!({})).await) == true;
+        if up {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(up, "the host comes online when its bridge connects");
+    // Past the TTL of the connect-time stamp, answered pings alone keep the host online.
+    ui.d.advance_clock(91_000);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(online(&ui.ok(&b, &csrf, "fleet.list", json!({})).await), true);
+    bridge.shutdown();
     ui.server.shutdown().await.unwrap();
 }
 

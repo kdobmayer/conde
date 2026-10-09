@@ -42,6 +42,9 @@ struct Assets;
 
 /// The header that carries the session's CSRF token on every browser RPC.
 pub const CSRF_HEADER: &str = "x-csrf-token";
+/// The error code of a request whose CSRF token is not the session's (another sign-in replaced
+/// the session): the app reloads `/v1/session` and retries once.
+pub const STALE_SESSION: &str = "stale_session";
 /// Every topic bit: sent when board events may have been missed.
 pub const ALL_TOPICS: u8 = u8::MAX;
 /// How long the event socket gathers board events before telling the browser.
@@ -139,15 +142,17 @@ async fn signed_in(app: &AppState, headers: &HeaderMap) -> Result<session::Sessi
 /// WebSocket handshakes do); `required` refuses a request that names none.
 fn same_origin(app: &AppState, headers: &HeaderMap, required: bool) -> bool {
     match headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
-        Some(origin) => origin == app.web.config().public_url,
+        Some(origin) => origin.eq_ignore_ascii_case(&app.web.config().public_url),
         None => !required,
     }
 }
 
-fn principal(record: &SessionRecord) -> WebPrincipal {
+/// The session's user; `register` only for a CSRF-checked request.
+fn principal(record: &SessionRecord, register: bool) -> WebPrincipal {
     WebPrincipal {
         user_id: record.user_id,
         user: record.user_name.clone(),
+        register,
     }
 }
 
@@ -188,7 +193,7 @@ pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Resp
     if !same_secret(token, &session.record.csrf) {
         return api_error(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            STALE_SESSION,
             "missing or stale CSRF token; reload the page",
         );
     }
@@ -211,11 +216,12 @@ pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Resp
         obj.remove("actor");
         obj.remove("from");
     }
-    let response = dispatch(app, principal(&session.record), request).await;
+    let response = dispatch(app, principal(&session.record, true), request).await;
     ([no_store()], axum::Json(response)).into_response()
 }
 
-/// `GET /v1/session`: who is signed in and the CSRF token for `/v1/rpc` and sign-out.
+/// `GET /v1/session`: who is signed in and the CSRF token for `/v1/rpc` and sign-out. The
+/// human's name is reported when it exists; a GET never names it (the app's first RPC does).
 async fn session_info(State(app): State<AppState>, headers: HeaderMap) -> Response {
     let session = match signed_in(&app, &headers).await {
         Ok(s) => s,
@@ -224,7 +230,7 @@ async fn session_info(State(app): State<AppState>, headers: HeaderMap) -> Respon
     let r = &session.record;
     let me = dispatch(
         &app,
-        principal(r),
+        principal(r, false),
         json!({"v": 1, "type": "request", "request_id": "session", "op": "agent.whoami", "body": {}}),
     )
     .await;
@@ -255,7 +261,7 @@ async fn attachment(
     };
     let request = json!({"v": 1, "type": "request", "request_id": "download", "op": "attachment.get",
                          "body": {"attachment_id": id}});
-    let response = dispatch(&app, principal(&session.record), request).await;
+    let response = dispatch(&app, principal(&session.record, false), request).await;
     if response["ok"] != true {
         let code = response["error"]["code"].as_str().unwrap_or("internal");
         let status = match code {

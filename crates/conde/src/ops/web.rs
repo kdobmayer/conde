@@ -142,8 +142,12 @@ fn recipient_state(db: &dyn Tx, m: &MsgRow, d: &Delivery) -> OpResult<Value> {
             Some(c) => db.read_seq(c, &d.recipient_id)?.is_some_and(|s| s >= m.seq),
             None => false,
         };
+    // A human has no push transport: until read, their notification is the unread badge
+    // (a bridge marks it so; one on the browser's host never runs).
+    let human = || -> OpResult<bool> { Ok(agents::by_id(db, &d.recipient_id)?.is_some_and(|a| a.is_human())) };
     let state = match d.status.as_str() {
         _ if read => "read",
+        "pending" | "dispatching" if human()? => "unread",
         "pending" if d.attempts > 0 => "retrying",
         "pending" => "queued",
         "dispatching" => "sending",
@@ -151,7 +155,7 @@ fn recipient_state(db: &dyn Tx, m: &MsgRow, d: &Delivery) -> OpResult<Value> {
         "badge" => "unread",
         other => other,
     };
-    let retry_at = (d.status == "pending" && !read).then(|| iso_from_ms(d.next_attempt_at));
+    let retry_at = (state == "retrying").then(|| iso_from_ms(d.next_attempt_at));
     let last_error = match (&d.last_status, &d.last_reason) {
         (Some(s), reason) if FAILED.contains(&s.as_str()) => json!({"status": s, "reason": reason}),
         _ => Value::Null,
@@ -184,6 +188,10 @@ pub fn read(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             ids.len()
         }
     };
+    // Self-announcing (the dispatcher leaves it out): a read that marks nothing wakes no browser.
+    if marked > 0 {
+        ctx.db.announce(crate::store::topics::MESSAGES | crate::store::topics::DELIVERY);
+    }
     Ok(json!({"marked": marked}))
 }
 

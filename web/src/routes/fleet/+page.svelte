@@ -1,9 +1,19 @@
 <script lang="ts">
-	import { board, short } from '#lib/board.svelte.ts';
+	import { onMount } from 'svelte';
+	import { board, refreshFleet, short } from '#lib/board.svelte.ts';
 	import { ago } from '#lib/time.ts';
 	import type { FleetAgent, FleetHost } from '#lib/types.ts';
 
 	let filter = $state('');
+
+	// Heartbeats announce nothing: while this page is open it refetches, so a host stays online
+	// as long as its bridge answers pings.
+	onMount(() => {
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible') void refreshFleet();
+		}, 30_000);
+		return () => clearInterval(timer);
+	});
 
 	/** Online while the heartbeat is younger than the server's TTL, on the server's clock. */
 	function online(h: FleetHost): boolean {

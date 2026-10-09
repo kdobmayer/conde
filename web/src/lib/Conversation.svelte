@@ -38,11 +38,16 @@
 		if (scroller) scroller.scrollTop = scroller.scrollHeight;
 	}
 
-	/** Newest page; older pages already loaded are kept. */
+	let generation = 0;
+
+	/** Newest page; older pages already loaded are kept. An answer overtaken by a later
+	 * request is dropped. */
 	async function refresh(first = false) {
 		const stick = first || nearBottom();
+		const mine = ++generation;
 		try {
 			const h = await rpc<History>('conversation.history', query({ limit: PAGE }));
+			if (mine !== generation) return;
 			const oldest = h.messages[0]?.seq ?? Infinity;
 			const older = messages.filter((m) => m.seq < oldest);
 			messages = [...older, ...h.messages];
@@ -53,7 +58,9 @@
 			await markRead(h);
 			if (stick) await scrollToEnd();
 		} catch (e) {
-			if (e instanceof RpcError && e.code === 'forbidden' && isChannel) notMember = true;
+			if (mine !== generation) return;
+			if (e instanceof RpcError && e.code === 'forbidden' && isChannel && e.message.startsWith('not a member'))
+				notMember = true;
 			else error = (e as Error).message;
 		} finally {
 			loading = false;

@@ -23,7 +23,7 @@ use crate::util::{iso_from_ms, new_ulid};
 
 /// The host of a human first named from the browser (`human:<user>@web`): a user whose human
 /// has no name on the board yet gets one there. Not a real host; nothing is delivered to it.
-pub const WEB_HOST: &str = "web";
+pub const WEB_HOST: &str = conde_remote::web::BROWSER_HOST;
 
 /// How long SIGTERM may take before the server stops waiting for connections.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(50);
@@ -133,7 +133,9 @@ impl conde_remote::Dispatcher for Board {
         let resp = match serde_json::from_value::<Request>(request) {
             Err(e) => Response::err(&id, ErrorCode::BadRequest, format!("bad request frame: {e}")),
             Ok(req) => match self.web_human(user) {
-                Ok((p, actor)) => self.d.dispatch(&p, &Request { actor: Some(actor), from: None, ..req }),
+                Ok((p, actor, name)) => {
+                    self.d.dispatch(&p, &Request { actor: Some(actor), from: Some(name), ..req })
+                }
                 Err((code, message)) => Response::err(&id, code, message),
             },
         };
@@ -173,20 +175,25 @@ impl Board {
 }
 
 impl Board {
-    /// The principal and actor a browser user acts as: their human, the name bound to a
+    /// The principal, actor and name a browser user acts as: their human, a name bound to a
     /// `human:` address in their namespace. A name registered from a terminal wins over the
-    /// browser's own; among several, the one named after the user. A user without one gets
-    /// `<user>` bound to `human:<user>@web`, through the same registration rules as the CLI (a
-    /// name held by an agent or pinned elsewhere is refused).
-    fn web_human(&self, user: &WebPrincipal) -> Result<(Principal, String), (ErrorCode, String)> {
+    /// browser's own; among several, the one named after the user. The browser acts by name
+    /// (the terminal human's `--from`), so two names on one human address stay usable. With
+    /// `register`, a user without a human gets `<user>` bound to `human:<user>@web` through the
+    /// CLI's registration rules, unless an agent session or a pin holds that name.
+    fn web_human(&self, user: &WebPrincipal) -> Result<(Principal, String, String), (ErrorCode, String)> {
         let internal = |e: crate::store::StoreError| (ErrorCode::Internal, format!("storage error: {e}"));
-        let (row, humans) = self
+        let (row, humans, same_name) = self
             .d
             .with_conn(|tx| {
                 let row = tx.user_by_id(user.user_id)?;
                 let humans: Vec<_> =
                     tx.bound_agents()?.into_iter().filter(|a| a.owner_id == user.user_id && a.is_human()).collect();
-                Ok((row, humans))
+                let same_name = match &row {
+                    Some(r) => tx.agent_by_name(r.user_id, &r.name)?,
+                    None => None,
+                };
+                Ok((row, humans, same_name))
             })
             .map_err(internal)?;
         let Some(row) = row.filter(|r| !r.disabled) else {
@@ -196,7 +203,8 @@ impl Board {
             user_id: row.user_id,
             user: row.name.clone(),
             host: host.to_string(),
-            local: false,
+            // Acts by name through `from`, which the dispatcher allows a human principal only.
+            local: true,
             bridge_instance: None,
             bridge_connection: None,
         };
@@ -208,8 +216,10 @@ impl Board {
             .find(|a| a.name == row.name)
             .or(if named.len() == 1 { named.first() } else { None })
             .or(if named.is_empty() { web.first() } else { None });
-        if let Some(address) = chosen.and_then(|a| a.address.as_ref()) {
-            return Ok((principal(&address.host), address.to_string()));
+        if let Some(agent) = chosen
+            && let Some(address) = &agent.address
+        {
+            return Ok((principal(&address.host), address.to_string(), agent.name.clone()));
         }
         if !humans.is_empty() {
             let names: Vec<String> = humans.iter().map(|a| a.canonical()).collect();
@@ -222,25 +232,36 @@ impl Board {
                 ),
             ));
         }
+        let none_yet = |why: &str| {
+            format!(
+                "your human has no name on the board yet{why}. Register your human from a terminal with: \
+                 conde register <name>"
+            )
+        };
+        if let Some(agent) = &same_name
+            && (agent.address.is_some() || agent.pinned.is_some())
+        {
+            let held = format!(", and the name '{}' belongs to {}", row.name, agent.address.as_ref().map_or_else(
+                || "a pinned role".to_string(),
+                |a| format!("the session {a}")
+            ));
+            return Err((ErrorCode::NotFound, none_yet(&held)));
+        }
+        if !user.register {
+            return Err((ErrorCode::NotFound, none_yet("")));
+        }
         let p = principal(WEB_HOST);
         let actor = Address::new(Kind::Human, &row.name, WEB_HOST).to_string();
         let mut register = Request::new(new_ulid(), "agent.register", json!({"name": row.name}));
         register.actor = Some(actor.clone());
         register.idempotency_key = Some(new_ulid());
-        let resp = self.d.dispatch(&p, &register);
+        let resp = self.d.dispatch(&Principal { local: false, ..p.clone() }, &register);
         match resp.error {
             None => {
                 tracing::info!(user = %row.name, %actor, "named the browser human");
-                Ok((p, actor))
+                Ok((p, actor, row.name.clone()))
             }
-            Some(e) => Err((
-                e.code,
-                format!(
-                    "your human has no name on the board yet, and naming it '{}' failed: {}. \
-                     Register your human from a terminal with: conde register <name>",
-                    row.name, e.message
-                ),
-            )),
+            Some(e) => Err((e.code, none_yet(&format!(", and naming it '{}' failed: {}", row.name, e.message)))),
         }
     }
 }

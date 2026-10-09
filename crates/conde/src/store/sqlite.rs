@@ -85,7 +85,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS attempts_by_instance ON attempts(bridge_instance, status);
-         CREATE INDEX IF NOT EXISTS credentials_by_host ON device_credentials(host_id);",
+         CREATE INDEX IF NOT EXISTS credentials_by_host ON device_credentials(host_id);
+         CREATE INDEX IF NOT EXISTS notifications_by_recipient ON notifications(recipient_agent_id);",
     )
 }
 
@@ -1230,6 +1231,7 @@ impl Tx for SqliteTx<'_> {
             "SELECT n.recipient_agent_id,
                     COUNT(DISTINCT CASE WHEN n.status = 'held' THEN n.notification_id END),
                     COUNT(DISTINCT CASE WHEN n.status IN ('pending', 'dispatching') AND m.created_at < ?2
+                          AND a.address_kind <> 'human'
                           THEN n.notification_id END),
                     MAX(CASE WHEN t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')
                         THEN t.attempt_id END)

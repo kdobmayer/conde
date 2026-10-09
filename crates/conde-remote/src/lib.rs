@@ -31,6 +31,8 @@ pub struct Principal {
 pub struct WebPrincipal {
     pub user_id: i64,
     pub user: String,
+    /// The request passed the CSRF check: the board may name the user's human on first use.
+    pub register: bool,
 }
 
 /// Executes one request object (DESIGN.md §4) for an authenticated principal and returns

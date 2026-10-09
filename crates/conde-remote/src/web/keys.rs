@@ -94,7 +94,9 @@ pub(crate) async fn mint(
                 } else {
                     format!("{base}-{n}")
                 };
-                if s.host_owner(&host)?.is_some_and(|owner| owner != user_id) {
+                if host == super::BROWSER_HOST
+                    || s.host_owner(&host)?.is_some_and(|owner| owner != user_id)
+                {
                     continue;
                 }
                 match s.mint_host_key(user_id, &host, &label, &token_digest, now)? {

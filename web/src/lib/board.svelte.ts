@@ -71,8 +71,14 @@ export async function refreshFleet(): Promise<void> {
 
 let socket: WebSocket | null = null;
 let retryMs = 1000;
+let reconnect: ReturnType<typeof setTimeout> | null = null;
 
 function connect(): void {
+	if (reconnect) {
+		clearTimeout(reconnect);
+		reconnect = null;
+	}
+	if (socket) return;
 	const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
 	const ws = new WebSocket(scheme + location.host + '/v1/events');
 	socket = ws;
@@ -90,15 +96,28 @@ function connect(): void {
 		}
 	};
 	ws.onclose = (e) => {
+		if (socket !== ws) return;
 		board.live = false;
 		socket = null;
 		if (e.code === 4401) {
 			signIn();
 			return;
 		}
-		setTimeout(connect, retryMs);
+		reconnect = setTimeout(connect, retryMs);
 		retryMs = Math.min(retryMs * 2, 30_000);
 	};
+}
+
+/** The first visit of a user without a human names it (a CSRF-checked call, never a GET). */
+async function nameHuman(): Promise<void> {
+	const s = board.session;
+	if (!s) return;
+	try {
+		const me = await rpc<{ name: string }>('agent.whoami');
+		board.session = { ...s, name: me.name, problem: null };
+	} catch (e) {
+		board.session = { ...s, problem: (e as Error).message };
+	}
 }
 
 let started = false;
@@ -108,6 +127,7 @@ export async function start(): Promise<void> {
 	if (started) return;
 	started = true;
 	board.session = await loadSession();
+	if (!board.session.name) await nameHuman();
 	await Promise.all([refreshRail(), refreshFleet()]);
 	connect();
 	setInterval(() => (board.now = Date.now()), 1000);
@@ -117,7 +137,7 @@ export async function start(): Promise<void> {
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'visible') {
 			changed(ALL);
-			if (!socket) connect();
+			connect();
 		}
 	});
 }

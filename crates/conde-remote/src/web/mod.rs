@@ -26,6 +26,10 @@ use thiserror::Error;
 
 pub use admin::{AdminState, router as admin_router};
 pub use app::embedded as app_embedded;
+
+/// The host of a human the browser names (`human:<user>@web`): never minted as a real host, so
+/// no bridge claims those humans' notifications.
+pub const BROWSER_HOST: &str = "web";
 pub use auth::{Oidc, RedeemResponse};
 pub use keys::new_host_key;
 

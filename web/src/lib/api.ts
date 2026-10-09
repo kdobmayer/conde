@@ -57,6 +57,17 @@ async function post(request: object, s: Session): Promise<Response> {
 
 /** One request; a mutation survives a dropped connection by resending the same key. */
 export async function rpc<T>(op: string, body: object = {}): Promise<T> {
+	try {
+		return await call<T>(op, body);
+	} catch (e) {
+		// Another sign-in replaced the session (new CSRF token): reload it and retry once.
+		if (!(e instanceof RpcError) || e.code !== 'stale_session') throw e;
+		await loadSession();
+		return call<T>(op, body);
+	}
+}
+
+async function call<T>(op: string, body: object): Promise<T> {
 	const s = session ?? (await loadSession());
 	const request: Record<string, unknown> = {
 		v: 1,

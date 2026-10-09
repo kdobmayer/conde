@@ -41,7 +41,7 @@
 				<span class="tag {tone[r.state] ?? ''}">{label[r.state] ?? r.state}</span>
 				{#if r.state === 'read' && r.read_at}<span class="muted">{ago(r.read_at, board.now)}</span>{/if}
 				{#if r.retry_at && r.state === 'retrying'}
-					<span class="muted">next try {countdown(r.retry_at, board.now - board.skewMs)}</span>
+					<span class="muted">next try {countdown(r.retry_at, board.now + board.skewMs)}</span>
 				{/if}
 				{#if r.attempts && r.attempts > 1}<span class="muted">{r.attempts} attempts</span>{/if}
 				{#if r.last_error}

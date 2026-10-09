@@ -161,7 +161,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [macos, linux]
+    needs: [web, macos, linux]
     runs-on: ubuntu-latest
     environment: release
     permissions:

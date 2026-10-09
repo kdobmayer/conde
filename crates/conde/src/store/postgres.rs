@@ -62,6 +62,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (1, "init", include_str!("migrations/0001_init.sql")),
     (2, "channel_topic", include_str!("migrations/0002_channel_topic.sql")),
     (3, "web", include_str!("migrations/0003_web.sql")),
+    (4, "notifications_by_recipient", include_str!("migrations/0004_notifications_by_recipient.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -1789,7 +1790,8 @@ impl Tx for PgTx {
                 "SELECT n.recipient_agent_id,
                         COUNT(DISTINCT n.notification_id) FILTER (WHERE n.status = 'held'),
                         COUNT(DISTINCT n.notification_id)
-                            FILTER (WHERE n.status IN ('pending', 'dispatching') AND m.created_at < $2),
+                            FILTER (WHERE n.status IN ('pending', 'dispatching') AND m.created_at < $2
+                                AND a.address_kind <> 'human'),
                         MAX(t.attempt_id)
                             FILTER (WHERE t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex'))
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id

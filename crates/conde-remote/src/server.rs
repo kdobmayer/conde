@@ -727,6 +727,8 @@ async fn run_bridge(
         conn_id,
         sent: HashSet::new(),
         endpoints,
+        heartbeat_pending: Arc::default(),
+        last_heartbeat: None,
     };
     let reason = conn.run(&mut tx, &mut rx, &mut control_rx).await;
     tracing::info!(%host, %instance, conn_id, reason, "bridge disconnected");
@@ -800,6 +802,10 @@ struct Conn {
     sent: HashSet<String>,
     /// The bridge's live endpoints: its hello's set, updated by `endpoints` diff frames.
     endpoints: HashSet<Endpoint>,
+    /// A heartbeat write is in flight (at most one per connection).
+    heartbeat_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// When the last heartbeat write was started.
+    last_heartbeat: Option<tokio::time::Instant>,
 }
 
 impl Conn {
@@ -884,8 +890,11 @@ impl Conn {
                         None | Some(Err(_)) => return "connection lost",
                         Some(Ok(Message::Close(_))) => return "closed by bridge",
                         Some(Ok(Message::Pong(_))) => {
-                            unanswered = 0;
-                            self.heartbeat();
+                            // Only the answer to an outstanding ping proves the bridge alive.
+                            if unanswered > 0 {
+                                unanswered = 0;
+                                self.heartbeat(cfg.ping_interval);
+                            }
                             continue
                         }
                         Some(Ok(Message::Ping(_))) => continue,
@@ -920,10 +929,23 @@ impl Conn {
         }
     }
 
-    /// Records that the bridge answered a ping, off the async workers and without waiting.
-    fn heartbeat(&self) {
+    /// Records that the bridge answered a ping, off the async workers and without waiting: at
+    /// most one write in flight per connection, and at most one per half ping period.
+    fn heartbeat(&mut self, ping_interval: Duration) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = tokio::time::Instant::now();
+        if self.last_heartbeat.is_some_and(|last| now.duration_since(last) < ping_interval / 2)
+            || self.heartbeat_pending.swap(true, SeqCst)
+        {
+            return;
+        }
+        self.last_heartbeat = Some(now);
         let (source, host, instance) = (self.shared.source.clone(), self.host.clone(), self.instance.clone());
-        tokio::task::spawn_blocking(move || source.heartbeat(&host, &instance));
+        let pending = self.heartbeat_pending.clone();
+        tokio::task::spawn_blocking(move || {
+            source.heartbeat(&host, &instance);
+            pending.store(false, SeqCst);
+        });
     }
 
     /// Sends pending notifications not yet pushed; false when the connection is lost. A fenced

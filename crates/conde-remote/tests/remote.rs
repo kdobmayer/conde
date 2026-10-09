@@ -57,6 +57,8 @@ struct State {
     fence_calls: Vec<(String, String)>,
     endpoints: Vec<Endpoint>,
     endpoint_updates: Vec<Vec<Endpoint>>,
+    /// Heartbeat writes (each takes a moment, like a store write).
+    heartbeats: usize,
     /// (host, instance) of the connection each outcome arrived on.
     outcome_conns: Vec<(String, String)>,
     /// The next this-many record_outcome calls answer Retry (a transient store failure).
@@ -141,6 +143,11 @@ impl NotificationSource for FakeSource {
         let mut s = self.state();
         s.endpoint_updates.push(sorted.clone());
         s.endpoints = sorted;
+    }
+
+    fn heartbeat(&self, _host_id: &str, _bridge_instance: &str) {
+        std::thread::sleep(Duration::from_millis(50));
+        self.state().heartbeats += 1;
     }
 }
 
@@ -651,6 +658,40 @@ async fn pings_keep_an_idle_connection_alive_and_silent_peers_are_cut() {
     .await;
     assert!(ended.is_ok(), "silent peer still connected");
     client.shutdown();
+    server.shutdown().await.unwrap();
+}
+
+/// Review fixture: unsolicited pongs write no heartbeat, and a burst answering one ping writes
+/// exactly one.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_answered_ping_writes_a_heartbeat_once() {
+    let source = Arc::new(FakeSource::default());
+    let config = ServerConfig {
+        ping_interval: Duration::from_millis(300),
+        max_missed_pongs: 5,
+        ..test_config()
+    };
+    let server = start_server(local(), config, source.clone()).await;
+    let mut ws = raw_ws(server.local_addr(), "tok-a").await.unwrap();
+    send_json(&mut ws, hello("host-a", "i-1")).await;
+    for _ in 0..50 {
+        ws.send(Message::Pong(Default::default())).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(source.state().heartbeats, 0, "no ping was outstanding");
+
+    // The first ping: answered by a burst of pongs (the reader's automatic one included).
+    loop {
+        match tokio::time::timeout(WAIT, ws.next()).await.expect("a ping").unwrap().unwrap() {
+            Message::Ping(_) => break,
+            _ => continue,
+        }
+    }
+    for _ in 0..50 {
+        ws.send(Message::Pong(Default::default())).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(source.state().heartbeats, 1, "one write for one answered ping");
     server.shutdown().await.unwrap();
 }
 

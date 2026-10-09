@@ -1054,6 +1054,12 @@ fn settled_notifications_keep_their_attempts(s: &dyn Store) {
             tx.settle_notification(&id, settled, None).unwrap();
         }
         assert_eq!(stale(tx, "new", "box"), vec![("open".to_string(), "bridge instance gone".to_string())]);
+        // Nor does the instance that owns them get them again.
+        let open: Vec<String> = tx.open_attempts("old").unwrap().into_iter().map(|o| o.attempt_id).collect();
+        assert_eq!(open, vec!["open".to_string()]);
+        assert_eq!(tx.held_attempts("old").unwrap().into_iter().map(|h| h.0).collect::<Vec<_>>(), vec!["open".to_string()]);
+        assert_eq!(tx.count_dispatching("old").unwrap(), 0);
+        assert_eq!(tx.gone_holds("old", "box").unwrap(), vec!["open".to_string()]);
     });
 }
 

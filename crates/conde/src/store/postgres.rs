@@ -1506,6 +1506,7 @@ impl Tx for PgTx {
              FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
              JOIN agents a ON a.agent_id = n.recipient_agent_id
              WHERE t.status = 'held' AND t.bridge_instance = $1 AND a.address_kind IS NOT NULL
+               AND n.status IN ('pending', 'dispatching', 'notified', 'held')
              ORDER BY t.attempt_seq",
             &[&bridge_instance],
         )
@@ -1552,6 +1553,16 @@ impl Tx for PgTx {
                 &[&id],
             )?
             .map(|r| (r.get(0), r.get(1))))
+    }
+
+    fn attempt_target(&self, id: &str) -> StoreResult<Option<(String, String, String)>> {
+        Ok(self
+            .query_opt(
+                "SELECT n.notification_id, n.message_id, n.recipient_agent_id FROM attempts t
+                 JOIN notifications n ON n.notification_id = t.notification_id WHERE t.attempt_id = $1",
+                &[&id],
+            )?
+            .map(|r| (r.get(0), r.get(1), r.get(2))))
     }
 
     fn attempt_owner(&self, id: &str) -> StoreResult<Option<(String, Option<String>, i64)>> {
@@ -1637,7 +1648,7 @@ impl Tx for PgTx {
                  FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
                  JOIN agents a ON a.agent_id = n.recipient_agent_id JOIN users u ON u.user_id = a.owner_id
                  WHERE t.bridge_instance = $1 AND t.status IN ('dispatching', 'held')
-                   AND t.text IS NOT NULL AND a.address_kind IS NOT NULL
+                   AND t.text IS NOT NULL AND a.address_kind IS NOT NULL AND n.status IN ('pending', 'dispatching', 'notified', 'held')
                  ORDER BY t.attempt_seq",
                 &[&bridge_instance],
             )?
@@ -1662,7 +1673,7 @@ impl Tx for PgTx {
                 "SELECT t.attempt_id FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
                  JOIN agents a ON a.agent_id = n.recipient_agent_id
                  WHERE t.bridge_instance = $1 AND t.status = 'held' AND a.address_kind IN ('claude', 'mailbox')
-                   AND a.host_id = $2
+                   AND a.host_id = $2 AND n.status IN ('pending', 'dispatching', 'notified', 'held')
                    AND NOT EXISTS (SELECT 1 FROM endpoints e
                                    WHERE e.host_id = a.host_id AND e.kind = a.address_kind
                                      AND e.target = a.address_target)
@@ -1677,7 +1688,8 @@ impl Tx for PgTx {
     fn count_dispatching(&self, bridge_instance: &str) -> StoreResult<i64> {
         Ok(self
             .query_one(
-                "SELECT COUNT(*) FROM attempts WHERE bridge_instance = $1 AND status = 'dispatching'",
+                "SELECT COUNT(*) FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
+                 WHERE t.bridge_instance = $1 AND t.status = 'dispatching' AND n.status IN ('pending', 'dispatching', 'notified', 'held')",
                 &[&bridge_instance],
             )?
             .get(0))

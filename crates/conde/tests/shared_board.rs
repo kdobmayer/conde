@@ -91,6 +91,8 @@ on_both!(
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     the_route_revision_orders_snapshots_and_answers,
     a_takeover_abandons_only_open_attempts,
+    a_read_hold_is_kept_when_the_mailbox_leaves_the_endpoints,
+    a_late_outcome_at_a_moved_generation_keeps_a_read_notification_read,
 );
 
 // --- harness -----------------------------------------------------------------------------------
@@ -1059,6 +1061,65 @@ async fn a_takeover_abandons_only_open_attempts(d: Arc<Dispatcher>) {
         [status(&delivered), status(&accepted), status(&held), status(&open)],
         ["delivered", "read", "read", "dispatching"]
     );
+}
+
+/// The notification of `n` (a notify frame), as the board holds it.
+async fn note_of(d: &Arc<Dispatcher>, n: &Value) -> String {
+    let d = d.clone();
+    let all = blocking(move || d.with_conn(|t| t.notifications()).unwrap()).await;
+    all.into_iter().find(|x| n["notification_id"] == x.id.as_str()).unwrap().status
+}
+
+/// A hold whose message the recipient has read is not abandoned when its mailbox leaves the
+/// endpoints: the notification settles as read, the attempt stays held, and it is never
+/// offered again, not even to the same instance reconnecting.
+async fn a_read_hold_is_kept_when_the_mailbox_leaves_the_endpoints(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let desk = id(s, "desk").await;
+    s.migrate(&fx.kd, &[&desk], "m-read-hold").await;
+    let mut home = s.v2(&fx.kd, "v2-read-hold", 8, &[&desk]).await;
+    home.next("routes").await;
+    let n = home.next("notify").await;
+    let attempt = n["attempt_id"].as_str().unwrap().to_string();
+    home.outcome(&attempt, 1, "held", None).await;
+    s.ok(&fx.kd, Some(mailbox(&desk).as_str()), "message.read", json!({"id": n["message_id"]})).await;
+    home.send(json!({"v": 1, "type": "endpoints", "added": [], "removed": [{"kind": "mailbox", "mailbox_id": desk}]}))
+        .await;
+    home.none("notify", Duration::from_millis(300)).await;
+    let a = s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
+    assert_eq!((a.status.as_str(), a.reason.as_deref()), ("held", None), "the attempt is left as it is");
+    assert_eq!(note_of(&d, &n).await, "read");
+    drop(home);
+    let mut again = s.v2(&fx.kd, "v2-read-hold", 8, &[&desk]).await;
+    again.next("routes").await;
+    again.none("notify", Duration::from_millis(300)).await;
+}
+
+/// An outcome A reports after B took over the mailbox, for a message the recipient has read
+/// meanwhile: the notification settles as read, the attempt is left as it is and nothing is
+/// re-attempted at B.
+async fn a_late_outcome_at_a_moved_generation_keeps_a_read_notification_read(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (mut home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    home.next("routes").await;
+    let n = home.next("notify").await;
+    let attempt = n["attempt_id"].as_str().unwrap().to_string();
+    s.ok(&fx.kd, Some(mailbox(&desk).as_str()), "message.read", json!({"id": n["message_id"]})).await;
+    let laptop = s.key("kd", "laptop").await;
+    s.migrate(&laptop, &[], &conde::util::new_ulid()).await;
+    s.ok(&laptop, None, "mailbox.publish", json!({"name": "desk", "take": true})).await;
+    assert_eq!(routes_of(&home.next("routes").await), []);
+    let ack = home.outcome(&attempt, 1, "failed", Some("transport error")).await;
+    assert_eq!(ack["rejected"], false, "{ack}");
+    let a = s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
+    assert_eq!((a.status.as_str(), a.reason.as_deref()), ("dispatching", None), "the attempt is left as it is");
+    assert_eq!(note_of(&d, &n).await, "read");
+    let mut lap = s.v2(&laptop, "v2-laptop-read", 8, &[&desk]).await;
+    lap.next("routes").await;
+    lap.none("notify", Duration::from_millis(300)).await;
 }
 
 // --- the SQLite file of a v1 board ------------------------------------------------------------

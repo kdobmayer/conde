@@ -410,8 +410,9 @@ conde-generated metadata; the text a user chooses to send is not filtered.
 `Mailbox{mailbox_id}` for publications whose local agent is bound to a live session (Claude:
 `live_claude`; Codex and human: bound counts as live, since Codex threads cannot be listed). No
 session or thread id is reported. The server abandons holds on a mailbox that leaves the set (the v1
-`gone_claude_holds`, extended to the mailbox kind). A replacement behind an unchanged mailbox is
-handled locally, as above.
+`gone_claude_holds`, extended to the mailbox kind); a hold whose message the recipient has read
+settles its notification as read instead. A replacement behind an unchanged mailbox is handled
+locally, as above.
 
 ### Resolved while building the daemon (lane V2, 2026-10-09)
 

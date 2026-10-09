@@ -247,10 +247,12 @@ pub fn endpoints(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     ctx.db.replace_endpoints(&ctx.p.host, me, &live, &ctx.now_iso())?;
     ctx.db.announce(topics::FLEET);
-    let gone = ctx.db.gone_holds(me, &ctx.p.host)?;
     let why = if ctx.mailbox_only { "recipient offline" } else { "recipient session gone" };
-    for attempt_id in &gone {
-        apply(ctx, attempt_id, "abandoned", Some(why), None)?;
+    let mut gone = Vec::new();
+    for attempt_id in ctx.db.gone_holds(me, &ctx.p.host)? {
+        if abandon(ctx, &attempt_id, why, None)?["status"] == "abandoned" {
+            gone.push(attempt_id);
+        }
     }
     Ok(json!({"endpoints": list.len(), "abandoned": gone}))
 }
@@ -264,16 +266,34 @@ pub fn endpoints(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 /// its attempt stays as it is and nothing is re-attempted.
 fn abandon_stale(ctx: &Ctx, me: &str) -> OpResult<()> {
     for a in ctx.db.stale_attempts(me, &ctx.p.host)? {
-        if let Some(m) = msg_by_id(ctx.db, &a.message_id)?
-            && read_by(ctx, &m, &a.recipient_id, member_seq(ctx, &m, &a.recipient_id)?)?
-        {
-            ctx.db.set_notification_status(&a.notification_id, "read")?;
-            ctx.db.announce(topics::DELIVERY);
-            continue;
+        if !settled_as_read(ctx, &a.notification_id, &a.message_id, &a.recipient_id)? {
+            apply(ctx, &a.attempt_id, "abandoned", Some(&a.reason), None)?;
         }
-        apply(ctx, &a.attempt_id, "abandoned", Some(&a.reason), None)?;
     }
     Ok(())
+}
+
+/// Abandon an attempt for re-attempt, unless the recipient has read its message meanwhile: then
+/// the notification settles as read and the attempt is left as it is.
+fn abandon(ctx: &Ctx, attempt_id: &str, reason: &str, event_seq: Option<i64>) -> OpResult<Value> {
+    if let Some((notification_id, message_id, recipient_id)) = ctx.db.attempt_target(attempt_id)?
+        && settled_as_read(ctx, &notification_id, &message_id, &recipient_id)?
+    {
+        return Ok(json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": "read"}));
+    }
+    apply(ctx, attempt_id, "abandoned", Some(reason), event_seq)
+}
+
+/// Whether the recipient has read the notification's message; if so the notification is
+/// settled as read (nothing is left to deliver).
+fn settled_as_read(ctx: &Ctx, notification_id: &str, message_id: &str, recipient_id: &str) -> OpResult<bool> {
+    let Some(m) = msg_by_id(ctx.db, message_id)? else { return Ok(false) };
+    if !read_by(ctx, &m, recipient_id, member_seq(ctx, &m, recipient_id)?)? {
+        return Ok(false);
+    }
+    ctx.db.set_notification_status(notification_id, "read")?;
+    ctx.db.announce(topics::DELIVERY);
+    Ok(true)
 }
 
 /// The recipient's read cursor in `m`'s channel, if `m` is a channel message and it is a member.
@@ -323,9 +343,10 @@ pub fn report(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     // An outcome at a binding the recipient has left (a takeover, an unpublish, a re-register)
     // never ends the notification: the attempt is abandoned and re-attempted at the current
-    // route, as the stale-attempt rule would at the next claim.
+    // route, as the stale-attempt rule would at the next claim; a message the recipient has read
+    // meanwhile settles the notification as read instead.
     if ctx.db.attempt_route(attempt_id)?.is_some_and(|(target, current)| target != current) {
-        return apply(ctx, attempt_id, "abandoned", Some("recipient rebound"), event_seq);
+        return abandon(ctx, attempt_id, "recipient rebound", event_seq);
     }
     apply(ctx, attempt_id, outcome, opt_str(body, "reason")?, event_seq)
 }

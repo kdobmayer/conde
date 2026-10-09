@@ -584,6 +584,9 @@ pub trait Tx {
         host: &str,
         text: &str,
     ) -> StoreResult<()>;
+    /// The instance-scoped queries below see attempts of open notifications only (pending,
+    /// dispatching, notified, held): an attempt left under a read or delivered one is never
+    /// offered, re-held or counted again.
     /// This instance's held attempts as (attempt id, recipient address) for bound recipients.
     fn held_attempts(&self, bridge_instance: &str) -> StoreResult<Vec<(String, String)>>;
     /// Attempts this instance claimed that no outcome settled (dispatching or held), oldest first.
@@ -600,6 +603,8 @@ pub trait Tx {
     fn count_dispatching(&self, bridge_instance: &str) -> StoreResult<i64>;
     /// (notification id, status) of an attempt.
     fn attempt(&self, id: &str) -> StoreResult<Option<(String, String)>>;
+    /// (notification id, message id, recipient agent id) of an attempt.
+    fn attempt_target(&self, id: &str) -> StoreResult<Option<(String, String, String)>>;
     /// (target binding version, the recipient's current binding version) of an attempt.
     fn attempt_route(&self, id: &str) -> StoreResult<Option<(i64, i64)>>;
     /// (bridge instance, host, last event seq) of an attempt.

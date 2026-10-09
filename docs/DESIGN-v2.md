@@ -4,7 +4,9 @@
 the earlier DNS-style search-list sketch is superseded where it differs). This file states the
 design to build; v1 (docs/DESIGN.md) stays the description of what is live. Nothing here is
 implemented yet. Revised the same day with Astra's design review (docs/DESIGN-v2-astra-review-1.md);
-this revision is the V0 contract the implementation lanes build on.
+this revision is the V0 contract the implementation lanes build on. The delivery contract (bounded
+lossless admission, the restart contract) was completed after Astra's second pass
+(docs/DESIGN-v2-astra-review-2.md).
 
 ## 1. Goal and non-goals
 
@@ -161,7 +163,8 @@ has none. v1 idempotency rows are never purged, which the `migrate` replay relie
 
 - `address::Kind::Mailbox` (`mailbox:<agent_id>@<host>`).
 - `conde_remote::Endpoint::Mailbox { mailbox_id }`.
-- `hello` gains `"proto": 2`; a v2 hello lists only `Mailbox` endpoints.
+- `hello` gains `"proto": 2` and `"window": W`, the admission window (section 5); a v2 hello lists
+  only `Mailbox` endpoints.
 - `Notify` gains `kind` (dm | mention | post), `sender`, `place`, `badges`, so the daemon renders the
   notification text with the board alias. They are required on a v2 connection; `text` stays for v1
   bridges only, and a v2 daemon never injects it.
@@ -246,20 +249,58 @@ board's outcome budget is full.
   each board), round-robin with one job per origin per turn. It never waits on a remote call, a
   reconnect, a report budget or an acknowledgement, and it holds no SQLite transaction across
   any of those.
-- **Outcomes go to the origin.** Each outcome is put on that origin's bounded outcome queue, and
-  that board's own task drains it into `bridge.report`. When a board's outcome queue is full, the
-  daemon stops taking that board's jobs: they stay open on the server and are offered again later.
-  Local jobs keep flowing.
+- **Admission window: the server holds the backlog.** The v1 transport cannot re-offer a job:
+  - the server pushes a pending attempt once per connection (its `sent` set);
+  - the client marks an attempt seen before the callback, and that mark survives reconnects;
+  - the callback channel is unbounded.
+
+  Pausing after the callback would therefore hide an unbounded backlog, and dropping a job would
+  strand it. V2 bounds the backlog where it is durable instead, on the server:
+  - **The window.** The v2 hello declares a window W (default 32). An attempt counts against it
+    from its push until the server records its first outcome; on the server that is the attempt
+    row in status `dispatching` for this bridge instance, so the count survives reconnects. The
+    server claims new attempts for a v2 instance only up to `W - dispatching`. Everything beyond
+    stays pending in the board's database, which is lossless and needs no memory on the host. A v1
+    bridge has no window and behaves as today.
+  - **Retention invariant.** An attempt the client has marked seen is retained by the daemon until
+    an outcome for it has been handed to the client: in the board's job queue (capacity W), then in
+    the token map once injected. Nothing seen is ever dropped. A job that admission refuses (route
+    revoked, publication gone) is settled with `refused` or `failed`, never discarded. A notify the
+    daemon already holds or already injected (by board and attempt id) is ignored. This second
+    de-duplication is backed by the token map, so it does not depend on the client's seen-set
+    capacity.
+  - **Outcomes and receipts.** Outcomes and late receipts never block the notifier thread. They go
+    into a per-board map keyed by token, where the latest status wins, and the board's task drains
+    the map into the client's outcome book (`bridge.report`) whenever the book has room. The map
+    holds at most one entry per in-flight or injected attempt, so it is bounded by W plus the
+    notifier's own cap on remembered injections (`REMEMBERED` in `harness.rs`). A late `held` or
+    `delivered` receipt of an already injected attempt therefore always has a slot: a full board
+    can delay a terminal receipt but cannot drop it.
+  - **Pause and recovery without a restart.** When the book stops draining (the server stops
+    acking, or its budget is full), first outcomes stop reaching the server. The window then stays
+    full and the server stops pushing, and the board pauses with bounded memory. The board's
+    connection task keeps reading frames while admission is paused: `outcome_ack` and `routes`
+    frames are handled by that task, not by the notifier thread. When acks resume, the map
+    drains, the window frees, and the server pushes again.
+  - **Local jobs keep flowing** throughout. The local origin uses the same rule with its own claim
+    limit (the free capacity of its queue).
 - **Local delivery tokens.** Each job gets a token minted locally (a ULID), which is what the
   notifier receives. The harness message id is derived from the token, so a board-supplied attempt
   id never becomes a harness identity and cannot collide with another origin's. An in-memory map
   `token -> (board, board-local attempt_id, local agent, local incarnation)` routes each late
   receipt. Only the board-local attempt id is sent back, and only to its own board.
-- **Restart.** The map is not persisted. Receipts for a previous incarnation's tokens are ignored.
-  Each board abandons the previous bridge instance's open attempts and re-attempts them (the v1
-  stale-attempt rule), and the local board does the same. Delivery is at least once: a crash between
-  injection and report can repeat one push. A crash after a report and before its ack resends the
-  outcome with its `event_seq`, which the board settles once.
+- **Connection loss and process death** (the at-least-once contract; v2 adds no durable outcome
+  journal):
+  - **Connection lost, process alive**: the client keeps every unacknowledged outcome in memory
+    and resends it with the same `event_seq` after reconnecting under the same bridge instance; the
+    board settles it once. Retained jobs and the token map are kept.
+  - **Process death**: the token map, the retained jobs and the client's unacknowledged outcomes
+    are gone. An outcome the server committed before the death stays settled, even if its ack was
+    lost. The new daemon is a new bridge instance. Every attempt of the old instance without a
+    committed terminal outcome (not yet reported, or reported only into the dead client's memory,
+    or still `accepted` or `held`) is abandoned by the v1 stale-attempt rule and re-attempted
+    through the new instance, so it may be injected again. Receipts for the old tokens are ignored.
+    The local board follows the same rule.
 - **Session replacement.** The local incarnation is the local agent's `binding_version`, a local
   counter that is never sent. When the 5-second rescan sees a published agent's binding change (the
   old and new sessions may both be live), the daemon reports `abandoned` with reason
@@ -318,7 +359,8 @@ handled locally, as above.
   selects this wording and the refusals above, instead of reusing `Principal.local`.
 - Listings (`agent.list`, `agent.resolve`, `profile.get`, `fleet.list`) show kind and host, never a
   target, for every row, which also hides the session ids of v1 hosts during the transition.
-- `bridge.claim` fills the structured `Notify` fields for mailbox recipients.
+- `bridge.claim` fills the structured `Notify` fields for mailbox recipients, and for a v2 instance
+  claims new attempts only up to its window (`W` minus its attempts in `dispatching`; section 5).
 - Fleet "reached": the v1 rule (`delivered`, or `accepted` on a codex row) stays for v1 rows. Mailbox
   rows count `delivered` only, which is what a confirmed Codex reach is normalized to.
 
@@ -543,12 +585,16 @@ server is involved), then run once live on homepc with a teammate:
   - a notify without the structured fields.
 
   A remote sender gets the same error text for an unpublished name as for a name that never existed.
-- **G6 restart and crash points**: a published agent and a teammate's agent exchange a DM and a
-  reply, with the ids carrying `dakai:` and `sent` showing both receipts. The daemon is then killed
-  at three points, with these expected results:
-  - after injection and before the report: the message is not lost, at most one repeated push;
-  - after the report and before the ack: no repeated settle, by `event_seq`;
-  - between two exchanges: no loss and no duplicate.
+- **G6 interruptions**: a published agent and a teammate's agent exchange a DM and a reply, with the
+  ids carrying `dakai:` and `sent` showing both receipts. Then three cases:
+  - a connection-only interruption (the server connection is dropped, the process stays): the
+    unacknowledged outcomes are resent with the same `event_seq`, settled once, with no repeated
+    push;
+  - the process killed after a report was accepted into the client's memory and before it was
+    sent: the attempt is abandoned and re-attempted through the new instance, and the message is
+    not lost (one repeated push is allowed);
+  - the process killed after the server committed a terminal outcome whose ack was lost: the
+    attempt stays settled, with no repeated push.
 - **G7 publish first**: an unpublished agent's `send --board dakai` returns the publish error and sends nothing.
 - **G8 migration**: on a copy of the central database, from a reviewed manifest:
   - the preview's candidates come from message relationships;
@@ -562,9 +608,15 @@ server is involved), then run once live on homepc with a teammate:
   agents. The owner sees his agents' DMs with anyone. No web request changes a cursor or a receipt.
 - **G10 history**: H1 is frozen and reviewed before the migration. H2 and H3 validate by hashes before
   the first v2 start. H4 revalidates the manifest and runs only after the owner's two confirmations.
-- **G11 a stalled board**: a connected server stops acknowledging outcomes until the board's outcome
-  queue is full, and the board's job queue is filled. Local pushes and local outcomes continue at
-  normal latency, and the stalled board's jobs are re-offered after it recovers.
+- **G11 a stalled board**: a connected server stops acknowledging outcomes; more notifications than
+  the window are made due; and a held attempt's late `delivered` receipt arrives while every
+  board-side queue and the client's outcome book are full. Checks:
+  - local pushes and local outcomes continue at normal latency;
+  - the daemon's memory for that board stays within its bounds (window, outcome map, book);
+  - when acks resume, without a daemon restart, the board recovers by itself;
+  - every job the daemon accepted is injected and settled exactly as in the contract, the late
+    receipt is settled, and the notifications beyond the window are pushed afterwards;
+  - `routes` frames and `outcome_ack` frames are processed throughout.
 - **G12 a lost board**: the board revokes the host's credential, and separately another instance
   fences it. The connection stops, the daemon and local delivery keep running, and `doctor` names
   the state.
@@ -593,16 +645,20 @@ First increment = local + one shared board + publish (V0 to V3). Fewest lanes th
 
 | Lane | Owns | Gate |
 |---|---|---|
-| V0 contract (standalone, before V1 to V3 start; Astra's second pass) | This document as amended, plus one commit of the shared types: `Kind::Mailbox`, `Endpoint::Mailbox`, hello `proto`, required `Notify` fields, the `routes` frame, the outcome status and reason enums, op names and bodies of sections 6 and 9 (including idempotency and generation fields), the `publications`/`board_ops` schema, response `board` labels | compiles; protocol round-trip tests; Astra's second pass clean |
-| V1 shared board | Section 6 on both backends: migration 0006 + SQLite rebuild, `mailbox.*` with generations, the `routes` push, `board.info`, `host.migrate_preview`/`host.migrate_v2` with v1 fencing, mailbox-only refusals, closed reasons, non-disclosure, target-free listings, fleet rule for mailbox rows, mixed v1/v2 hosts | G5 (server half), G8, G15 (server half); the v1 cloud suite still green on SQLite and on a real PG 18 |
-| V2 daemon | Section 5: single daemon shape, connection-local failure, resolver, `publications` + `board_ops` with resume, credential move and alias pinning, the multiplexer (per-origin queues, tokens, incarnations), admission, outcome normalization and sanitizing, actor translation, endpoint reporting, reconciliation, aggregate views | G1 to G7 and G11 to G17 in an in-process two-host test |
+| V0 contract (standalone, before V1 to V3 start; Astra's second pass) | This document as amended, plus one commit of the shared types: `Kind::Mailbox`, `Endpoint::Mailbox`, hello `proto` and `window`, required `Notify` fields, the `routes` frame, the outcome status and reason enums, op names and bodies of sections 6 and 9 (including idempotency and generation fields), the `publications`/`board_ops` schema, response `board` labels | compiles; protocol round-trip tests; Astra's second pass clean |
+| V1 shared board | Section 6 on both backends: migration 0006 + SQLite rebuild, `mailbox.*` with generations, the `routes` push, `board.info`, `host.migrate_preview`/`host.migrate_v2` with v1 fencing, mailbox-only refusals, closed reasons, non-disclosure, target-free listings, fleet rule for mailbox rows, mixed v1/v2 hosts, the admission window in `bridge.claim` and `conde-remote` `server.rs` | G5 (server half), G11 (server half), G8, G15 (server half); the v1 cloud suite still green on SQLite and on a real PG 18 |
+| V2 daemon | Section 5, and the `conde-remote` client (`client.rs`): single daemon shape, connection-local failure, resolver, `publications` + `board_ops` with resume, credential move and alias pinning, the multiplexer (window, retention invariant, per-board outcome map, tokens, incarnations), admission, outcome normalization and sanitizing, actor translation, endpoint reporting, reconciliation, aggregate views | G1 to G7 and G11 to G17 in an in-process two-host test |
 | V3 surface | Section 7: CLI commands and printing, MCP `board` with the same rules, the `setup` unit rewrite plus the default-board and migration-review prompts, skills, README | cli_wiring + mcp tests; README path in a fresh HOME ends with `doctor` all clear |
 | L9 (running) | section 8 owner view | G9 |
 | H-pre (before the switch) | H1 inventory and the frozen manifest; the H2 hash validation in the importer; the H3 one-off copy and `history.copy` | G10, first two parts, run on a rehearsal copy |
 | H4 (after the teammates migrate) | revalidation and the exact deletion list | G10, third part; executed only on the owner's two confirmations |
 
+The admission window is one contract across the server, the client and the daemon. V0 fixes it
+(hello `window`, the `dispatching` count, the retention invariant). V1 owns `server.rs` and the
+claim limit, and V2 owns `client.rs` and the daemon side. G11 counts only on the integrated build.
+
 Order:
-1. V0, then Astra's second pass.
+1. V0, then Astra's next pass.
 2. V1, V2, V3 and H-pre in parallel, then the integrated review.
 3. Deploy the server (dakai-helper rolls the image).
 4. Switch homepc (H2 + H3 + migration) and run the live gates.

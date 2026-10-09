@@ -39,7 +39,7 @@ fn publish_round_trip_with_optional_flags() {
         json!({"name": "krisz", "human": true, "take": true}),
     );
     round_trip(
-        &Published { name: "worker".into(), mailbox_id: "01MBX".into(), route_generation: 2 },
+        &Published { name: "worker".into(), mailbox_id: "01MBX".into(), route_generation: 2, revision: None },
         json!({"name": "worker", "mailbox_id": "01MBX", "route_generation": 2}),
     );
     assert!(serde_json::from_value::<PublishBody>(json!({"take": true})).is_err(), "name is required");
@@ -53,7 +53,7 @@ fn unpublish_carries_the_expected_generation() {
     );
     assert!(serde_json::from_value::<UnpublishBody>(json!({"mailbox_id": "01MBX"})).is_err());
     round_trip(
-        &Unpublished { mailbox_id: "01MBX".into(), route_generation: 3 },
+        &Unpublished { mailbox_id: "01MBX".into(), route_generation: 3, revision: None },
         json!({"mailbox_id": "01MBX", "route_generation": 3}),
     );
 }
@@ -62,8 +62,11 @@ fn unpublish_carries_the_expected_generation() {
 fn mine_round_trip() {
     let mine = Mine {
         mailboxes: vec![MineMailbox { name: "desk".into(), mailbox_id: "01MBX".into(), route_generation: 5 }],
+        revision: None,
     };
     round_trip(&mine, json!({"mailboxes": [{"name": "desk", "mailbox_id": "01MBX", "route_generation": 5}]}));
+    let revised = Mine { revision: Some(7), ..mine };
+    round_trip(&revised, json!({"mailboxes": [{"name": "desk", "mailbox_id": "01MBX", "route_generation": 5}], "revision": 7}));
 }
 
 #[test]

@@ -480,8 +480,12 @@ pub trait Tx {
     fn agents_on_host(&self, host: &str) -> StoreResult<Vec<Agent>>;
     fn insert_agent(&self, id: &str, owner_id: i64, name: &str) -> StoreResult<()>;
     /// Rebinds (or unbinds) and bumps binding_version; the old and the new host are woken
-    /// on commit (a moved mailbox changes both hosts' routes).
+    /// on commit (a moved mailbox changes both hosts' routes), and both hosts' route
+    /// revision is bumped in the same transaction.
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()>;
+    /// The host's route revision (`hosts.route_revision`): bumped by every binding change
+    /// that touches the host, so a routes snapshot carries the causal point it was read at.
+    fn route_revision(&self, host: &str) -> StoreResult<u64>;
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()>;
     fn set_display(&self, agent_id: &str, display: Option<&str>) -> StoreResult<()>;
     /// Gives the agent a new name in place: id, binding and every reference stay.

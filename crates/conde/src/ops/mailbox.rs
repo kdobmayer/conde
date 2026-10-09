@@ -62,7 +62,7 @@ pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         Address::new(Kind::Mailbox, &row.id, &ctx.p.host)
     };
     match &row.address {
-        Some(a) if *a == target => return published(&row),
+        Some(a) if *a == target => return published(ctx, &row),
         Some(a) if a.host != ctx.p.host && !b.take => {
             return Err(conflict(format!(
                 "{} is published on host '{}'; take it over with --take",
@@ -81,11 +81,21 @@ pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         agents::join_lobby(ctx, &row)?;
     }
     let row = agents::by_id(ctx.db, &row.id)?.ok_or_else(|| not_found(name.clone()))?;
-    published(&row)
+    published(ctx, &row)
 }
 
-fn published(a: &Agent) -> OpResult<Value> {
-    json(&Published { name: a.name.clone(), mailbox_id: a.id.clone(), route_generation: generation(a) })
+/// The calling host's route revision, read in the op's own transaction.
+pub fn revision(ctx: &Ctx) -> OpResult<u64> {
+    Ok(ctx.db.route_revision(&ctx.p.host)?)
+}
+
+fn published(ctx: &Ctx, a: &Agent) -> OpResult<Value> {
+    json(&Published {
+        name: a.name.clone(),
+        mailbox_id: a.id.clone(),
+        route_generation: generation(a),
+        revision: Some(revision(ctx)?),
+    })
 }
 
 /// `mailbox.unpublish {mailbox_id, expected_generation}`: unbinds only a mailbox bound to the
@@ -104,7 +114,7 @@ pub fn unpublish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         return Err(moved());
     }
     ctx.db.set_binding(&row.id, None)?;
-    json(&Unpublished { mailbox_id: row.id, route_generation: b.expected_generation + 1 })
+    json(&Unpublished { mailbox_id: row.id, route_generation: b.expected_generation + 1, revision: Some(revision(ctx)?) })
 }
 
 /// `mailbox.mine`: the mailboxes routed to the calling host, with their generations.
@@ -117,5 +127,5 @@ pub fn mine(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         .filter(|a| routed(a, &ctx.p.host))
         .map(|a| MineMailbox { name: a.name.clone(), mailbox_id: a.id.clone(), route_generation: generation(a) })
         .collect();
-    json(&Mine { mailboxes })
+    json(&Mine { mailboxes, revision: Some(revision(ctx)?) })
 }

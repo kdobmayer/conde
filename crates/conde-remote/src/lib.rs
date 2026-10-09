@@ -314,6 +314,10 @@ pub enum Endpoint {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Routes {
     pub mailboxes: Vec<Route>,
+    /// The host's route revision this set was read at; a daemon ignores a set older than one
+    /// it already applied (absent from a server that does not count revisions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// One mailbox routed to this host at its route generation (the row's `binding_version`).

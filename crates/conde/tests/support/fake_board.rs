@@ -160,7 +160,7 @@ impl St {
             .filter(|m| m.host.as_deref() == Some(host))
             .map(|m| Route { mailbox_id: m.id.clone(), route_generation: m.generation })
             .collect();
-        frame("routes", &serde_json::to_value(Routes { mailboxes }).unwrap())
+        frame("routes", &serde_json::to_value(Routes { mailboxes, revision: None }).unwrap())
     }
 
     /// The stale-attempt rule: an open attempt whose instance is not the host's active one, or

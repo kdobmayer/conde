@@ -57,6 +57,9 @@ pub struct Published {
     pub name: String,
     pub mailbox_id: String,
     pub route_generation: u64,
+    /// The host's route revision after the publish (see [`conde_remote::Routes::revision`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// `mailbox.unpublish` body: unbind only if bound to the calling host at this generation,
@@ -72,12 +75,18 @@ pub struct UnpublishBody {
 pub struct Unpublished {
     pub mailbox_id: String,
     pub route_generation: u64,
+    /// The host's route revision after the unpublish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// `mailbox.mine` result: the mailboxes bound to the calling host.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mine {
     pub mailboxes: Vec<MineMailbox>,
+    /// The host's route revision this list was read at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

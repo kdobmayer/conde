@@ -89,6 +89,7 @@ on_both!(
     a_mailbox_row_is_reached_only_when_delivered,
     board_info_names_the_board_account_and_host,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
+    the_route_revision_orders_snapshots_and_answers,
 );
 
 // --- harness -----------------------------------------------------------------------------------
@@ -624,7 +625,7 @@ async fn g15_unpublish_republish_and_takeover_move_the_route_generation(d: Arc<D
 
     // Unpublish at the current generation: the route is gone, a remote send is refused.
     let u = s.ok(&fx.kd, None, "mailbox.unpublish", json!({"mailbox_id": desk, "expected_generation": g1})).await;
-    assert_eq!(u, json!({"mailbox_id": desk, "route_generation": g1 + 1}));
+    assert_eq!(unrevised(u), json!({"mailbox_id": desk, "route_generation": g1 + 1}));
     assert_eq!(routes_of(&home.next("routes").await), []);
     let refused = s.err(&fx.ben, Some(RELAY), "message.send", json!({"to": {"agent": "kd/desk"}, "text": "x"})).await;
     assert_eq!(refused, ("not_found".into(), "recipient unavailable: kd/desk".into()));
@@ -636,11 +637,11 @@ async fn g15_unpublish_republish_and_takeover_move_the_route_generation(d: Arc<D
     // Re-publishing the same name: the same mailbox at a new generation; messages flow again.
     let p = s.ok(&fx.kd, None, "mailbox.publish", json!({"name": "desk"})).await;
     let g3 = g1 + 2;
-    assert_eq!(p, json!({"name": "desk", "mailbox_id": desk, "route_generation": g3}));
+    assert_eq!(unrevised(p.clone()), json!({"name": "desk", "mailbox_id": desk, "route_generation": g3}));
     assert_eq!(s.ok(&fx.kd, None, "mailbox.publish", json!({"name": "desk"})).await, p, "again: a no-op");
     assert_eq!(routes_of(&home.next("routes").await), [(desk.clone(), g3)]);
     let mine = s.ok(&fx.kd, None, "mailbox.mine", json!({})).await;
-    assert_eq!(mine, json!({"mailboxes": [{"name": "desk", "mailbox_id": desk, "route_generation": g3}]}));
+    assert_eq!(unrevised(mine), json!({"mailboxes": [{"name": "desk", "mailbox_id": desk, "route_generation": g3}]}));
     let id = s.send(&fx.ben, RELAY, "kd/desk", "back?").await;
     let n = home.next("notify").await;
     assert_eq!((n["message_id"].as_str(), n["binding_version"].as_u64()), (Some(id.as_str()), Some(g3)));
@@ -653,7 +654,7 @@ async fn g15_unpublish_republish_and_takeover_move_the_route_generation(d: Arc<D
     assert_eq!(code, "conflict", "published on homepc: --take is needed");
     let t = s.ok(&laptop, None, "mailbox.publish", json!({"name": "desk", "take": true})).await;
     let g4 = g3 + 1;
-    assert_eq!(t, json!({"name": "desk", "mailbox_id": desk, "route_generation": g4}));
+    assert_eq!(unrevised(t), json!({"name": "desk", "mailbox_id": desk, "route_generation": g4}));
     // The old host is pushed its routes without the mailbox.
     assert_eq!(routes_of(&home.next("routes").await), []);
     let mut lap = s.v2(&laptop, "v2-laptop", 8, &[&desk]).await;
@@ -668,7 +669,51 @@ async fn g15_unpublish_republish_and_takeover_move_the_route_generation(d: Arc<D
     assert_eq!(code, "conflict");
     let row = s.agent("kd", "desk").await;
     assert_eq!((row.address.unwrap().host, row.binding_version as u64), ("laptop".to_string(), g4));
-    assert_eq!(s.ok(&fx.kd, None, "mailbox.mine", json!({})).await, json!({"mailboxes": []}));
+    assert_eq!(unrevised(s.ok(&fx.kd, None, "mailbox.mine", json!({})).await), json!({"mailboxes": []}));
+}
+
+/// The answer without its route revision (checked on its own below).
+fn unrevised(mut v: Value) -> Value {
+    if let Some(o) = v.as_object_mut() {
+        o.remove("revision");
+    }
+    v
+}
+
+/// A host's route revision moves with every binding change that touches the host, in the same
+/// transaction, and rides every snapshot and answer: `routes`, `mailbox.mine`, `mailbox.publish`,
+/// `mailbox.unpublish`. A takeover moves the old host's revision too. A daemon orders snapshots
+/// by it, not by when their answers arrive.
+async fn the_route_revision_orders_snapshots_and_answers(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (mut home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    let rev = |v: &Value| v["revision"].as_u64().unwrap_or_else(|| panic!("no revision in {v}"));
+    let r0 = rev(&home.next("routes").await);
+    assert_eq!(rev(&s.ok(&fx.kd, None, "mailbox.mine", json!({})).await), r0);
+    let g = s.agent("kd", "desk").await.binding_version as u64;
+
+    let u = s.ok(&fx.kd, None, "mailbox.unpublish", json!({"mailbox_id": desk, "expected_generation": g})).await;
+    let r1 = rev(&u);
+    assert!(r1 > r0, "{r1} > {r0}");
+    assert_eq!(rev(&home.next("routes").await), r1);
+
+    let p = s.ok(&fx.kd, None, "mailbox.publish", json!({"name": "desk"})).await;
+    let r2 = rev(&p);
+    assert!(r2 > r1);
+    assert_eq!(rev(&s.ok(&fx.kd, None, "mailbox.publish", json!({"name": "desk"})).await), r2, "a no-op moves nothing");
+    assert_eq!(rev(&s.ok(&fx.kd, None, "mailbox.mine", json!({})).await), r2);
+    assert_eq!(rev(&home.next("routes").await), r2);
+
+    let laptop = s.key("kd", "laptop").await;
+    s.migrate(&laptop, &[], &conde::util::new_ulid()).await;
+    let before = rev(&s.ok(&laptop, None, "mailbox.mine", json!({})).await);
+    let t = s.ok(&laptop, None, "mailbox.publish", json!({"name": "desk", "take": true})).await;
+    assert!(rev(&t) > before, "the new host's revision moved");
+    let r3 = rev(&home.next("routes").await);
+    assert!(r3 > r2, "the old host's revision moved with the takeover: {r3} > {r2}");
+    assert_eq!(rev(&s.ok(&fx.kd, None, "mailbox.mine", json!({})).await), r3);
 }
 
 /// The old host applied the routes frame and reports its attempt at the old generation refused

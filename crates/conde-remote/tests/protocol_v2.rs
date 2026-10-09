@@ -256,6 +256,7 @@ fn routes_frame_round_trip() {
                 route_generation: 1,
             },
         ],
+        revision: None,
     };
     round_trip(
         &routes,

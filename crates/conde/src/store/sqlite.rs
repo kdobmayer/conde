@@ -34,6 +34,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("channels", "topic", "TEXT"),
     ("users", "disabled", "INTEGER NOT NULL DEFAULT 0"),
     ("attempts", "settled_at", "TEXT"),
+    ("hosts", "route_revision", "INTEGER NOT NULL DEFAULT 0"),
     ("hosts", "mailbox_only", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
@@ -653,7 +654,7 @@ impl Tx for SqliteTx<'_> {
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()> {
         let old: Option<String> =
             self.opt("SELECT host_id FROM agents WHERE agent_id = ?1", [agent_id], one_col)?.flatten();
-        self.wakes.borrow_mut().hosts.extend(old);
+        self.wakes.borrow_mut().hosts.extend(old.clone());
         self.exec(
             "UPDATE agents SET address_kind = ?2, address_target = ?3, host_id = ?4,
              binding_version = binding_version + 1 WHERE agent_id = ?1",
@@ -664,10 +665,19 @@ impl Tx for SqliteTx<'_> {
                 address.map(|a| a.host.as_str())
             ],
         )?;
+        self.exec(
+            "UPDATE hosts SET route_revision = route_revision + 1 WHERE host_id IN (?1, ?2)",
+            params![old, address.map(|a| a.host.as_str())],
+        )?;
         if let Some(a) = address {
             self.wakes.borrow_mut().hosts.insert(a.host.clone());
         }
         Ok(())
+    }
+
+    fn route_revision(&self, host: &str) -> StoreResult<u64> {
+        let r: Option<i64> = self.opt("SELECT route_revision FROM hosts WHERE host_id = ?1", [host], one_col)?;
+        Ok(r.unwrap_or_default() as u64)
     }
 
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()> {

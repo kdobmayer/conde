@@ -155,6 +155,7 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     if v2 {
         out["routes"] = json!(super::mailbox::routes(ctx)?);
+        out["routes_revision"] = json!(super::mailbox::revision(ctx)?);
     }
     Ok(out)
 }

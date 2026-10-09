@@ -65,6 +65,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (4, "notifications_by_recipient", include_str!("migrations/0004_notifications_by_recipient.sql")),
     (5, "attempt_settled_at", include_str!("migrations/0005_attempt_settled_at.sql")),
     (6, "mailbox", include_str!("migrations/0006_mailbox.sql")),
+    (7, "route_revision", include_str!("migrations/0007_route_revision.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -1102,7 +1103,7 @@ impl Tx for PgTx {
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()> {
         let old: Option<String> =
             self.query_opt("SELECT host_id FROM agents WHERE agent_id = $1", &[&agent_id])?.and_then(|r| r.get(0));
-        self.wakes.borrow_mut().hosts.extend(old);
+        self.wakes.borrow_mut().hosts.extend(old.clone());
         self.execute(
             "UPDATE agents SET address_kind = $2, address_target = $3, host_id = $4,
              binding_version = binding_version + 1 WHERE agent_id = $1",
@@ -1113,10 +1114,20 @@ impl Tx for PgTx {
                 &address.map(|a| a.host.as_str()),
             ],
         )?;
+        let new = address.map(|a| a.host.clone());
+        self.execute(
+            "UPDATE hosts SET route_revision = route_revision + 1 WHERE host_id = $1 OR host_id = $2",
+            &[&old, &new],
+        )?;
         if let Some(a) = address {
             self.wakes.borrow_mut().hosts.insert(a.host.clone());
         }
         Ok(())
+    }
+
+    fn route_revision(&self, host: &str) -> StoreResult<u64> {
+        let r: Option<i64> = self.query_opt("SELECT route_revision FROM hosts WHERE host_id = $1", &[&host])?.map(|r| r.get(0));
+        Ok(r.unwrap_or_default() as u64)
     }
 
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()> {

@@ -239,7 +239,9 @@ impl Board {
             })
             .collect();
         match claim.get("routes").map(|r| serde_json::from_value::<Vec<Route>>(r.clone())) {
-            Some(Ok(mailboxes)) => Polled::Routed { notifies, routes: Routes { mailboxes } },
+            Some(Ok(mailboxes)) => {
+                Polled::Routed { notifies, routes: Routes { mailboxes, revision: claim["routes_revision"].as_u64() } }
+            }
             Some(Err(e)) => {
                 tracing::error!(host = host_id, instance = bridge_instance, "unreadable routes in a claim: {e}");
                 Polled::Due(notifies)

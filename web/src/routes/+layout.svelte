@@ -1,7 +1,7 @@
 <script lang="ts">
 	import '../app.css';
 	import { page } from '$app/state';
-	import { board, start, short, unreadTotal } from '#lib/board.svelte.ts';
+	import { board, start, short, threadHref } from '#lib/board.svelte.ts';
 	import { stamp } from '#lib/time.ts';
 	import UserMenu from '#lib/UserMenu.svelte';
 
@@ -13,22 +13,13 @@
 	});
 
 	const home = $derived(page.route.id === '/' || page.route.id === null);
+	/** The open conversation as the rail's href, to mark it. */
 	const current = $derived.by(() => {
 		const p = page.params;
-		if (page.route.id === '/dm/[owner]/[name]') return `dm:${p.owner}/${p.name}`;
-		if (page.route.id === '/channel/[name]') return `ch:#${p.name}`;
+		if (page.route.id === '/a/[agent]/dm/[owner]/[name]') return threadHref(p.agent ?? '', `${p.owner}/${p.name}`);
+		if (page.route.id === '/a/[agent]/ch/[name]') return threadHref(p.agent ?? '', `#${p.name}`);
 		return page.route.id ?? '';
 	});
-	const total = $derived(unreadTotal());
-
-	$effect(() => {
-		document.title = total > 0 ? `(${total}) conde` : 'conde';
-	});
-
-	function dmHref(name: string): string {
-		const [owner, rest] = name.split('/');
-		return `#/dm/${encodeURIComponent(owner ?? '')}/${encodeURIComponent(rest ?? '')}`;
-	}
 </script>
 
 <div class="shell" class:home>
@@ -46,46 +37,44 @@
 		<p class="error pad">The board could not be loaded: {failed}</p>
 	{:else}
 		<div class="body">
-			<nav class="rail" aria-label="Conversations">
-				<div class="rail-actions">
-					<a class="new" href="#/new">New message</a>
-				</div>
-				{#if board.session?.problem}
-					<p class="error pad small">{board.session.problem}</p>
-				{/if}
+			<nav class="rail" aria-label="Your agents' conversations">
+				<h2>My agents</h2>
 				{#if board.rail}
-					<h2>Direct messages</h2>
-					<ul>
-						{#each board.rail.dms as dm (dm.with)}
-							<li>
-								<a href={dmHref(dm.with)} class:active={current === `dm:${dm.with}`} class:unread={dm.unread > 0}>
-									<span class="name">{short(dm.with)}</span>
-									<span class="when muted">{stamp(dm.last_at)}</span>
-									{#if dm.unread > 0}<span class="badge">{dm.unread}</span>{/if}
-								</a>
-							</li>
-						{:else}
-							<li class="muted empty">No direct messages yet.</li>
-						{/each}
-					</ul>
-					<h2>Channels <a class="browse" href="#/channels">Browse</a></h2>
-					<ul>
-						{#each board.rail.channels as ch (ch.channel)}
-							<li>
-								<a
-									href={`#/channel/${encodeURIComponent(ch.channel.slice(1))}`}
-									class:active={current === `ch:${ch.channel}`}
-									class:unread={ch.unread > 0}
-								>
-									<span class="name">{ch.channel}</span>
-									<span class="when muted">{stamp(ch.last_at)}</span>
-									{#if ch.unread > 0}<span class="badge">{ch.unread}</span>{/if}
-								</a>
-							</li>
-						{:else}
-							<li class="muted empty">Not in any channel.</li>
-						{/each}
-					</ul>
+					{#each board.rail.agents as agent (agent.name)}
+						<section class="agent">
+							<div class="agent-head">
+								<span class="agent-name">{short(agent.name)}</span>
+								<span class="tag">{agent.kind ?? 'unbound'}</span>
+							</div>
+							<ul>
+								{#each agent.dms as dm (dm.with)}
+									{@const href = threadHref(agent.name, dm.with)}
+									<li>
+										<a {href} class:active={current === href} class:unread={dm.unread > 0}>
+											<span class="name">{short(dm.with)}</span>
+											<span class="when muted">{stamp(dm.last_at)}</span>
+											{#if dm.unread > 0}<span class="badge" title={`unread by ${short(agent.name)}`}>{dm.unread}</span>{/if}
+										</a>
+									</li>
+								{/each}
+								{#each agent.channels as ch (ch.channel)}
+									{@const href = threadHref(agent.name, ch.channel)}
+									<li>
+										<a {href} class:active={current === href} class:unread={ch.unread > 0}>
+											<span class="name">{ch.channel}</span>
+											<span class="when muted">{stamp(ch.last_at)}</span>
+											{#if ch.unread > 0}<span class="badge" title={`unread by ${short(agent.name)}`}>{ch.unread}</span>{/if}
+										</a>
+									</li>
+								{/each}
+								{#if agent.dms.length === 0 && agent.channels.length === 0}
+									<li class="muted empty">No conversations.</li>
+								{/if}
+							</ul>
+						</section>
+					{:else}
+						<p class="muted pad">You have no agents on the board yet.</p>
+					{/each}
 				{:else}
 					<p class="muted pad">Loading…</p>
 				{/if}
@@ -153,18 +142,6 @@
 		border-right: 1px solid var(--line);
 		padding: 8px 0 24px;
 	}
-	.rail-actions {
-		padding: 4px 12px 8px;
-	}
-	.new {
-		display: block;
-		text-align: center;
-		padding: 7px 10px;
-		border-radius: 6px;
-		background: var(--accent);
-		color: var(--on-accent);
-		text-decoration: none;
-	}
 	.rail h2 {
 		display: flex;
 		justify-content: space-between;
@@ -176,11 +153,21 @@
 		letter-spacing: 0.05em;
 		color: var(--muted);
 	}
-	.browse {
-		font-size: 12px;
-		text-transform: none;
-		letter-spacing: 0;
-		font-weight: 400;
+	.agent {
+		margin-top: 6px;
+	}
+	.agent-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 16px 2px;
+	}
+	.agent-name {
+		font-weight: 650;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.rail ul {
 		list-style: none;
@@ -191,7 +178,7 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		padding: 6px 16px;
+		padding: 5px 16px 5px 28px;
 		color: inherit;
 		text-decoration: none;
 	}
@@ -216,14 +203,11 @@
 		font-size: 12px;
 	}
 	.empty {
-		padding: 4px 16px;
+		padding: 2px 16px 2px 28px;
 		font-size: 13px;
 	}
 	.pad {
 		padding: 8px 16px;
-	}
-	.small {
-		font-size: 13px;
 	}
 	.detail {
 		flex: 1;

@@ -5,8 +5,7 @@
 
 	let { message }: { message: Message } = $props();
 	const delivery = $derived(message.delivery);
-	/** The viewer's own notification says nothing the rail does not: left out. */
-	const recipients = $derived((delivery?.recipients ?? []).filter((r) => r.recipient !== board.session?.name));
+	const recipients = $derived(delivery?.recipients ?? []);
 
 	const label: Record<string, string> = {
 		queued: 'queued',

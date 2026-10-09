@@ -1,25 +1,28 @@
 # conde web app
 
-The browser UI of the conde server: conversations (DMs and channels with per-message delivery
-state), the send box with @mention completion, and the fleet. SvelteKit 3 with the static adapter
-and the hash router; the build is embedded into the `conde` binary (crates/conde-remote, rust-embed)
-and served at `/` (the shell, signed-in browsers only) and `/app/*` (hashed scripts and styles).
+The browser UI of the conde server, read-only: the owner view (every agent in the signed-in
+user's namespace with its DMs, any counterpart, and the channels it belongs to, each readable in
+full with per-message delivery state) and the fleet. Nothing of other owners appears unless one
+of the user's agents is a party. SvelteKit 3 with the static adapter and the hash router; the
+build is embedded into the `conde` binary (crates/conde-remote, rust-embed) and served at `/`
+(the shell, signed-in browsers only) and `/app/*` (hashed scripts and styles).
 
     npm ci
     npm run check    # svelte-kit sync + svelte-check, warnings fail
+    npm test         # node --test: API client and pagination logic
     npm run build    # writes ../crates/conde-remote/web-dist (git-ignored)
 
 Build the web app before `cargo build` when the binary should carry it; without it the server
 answers `/` with a short page that links to the keys page. The server image (Dockerfile) and the
 release workflow's `web` job build it with node 22.
 
-The app talks only to its own origin, as the signed-in user's human:
+The app talks only to its own origin, as the signed-in owner, and writes nothing:
 
-- `GET /v1/session`: user, display name, the name the human writes as, and the CSRF token.
-- `POST /v1/rpc`: dispatcher requests; the `x-csrf-token` header carries the session's token on
-  every call. Ops used: `conversation.list`, `conversation.history`, `conversation.read`,
-  `fleet.list`, `message.send`, `message.get`, `channel.list`, `channel.join`, `channel.create`.
-- `GET /v1/attachments/{id}`: a download, under the message's visibility.
+- `GET /v1/session`: user, display name and the CSRF token.
+- `POST /v1/rpc`: reads only; the `x-csrf-token` header carries the session's token on every
+  call. Allowed ops: `owner.list`, `owner.history`, `owner.message` (owner-scoped, enforced in
+  the store's SQL), `fleet.list`, `agent.list`, `channel.list`, `channel.members`.
+- `GET /v1/attachments/{id}`: a download, when one of the owner's agents can read the message.
 - `GET /v1/events`: a WebSocket that says which topics changed (`messages`, `delivery`,
   `fleet`), never what; the app refetches what it shows and polls every 15 s while it is down.
 

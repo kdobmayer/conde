@@ -10,20 +10,6 @@ export class RpcError extends Error {
 	}
 }
 
-/** Ops that change the board: each carries an idempotency key, reused on a network retry. */
-const MUTATIONS = new Set([
-	'message.send',
-	'message.read',
-	'reaction.set',
-	'channel.create',
-	'channel.join',
-	'channel.leave',
-	'channel.topic',
-	'channel.invite',
-	'profile.set',
-	'conversation.read'
-]);
-
 let session: Session | null = null;
 
 /** Sends the browser to sign in, then back to the current view. */
@@ -55,10 +41,8 @@ async function post(request: object, s: Session): Promise<Response> {
 	});
 }
 
-/**
- * One request. A mutation carries one idempotency key for its whole life: resent after a
- * dropped connection and after a session reload, the board commits it once.
- */
+/** One read (the web app writes nothing); retried after a dropped connection and once after
+ * a session reload. */
 export async function rpc<T>(op: string, body: object = {}): Promise<T> {
 	const request: Record<string, unknown> = {
 		v: 1,
@@ -67,7 +51,6 @@ export async function rpc<T>(op: string, body: object = {}): Promise<T> {
 		op,
 		body
 	};
-	if (MUTATIONS.has(op)) request.idempotency_key = crypto.randomUUID();
 	try {
 		return await call<T>(request);
 	} catch (e) {
@@ -106,17 +89,4 @@ async function call<T>(request: Record<string, unknown>): Promise<T> {
 		);
 	}
 	return json.result as T;
-}
-
-/** A file as the base64 the board stores. */
-export function fileToBase64(file: File): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const reader = new FileReader();
-		reader.onerror = () => reject(reader.error);
-		reader.onload = () => {
-			const url = String(reader.result);
-			resolve(url.slice(url.indexOf(',') + 1));
-		};
-		reader.readAsDataURL(file);
-	});
 }

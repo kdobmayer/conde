@@ -40,10 +40,6 @@
 		return [...owners.entries()].sort(([a], [b]) => (a === me ? -1 : b === me ? 1 : a.localeCompare(b)));
 	});
 
-	function dmHref(name: string): string {
-		const [owner, rest] = name.split('/');
-		return `#/dm/${encodeURIComponent(owner ?? '')}/${encodeURIComponent(rest ?? '')}`;
-	}
 </script>
 
 <section class="fleet">
@@ -69,7 +65,7 @@
 						<span class="dot" class:up aria-hidden="true"></span>
 						<strong>{host.host}</strong>
 						{#if !host.bridge}
-							<span class="muted">{host.host === 'web' ? 'browser' : 'no bridge yet'}</span>
+							<span class="muted">no bridge yet</span>
 						{:else if up}
 							<span class="muted">online · heartbeat {ago(host.heartbeat, board.now + board.skewMs)}</span>
 						{:else}
@@ -80,7 +76,7 @@
 						<ul>
 							{#each agents as a (a.name)}
 								<li>
-									<a class="name" href={dmHref(a.name)}>{short(a.name)}</a>
+									<span class="name">{short(a.name)}</span>
 									{#if a.display}<span class="muted">{a.display}</span>{/if}
 									<span class="tag">{a.kind}</span>
 									{#if a.pinned}<span class="tag" title={`pinned to ${a.pinned}`}>pinned</span>{/if}
@@ -191,7 +187,6 @@
 	}
 	.name {
 		font-weight: 600;
-		text-decoration: none;
 		overflow-wrap: anywhere;
 	}
 	.reach {

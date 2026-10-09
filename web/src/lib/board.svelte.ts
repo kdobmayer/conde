@@ -51,7 +51,7 @@ export function changed(topics: Topic[]): void {
 
 export async function refreshRail(): Promise<void> {
 	try {
-		board.rail = await rpc<Rail>('conversation.list');
+		board.rail = await rpc<Rail>('owner.list');
 		board.error = '';
 	} catch (e) {
 		board.error = (e as Error).message;
@@ -108,18 +108,6 @@ function connect(): void {
 	};
 }
 
-/** The first visit of a user without a human names it (a CSRF-checked call, never a GET). */
-async function nameHuman(): Promise<void> {
-	const s = board.session;
-	if (!s) return;
-	try {
-		const me = await rpc<{ name: string }>('agent.whoami');
-		board.session = { ...s, name: me.name, problem: null };
-	} catch (e) {
-		board.session = { ...s, problem: (e as Error).message };
-	}
-}
-
 let started = false;
 
 /** Loads the session and the rail, opens the event socket and starts the clocks. */
@@ -127,7 +115,6 @@ export async function start(): Promise<void> {
 	if (started) return;
 	started = true;
 	board.session = await loadSession();
-	if (!board.session.name) await nameHuman();
 	await Promise.all([refreshRail(), refreshFleet()]);
 	connect();
 	setInterval(() => (board.now = Date.now()), 1000);
@@ -148,9 +135,10 @@ export function short(name: string): string {
 	return me && name.startsWith(me + '/') ? name.slice(me.length + 1) : name;
 }
 
-/** Every unread count on the rail. */
-export function unreadTotal(): number {
-	const rail = board.rail;
-	if (!rail) return 0;
-	return rail.dms.reduce((n, d) => n + d.unread, 0) + rail.channels.reduce((n, c) => n + c.unread, 0);
+/** The rail link of an agent's conversation: a DM partner or a `#channel`. */
+export function threadHref(agent: string, target: string): string {
+	const a = encodeURIComponent(short(agent));
+	if (target.startsWith('#')) return `#/a/${a}/ch/${encodeURIComponent(target.slice(1))}`;
+	const [owner, name] = target.split('/');
+	return `#/a/${a}/dm/${encodeURIComponent(owner ?? '')}/${encodeURIComponent(name ?? '')}`;
 }

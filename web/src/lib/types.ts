@@ -5,30 +5,39 @@ export interface Session {
 	display: string;
 	csrf: string;
 	csrf_header: string;
-	/** The human's canonical name on the board; null when it could not be resolved. */
-	name: string | null;
-	problem: string | null;
 }
 
+/** A DM conversation of one of the owner's agents. */
 export interface RailDm {
 	with: string;
 	last_seq: number;
 	last_at: string;
+	/** DMs from the counterpart the agent has not read. */
 	unread: number;
 }
 
+/** A channel one of the owner's agents belongs to. */
 export interface RailChannel {
 	channel: string;
 	topic: string | null;
 	last_seq: number;
 	last_at: string | null;
+	/** Posts by others past the agent's read position. */
 	unread: number;
 }
 
-export interface Rail {
-	me: string;
+export interface OwnerAgent {
+	name: string;
+	kind: 'claude' | 'codex' | 'human' | null;
+	address: string | null;
 	dms: RailDm[];
 	channels: RailChannel[];
+}
+
+/** Everything the owner's agents can read, per agent. */
+export interface Rail {
+	owner: string;
+	agents: OwnerAgent[];
 }
 
 export interface Attachment {
@@ -69,14 +78,12 @@ export interface Message {
 }
 
 export interface History {
-	me: string;
+	/** The owner's agent whose conversation this is. */
+	agent: string;
 	channel?: string;
 	topic?: string | null;
-	read_seq?: number | null;
 	with?: string;
 	kind?: string | null;
-	/** DMs from the partner not read yet. */
-	unread?: number;
 	messages: Message[];
 	more: boolean;
 }

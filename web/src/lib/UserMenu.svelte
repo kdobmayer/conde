@@ -17,10 +17,7 @@
 	</button>
 	{#if open && board.session}
 		<div class="panel" role="menu">
-			<p class="muted small">
-				Signed in as <strong>{board.session.user}</strong>{#if board.session.name}; you write as
-					<strong>{board.session.name}</strong>{/if}.
-			</p>
+			<p class="muted small">Signed in as <strong>{board.session.user}</strong>.</p>
 			<a role="menuitem" href="/keys">Host keys</a>
 			<form method="post" action="/auth/logout">
 				<input type="hidden" name="csrf" value={board.session.csrf} />

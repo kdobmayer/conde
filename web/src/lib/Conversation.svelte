@@ -1,15 +1,15 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { RpcError, rpc } from './api';
-	import { changed, onBoard, short } from './board.svelte';
+	import { onBoard, short } from './board.svelte';
 	import { acceptEarlier, acceptNewest, emptyThread } from './thread';
 	import { bytes, clock, day } from './time';
 	import type { History, Message } from './types';
 	import Delivery from './Delivery.svelte';
-	import SendBox from './SendBox.svelte';
 
-	/** `#name` for a channel, else an agent's canonical name. */
-	let { target }: { target: string } = $props();
+	/** One of the owner's agents, and its counterpart: `#name` for a channel, else an agent's
+	 * canonical name. Read-only: the owner sees what the agent can read. */
+	let { agent, target }: { agent: string; target: string } = $props();
 	const isChannel = $derived(target.startsWith('#'));
 
 	let messages = $state<Message[]>([]);
@@ -19,7 +19,6 @@
 	let loading = $state(true);
 	let error = $state('');
 	let notMember = $state(false);
-	let replyTo = $state<Message | null>(null);
 	let quoted = $state<Record<string, Message | 'missing'>>({});
 	let flash = $state('');
 	let scroller: HTMLElement | undefined = $state();
@@ -27,7 +26,7 @@
 	const PAGE = 100;
 
 	function query(extra: Record<string, unknown> = {}) {
-		return { ...(isChannel ? { channel: target } : { with: target }), ...extra };
+		return { agent, ...(isChannel ? { channel: target } : { with: target }), ...extra };
 	}
 
 	function nearBottom(): boolean {
@@ -47,7 +46,7 @@
 	async function refresh(first = false) {
 		const mine = ++generation;
 		try {
-			const h = await rpc<History>('conversation.history', query({ limit: PAGE }));
+			const h = await rpc<History>('owner.history', query({ limit: PAGE }));
 			if (mine !== generation) return;
 			const stick = first || !thread.paged || nearBottom();
 			thread = acceptNewest(thread, h);
@@ -56,12 +55,11 @@
 			head = h;
 			error = '';
 			notMember = false;
-			await markRead(h);
 			if (stick) await scrollToEnd();
 		} catch (e) {
 			if (mine !== generation) return;
 			if (e instanceof RpcError && e.code === 'forbidden' && isChannel && e.message.startsWith('not a member'))
-				notMember = true;
+				notMember = true; // the agent left the channel
 			else error = (e as Error).message;
 		} finally {
 			loading = false;
@@ -73,38 +71,12 @@
 		if (!first || !scroller) return;
 		const height = scroller.scrollHeight;
 		try {
-			const h = await rpc<History>('conversation.history', query({ before: first.seq, limit: PAGE }));
+			const h = await rpc<History>('owner.history', query({ before: first.seq, limit: PAGE }));
 			thread = acceptEarlier(thread, h);
 			messages = thread.messages;
 			more = thread.more;
 			await tick();
 			scroller.scrollTop = scroller.scrollHeight - height;
-		} catch (e) {
-			error = (e as Error).message;
-		}
-	}
-
-	/** Marks what is on screen read, only when something is unread (each mark is a write). */
-	async function markRead(h: History) {
-		if (document.visibilityState !== 'visible') return;
-		const last = h.messages[h.messages.length - 1];
-		if (!last) return;
-		const unread = isChannel ? (h.read_seq ?? 0) < last.seq : (h.unread ?? 0) > 0;
-		if (!unread) return;
-		try {
-			await rpc('conversation.read', query({ up_to: last.seq }));
-			changed(['messages']);
-		} catch {
-			// a failed mark leaves the badge; the next refresh tries again
-		}
-	}
-
-	async function join() {
-		try {
-			await rpc('channel.join', { channel: target });
-			changed(['messages']);
-			loading = true;
-			await refresh(true);
 		} catch (e) {
 			error = (e as Error).message;
 		}
@@ -124,7 +96,7 @@
 			return;
 		}
 		try {
-			const r = await rpc<{ message: Message }>('message.get', { id });
+			const r = await rpc<{ message: Message }>('owner.message', { id });
 			quoted = { ...quoted, [id]: r.message };
 		} catch {
 			quoted = { ...quoted, [id]: 'missing' };
@@ -137,13 +109,13 @@
 	}
 
 	$effect(() => {
+		agent;
 		target;
 		messages = [];
 		thread = emptyThread();
 		more = false;
 		head = null;
 		quoted = {};
-		replyTo = null;
 		loading = true;
 		void refresh(true);
 		return onBoard((topics) => {
@@ -151,7 +123,7 @@
 		});
 	});
 
-	const title = $derived(isChannel ? target : short(target));
+	const title = $derived(`${short(agent)} · ${isChannel ? target : short(target)}`);
 </script>
 
 <section class="conv">
@@ -168,10 +140,7 @@
 		{#if loading}
 			<p class="muted pad">Loading…</p>
 		{:else if notMember}
-			<div class="pad">
-				<p>You are not in {target}. Its messages are visible to members only.</p>
-				<button onclick={join}>Join {target}</button>
-			</div>
+			<p class="pad">{short(agent)} is not in {target} any more.</p>
 		{:else}
 			{#if more}
 				<div class="pad center"><button class="quiet" onclick={earlier}>Load earlier messages</button></div>
@@ -183,7 +152,7 @@
 				{#if i === 0 || day(messages[i - 1]!.date) !== day(m.date)}
 					<div class="day muted"><span>{day(m.date)}</span></div>
 				{/if}
-				<article id={`m-${m.message_id}`} class="msg" class:mine={m.from === head?.me} class:flash={flash === m.message_id}>
+				<article id={`m-${m.message_id}`} class="msg" class:mine={m.from === head?.agent} class:flash={flash === m.message_id}>
 					<div class="meta">
 						<span class="from">{short(m.from)}</span>
 						<time datetime={m.date} title={new Date(m.date).toLocaleString()}>{clock(m.date)}</time>
@@ -224,7 +193,6 @@
 					{/if}
 					<Delivery message={m} />
 					<div class="actions">
-						<button class="link" onclick={() => (replyTo = m)}>Reply</button>
 						<span class="muted id">{m.message_id}</span>
 					</div>
 				</article>
@@ -232,10 +200,6 @@
 		{/if}
 		{#if error}<p class="error pad">{error}</p>{/if}
 	</div>
-
-	{#if !notMember && !loading}
-		<SendBox to={target} bind:replyTo />
-	{/if}
 </section>
 
 <style>

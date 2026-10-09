@@ -28,13 +28,15 @@ test ! -e ~/.local/share/conde/conde.db
 env -u DATABASE_URL conde import --from "$snap" --expect-files "$n" --owner kdobmayer --host homepc \
   --skip-agents ~/.cache/conde-prune.txt
 
-# 5. H3 from the purge's saved rows, dry run first. It must end "result: OK": the frozen class (b)
-#    rows equal to the manifest's hashes, the newer DMs equal to the saved rows, every reply-to,
-#    read state and reaction equal (49 rows when nothing is pruned: 32 frozen, 17 newer).
+# 5. H3 from the purge's saved rows, dry run first, run from desk's session (the 9 class (b) DMs
+#    kept on the shared board are read back there as desk; from another shell add
+#    --verify-as claude:<desk's session id>). It must end "result: OK" with every row accounted
+#    for: saved 17954 = class (a) 17905 + frozen (b) 32 + newer 17; class (b) 41 = restored 32 +
+#    skipped 0 + kept on the shared board 9 (verified); 49 rows restored, all hashes equal.
 csv=~/.cache/conde-central-purge-2026-10-09/central-purge-2026-10-09
 man=~/work/ai/conde/docs/history-manifest-2026-10-09
-conde history copy --manifest "$man" --from-csv "$csv" --after-freeze --skip-agents ~/.cache/conde-prune.txt --dry-run
-conde history copy --manifest "$man" --from-csv "$csv" --after-freeze --skip-agents ~/.cache/conde-prune.txt
+conde history copy --manifest "$man" --from-csv "$csv" --skip-agents ~/.cache/conde-prune.txt --dry-run
+conde history copy --manifest "$man" --from-csv "$csv" --skip-agents ~/.cache/conde-prune.txt
 
 # On a failure in step 4 or 5:  rm -f ~/.local/share/conde/conde.db*  and rerun from step 4.
 ```
@@ -46,11 +48,15 @@ What each part covers:
   `~/.cache/kond-outbox-held-2026-10-09` are not in it.
 - The prune file drops a name with every message it sent or received, its channel memberships and
   its reactions, from both steps. A name the snapshot does not know stops the import.
+- The saved rows must be the purge's whole output: every CSV holds the row count counts.txt
+  states, and agents.csv names exactly the agents preview.txt lists as gone. Absence from a file
+  is never read as "still on the shared board".
 - The manifest (`docs/history-manifest-2026-10-09*`, local only) is the H1 freeze at commit_seq
-  18724. Its class (b) has 41 rows: 32 were saved by the purge (desk with astra) and are copied;
-  9 (desk with dakai-helper) stay on the shared board, where both names remain.
-- `--after-freeze` adds the 17 DMs the purge saved that are newer than the freeze (desk, astra,
-  vvp-alpha, vvp-astra, native-fable and native-astra with each other); without it they are not
-  restored anywhere. They are checked against the saved rows, since no manifest lists them.
+  18724. Its class (b) has 41 rows: 32 were saved by the purge (desk with astra) and are restored;
+  9 (desk with dakai-helper) stay on the shared board, where both names were kept, and each is read
+  back there before anything is written. A class (b) row in neither place stops the copy.
+- The 17 saved DMs newer than the freeze (desk, astra, vvp-alpha, vvp-astra, native-fable and
+  native-astra with each other) are restored too, checked against the saved rows, since no
+  manifest lists them. The saved class (a) rows must already be on the local board from step 4.
 - A copied DM older than a kond DM between the same two names is listed after it on the local
   board (the copy reports each one); its read state is its own, so nothing else changes.

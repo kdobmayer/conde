@@ -381,3 +381,16 @@ fn mcp_renders_unconfirmed_reads_and_per_board_paging_with_its_own_arguments() {
     drop(p);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn mcp_sent_names_each_boards_continuation() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
+    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |_| {
+        Ok(json!({"receipts": [], "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "next_cursor": 200}]}))
+    });
+    let mut p = claude_peer_at(d.socket.clone(), "s-sent");
+    let out = p.ok("sent", json!({}), json!({}));
+    assert!(out.contains("(more on dakai: call sent with board=\"dakai\" after=200)"), "{out}");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -662,3 +662,22 @@ fn review_fields_unconfirmed_recovery_shared_resolve_profile_paging_and_forget()
     let (ok, _, err) = r.conde(&["send", "x", "hi"]);
     assert!(!ok && err == "conde: the default board 'dakai' is not enrolled on this host; ...\n", "{err}");
 }
+
+/// Astra's second pass, P3: an aggregate `sent` pages each board on its own, as inbox does.
+#[test]
+fn aggregate_sent_names_each_boards_continuation() {
+    let r = Root::new();
+    let _d = r.fake(|req| {
+        Ok(match (req["op"].as_str().unwrap(), req["board"].as_str()) {
+            ("receipt.list", Some("dakai")) => json!({"board": "dakai", "next_cursor": 7, "receipts": []}),
+            ("receipt.list", _) => json!({"receipts": [{"board": "dakai", "message_id": "dakai:01M", "to": "alice/worker", "status": "queued"}],
+                "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "next_cursor": 200}]}),
+            _ => json!({}),
+        })
+    });
+    let (_, out, err) = r.conde(&["sent"]);
+    assert_eq!(out, "dakai  dakai:01M  alice/worker  queued\n");
+    assert!(err.contains("(more on dakai: conde sent --board dakai --after 200)"), "{err}");
+    let (_, _, err) = r.conde(&["sent", "--board", "dakai"]);
+    assert!(err.contains("(more: conde sent --board dakai --after 7)"), "{err}");
+}

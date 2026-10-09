@@ -575,7 +575,7 @@ fn run_tool(
             )?;
             surface::search(&r, Surface::Mcp).joined()
         }
-        "sent" => surface::sent(&call("receipt.list", json!({"after": arg_int(args, "after")?}))?).joined(),
+        "sent" => surface::sent(&call("receipt.list", json!({"after": arg_int(args, "after")?}))?, Surface::Mcp).joined(),
         "react" => {
             let id = check_ref(req_str(args, "id")?)?;
             let emoji = arg_str(args, "emoji")?.unwrap_or("\u{1F44D}");

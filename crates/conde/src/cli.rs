@@ -626,7 +626,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 println!("removed {emoji} from {id} in {}", s(&r["place"]));
             }
         }
-        Cmd::Sent { after } => print(surface::sent(&sx.call("receipt.list", json!({"after": after}))?)),
+        Cmd::Sent { after } => print(surface::sent(&sx.call("receipt.list", json!({"after": after}))?, Surface::Cli)),
         Cmd::Create { channel } => {
             let r = sx.call("channel.create", json!({"channel": channel}))?;
             println!("created {} (you are a member)", s(&r["channel"]));

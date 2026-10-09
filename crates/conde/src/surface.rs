@@ -378,7 +378,7 @@ pub fn search(r: &Value, surface: Surface) -> Out {
 }
 
 /// `sent`: one line per message with its board's receipt.
-pub fn sent(r: &Value) -> Out {
+pub fn sent(r: &Value, surface: Surface) -> Out {
     let requested = result_board(r);
     let mut out = Out::default();
     let rows = r["receipts"].as_array().cloned().unwrap_or_default();
@@ -397,6 +397,7 @@ pub fn sent(r: &Value) -> Out {
         out.note("(nothing sent)");
     }
     unavailable(&mut out, r);
+    more(&mut out, r, surface, "sent");
     out
 }
 
@@ -565,10 +566,19 @@ mod tests {
         assert_eq!(out.text, "local\tdm\t01L\ta\td\tp\ndakai\t#dev\tdakai:01D\tb/x\td\tq\n");
         assert_eq!(out.notes, "(local: 1 unread; dakai: 1 unread)\n(two: unavailable)\n");
         // an unlabelled row takes its result's board, else local; never the board a request named
-        let out = sent(&json!({"board": "dakai", "receipts": [{"message_id": "01X", "to": "b/y", "status": "unread"}]}));
+        let out = sent(&json!({"board": "dakai", "receipts": [{"message_id": "01X", "to": "b/y", "status": "unread"}]}), Surface::Cli);
         assert_eq!(out.text, "dakai  dakai:01X  b/y  unread\n");
-        let out = sent(&json!({"receipts": [{"message_id": "01X", "to": "b/y", "status": "unread"}]}));
+        let out = sent(&json!({"receipts": [{"message_id": "01X", "to": "b/y", "status": "unread"}]}), Surface::Cli);
         assert_eq!(out.text, "local  01X  b/y  unread\n");
+    }
+
+    #[test]
+    fn a_shared_sent_continuation_is_rendered() {
+        // Astra's second-pass probe
+        let result = json!({"receipts": [{"board": "dakai", "message_id": "dakai:01M", "to": "alice/worker", "status": "queued"}],
+            "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "next_cursor": 200}]});
+        assert!(sent(&result, Surface::Cli).joined().contains("conde sent --board dakai --after 200"));
+        assert!(sent(&result, Surface::Mcp).joined().contains("call sent with board=\"dakai\" after=200"));
     }
 
     #[test]

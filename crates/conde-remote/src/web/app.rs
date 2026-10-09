@@ -11,7 +11,8 @@
 //! - `GET /v1/events`: a WebSocket that says when the board changed (never what), so the app
 //!   refetches what it shows.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -342,9 +343,35 @@ async fn root(State(app): State<AppState>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
+/// The build's files under `app/`, listed once from the embed. A request is answered only with
+/// one of these names, the same in a debug build (which reads web-dist from disk) as in release.
+fn app_files() -> &'static HashSet<String> {
+    static FILES: LazyLock<HashSet<String>> = LazyLock::new(|| {
+        Assets::iter()
+            .filter(|name| name.starts_with("app/"))
+            .map(|name| name.into_owned())
+            .collect()
+    });
+    &FILES
+}
+
+/// The build's file `app/<path>`, when `path` (decoded) is a plain relative name: no empty,
+/// `.` or `..` segment, no leading `/`, no backslash or NUL.
+fn app_file(path: &str) -> Option<rust_embed::EmbeddedFile> {
+    let plain = !path.contains(['\\', '\0'])
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    let name = format!("app/{path}");
+    if !plain || !app_files().contains(&name) {
+        return None;
+    }
+    Assets::get(&name)
+}
+
 /// `GET /app/{*path}`: one file of the build; hashed files are cached for good.
 pub(crate) async fn asset(Path(path): Path<String>) -> Response {
-    let Some(file) = Assets::get(&format!("app/{path}")) else {
+    let Some(file) = app_file(&path) else {
         return (StatusCode::NOT_FOUND, [no_store()], "not found\n").into_response();
     };
     let cache = if path.starts_with("immutable/") {
@@ -474,7 +501,7 @@ async fn run_events(
 /// The conde mark as inline SVG for the server's own pages (the web app's `mark.svg`, drawn
 /// with the pages' colour tokens); empty when the binary was built without the web app.
 pub(crate) fn mark_svg() -> &'static str {
-    static MARK: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    static MARK: LazyLock<String> = LazyLock::new(|| {
         Assets::get("app/mark.svg")
             .map(|f| String::from_utf8_lossy(&f.data).trim().to_string())
             .unwrap_or_default()
@@ -505,6 +532,26 @@ pub fn embedded() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_names_of_the_build_are_served() {
+        for path in [
+            "",
+            "/etc/passwd",
+            "../Cargo.toml",
+            "immutable/../../index.html",
+            "./version.json",
+            "a//b",
+            "a\\b",
+            "a\0b",
+        ] {
+            assert!(app_file(path).is_none(), "{path:?}");
+        }
+        if embedded() {
+            assert!(app_file("version.json").is_some());
+            assert!(app_file("favicon.svg").is_some());
+        }
+    }
 
     #[test]
     fn content_disposition_quotes_and_encodes() {

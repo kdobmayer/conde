@@ -908,3 +908,68 @@ impl Browser {
         self.jar.cookies(&url).unwrap().to_str().unwrap().to_string()
     }
 }
+
+// --- static files without sign-in ----------------------------------------------------------------
+
+/// A server without sign-in serves the app's static files and the icons, and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_sign_in_only_the_static_files_are_served() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let d = Arc::new(Dispatcher::open_in_memory().unwrap());
+    let server = conde::cloud::start(d, "127.0.0.1:0".parse().unwrap(), ServerConfig::default()).await.unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+    if web::app_embedded() {
+        for path in ["/app/favicon.svg", "/app/mark.svg", "/app/favicon-light-32.png", "/app/favicon-dark-32.png", "/favicon.ico"] {
+            let response = client.get(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(!response.headers().contains_key("set-cookie"), "{path}");
+        }
+    }
+    for path in [
+        "/v1/session",
+        "/v1/attachments/example",
+        "/v1/events",
+        "/app/v1/session",
+        "/app/v1/rpc",
+        "/app/%2e%2e%2f%2e%2e%2fCargo.toml",
+        "/app/%2e%2e%2f%2e%2e%2fsrc%2fserver.rs",
+        "/app/immutable%2f..%2f..%2findex.html",
+        "/app/%2fetc%2fpasswd",
+    ] {
+        let response = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    let response = client.post(format!("{base}/v1/rpc")).json(&json!({"op": "owner.list", "body": {}})).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let readme = client.get(format!("{base}/readme")).send().await.unwrap();
+    assert_eq!(readme.status(), StatusCode::OK);
+    let html = readme.text().await.unwrap();
+    assert!(html.contains("/app/favicon.svg"), "{html}");
+    if web::app_embedded() {
+        assert!(html.contains("<svg "), "{html}");
+    }
+    server.shutdown().await.unwrap();
+}
+
+/// An encoded parent traversal never reaches a file outside the build, not even through a symlink.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_encoded_traversal_never_leaves_the_build() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("outside.txt");
+    std::fs::write(&target, "OUTSIDE THE WEB BUILD").unwrap();
+    let link = dir.path().join("outside-link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let d = Arc::new(Dispatcher::open_in_memory().unwrap());
+    let server = conde::cloud::start(d, "127.0.0.1:0".parse().unwrap(), ServerConfig::default()).await.unwrap();
+    let traversal = format!("{}{}", "../".repeat(20), link.to_str().unwrap().trim_start_matches('/'))
+        .replace('.', "%2e")
+        .replace('/', "%2f");
+    let response = reqwest::get(format!("http://{}/app/{traversal}", server.local_addr())).await.unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    server.shutdown().await.unwrap();
+    assert_eq!(status, StatusCode::NOT_FOUND, "a file outside the build was served: {body}");
+}

@@ -692,4 +692,10 @@ fn a_publish_withdrawn_on_the_board_is_not_pending() {
     assert!(!ok, "{out}");
     assert_eq!(err, "conde: not published: worker was withdrawn on dakai before the publish completed; run conde publish again or check conde boards\n");
     assert!(!out.contains("pending"), "{out}");
+    // the board forgotten before the op completed is terminal too
+    drop(_d);
+    let _d = r.fake(scripted(vec![("mailbox.publish", json!({"state": "forgotten", "op_id": "01OP"}))]));
+    let (ok, out, err) = r.conde(&["publish", "worker", "--board", "dakai"]);
+    assert!(!ok && !out.contains("pending"), "{out}");
+    assert_eq!(err, "conde: not published: board dakai was forgotten before the publish completed\n");
 }

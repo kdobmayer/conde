@@ -336,7 +336,6 @@ pub struct Inventory {
     /// Class (a) rows whose body or attachments differ from the snapshot.
     pub snapshot_differs: Vec<String>,
     pub snapshot_messages: usize,
-    pub snapshot_parse_errors: Vec<String>,
 }
 
 pub fn classify(x: Extract, snap: &Snapshot) -> Inventory {
@@ -471,7 +470,6 @@ pub fn classify(x: Extract, snap: &Snapshot) -> Inventory {
     channels.sort_by(|a, b| (!a.imported, &a.name).cmp(&(!b.imported, &b.name)));
     Inventory {
         snapshot_messages: snap.messages.len(),
-        snapshot_parse_errors: snap.parse_errors.clone(),
         x,
         class,
         names,
@@ -668,12 +666,11 @@ impl Inventory {
             s,
             "- snapshot messages (as the importer reads them): {}; on the board: {}; missing from the board: {}\n\
              - class (a) rows whose body or attachments differ from the snapshot by sha256: {}\n\
-             - snapshot parse errors: {}\n",
+             - the snapshot read is complete: no parse error (any would have refused this manifest)\n",
             self.snapshot_messages,
             self.snapshot_messages - self.snapshot_missing.len(),
             list_or_none(&self.snapshot_missing),
             list_or_none(&self.snapshot_differs),
-            self.snapshot_parse_errors.len()
         );
 
         let dangling: Vec<String> = {
@@ -868,9 +865,9 @@ pub fn write_manifest(inv: &Inventory, out: &Path, source: &str) -> anyhow::Resu
 /// `conde history inventory`: classify an extraction against a kond snapshot and write the
 /// manifest files at `<out>.md`, `<out>-messages.tsv`, `<out>-attachments.tsv`, `<out>-names.tsv`.
 pub fn inventory_main(extract: &Path, snapshot: &Path, out: &Path, source: &str) -> anyhow::Result<i32> {
+    let snap = crate::import::snapshot(snapshot)?;
     let raw = fs::read_to_string(extract).with_context(|| format!("reading {}", extract.display()))?;
     let x = parse_extract(&raw).with_context(|| format!("checking {}", extract.display()))?;
-    let snap = crate::import::snapshot(snapshot)?;
     let inv = classify(x, &snap);
     let paths = write_manifest(&inv, out, source)?;
     println!(

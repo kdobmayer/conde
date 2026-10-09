@@ -560,3 +560,38 @@ fn postgres_copy_csv_reads_back_exactly() {
     assert_eq!(rows[1], vec![Some(tricky.to_string()), Some(String::new()), Some("\\x00ff0a".into())]);
     assert_eq!(rows[2], vec![None, Some("x".into()), None]);
 }
+
+// --- an incomplete snapshot -----------------------------------------------------------------
+
+/// Both copies of one kond DM unreadable: the snapshot read is incomplete, so no manifest and no
+/// prune list come out of it (a lost imported row would otherwise classify as conde-native).
+#[test]
+fn inventory_and_prune_list_refuse_a_snapshot_with_parse_errors() {
+    let tmp = TempDir::new("corrupt");
+    let kond = tmp.0.join("kond");
+    kond_fixture(&kond);
+    let copies = [
+        kond.join("board/agents/lead/outbox/sent").join(kid(1)),
+        kond.join("board/agents/worker/inbox/cur").join(kid(1)),
+    ];
+    for c in &copies {
+        fs::write(c, [0xffu8, 0xfe, b'\n']).unwrap();
+    }
+    let err = format!("{:#}", import::snapshot(&kond).unwrap_err());
+    assert!(err.contains("2 parse errors") && copies.iter().all(|c| err.contains(c.to_str().unwrap())), "{err}");
+    let err = format!("{:#}", import::agent_activity(&kond).unwrap_err());
+    assert!(err.contains("2 parse errors"), "{err}");
+
+    let extract = tmp.0.join("extract.txt");
+    fs::write(&extract, "").unwrap();
+    let stem = tmp.0.join("manifest");
+    let run = |args: &[&std::ffi::OsStr]| std::process::Command::new(env!("CARGO_BIN_EXE_conde")).args(args).output().unwrap();
+    let out = run(&["history".as_ref(), "inventory".as_ref(), "--extract".as_ref(), extract.as_os_str(), "--snapshot".as_ref(), kond.as_os_str(), "--out".as_ref(), stem.as_os_str()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && stderr.contains("2 parse errors"), "{stderr}");
+    assert!(history::manifest_paths(&stem).iter().all(|p| !p.exists()), "no manifest file written");
+    let list = tmp.0.join("prune.tsv");
+    let out = run(&["history".as_ref(), "prune-candidates".as_ref(), "--snapshot".as_ref(), kond.as_os_str(), "--out".as_ref(), list.as_os_str()]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("2 parse errors"));
+    assert!(!list.exists(), "no prune list written");
+}

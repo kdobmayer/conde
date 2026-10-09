@@ -1081,13 +1081,9 @@ pub struct AgentActivity {
 
 /// Every kond name of the snapshot with its activity, oldest last activity first.
 pub fn agent_activity(root: &Path) -> anyhow::Result<Vec<AgentActivity>> {
-    if !root.join("board").is_dir() && !root.join("registry").is_dir() {
-        bail!("{} is not a kond data directory (no board/ or registry/)", root.display());
-    }
-    let mut scanner = Scanner { root, progress: false, files: 0, src: Source::default(), symlinks: HashSet::new() };
-    scanner.scan();
+    let src = complete_scan(root)?;
     let mut count: HashMap<String, (usize, String)> = HashMap::new();
-    for m in scanner.src.messages.values() {
+    for m in src.messages.values() {
         let parties = std::iter::once(&m.from).chain(match &m.to {
             To::Agent(a) => Some(a),
             To::Channel(_) => None,
@@ -1100,8 +1096,7 @@ pub fn agent_activity(root: &Path) -> anyhow::Result<Vec<AgentActivity>> {
             }
         }
     }
-    let registry: Vec<(String, Option<String>, bool, Option<String>)> = scanner
-        .src
+    let registry: Vec<(String, Option<String>, bool, Option<String>)> = src
         .agents
         .iter()
         .map(|(n, a)| {
@@ -1112,7 +1107,7 @@ pub fn agent_activity(root: &Path) -> anyhow::Result<Vec<AgentActivity>> {
             (n.clone(), kind, a.pin.is_some(), at)
         })
         .collect();
-    let plan = plan(scanner.src, "snapshot", &iso_from_ms(now_ms()));
+    let plan = plan(src, "snapshot", &iso_from_ms(now_ms()));
     let mut out: Vec<AgentActivity> = plan
         .names
         .iter()
@@ -1205,7 +1200,6 @@ pub struct Snapshot {
     pub messages: BTreeMap<String, SnapshotMessage>,
     pub agents: BTreeSet<String>,
     pub channels: BTreeSet<String>,
-    pub parse_errors: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1215,17 +1209,30 @@ pub struct SnapshotMessage {
     pub attachments: Vec<(String, String)>,
 }
 
-pub fn snapshot(root: &Path) -> anyhow::Result<Snapshot> {
+/// Scan a snapshot for the history tools, which describe the whole of it: any parse error
+/// refuses the read (a lost message would otherwise look absent from kond).
+fn complete_scan(root: &Path) -> anyhow::Result<Source> {
     if !root.join("board").is_dir() && !root.join("registry").is_dir() {
         bail!("{} is not a kond data directory (no board/ or registry/)", root.display());
     }
     let mut scanner = Scanner { root, progress: false, files: 0, src: Source::default(), symlinks: HashSet::new() };
     scanner.scan();
-    let plan = plan(scanner.src, "snapshot", &iso_from_ms(now_ms()));
+    let errors = &scanner.src.parse_errors;
+    if !errors.is_empty() {
+        bail!("{} has {} parse errors; the snapshot is incomplete:\n  {}", root.display(), errors.len(), errors.join("\n  "));
+    }
+    Ok(scanner.src)
+}
+
+pub fn snapshot(root: &Path) -> anyhow::Result<Snapshot> {
+    let src = complete_scan(root)?;
+    let plan = plan(src, "snapshot", &iso_from_ms(now_ms()));
+    if !plan.src.parse_errors.is_empty() {
+        bail!("{} has {} parse errors in its registry:\n  {}", root.display(), plan.src.parse_errors.len(), plan.src.parse_errors.join("\n  "));
+    }
     let mut out = Snapshot {
         agents: plan.names.values().cloned().collect(),
         channels: plan.chans.values().cloned().collect(),
-        parse_errors: plan.src.parse_errors.clone(),
         ..Snapshot::default()
     };
     for (id, m) in &plan.src.messages {

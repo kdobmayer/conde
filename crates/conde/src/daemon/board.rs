@@ -54,6 +54,9 @@ pub struct BoardConn {
     /// The newest route revision applied (from a snapshot or a mutation's answer); an older
     /// snapshot is ignored.
     revision: Mutex<u64>,
+    /// The newest snapshot applied with a revision, with its routes: a publish answer read at
+    /// an older revision is settled against it instead of installing its own state.
+    snapshot: Mutex<Option<(u64, Vec<Route>)>>,
     /// `board.forget` removed this board: nothing applies to it or starts it any more.
     pub forgotten: AtomicBool,
 }
@@ -75,6 +78,7 @@ impl BoardConn {
             epoch: AtomicU64::new(0),
             mine_due: AtomicBool::new(false),
             revision: Mutex::new(0),
+            snapshot: Mutex::new(None),
             forgotten: AtomicBool::new(false),
         }
     }
@@ -329,9 +333,14 @@ pub fn reconcile(core: &Core, alias: &str, routes: &[Route], seq: u64, revision:
                 return Ok(removed);
             }
             *applied = r;
+            *conn.snapshot.lock().unwrap_or_else(|p| p.into_inner()) = Some((r, routes.to_vec()));
         }
         for p in tx.publications(Some(alias))? {
-            if p.state != PublicationState::Published || completions.get(&p.agent_id).is_some_and(|done| *done > seq) {
+            // With a revision, the revision alone decides; the frame order is the fallback for
+            // a snapshot without one. A publishing row is settled when its answer comes, against
+            // the snapshot recorded above.
+            let older_than_completion = revision.is_none() && completions.get(&p.agent_id).is_some_and(|done| *done > seq);
+            if p.state != PublicationState::Published || older_than_completion {
                 continue;
             }
             let Some(mailbox) = p.mailbox_id.as_deref() else { continue };
@@ -407,6 +416,7 @@ fn settled(op: &BoardOp) -> Result<String, (ErrorCode, String)> {
             let message = op.result.as_ref().and_then(|r| r["error"]["message"].as_str()).unwrap_or("refused").to_string();
             Err((ErrorCode::Conflict, format!("{}: {message}", op.board)))
         }
+        (BoardOpKind::Publish, _) if op.result.as_ref().is_some_and(|r| r["withdrawn"] == true) => Ok("withdrawn".into()),
         (BoardOpKind::Publish, _) => Ok("published".into()),
         (BoardOpKind::Unpublish, _) => Ok("unpublished".into()),
         (BoardOpKind::Migrate, _) => Ok("migrated".into()),
@@ -470,6 +480,31 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
                 .local_tx(|tx| {
                     if let Some(done) = stored(tx)? {
                         return Ok(Some(done));
+                    }
+                    // An answer read at an older revision than a snapshot already applied is
+                    // settled against that snapshot: absent there, the mailbox was withdrawn
+                    // meanwhile; present, it is routed here at the snapshot's generation.
+                    let newer = conn.snapshot.lock().unwrap_or_else(|p| p.into_inner()).clone().filter(|(r, _)| {
+                        published.as_ref().and_then(|p| p.revision).is_some_and(|answer| answer < *r)
+                    });
+                    if let (Some(p), Some((_, routes))) = (&published, &newer)
+                        && owned(tx, PublicationState::Publishing)?
+                    {
+                        match routes.iter().find(|r| r.mailbox_id == p.mailbox_id) {
+                            None => {
+                                tx.delete_publication(alias, &agent)?;
+                                let mut stored = result.clone();
+                                stored["withdrawn"] = json!(true);
+                                tx.finish_op(&op.op_id, BoardOpState::Done, Some(&stored), &now)?;
+                                return Ok(Some(Ok("withdrawn".to_string())));
+                            }
+                            Some(r) => {
+                                let generation = r.route_generation.max(p.route_generation);
+                                tx.update_publication(alias, &agent, Some((&p.mailbox_id, generation)), PublicationState::Published, &now)?;
+                                tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
+                                return Ok(None);
+                            }
+                        }
                     }
                     if let Some(p) = &published
                         && owned(tx, PublicationState::Publishing)?
@@ -797,5 +832,35 @@ mod tests {
         // The real HTTP request or startup resume worker still owns this Arc and op.
         let _late = finish_op(&core, &conn, &migration, OpOutcome::Done(answer, None));
         assert_eq!(state(&core, &agent), None, "board.forget must prevent its outstanding migration from recreating exposure");
+    }
+
+    #[test]
+    fn review_newer_route_revision_overrides_response_frame_order() {
+        let (_dir, _rt, core, conn, agent) = setup();
+        let publish = op("01CAUSALFRAME", BoardOpKind::Publish, &agent, json!({"name": "worker"}));
+        begin(&core, &publish, Some(publishing(&agent)), None);
+        let answer = json!({"name": "worker", "mailbox_id": "01MB", "route_generation": 2, "revision": 5});
+
+        // Publish committed at revision 5, but its response arrived after the revision-6
+        // withdrawal snapshot. Its async caller runs before the queued snapshot callback.
+        finish_op(&core, &conn, &publish, OpOutcome::Done(answer, Some(9))).unwrap();
+        reconcile(&core, "dakai", &[], 8, Some(6));
+        assert_eq!(state(&core, &agent), None,
+            "a revision-6 withdrawal must supersede the revision-5 publish, regardless of frame order");
+    }
+
+    #[test]
+    fn review_newer_route_snapshot_fences_older_pending_publish_answer() {
+        let (_dir, _rt, core, conn, agent) = setup();
+        let publish = op("01CAUSALPENDING", BoardOpKind::Publish, &agent, json!({"name": "worker"}));
+        begin(&core, &publish, Some(publishing(&agent)), None);
+        let answer = json!({"name": "worker", "mailbox_id": "01MB", "route_generation": 2, "revision": 5});
+
+        // The real publish committed at revision 5, then another host took its mailbox.
+        // The revision-6 withdrawal is handled while the local row is still Publishing.
+        reconcile(&core, "dakai", &[], 8, Some(6));
+        finish_op(&core, &conn, &publish, OpOutcome::Done(answer, Some(9))).unwrap();
+        assert_eq!(state(&core, &agent), None,
+            "an old publish answer must not recreate a mapping withdrawn by an already-handled newer snapshot");
     }
 }

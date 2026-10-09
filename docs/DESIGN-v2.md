@@ -463,10 +463,14 @@ Each line closes a question the sections above left open; the gate tests in
   route revision (`hosts.route_revision`), bumped in the same transaction as every binding
   change that touches the host (the old and the new host of a takeover); `routes`,
   `mailbox.mine`, `mailbox.publish` and `mailbox.unpublish` carry the revision they were read
-  at (`revision`, absent from an older server). The daemon applies a snapshot only if its
-  revision is not older than the newest it applied from a snapshot or a mutation's answer. As
-  a second guard, the client numbers the frames it receives, and a publication completed by a
-  response numbered after a snapshot is not deleted by that snapshot.
+  at (`revision`, absent from an older server). When a revision is present it alone decides:
+  the daemon applies a snapshot only if its revision is not older than the newest it applied
+  (from a snapshot or a mutation's answer), and it records that snapshot even while a row is
+  still `publishing`. A publish answer read at an older revision than that snapshot is settled
+  against it: absent there, the publication ends withdrawn (the op completes, the command
+  answers `withdrawn`); present, it is published at the snapshot's generation. Only for a
+  snapshot without a revision, the client's frame numbering is the fallback: a publication
+  completed by a response numbered after that snapshot is not deleted by it.
 - **A forgotten board**: `board.forget` marks the board first; afterwards no late answer
   applies to it (a completion for an op that no longer exists is a no-op answering
   `forgotten`, and recording an op's end must update exactly its one row) and nothing starts

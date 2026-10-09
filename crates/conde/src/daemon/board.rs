@@ -432,13 +432,6 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
         }
         (BoardOpKind::Publish, OpOutcome::Done(result, seq)) => {
             let published: Option<Published> = serde_json::from_value(result.clone()).ok();
-            // Before the commit: a snapshot older than this answer must never see the row
-            // published without seeing this mark.
-            if let Some(seq) = seq {
-                let mut done = conn.completions.lock().unwrap_or_else(|p| p.into_inner());
-                let mark = done.entry(agent.clone()).or_default();
-                *mark = (*mark).max(seq);
-            }
             let duplicate = core
                 .local_tx(|tx| {
                     if let Some(done) = stored(tx)? {
@@ -448,6 +441,15 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
                         && owned(tx, PublicationState::Publishing)?
                     {
                         tx.update_publication(alias, &agent, Some((&p.mailbox_id, p.route_generation)), PublicationState::Published, &now)?;
+                        // Only the completion that published the row marks it, and before the
+                        // commit, under the store lock reconciliation reads the marks under:
+                        // an older snapshot never sees the row published without the mark, and a
+                        // duplicate never moves the mark past a newer withdrawal.
+                        if let Some(seq) = seq {
+                            let mut done = conn.completions.lock().unwrap_or_else(|p| p.into_inner());
+                            let mark = done.entry(agent.clone()).or_default();
+                            *mark = (*mark).max(seq);
+                        }
                     }
                     tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
                     Ok(None)
@@ -711,5 +713,24 @@ mod tests {
         // the reconnect worker finishes the old unpublish again
         assert_eq!(finish_op(&core, &conn, &unpublish, OpOutcome::Done(gone, Some(3))), Ok("unpublished".into()));
         assert_eq!(state(&core, &agent), Some(PublicationState::Publishing), "the newer publication stays");
+    }
+
+    // Desired invariant: a duplicate response does not make a newer withdrawal snapshot stale.
+    #[test]
+    fn review_duplicate_completion_does_not_mask_a_newer_routes_withdrawal() {
+        let (_dir, _rt, core, conn, agent) = setup();
+        let answer = json!({"name": "worker", "mailbox_id": "01MB", "route_generation": 2});
+        let publish = op("01P", BoardOpKind::Publish, &agent, json!({"name": "worker"}));
+        begin(&core, &publish, Some(publishing(&agent)), None);
+        finish_op(&core, &conn, &publish, OpOutcome::Done(answer.clone(), Some(5))).unwrap();
+        assert_eq!(state(&core, &agent), Some(PublicationState::Published));
+
+        // The server's empty routes snapshot (frame 8) reflects a takeover after publishing.
+        // Its callback is queued while the idempotent response for the old publish (frame 9)
+        // reaches the concurrently resumed op worker. The operation is already locally Done.
+        finish_op(&core, &conn, &publish, OpOutcome::Done(answer, Some(9))).unwrap();
+        reconcile(&core, "dakai", &[], 8);
+        assert_eq!(state(&core, &agent), None,
+            "a duplicate completion must not suppress a newer routes withdrawal");
     }
 }

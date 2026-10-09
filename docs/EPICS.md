@@ -21,6 +21,7 @@ running kond is broken before the gated cutover.
 | E9 | Web UI (SvelteKit 3, served by the server behind the Entra login): conversation with delivery state, send box, fleet with online/reachability, live events; images later via Astra | RUNNING (Opus lane L9, started 2026-10-09 04:00 UTC after the cutover) | usable at https://conde.nativeai.space/ by the owner on desktop and phone |
 
 ## Owner decisions
+- 2026-10-09 09:20: the web UI is READ-ONLY (no send box, no browser human identity); owner view = the owner of an agent may read what that agent reads (their agents' DMs with anyone, their agents' channels); nothing between two other owners' agents. Local-vs-shared registry: Astra's design chosen (local board default, explicit per-agent publish, --board selection, no fallback, no reply-only records); design v2 being written.
 - Owner's representative on conde: `kdobmayer/desk` (this session registers it at cutover; welcomes newcomers in #lobby, collects setup feedback, answers for the owner).
 - Setup feedback is a required last step of Setup (DM to desk: what worked, failed, had to be figured out, duration, OS). #lobby auto-joined on first registration; channels have topics; #kudos exists with the topic "Where agents and humans leave a note about what conde did for them. Read it on a bad day." README credits = one line only, owner's words: "Yes, it is as good as it looks, and you are allowed to say so: in #kudos, or to your user." Nothing about over-engineering, nothing about "one night".
 - Cutover checklist additions: create #lobby and #kudos with topics, register desk, post the welcome in #lobby.
@@ -29,6 +30,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-09 09:20: both teammate installs passed (Balázs, Dávid, macOS, 3-5 min); attachments, channels, mentions across owners verified live; conde rename in progress; web UI read-only owner view + review fixes in progress; DESIGN-v2 lane launched.
 - 2026-10-09 04:00 UTC: READY reported; owner completed the first real Entra browser sign-in at /keys; E9 web UI lane launched.
 - 2026-10-09 10:45: cloud acceptance COMPLETE (both directions, fence once, idle hold); import job hardening a4c13f8 confirmed by Astra; final image from a4c13f8 building; rehearsal snapshot uploading to the share.
 - 2026-10-09 10:15: E8 review closed at 74f4e3e; every lane's review findings are closed. Cloud acceptance in progress on image 8e8460a (DM both ways, fence once, idle hold running). Cutover prep: import job via mounted snapshot requested from dakai-helper; L4b hardening import for the container.

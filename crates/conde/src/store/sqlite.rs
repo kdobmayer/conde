@@ -33,6 +33,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("device_credentials", "created_at", "TEXT"),
     ("channels", "topic", "TEXT"),
     ("users", "disabled", "INTEGER NOT NULL DEFAULT 0"),
+    ("attempts", "settled_at", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -994,11 +995,18 @@ impl Tx for SqliteTx<'_> {
         })
     }
 
-    fn update_attempt(&self, id: &str, status: &str, reason: Option<&str>, event_seq: Option<i64>) -> StoreResult<()> {
+    fn update_attempt(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&str>,
+        event_seq: Option<i64>,
+        at: &str,
+    ) -> StoreResult<()> {
         self.exec(
-            "UPDATE attempts SET status = ?2, reason = ?3, last_event_seq = COALESCE(?4, last_event_seq)
-             WHERE attempt_id = ?1",
-            params![id, status, reason, event_seq],
+            "UPDATE attempts SET status = ?2, reason = ?3, last_event_seq = COALESCE(?4, last_event_seq),
+             settled_at = ?5 WHERE attempt_id = ?1",
+            params![id, status, reason, event_seq, at],
         )?;
         Ok(())
     }
@@ -1234,7 +1242,7 @@ impl Tx for SqliteTx<'_> {
                           AND a.address_kind <> 'human'
                           THEN n.notification_id END),
                     MAX(CASE WHEN t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')
-                        THEN t.attempt_id END)
+                        THEN t.settled_at END)
              FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
              JOIN messages m ON m.message_id = n.message_id
              LEFT JOIN attempts t ON t.notification_id = n.notification_id

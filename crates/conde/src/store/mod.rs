@@ -292,7 +292,7 @@ pub struct AgentHealth {
     pub held: i64,
     /// Notifications still pending or dispatching for a message older than the cutoff.
     pub stuck: i64,
-    /// The newest attempt that reached the recipient (delivered; accepted for Codex), a ULID.
+    /// When the newest attempt reached the recipient (delivered; accepted for Codex).
     pub last_reached: Option<String>,
 }
 
@@ -543,7 +543,8 @@ pub trait Tx {
     /// (bridge instance, host, last event seq) of an attempt.
     fn attempt_owner(&self, id: &str) -> StoreResult<Option<(String, Option<String>, i64)>>;
     /// Sets status and reason, and last_event_seq when given.
-    fn update_attempt(&self, id: &str, status: &str, reason: Option<&str>, event_seq: Option<i64>)
+    /// Sets status and reason, and last_event_seq when given; `at` is when the outcome was recorded.
+    fn update_attempt(&self, id: &str, status: &str, reason: Option<&str>, event_seq: Option<i64>, at: &str)
     -> StoreResult<()>;
     /// The notification's most recently created attempt.
     fn latest_attempt(&self, notification_id: &str) -> StoreResult<Option<String>>;

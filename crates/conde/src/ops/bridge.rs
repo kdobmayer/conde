@@ -250,7 +250,7 @@ fn apply(ctx: &Ctx, attempt_id: &str, outcome: &str, reason: Option<&str>, event
         // The earlier frame with this id is still pending at the recipient.
         return Ok(json!({"attempt_id": attempt_id, "ignored": "duplicate"}));
     }
-    ctx.db.update_attempt(attempt_id, outcome, reason, event_seq)?;
+    ctx.db.update_attempt(attempt_id, outcome, reason, event_seq, &ctx.now_iso())?;
     ctx.db.announce(topics::DELIVERY | topics::FLEET);
     let current = ctx.db.latest_attempt(&notification_id)?.as_deref() == Some(attempt_id);
     if current {

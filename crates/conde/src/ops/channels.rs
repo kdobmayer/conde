@@ -136,13 +136,18 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     Ok(json!({"channels": channels}))
 }
 
+/// Who belongs to a channel; read positions (`behind`) only for a member, like its content.
 pub fn members(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let channel = existing(ctx, str_param(body, "channel")?)?;
+    let member = match ctx.me() {
+        Ok(me) => read_seq(ctx.db, &channel.id, &me.id)?.is_some(),
+        Err(_) => false,
+    };
     let members: Vec<Value> = ctx
         .db
         .channel_member_status(&channel.id)?
         .into_iter()
-        .map(|(name, behind)| json!({"name": name, "behind": behind}))
+        .map(|(name, behind)| if member { json!({"name": name, "behind": behind}) } else { json!({"name": name}) })
         .collect();
     Ok(json!({"channel": format!("#{}", channel.name), "members": members}))
 }

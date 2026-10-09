@@ -401,6 +401,11 @@ async fn conversations_follow_dm_and_channel_visibility(d: Arc<Dispatcher>) {
     // A channel by membership only.
     let (_, v) = ui.rpc(&b, &csrf, "conversation.history", json!({"channel": "#secret"})).await;
     assert_eq!(v["error"]["code"], "forbidden", "{v}");
+    // Who is in a channel is public; how far each member has read is for members only.
+    let m = ui.ok(&b, &csrf, "channel.members", json!({"channel": "#secret"})).await;
+    assert_eq!(m["members"], json!([{"name": "david/scout"}]), "{m}");
+    let m = ui.ok(&b, &csrf, "channel.members", json!({"channel": "#team"})).await;
+    assert!(m["members"].as_array().unwrap().iter().all(|x| x["behind"].is_i64()), "{m}");
     let h = ui.ok(&b, &csrf, "conversation.history", json!({"channel": "#team"})).await;
     let posts = h["messages"].as_array().unwrap();
     assert!(posts[0]["text"].as_str().unwrap().contains("was added to #team"), "{h}");
@@ -572,7 +577,11 @@ async fn the_fleet_shows_online_discovery_and_own_delivery_health(d: Arc<Dispatc
     ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "worker"}, "text": "one"})).await;
     let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
     let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
+    // The delivery receipt comes 30 s after the claim: "reached" is the receipt's time.
+    let claimed_at = ui.ok(&b, &csrf, "fleet.list", json!({})).await["now"].as_str().unwrap().to_string();
+    ui.d.advance_clock(30_000);
     ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempt, "outcome": "delivered"})).await;
+    let reported_at = ui.ok(&b, &csrf, "fleet.list", json!({})).await["now"].as_str().unwrap().to_string();
     // A second DM is held at the session.
     ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "worker"}, "text": "two"})).await;
     let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
@@ -585,7 +594,8 @@ async fn the_fleet_shows_online_discovery_and_own_delivery_health(d: Arc<Dispatc
     let w = agent(&f, &format!("{USER}/worker"));
     assert!(w["discovered"].is_string(), "{w}");
     assert_eq!(w["held"], 1, "{w}");
-    assert!(w["last_reached"].is_string(), "{w}");
+    let reached = w["last_reached"].as_str().unwrap().to_string();
+    assert!(reached > claimed_at && reached <= reported_at, "{reached} is the receipt's time, after {claimed_at}");
 
     // Without heartbeats the host drops offline after the TTL; one heartbeat brings it back.
     ui.d.advance_clock(91_000);
@@ -663,15 +673,28 @@ async fn the_event_socket_says_when_the_board_changed(d: Arc<Dispatcher>) {
     let bridge = ui.d.bridge_principal(&k);
     let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
     let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
+    // Everything up to the claim is announced and consumed first, so the next frame can only
+    // be the report's.
+    while quiet_frame(&mut ws).await.is_some() {}
     ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempt, "outcome": "delivered"})).await;
-    loop {
-        let f = next_frame(&mut ws).await.expect("a delivery change");
-        if f["type"] == "changed" && f["topics"].as_array().unwrap().contains(&json!("delivery")) {
-            break;
-        }
-    }
+    let f = next_frame(&mut ws).await.expect("the report's change");
+    assert_eq!(f["type"], "changed", "{f}");
+    assert_eq!(f["topics"], json!(["delivery", "fleet"]), "{f}");
     ws.send(tungstenite::Message::Close(None)).await.unwrap();
     ui.server.shutdown().await.unwrap();
+}
+
+/// The next text frame unless the socket stays quiet for a moment.
+async fn quiet_frame(ws: &mut Ws) -> Option<Value> {
+    let read = async {
+        loop {
+            match ws.next().await?.ok()? {
+                tungstenite::Message::Text(t) => return serde_json::from_str::<Value>(&t).ok(),
+                _ => continue,
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(800), read).await.ok().flatten()
 }
 
 /// Whether a board wake arrives within a moment (other wakes skipped).
@@ -703,6 +726,18 @@ async fn a_name_held_by_an_agent_session_is_never_taken_by_the_browser(d: Arc<Di
     assert!(v["error"]["message"].as_str().unwrap().contains("conde register"), "{v}");
     let me = ui.op(&k, "claude:sess-1", "agent.whoami", json!({})).await;
     assert_eq!(me["address"], "claude:sess-1@k-host", "the session keeps its name");
+    // The race: the session registered after the browser read the registry. The browser's
+    // registration re-checks in its own write transaction and refuses.
+    let web = ui.principal(USER, "web-race").await;
+    let (d2, mut p) = (ui.d.clone(), web.clone());
+    p.host = "web".into();
+    let mut req = Request::new("r", "agent.register", json!({"name": USER, "keep_sessions": true}));
+    req.actor = Some(format!("human:{USER}@web"));
+    req.idempotency_key = Some(conde::util::new_ulid());
+    let resp = blocking(move || d2.dispatch(&p, &req)).await;
+    assert_eq!(resp.error.map(|e| e.code), Some(conde::protocol::ErrorCode::Conflict));
+    let me = ui.op(&k, "claude:sess-1", "agent.whoami", json!({})).await;
+    assert_eq!(me["address"], "claude:sess-1@k-host", "the binding is untouched");
     ui.server.shutdown().await.unwrap();
 }
 

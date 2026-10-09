@@ -63,6 +63,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (2, "channel_topic", include_str!("migrations/0002_channel_topic.sql")),
     (3, "web", include_str!("migrations/0003_web.sql")),
     (4, "notifications_by_recipient", include_str!("migrations/0004_notifications_by_recipient.sql")),
+    (5, "attempt_settled_at", include_str!("migrations/0005_attempt_settled_at.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -1478,11 +1479,18 @@ impl Tx for PgTx {
             .map(|r| (r.get(0), r.get(1), r.get(2))))
     }
 
-    fn update_attempt(&self, id: &str, status: &str, reason: Option<&str>, event_seq: Option<i64>) -> StoreResult<()> {
+    fn update_attempt(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&str>,
+        event_seq: Option<i64>,
+        at: &str,
+    ) -> StoreResult<()> {
         self.execute(
-            "UPDATE attempts SET status = $2, reason = $3, last_event_seq = COALESCE($4, last_event_seq)
-             WHERE attempt_id = $1",
-            &[&id, &status, &reason, &event_seq],
+            "UPDATE attempts SET status = $2, reason = $3, last_event_seq = COALESCE($4, last_event_seq),
+             settled_at = $5 WHERE attempt_id = $1",
+            &[&id, &status, &reason, &event_seq, &at],
         )?;
         Ok(())
     }
@@ -1792,7 +1800,7 @@ impl Tx for PgTx {
                         COUNT(DISTINCT n.notification_id)
                             FILTER (WHERE n.status IN ('pending', 'dispatching') AND m.created_at < $2
                                 AND a.address_kind <> 'human'),
-                        MAX(t.attempt_id)
+                        MAX(t.settled_at)
                             FILTER (WHERE t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex'))
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN messages m ON m.message_id = n.message_id

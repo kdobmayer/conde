@@ -496,9 +496,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Members { channel } => {
             let r = sx.call("channel.members", json!({"channel": channel}))?;
             for m in r["members"].as_array().into_iter().flatten() {
-                let behind = m["behind"].as_i64().unwrap_or(0);
-                let status = if behind == 0 { "up to date".to_string() } else { format!("{behind} behind") };
-                println!("{}\t{status}", s(&m["name"]));
+                match m["behind"].as_i64() {
+                    Some(0) => println!("{}\tup to date", s(&m["name"])),
+                    Some(behind) => println!("{}\t{behind} behind", s(&m["name"])),
+                    None => println!("{}", s(&m["name"])),
+                }
             }
         }
         Cmd::Register { name, address } => {

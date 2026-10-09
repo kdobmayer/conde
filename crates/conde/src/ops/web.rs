@@ -232,7 +232,7 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         };
         let own = a.owner_id == ctx.p.user_id;
         let h = health.get(&a.id);
-        let reached = h.and_then(|h| h.last_reached.as_deref()).and_then(ulid_iso);
+        let reached = h.and_then(|h| h.last_reached.clone());
         agents.push(json!({
             "name": a.canonical(), "owner": a.owner, "display": a.display, "kind": address.kind.as_str(),
             "host": address.host, "address": address.to_string(), "pinned": a.pinned,
@@ -247,10 +247,4 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         "now": iso_from_ms(now), "online_ttl_s": ONLINE_TTL_MS / 1000,
         "hosts": hosts.into_values().collect::<Vec<_>>(), "agents": agents,
     }))
-}
-
-/// A ULID's creation time.
-fn ulid_iso(id: &str) -> Option<String> {
-    let u = ulid::Ulid::from_string(id).ok()?;
-    Some(iso_from_ms(u.timestamp_ms() as i64))
 }

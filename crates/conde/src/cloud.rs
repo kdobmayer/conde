@@ -252,7 +252,8 @@ impl Board {
         }
         let p = principal(WEB_HOST);
         let actor = Address::new(Kind::Human, &row.name, WEB_HOST).to_string();
-        let mut register = Request::new(new_ulid(), "agent.register", json!({"name": row.name}));
+        let mut register =
+            Request::new(new_ulid(), "agent.register", json!({"name": row.name, "keep_sessions": true}));
         register.actor = Some(actor.clone());
         register.idempotency_key = Some(new_ulid());
         let resp = self.d.dispatch(&Principal { local: false, ..p.clone() }, &register);

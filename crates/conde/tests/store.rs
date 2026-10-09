@@ -724,8 +724,8 @@ fn notifications_and_attempts(s: &dyn Store) {
         assert_eq!(tx.latest_attempt("nope").unwrap(), None);
         assert_eq!(tx.attempt("m9").unwrap(), Some(("x".into(), "dispatching".into())));
         assert_eq!(tx.attempt("nope").unwrap(), None);
-        tx.update_attempt("h1", "held", None, None).unwrap();
-        tx.update_attempt("old", "held", Some("parked"), Some(3)).unwrap();
+        tx.update_attempt("h1", "held", None, None, "2026-10-09T00:00:00.000Z").unwrap();
+        tx.update_attempt("old", "held", Some("parked"), Some(3), "2026-10-09T00:00:00.000Z").unwrap();
         assert_eq!(tx.attempt_owner("old").unwrap(), Some(("bridge-0".to_string(), Some("box".to_string()), 3)));
         assert_eq!(tx.attempt_owner("h1").unwrap(), Some(("bridge-1".to_string(), Some("box".to_string()), 0)));
         assert_eq!(tx.attempt_owner("nope").unwrap(), None);
@@ -996,7 +996,7 @@ fn fencing_and_endpoints(s: &dyn Store) {
         dm(tx, 1, &w.a, &w.a, "self");
         tx.insert_notification(&notification("n1", &mid(1), &w.a, 0)).unwrap();
         tx.insert_attempt("held1", "n1", "b2", 1, "box", "t").unwrap();
-        tx.update_attempt("held1", "held", None, None).unwrap();
+        tx.update_attempt("held1", "held", None, None, "2026-10-09T00:00:00.000Z").unwrap();
         tx.replace_endpoints("box", "b2", &[("claude", "s1"), ("codex", "t1")], "t5").unwrap();
         assert_eq!(tx.count_endpoints().unwrap(), 2);
         assert!(tx.gone_claude_holds("b2", "box").unwrap().is_empty(), "s1 is live");
@@ -1013,7 +1013,7 @@ fn provisional_acceptance_goes_stale(s: &dyn Store) {
         dm(tx, 1, &w.b, &w.a, "x");
         tx.insert_notification(&notification("n1", &mid(1), &w.a, 0)).unwrap();
         tx.insert_attempt("acc", "n1", "old", 1, "box", "t").unwrap();
-        tx.update_attempt("acc", "accepted", None, None).unwrap();
+        tx.update_attempt("acc", "accepted", None, None, "2026-10-09T00:00:00.000Z").unwrap();
         tx.settle_notification("n1", "notified", None).unwrap();
         assert_eq!(tx.stale_attempts("new", "box").unwrap(), vec![("acc".to_string(), "bridge instance gone".to_string())]);
         tx.settle_notification("n1", "delivered", None).unwrap();

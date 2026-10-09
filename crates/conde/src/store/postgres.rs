@@ -1520,6 +1520,17 @@ impl Tx for PgTx {
             .map(|r| (r.get(0), r.get(1))))
     }
 
+    fn attempt_route(&self, id: &str) -> StoreResult<Option<(i64, i64)>> {
+        Ok(self
+            .query_opt(
+                "SELECT t.target_binding_version, a.binding_version FROM attempts t
+             JOIN notifications n ON n.notification_id = t.notification_id
+             JOIN agents a ON a.agent_id = n.recipient_agent_id WHERE t.attempt_id = $1",
+                &[&id],
+            )?
+            .map(|r| (r.get(0), r.get(1))))
+    }
+
     fn attempt_owner(&self, id: &str) -> StoreResult<Option<(String, Option<String>, i64)>> {
         Ok(self
             .query_opt("SELECT bridge_instance, host_id, last_event_seq FROM attempts WHERE attempt_id = $1", &[&id])?

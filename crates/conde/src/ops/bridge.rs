@@ -303,6 +303,12 @@ pub fn report(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if event_seq.is_some_and(|seq| seq <= last_seq) {
         return Ok(json!({"attempt_id": attempt_id, "duplicate": true}));
     }
+    // An outcome at a binding the recipient has left (a takeover, an unpublish, a re-register)
+    // never ends the notification: the attempt is abandoned and re-attempted at the current
+    // route, as the stale-attempt rule would at the next claim.
+    if ctx.db.attempt_route(attempt_id)?.is_some_and(|(target, current)| target != current) {
+        return apply(ctx, attempt_id, "abandoned", Some("recipient rebound"), event_seq);
+    }
     apply(ctx, attempt_id, outcome, opt_str(body, "reason")?, event_seq)
 }
 

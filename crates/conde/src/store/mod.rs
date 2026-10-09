@@ -584,6 +584,8 @@ pub trait Tx {
     fn count_dispatching(&self, bridge_instance: &str) -> StoreResult<i64>;
     /// (notification id, status) of an attempt.
     fn attempt(&self, id: &str) -> StoreResult<Option<(String, String)>>;
+    /// (target binding version, the recipient's current binding version) of an attempt.
+    fn attempt_route(&self, id: &str) -> StoreResult<Option<(i64, i64)>>;
     /// (bridge instance, host, last event seq) of an attempt.
     fn attempt_owner(&self, id: &str) -> StoreResult<Option<(String, Option<String>, i64)>>;
     /// Sets status and reason, and last_event_seq when given.

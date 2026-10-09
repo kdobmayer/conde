@@ -80,6 +80,8 @@ on_both!(
     g8_a_v1_host_keeps_exchanging_messages_with_a_migrated_one,
     g5_an_unpublished_name_reads_like_one_that_never_existed,
     g15_unpublish_republish_and_takeover_move_the_route_generation,
+    an_outcome_at_a_moved_generation_reattempts_at_the_current_route,
+    a_late_delivered_at_a_moved_generation_reattempts_at_the_current_route,
     g11_the_window_bounds_claims_while_acks_and_routes_flow,
     a_migrated_host_refuses_session_addresses_and_v1_bridges,
     min_proto_2_refuses_every_v1_hello,
@@ -667,6 +669,50 @@ async fn g15_unpublish_republish_and_takeover_move_the_route_generation(d: Arc<D
     let row = s.agent("kd", "desk").await;
     assert_eq!((row.address.unwrap().host, row.binding_version as u64), ("laptop".to_string(), g4));
     assert_eq!(s.ok(&fx.kd, None, "mailbox.mine", json!({})).await, json!({"mailboxes": []}));
+}
+
+/// The old host applied the routes frame and reports its attempt at the old generation refused
+/// before the new host's bridge has claimed anything: the notification is not ended; the attempt
+/// is abandoned and re-attempted at the current route.
+async fn an_outcome_at_a_moved_generation_reattempts_at_the_current_route(d: Arc<Dispatcher>) {
+    moved_generation(d, "refused", Some("recipient unavailable")).await;
+}
+
+/// A's delayed `delivered` for an attempt at the generation B took over does not complete the
+/// notification; it stays for B (Astra's integrated review, finding 6).
+async fn a_late_delivered_at_a_moved_generation_reattempts_at_the_current_route(d: Arc<Dispatcher>) {
+    moved_generation(d, "delivered", None).await;
+}
+
+async fn moved_generation(d: Arc<Dispatcher>, status: &str, reason: Option<&str>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (mut home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    home.next("routes").await;
+    let n = home.next("notify").await; // the DM from before the migration, at the mailbox
+    let attempt = n["attempt_id"].as_str().unwrap().to_string();
+    let laptop = s.key("kd", "laptop").await;
+    s.migrate(&laptop, &[], &conde::util::new_ulid()).await;
+    s.ok(&laptop, None, "mailbox.publish", json!({"name": "desk", "take": true})).await;
+    assert_eq!(routes_of(&home.next("routes").await), []);
+    let ack = home.outcome(&attempt, 1, status, reason).await;
+    assert_eq!(ack["rejected"], false, "{ack}");
+    let old = s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
+    assert_eq!(old.status, "abandoned", "{old:?}");
+    let note = blocking({
+        let d = d.clone();
+        move || d.with_conn(|t| t.notifications()).unwrap()
+    })
+    .await
+    .into_iter()
+    .find(|x| n["notification_id"] == x.id.as_str())
+    .unwrap();
+    assert_eq!(note.status, "pending", "the notification waits for the current route");
+    let mut lap = s.v2(&laptop, "v2-laptop-moved", 8, &[&desk]).await;
+    let again = lap.next("notify").await;
+    assert_eq!(again["notification_id"], n["notification_id"]);
+    assert_eq!(again["binding_version"].as_u64(), Some(s.agent("kd", "desk").await.binding_version as u64));
 }
 
 // --- G11 (server half) ------------------------------------------------------------------------

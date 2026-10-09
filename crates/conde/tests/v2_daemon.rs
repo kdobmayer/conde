@@ -1494,3 +1494,104 @@ fn integrated_g11b_a_held_attempt_pauses_only_its_origin() {
     wait_for("the late receipt settled", || b.delivery(&relay, &held).filter(|d| d.contains("delivered")));
     wait_for("the origin resumes", || b.delivery(&relay, &waiting).filter(|d| d.contains("delivered")));
 }
+
+impl RealBoard {
+    /// (mailbox id, route generation, host) of `owner/name` on the real board.
+    fn mailbox(&self, owner: &str, name: &str) -> (String, u64, Option<String>) {
+        let a = self
+            .d
+            .with_conn(|tx| {
+                let uid = tx.user_id(owner)?.unwrap();
+                tx.agent_by_name(uid, name)
+            })
+            .unwrap()
+            .unwrap();
+        (a.id, a.binding_version as u64, a.address.map(|x| x.host))
+    }
+}
+
+/// G14 on the real board: A holds a job queued and one injected; B takes the mailbox. A applies
+/// the routes frame and never injects the queued job; the server re-attempts both at B (the
+/// injected one is the documented race), and B's receipt settles them.
+#[test]
+fn integrated_g14_a_takeover_moves_the_queued_job_to_the_new_host() {
+    let tuning = Tuning { receipt_budget: 1, ..fast() };
+    let board = RealBoard::start();
+    let (a, _) = real_host(&board, "kdobmayer", "homepc", "worker", "s-a", tuning);
+    let mut b = Host::tuned("kdobmayer", "laptop", fast());
+    b.join_real(&board);
+    b.claude("worker", "s-b");
+    let (c, relay) = real_host(&board, "balazs", "box-b", "relay", "s-relay", fast());
+
+    let injected = id_of(&c.send(&relay, "kdobmayer/worker", "injected before the move", Some("dakai")).unwrap());
+    a.harness.wait_pushes(bare(&injected), 1);
+    let queued = id_of(&c.send(&relay, "kdobmayer/worker", "queued at the move", Some("dakai")).unwrap());
+    wait_for("the job queued on A", || (slots(&a, "dakai").queued == 1).then_some(()));
+    assert!(a.harness.pushes_of(bare(&queued)).is_empty());
+
+    let took = b.ok(&b.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker", "take": true}), Some("dakai"));
+    assert_eq!(took["state"], "published", "{took}");
+    wait_for("A applied the routes frame", || a.doctor().contains("publication removed: worker").then_some(()));
+    let at_b = b.harness.wait_pushes(bare(&queued), 1).remove(0);
+    assert_eq!(at_b.address, "claude:s-b@laptop");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(a.harness.pushes_of(bare(&queued)).is_empty(), "A never injects the queued job");
+    let again = b.harness.wait_pushes(bare(&injected), 1).remove(0);
+    assert_eq!(a.harness.pushes_of(bare(&injected)).len(), 1);
+    b.harness.receipt(&at_b.token, ReceiptStatus::Delivered);
+    b.harness.receipt(&again.token, ReceiptStatus::Delivered);
+    wait_for("queued delivered at B", || c.delivery(&relay, &queued).filter(|d| d.contains("delivered")));
+    wait_for("injected delivered at B", || c.delivery(&relay, &injected).filter(|d| d.contains("delivered")));
+    assert!(board.attempts(&queued).iter().all(|x| x.0 != "refused" && x.0 != "denied"), "{:?}", board.attempts(&queued));
+    wait_for("A's queue drained", || (slots(&a, "dakai").queued == 0).then_some(()));
+}
+
+/// G15 on the real board: after unpublish a remote send gets `recipient unavailable`;
+/// re-publishing makes a new generation and messages flow; an unpublish replayed after the
+/// mailbox moved to another host does not unbind it.
+#[test]
+fn integrated_g15_unpublish_and_republish() {
+    let board = RealBoard::start();
+    let (mut a, _) = real_host(&board, "kdobmayer", "homepc", "worker", "s-worker", fast());
+    let (b, relay) = real_host(&board, "balazs", "box-b", "relay", "s-relay", fast());
+    let (before_id, before_gen, _) = board.mailbox("kdobmayer", "worker");
+
+    let gone = a.ok(&a.human(), op::MAILBOX_UNPUBLISH, json!({"agent": "worker"}), Some("dakai"));
+    assert_eq!(gone["state"], "unpublished");
+    let e = b.send(&relay, "kdobmayer/worker", "anyone?", Some("dakai")).unwrap_err();
+    assert!(e.1.contains("recipient unavailable"), "{e:?}");
+
+    let again = a.publish("worker");
+    assert_eq!(again["mailbox_id"], json!(before_id));
+    assert!(again["route_generation"].as_u64().unwrap() > before_gen + 1, "{again}");
+    let id = id_of(&b.send(&relay, "kdobmayer/worker", "back", Some("dakai")).unwrap());
+    let p = a.harness.wait_pushes(bare(&id), 1).remove(0);
+    a.harness.receipt(&p.token, ReceiptStatus::Delivered);
+    wait_for("delivered again", || b.delivery(&relay, &id).filter(|d| d.contains("delivered")));
+
+    // an unpublish that was pending when the process died, replayed after the move
+    let (current_id, current_gen, _) = board.mailbox("kdobmayer", "worker");
+    a.kill();
+    let c = sql(&a);
+    let agent = local_agent_id(&a, "worker");
+    c.execute("UPDATE publications SET state = 'unpublishing' WHERE agent_id = ?1", [&agent]).unwrap();
+    c.execute(
+        "INSERT INTO board_ops(op_id, board, kind, agent_id, request_json, state, created_at, updated_at)
+         VALUES ('01REPLAYEDUNPUBLISH0000000', 'dakai', 'unpublish', ?1, ?2, 'pending', 't', 't')",
+        rusqlite::params![agent, json!({"mailbox_id": current_id, "expected_generation": current_gen}).to_string()],
+    )
+    .unwrap();
+    let mut l = Host::tuned("kdobmayer", "laptop", fast());
+    l.join_real(&board);
+    l.claude("worker", "s-laptop");
+    let took = l.ok(&l.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker", "take": true}), Some("dakai"));
+    assert_eq!(took["state"], "published", "{took}");
+    a.start();
+    wait_for("the replayed unpublish finished", || {
+        let state: String = sql(&a).query_row("SELECT state FROM board_ops WHERE op_id = '01REPLAYEDUNPUBLISH0000000'", [], |r| r.get(0)).unwrap();
+        (state == "done").then_some(())
+    });
+    assert_eq!(board.mailbox("kdobmayer", "worker").2.as_deref(), Some("laptop"), "the new route is untouched");
+    let rows: i64 = sql(&a).query_row("SELECT count(*) FROM publications WHERE agent_id = ?1", [&agent], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
+}

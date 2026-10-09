@@ -339,6 +339,17 @@ pub struct WebSessionRow {
     pub last_seen: i64,
 }
 
+/// An attempt a new bridge instance or a rebind outdated, with what its notification is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleAttempt {
+    pub attempt_id: String,
+    /// 'bridge instance gone' or 'recipient rebound'.
+    pub reason: String,
+    pub notification_id: String,
+    pub message_id: String,
+    pub recipient_id: String,
+}
+
 /// An attempt still open on a bridge instance, as it is offered again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenAttempt {
@@ -579,8 +590,9 @@ pub trait Tx {
     fn open_attempts(&self, bridge_instance: &str) -> StoreResult<Vec<OpenAttempt>>;
     /// Held or dispatching attempts, and accepted ones whose notification
     /// still stands at 'notified', for recipients on `host` (or unbound), that
-    /// another instance owns or that target an older binding, as (attempt id, reason).
-    fn stale_attempts(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<(String, String)>>;
+    /// another instance owns or that target an older binding. Only attempts of open
+    /// notifications (pending, dispatching, notified, held): a read or delivered one keeps its attempts.
+    fn stale_attempts(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<StaleAttempt>>;
     /// This instance's holds on Claude or mailbox recipients of `host` whose session or
     /// mailbox is not a live endpoint.
     fn gone_holds(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<String>>;

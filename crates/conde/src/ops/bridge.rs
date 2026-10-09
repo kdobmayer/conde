@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use super::agents;
 use super::channels;
-use super::messages::msg_by_id;
+use super::messages::{MsgRow, msg_by_id};
 use crate::address::Kind;
 use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, opt_i64, opt_str, str_param};
 use crate::store::topics;
@@ -91,15 +91,8 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             continue;
         };
         let Some(address) = rcpt.address.clone() else { continue };
-        let member_seq = match &m.channel_id {
-            Some(c) => channels::read_seq(ctx.db, c, &rcpt.id)?,
-            None => None,
-        };
-        let already_read = match &m.channel_id {
-            Some(_) => member_seq.is_some_and(|s| s >= m.seq),
-            None => ctx.db.dm_read_at(&m.id, &rcpt.id)?.is_some(),
-        };
-        if already_read {
+        let member_seq = member_seq(ctx, &m, &rcpt.id)?;
+        if read_by(ctx, &m, &rcpt.id, member_seq)? {
             set_status("read")?;
             continue;
         }
@@ -267,12 +260,36 @@ pub fn endpoints(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 /// process), to the incarnation they targeted; otherwise they are abandoned
 /// and re-attempted at once. A provisional acceptance counts only while it is
 /// the notification's standing state; confirmed deliveries are never touched.
+/// A notification the recipient has read meanwhile is settled as read instead:
+/// its attempt stays as it is and nothing is re-attempted.
 fn abandon_stale(ctx: &Ctx, me: &str) -> OpResult<()> {
-    let stale = ctx.db.stale_attempts(me, &ctx.p.host)?;
-    for (attempt_id, reason) in stale {
-        apply(ctx, &attempt_id, "abandoned", Some(&reason), None)?;
+    for a in ctx.db.stale_attempts(me, &ctx.p.host)? {
+        if let Some(m) = msg_by_id(ctx.db, &a.message_id)?
+            && read_by(ctx, &m, &a.recipient_id, member_seq(ctx, &m, &a.recipient_id)?)?
+        {
+            ctx.db.set_notification_status(&a.notification_id, "read")?;
+            ctx.db.announce(topics::DELIVERY);
+            continue;
+        }
+        apply(ctx, &a.attempt_id, "abandoned", Some(&a.reason), None)?;
     }
     Ok(())
+}
+
+/// The recipient's read cursor in `m`'s channel, if `m` is a channel message and it is a member.
+fn member_seq(ctx: &Ctx, m: &MsgRow, rcpt: &str) -> OpResult<Option<i64>> {
+    Ok(match &m.channel_id {
+        Some(c) => channels::read_seq(ctx.db, c, rcpt)?,
+        None => None,
+    })
+}
+
+/// Whether the recipient has read `m`: the DM is marked read, or its channel cursor is past `m`.
+fn read_by(ctx: &Ctx, m: &MsgRow, rcpt: &str, member_seq: Option<i64>) -> OpResult<bool> {
+    Ok(match &m.channel_id {
+        Some(_) => member_seq.is_some_and(|s| s >= m.seq),
+        None => ctx.db.dm_read_at(&m.id, rcpt)?.is_some(),
+    })
 }
 
 fn unread_badges(ctx: &Ctx, agent_id: &str) -> OpResult<Vec<String>> {

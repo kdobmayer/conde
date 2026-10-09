@@ -90,6 +90,7 @@ on_both!(
     board_info_names_the_board_account_and_host,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     the_route_revision_orders_snapshots_and_answers,
+    a_takeover_abandons_only_open_attempts,
 );
 
 // --- harness -----------------------------------------------------------------------------------
@@ -999,6 +1000,65 @@ async fn a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoin
     assert_ne!(again["attempt_id"], attempt.as_str(), "re-attempted");
     let old = fx.s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
     assert_eq!((old.status.as_str(), old.reason.as_deref()), ("abandoned", Some("recipient offline")));
+}
+
+/// A new bridge instance of the host (a daemon restart) abandons and re-offers only the old
+/// instance's attempts whose notification is still open. A delivered notification keeps its
+/// delivered attempt; one the recipient already read keeps its accepted or held attempt and
+/// is settled as read, never re-attempted.
+async fn a_takeover_abandons_only_open_attempts(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (mut home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    home.next("routes").await;
+    let me = mailbox(&desk);
+    let read = |id: Value| s.ok(&fx.kd, Some(me.as_str()), "message.read", json!({"id": id}));
+    // Delivered, then read.
+    let delivered = home.next("notify").await; // the DM from before the migration
+    home.outcome(delivered["attempt_id"].as_str().unwrap(), 1, "delivered", None).await;
+    read(delivered["message_id"].clone()).await;
+    // Accepted without a receipt, then read.
+    let id = s.send(&fx.ben, RELAY, "kd/desk", "accepted and read").await;
+    let accepted = home.notify_for(&id).await;
+    home.outcome(accepted["attempt_id"].as_str().unwrap(), 1, "accepted", None).await;
+    read(json!(id)).await;
+    // Held, then read.
+    let id = s.send(&fx.ben, RELAY, "kd/desk", "held and read").await;
+    let held = home.notify_for(&id).await;
+    home.outcome(held["attempt_id"].as_str().unwrap(), 1, "held", None).await;
+    read(json!(id)).await;
+    // Accepted, not read: still open.
+    let id = s.send(&fx.ben, RELAY, "kd/desk", "still open").await;
+    let open = home.notify_for(&id).await;
+    home.outcome(open["attempt_id"].as_str().unwrap(), 1, "accepted", None).await;
+
+    let mut next = s.v2(&fx.kd, "v2-after-restart", 8, &[&desk]).await;
+    next.next("routes").await;
+    let again = next.next("notify").await;
+    assert_eq!(again["notification_id"], open["notification_id"], "only the open one is re-offered: {again}");
+    assert_ne!(again["attempt_id"], open["attempt_id"]);
+    next.none("notify", Duration::from_millis(300)).await;
+
+    let attempts = s.attempts().await;
+    let attempt = |n: &Value| {
+        let a = attempts.iter().find(|a| n["attempt_id"] == a.id.as_str()).unwrap();
+        (a.status.clone(), a.reason.clone())
+    };
+    assert_eq!(attempt(&delivered), ("delivered".into(), None));
+    assert_eq!(attempt(&accepted), ("accepted".into(), None));
+    assert_eq!(attempt(&held), ("held".into(), None));
+    assert_eq!(attempt(&open), ("abandoned".into(), Some("bridge instance gone".into())));
+    let notes = blocking({
+        let d = d.clone();
+        move || d.with_conn(|t| t.notifications()).unwrap()
+    })
+    .await;
+    let status = |n: &Value| notes.iter().find(|x| n["notification_id"] == x.id.as_str()).unwrap().status.clone();
+    assert_eq!(
+        [status(&delivered), status(&accepted), status(&held), status(&open)],
+        ["delivered", "read", "read", "dispatching"]
+    );
 }
 
 // --- the SQLite file of a v1 board ------------------------------------------------------------

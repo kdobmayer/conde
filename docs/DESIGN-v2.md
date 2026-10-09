@@ -377,7 +377,9 @@ board's outcome budget is full.
     committed terminal outcome (not yet reported, or reported only into the dead client's memory,
     or still `accepted` or `held`) is abandoned by the v1 stale-attempt rule and re-attempted
     through the new instance, so it may be injected again. Receipts for the old tokens are ignored.
-    The local board follows the same rule.
+    The rule covers open notifications only: an attempt whose notification is already delivered or
+    read is left as it is, and one whose message the recipient has read meanwhile settles its
+    notification as read instead of being abandoned. The local board follows the same rule.
 - **Session replacement.** The local incarnation is the local agent's `binding_version`, a local
   counter that is never sent. When the 5-second rescan sees a published agent's binding change (the
   old and new sessions may both be live), the daemon reports `abandoned` with reason

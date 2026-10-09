@@ -31,7 +31,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt,
+    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
     PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes, WebSessionRow, address_of,
 };
 use crate::address::Address;
@@ -1511,18 +1511,30 @@ impl Tx for PgTx {
         )
     }
 
-    fn stale_attempts(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<(String, String)>> {
-        self.pairs(
-            "SELECT t.attempt_id, CASE WHEN t.bridge_instance <> $1 THEN 'bridge instance gone'
-                                       ELSE 'recipient rebound' END
-             FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
-             JOIN agents a ON a.agent_id = n.recipient_agent_id
-             WHERE (t.status IN ('held', 'dispatching') OR (t.status = 'accepted' AND n.status = 'notified'))
-               AND (a.host_id = $2 OR a.host_id IS NULL)
-               AND (t.bridge_instance <> $1 OR t.target_binding_version <> a.binding_version)
-             ORDER BY t.attempt_seq",
-            &[&bridge_instance, &host],
-        )
+    fn stale_attempts(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<StaleAttempt>> {
+        Ok(self
+            .query(
+                "SELECT t.attempt_id, CASE WHEN t.bridge_instance <> $1 THEN 'bridge instance gone'
+                                           ELSE 'recipient rebound' END,
+                        n.notification_id, n.message_id, n.recipient_agent_id
+                 FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
+                 JOIN agents a ON a.agent_id = n.recipient_agent_id
+                 WHERE (t.status IN ('held', 'dispatching') OR (t.status = 'accepted' AND n.status = 'notified'))
+                   AND n.status IN ('pending', 'dispatching', 'notified', 'held')
+                   AND (a.host_id = $2 OR a.host_id IS NULL)
+                   AND (t.bridge_instance <> $1 OR t.target_binding_version <> a.binding_version)
+                 ORDER BY t.attempt_seq",
+                &[&bridge_instance, &host],
+            )?
+            .iter()
+            .map(|r| StaleAttempt {
+                attempt_id: r.get(0),
+                reason: r.get(1),
+                notification_id: r.get(2),
+                message_id: r.get(3),
+                recipient_id: r.get(4),
+            })
+            .collect())
     }
 
     fn attempt(&self, id: &str) -> StoreResult<Option<(String, String)>> {

@@ -35,6 +35,7 @@ const CASES: &[Case] = &[
     ("diagnostics", diagnostics),
     ("fencing_and_endpoints", fencing_and_endpoints),
     ("provisional_acceptance_goes_stale", provisional_acceptance_goes_stale),
+    ("settled_notifications_keep_their_attempts", settled_notifications_keep_their_attempts),
     ("import_helpers", import_helpers),
     ("channel_topics", channel_topics),
     ("writes_are_serialized", writes_are_serialized),
@@ -342,6 +343,11 @@ fn post(tx: &dyn Tx, n: usize, from: &str, channel: &str, text: &str) -> i64 {
 
 fn notification<'a>(id: &'a str, message_id: &'a str, recipient_id: &'a str, at: i64) -> NewNotification<'a> {
     NewNotification { id, message_id, recipient_id, kind: "dm", binding_version: 1, next_attempt_at: at }
+}
+
+/// `stale_attempts` as (attempt id, reason).
+fn stale(tx: &dyn Tx, instance: &str, host: &str) -> Vec<(String, String)> {
+    tx.stale_attempts(instance, host).unwrap().into_iter().map(|a| (a.attempt_id, a.reason)).collect()
 }
 
 fn chan(id: &str, name: &str, created_by: &str) -> Channel {
@@ -759,16 +765,15 @@ fn notifications_and_attempts(s: &dyn Store) {
         assert_eq!(tx.held_attempts("bridge-1").unwrap(), vec![("h1".to_string(), "human:krisz@box".to_string())]);
         // rebinding a outdates its attempts; bridge-0's hold has no live bridge
         tx.set_binding(&w.a, Some(&addr(Kind::Claude, "s2", "box"))).unwrap();
-        let stale = tx.stale_attempts("bridge-1", "box").unwrap();
         assert_eq!(
-            stale,
+            stale(tx, "bridge-1", "box"),
             vec![
                 ("m9".to_string(), "recipient rebound".to_string()),
                 ("m2".to_string(), "recipient rebound".to_string()),
                 ("old".to_string(), "bridge instance gone".to_string()),
             ]
         );
-        assert!(tx.stale_attempts("bridge-1", "far").unwrap().is_empty());
+        assert!(stale(tx, "bridge-1", "far").is_empty());
         let attempts = tx.attempts().unwrap();
         assert_eq!(attempts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["m9", "m2", "h1", "old"]);
         let old = attempts.iter().find(|a| a.id == "old").unwrap();
@@ -1025,9 +1030,30 @@ fn provisional_acceptance_goes_stale(s: &dyn Store) {
         tx.insert_attempt("acc", "n1", "old", 1, "box", "t").unwrap();
         tx.update_attempt("acc", "accepted", None, None, "2026-10-09T00:00:00.000Z").unwrap();
         tx.settle_notification("n1", "notified", None).unwrap();
-        assert_eq!(tx.stale_attempts("new", "box").unwrap(), vec![("acc".to_string(), "bridge instance gone".to_string())]);
+        assert_eq!(stale(tx, "new", "box"), vec![("acc".to_string(), "bridge instance gone".to_string())]);
         tx.settle_notification("n1", "delivered", None).unwrap();
-        assert!(tx.stale_attempts("new", "box").unwrap().is_empty(), "confirmed deliveries are never touched");
+        assert!(stale(tx, "new", "box").is_empty(), "confirmed deliveries are never touched");
+    });
+}
+
+/// A takeover abandons the old instance's attempts only while their notification is open: one
+/// already read or delivered keeps its attempts as they are.
+fn settled_notifications_keep_their_attempts(s: &dyn Store) {
+    let w = world(s);
+    write(s, |tx| {
+        for (n, attempt, status, settled) in
+            [(1, "held-read", "held", "read"), (2, "sent-delivered", "dispatching", "delivered"), (3, "open", "held", "held")]
+        {
+            dm(tx, n, &w.b, &w.a, "x");
+            let id = format!("n{n}");
+            tx.insert_notification(&notification(&id, &mid(n), &w.a, 0)).unwrap();
+            tx.insert_attempt(attempt, &id, "old", 1, "box", "t").unwrap();
+            if status != "dispatching" {
+                tx.update_attempt(attempt, status, None, None, "2026-10-09T00:00:00.000Z").unwrap();
+            }
+            tx.settle_notification(&id, settled, None).unwrap();
+        }
+        assert_eq!(stale(tx, "new", "box"), vec![("open".to_string(), "bridge instance gone".to_string())]);
     });
 }
 

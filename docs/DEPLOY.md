@@ -48,3 +48,15 @@ listing) at https://stconde.blob.core.windows.net/dist; the server redirects
 Single replica until the server is proven stateless; Postgres B1ms single zone,
 no HA; no NAT gateway; Entra client secret valid until 2028-10-08. Infra code
 lives in infra/ locally (not pushed; owner decides).
+
+## Binding an admin-created user to an Entra identity
+
+A user created by the admin API or the import (for example the owner at cutover) has no
+Entra identity. If that person signs in BEFORE the admin binds them, the login creates a
+second user from the UPN (`krisztian-dobmayer` on 2026-10-09) and the owner view is empty.
+Bind first: `POST /v1/admin/users {"tid","oid","name":"<existing user>"}` (admin bearer key
+from the vault; oid = `az ad signed-in-user show --query id`). If the sign-in already
+happened, move the binding in one transaction on the database (through the job, never from
+a workstation): `UPDATE identities SET user_id = <existing user id> WHERE tid = ... AND oid =
+...;` then `DELETE FROM web_sessions WHERE user_id = <stray user id>;` and have the person
+sign in again. Leave the stray user row.

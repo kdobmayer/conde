@@ -21,10 +21,6 @@ use crate::protocol::{ErrorCode, Request, Response};
 use crate::store::Wake;
 use crate::util::{iso_from_ms, new_ulid};
 
-/// The host of a human first named from the browser (`human:<user>@web`): a user whose human
-/// has no name on the board yet gets one there. Not a real host; nothing is delivered to it.
-pub const WEB_HOST: &str = conde_remote::web::BROWSER_HOST;
-
 /// How long SIGTERM may take before the server stops waiting for connections.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(50);
 
@@ -128,16 +124,23 @@ impl conde_remote::Dispatcher for Board {
         self.dispatch_as(principal, Some(bridge_instance), request)
     }
 
+    /// A browser read as the signed-in owner: no actor, no host, so only owner-scoped and
+    /// public reads answer (conde-remote lets nothing else through).
     fn dispatch_web(&self, user: &WebPrincipal, request: Value) -> Value {
         let id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_string();
         let resp = match serde_json::from_value::<Request>(request) {
             Err(e) => Response::err(&id, ErrorCode::BadRequest, format!("bad request frame: {e}")),
-            Ok(req) => match self.web_human(user) {
-                Ok((p, actor, name)) => {
-                    self.d.dispatch(&p, &Request { actor: Some(actor), from: Some(name), ..req })
-                }
-                Err((code, message)) => Response::err(&id, code, message),
-            },
+            Ok(req) => {
+                let p = Principal {
+                    user_id: user.user_id,
+                    user: user.user.clone(),
+                    host: conde_remote::web::BROWSER_HOST.to_string(),
+                    local: false,
+                    bridge_instance: None,
+                    bridge_connection: None,
+                };
+                self.d.dispatch(&p, &Request { actor: None, from: None, idempotency_key: None, ..req })
+            }
         };
         serde_json::to_value(resp).unwrap_or_else(|e| json!({"v": 1, "type": "response", "request_id": id, "ok": false,
             "error": {"code": "internal", "message": e.to_string()}}))
@@ -171,99 +174,6 @@ impl Board {
         };
         serde_json::to_value(resp).unwrap_or_else(|e| json!({"v": 1, "type": "response", "request_id": id, "ok": false,
             "error": {"code": "internal", "message": e.to_string()}}))
-    }
-}
-
-impl Board {
-    /// The principal, actor and name a browser user acts as: their human, a name bound to a
-    /// `human:` address in their namespace. A name registered from a terminal wins over the
-    /// browser's own; among several, the one named after the user. The browser acts by name
-    /// (the terminal human's `--from`), so two names on one human address stay usable. With
-    /// `register`, a user without a human gets `<user>` bound to `human:<user>@web` through the
-    /// CLI's registration rules, unless an agent session or a pin holds that name.
-    fn web_human(&self, user: &WebPrincipal) -> Result<(Principal, String, String), (ErrorCode, String)> {
-        let internal = |e: crate::store::StoreError| (ErrorCode::Internal, format!("storage error: {e}"));
-        let (row, humans, same_name) = self
-            .d
-            .with_conn(|tx| {
-                let row = tx.user_by_id(user.user_id)?;
-                let humans: Vec<_> =
-                    tx.bound_agents()?.into_iter().filter(|a| a.owner_id == user.user_id && a.is_human()).collect();
-                let same_name = match &row {
-                    Some(r) => tx.agent_by_name(r.user_id, &r.name)?,
-                    None => None,
-                };
-                Ok((row, humans, same_name))
-            })
-            .map_err(internal)?;
-        let Some(row) = row.filter(|r| !r.disabled) else {
-            return Err((ErrorCode::Unauthenticated, "this account is disabled or gone".into()));
-        };
-        let principal = |host: &str| Principal {
-            user_id: row.user_id,
-            user: row.name.clone(),
-            host: host.to_string(),
-            // Acts by name through `from`, which the dispatcher allows a human principal only.
-            local: true,
-            bridge_instance: None,
-            bridge_connection: None,
-        };
-        // A human named from a terminal wins over the one the browser named on `web`.
-        let on_web = |a: &&crate::store::Agent| a.address.as_ref().is_some_and(|x| x.host == WEB_HOST);
-        let (web, named): (Vec<_>, Vec<_>) = humans.iter().partition(on_web);
-        let chosen = named
-            .iter()
-            .find(|a| a.name == row.name)
-            .or(if named.len() == 1 { named.first() } else { None })
-            .or(if named.is_empty() { web.first() } else { None });
-        if let Some(agent) = chosen
-            && let Some(address) = &agent.address
-        {
-            return Ok((principal(&address.host), address.to_string(), agent.name.clone()));
-        }
-        if !humans.is_empty() {
-            let names: Vec<String> = humans.iter().map(|a| a.canonical()).collect();
-            return Err((
-                ErrorCode::Conflict,
-                format!(
-                    "several names are bound to your human ({}); the browser acts as the one named '{}'",
-                    names.join(", "),
-                    row.name
-                ),
-            ));
-        }
-        let none_yet = |why: &str| {
-            format!(
-                "your human has no name on the board yet{why}. Register your human from a terminal with: \
-                 conde register <name>"
-            )
-        };
-        if let Some(agent) = &same_name
-            && (agent.address.is_some() || agent.pinned.is_some())
-        {
-            let held = format!(", and the name '{}' belongs to {}", row.name, agent.address.as_ref().map_or_else(
-                || "a pinned role".to_string(),
-                |a| format!("the session {a}")
-            ));
-            return Err((ErrorCode::NotFound, none_yet(&held)));
-        }
-        if !user.register {
-            return Err((ErrorCode::NotFound, none_yet("")));
-        }
-        let p = principal(WEB_HOST);
-        let actor = Address::new(Kind::Human, &row.name, WEB_HOST).to_string();
-        let mut register =
-            Request::new(new_ulid(), "agent.register", json!({"name": row.name, "keep_sessions": true}));
-        register.actor = Some(actor.clone());
-        register.idempotency_key = Some(new_ulid());
-        let resp = self.d.dispatch(&Principal { local: false, ..p.clone() }, &register);
-        match resp.error {
-            None => {
-                tracing::info!(user = %row.name, %actor, "named the browser human");
-                Ok((p, actor, row.name.clone()))
-            }
-            Some(e) => Err((e.code, none_yet(&format!(", and naming it '{}' failed: {}", row.name, e.message)))),
-        }
     }
 }
 

@@ -77,13 +77,6 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         }
     }
     let agent = ensure_row(ctx, &name)?;
-    // `keep_sessions` (the browser naming its human): never move a name off an agent session,
-    // checked in the same transaction as the binding.
-    if body.get("keep_sessions").and_then(Value::as_bool) == Some(true)
-        && let Some(current) = agent.address.as_ref().filter(|a| a.kind != Kind::Human)
-    {
-        return Err(conflict(format!("{} is bound to the session {current}", agent.canonical())));
-    }
     if let Some(pin) = &agent.pinned
         && *pin != own.to_string() {
             return Err(forbidden(format!(

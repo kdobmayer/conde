@@ -4,8 +4,9 @@
 //! - `GET /`: the app shell for a signed-in browser, else a redirect to sign in.
 //! - `GET /app/{*path}`: the app's scripts and styles (no data, no session needed).
 //! - `GET /v1/session`: who is signed in, and the CSRF token the app sends back.
-//! - `POST /v1/rpc` (without a bearer token): one dispatcher request as the user's human; the
-//!   `x-csrf-token` header must carry the session's token.
+//! - `POST /v1/rpc` (without a bearer token): one read for the signed-in owner (owner-scoped
+//!   reads, the fleet, the directory; nothing writes); the `x-csrf-token` header must carry the
+//!   session's token.
 //! - `GET /v1/attachments/{id}`: one attachment as a download, under the same visibility rules.
 //! - `GET /v1/events`: a WebSocket that says when the board changed (never what), so the app
 //!   refetches what it shows.
@@ -51,33 +52,16 @@ pub const ALL_TOPICS: u8 = u8::MAX;
 const COALESCE: Duration = Duration::from_millis(250);
 /// Ping period of the event socket (inside the ingress idle cut) and its session recheck.
 const EVENTS_PING: Duration = Duration::from_secs(30);
-/// The ops a browser may call: what a human does on the board, nothing that registers,
-/// pins or acts as a bridge.
+/// The ops a browser may call: the owner-scoped reads, the fleet and public directory reads.
+/// The web app is read-only: nothing that writes, registers or acts as an agent.
 const BROWSER_OPS: &[&str] = &[
-    "agent.whoami",
-    "agent.resolve",
+    "owner.list",
+    "owner.history",
+    "owner.message",
+    "fleet.list",
     "agent.list",
-    "profile.get",
-    "profile.set",
-    "message.send",
-    "message.read",
-    "message.get",
-    "attachment.get",
-    "inbox.list",
-    "reaction.set",
-    "search",
-    "receipt.list",
-    "channel.create",
-    "channel.join",
-    "channel.leave",
-    "channel.topic",
-    "channel.invite",
     "channel.list",
     "channel.members",
-    "conversation.list",
-    "conversation.history",
-    "conversation.read",
-    "fleet.list",
 ];
 
 /// What the app routes share with the server.
@@ -147,12 +131,10 @@ fn same_origin(app: &AppState, headers: &HeaderMap, required: bool) -> bool {
     }
 }
 
-/// The session's user; `register` only for a CSRF-checked request.
-fn principal(record: &SessionRecord, register: bool) -> WebPrincipal {
+fn principal(record: &SessionRecord) -> WebPrincipal {
     WebPrincipal {
         user_id: record.user_id,
         user: record.user_name.clone(),
-        register,
     }
 }
 
@@ -172,8 +154,8 @@ async fn dispatch(app: &AppState, user: WebPrincipal, request: Value) -> Value {
     response
 }
 
-/// `POST /v1/rpc` from a browser: the session's user acts as their human. The CSRF token
-/// header is required on every call, reads included.
+/// `POST /v1/rpc` from a browser: one read for the session's user. The CSRF token header is
+/// required on every call.
 pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Response {
     if !same_origin(app, &headers, false) {
         return api_error(
@@ -216,40 +198,28 @@ pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Resp
         obj.remove("actor");
         obj.remove("from");
     }
-    let response = dispatch(app, principal(&session.record, true), request).await;
+    let response = dispatch(app, principal(&session.record), request).await;
     ([no_store()], axum::Json(response)).into_response()
 }
 
-/// `GET /v1/session`: who is signed in and the CSRF token for `/v1/rpc` and sign-out. The
-/// human's name is reported when it exists; a GET never names it (the app's first RPC does).
+/// `GET /v1/session`: who is signed in and the CSRF token for `/v1/rpc` and sign-out.
 async fn session_info(State(app): State<AppState>, headers: HeaderMap) -> Response {
     let session = match signed_in(&app, &headers).await {
         Ok(s) => s,
         Err(refused) => return refused,
     };
     let r = &session.record;
-    let me = dispatch(
-        &app,
-        principal(r, false),
-        json!({"v": 1, "type": "request", "request_id": "session", "op": "agent.whoami", "body": {}}),
-    )
-    .await;
-    let (name, problem) = match (me["ok"].as_bool(), me["result"]["name"].as_str()) {
-        (Some(true), Some(name)) => (Some(name.to_string()), None),
-        _ => (None, me["error"]["message"].as_str().map(str::to_string)),
-    };
     (
         [no_store()],
         axum::Json(json!({
-            "user": r.user_name, "display": r.display, "csrf": r.csrf,
-            "name": name, "problem": problem, "csrf_header": CSRF_HEADER,
+            "user": r.user_name, "display": r.display, "csrf": r.csrf, "csrf_header": CSRF_HEADER,
         })),
     )
         .into_response()
 }
 
-/// `GET /v1/attachments/{id}`: the bytes as a download, if the user's human may see the
-/// message (the same `attachment.get` op the CLI uses decides).
+/// `GET /v1/attachments/{id}`: the bytes as a download, if one of the user's agents can read
+/// the message (`owner.attachment` decides).
 async fn attachment(
     State(app): State<AppState>,
     headers: HeaderMap,
@@ -259,9 +229,9 @@ async fn attachment(
         Ok(s) => s,
         Err(refused) => return refused,
     };
-    let request = json!({"v": 1, "type": "request", "request_id": "download", "op": "attachment.get",
+    let request = json!({"v": 1, "type": "request", "request_id": "download", "op": "owner.attachment",
                          "body": {"attachment_id": id}});
-    let response = dispatch(&app, principal(&session.record, false), request).await;
+    let response = dispatch(&app, principal(&session.record), request).await;
     if response["ok"] != true {
         let code = response["error"]["code"].as_str().unwrap_or("internal");
         let status = match code {

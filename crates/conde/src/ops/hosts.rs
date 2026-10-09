@@ -30,6 +30,9 @@ pub fn host_owner(db: &dyn Tx, host: &str) -> StoreResult<Option<(i64, String)>>
 /// sight. A host belongs to exactly one user.
 pub fn insert_key(db: &dyn Tx, user: &str, host: &str, digest: &str, label: &str, now: &str) -> anyhow::Result<()> {
     let (user, host) = (user.to_lowercase(), host.to_lowercase());
+    if host == conde_remote::web::BROWSER_HOST {
+        bail!("host id '{host}' is reserved; choose another");
+    }
     let user_id = db.ensure_user(&user)?;
     db.ensure_host(&host, user_id)?;
     let owner = db.host_owner(&host)?.context("host row missing")?;

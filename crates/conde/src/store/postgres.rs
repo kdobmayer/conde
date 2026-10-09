@@ -1662,88 +1662,124 @@ impl Tx for PgTx {
         Ok(self.query_one("SELECT COUNT(*) FROM endpoints", &[])?.get(0))
     }
 
-    // web UI
+    // web UI: owner-scoped reads
 
-    fn dm_threads(&self, agent_id: &str) -> StoreResult<Vec<DmThread>> {
+    fn owner_agents(&self, owner_id: i64) -> StoreResult<Vec<Agent>> {
+        Ok(self
+            .query(&format!("{AGENT_SELECT} WHERE a.owner_id = $1 ORDER BY a.name_lower"), &[&owner_id])?
+            .iter()
+            .map(agent_row)
+            .collect())
+    }
+
+    fn owner_dm_threads(&self, owner_id: i64) -> StoreResult<Vec<DmThread>> {
         Ok(self
             .query(
-                "SELECT p.partner, pu.name || '/' || pa.name_lower, p.last_seq, lm.created_at, p.unread
-                 FROM (SELECT CASE WHEN m.sender_agent_id = $1 THEN m.recipient_agent_id ELSE m.sender_agent_id END
-                              AS partner,
-                              MAX(m.commit_seq) AS last_seq,
-                              COUNT(*) FILTER (WHERE m.recipient_agent_id = $1 AND NOT EXISTS (SELECT 1 FROM dm_read d
-                                  WHERE d.message_id = m.message_id AND d.agent_id = $1)) AS unread
-                       FROM messages m
-                       WHERE m.channel_id IS NULL AND (m.sender_agent_id = $1 OR m.recipient_agent_id = $1)
-                       GROUP BY 1) p
+                "SELECT p.me, au.name || '/' || a.name_lower, p.partner, pu.name || '/' || pa.name_lower,
+                        p.last_seq, lm.created_at, p.unread
+                 FROM (SELECT x.me, x.partner, MAX(x.seq) AS last_seq, SUM(x.unread)::BIGINT AS unread FROM (
+                           SELECT m.sender_agent_id AS me, m.recipient_agent_id AS partner, m.commit_seq AS seq,
+                                  0 AS unread
+                           FROM messages m JOIN agents o ON o.agent_id = m.sender_agent_id
+                           WHERE m.channel_id IS NULL AND o.owner_id = $1
+                           UNION ALL
+                           SELECT m.recipient_agent_id, m.sender_agent_id, m.commit_seq,
+                                  CASE WHEN EXISTS (SELECT 1 FROM dm_read d WHERE d.message_id = m.message_id
+                                      AND d.agent_id = m.recipient_agent_id) THEN 0 ELSE 1 END
+                           FROM messages m JOIN agents o ON o.agent_id = m.recipient_agent_id
+                           WHERE m.channel_id IS NULL AND o.owner_id = $1) x
+                       GROUP BY x.me, x.partner) p
+                 JOIN agents a ON a.agent_id = p.me JOIN users au ON au.user_id = a.owner_id
                  JOIN agents pa ON pa.agent_id = p.partner JOIN users pu ON pu.user_id = pa.owner_id
                  JOIN messages lm ON lm.commit_seq = p.last_seq
-                 ORDER BY p.last_seq DESC",
-                &[&agent_id],
+                 WHERE a.owner_id = $1
+                 ORDER BY p.last_seq DESC, p.me",
+                &[&owner_id],
             )?
             .iter()
             .map(|r| DmThread {
-                partner_id: r.get(0),
-                partner: r.get(1),
-                last_seq: r.get(2),
-                last_at: r.get(3),
-                unread: r.get(4),
+                agent_id: r.get(0),
+                agent: r.get(1),
+                partner_id: r.get(2),
+                partner: r.get(3),
+                last_seq: r.get(4),
+                last_at: r.get(5),
+                unread: r.get(6),
             })
             .collect())
     }
 
-    fn channel_threads(&self, agent_id: &str) -> StoreResult<Vec<ChannelThread>> {
+    fn owner_channel_threads(&self, owner_id: i64) -> StoreResult<Vec<ChannelThread>> {
         Ok(self
             .query(
-                "SELECT c.name_lower, c.topic,
+                "SELECT a.agent_id, u.name || '/' || a.name_lower, c.name_lower, c.topic,
                         COALESCE((SELECT MAX(commit_seq) FROM messages WHERE channel_id = c.channel_id), 0),
                         (SELECT created_at FROM messages WHERE channel_id = c.channel_id
                          ORDER BY commit_seq DESC LIMIT 1),
                         (SELECT COUNT(*) FROM messages m WHERE m.channel_id = c.channel_id
                          AND m.commit_seq > x.read_seq AND m.sender_agent_id <> x.agent_id)
                  FROM memberships x JOIN channels c ON c.channel_id = x.channel_id
-                 WHERE x.agent_id = $1 ORDER BY c.name_lower",
-                &[&agent_id],
+                 JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
+                 WHERE a.owner_id = $1 ORDER BY a.name_lower, c.name_lower",
+                &[&owner_id],
             )?
             .iter()
             .map(|r| ChannelThread {
-                name: r.get(0),
-                topic: r.get(1),
-                last_seq: r.get(2),
-                last_at: r.get(3),
-                unread: r.get(4),
+                agent_id: r.get(0),
+                agent: r.get(1),
+                name: r.get(2),
+                topic: r.get(3),
+                last_seq: r.get(4),
+                last_at: r.get(5),
+                unread: r.get(6),
             })
             .collect())
     }
 
-    fn dm_history(&self, a: &str, b: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>> {
+    fn owner_dm_history(
+        &self,
+        owner_id: i64,
+        agent_id: &str,
+        partner_id: &str,
+        before: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>> {
         self.msgs(
-            "m.channel_id IS NULL AND ((m.sender_agent_id = $1 AND m.recipient_agent_id = $2)
-                OR (m.sender_agent_id = $2 AND m.recipient_agent_id = $1))
+            "m.channel_id IS NULL AND ((m.sender_agent_id = $2 AND m.recipient_agent_id = $3)
+                OR (m.sender_agent_id = $3 AND m.recipient_agent_id = $2))
+             AND EXISTS (SELECT 1 FROM agents o WHERE o.agent_id = $2 AND o.owner_id = $1)
+             AND m.commit_seq < $4 ORDER BY m.commit_seq DESC LIMIT $5",
+            &[&owner_id, &agent_id, &partner_id, &before, &limit],
+        )
+    }
+
+    fn owner_channel_history(
+        &self,
+        owner_id: i64,
+        channel_id: &str,
+        before: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>> {
+        self.msgs(
+            "m.channel_id = $2 AND EXISTS (SELECT 1 FROM memberships x JOIN agents o ON o.agent_id = x.agent_id
+                WHERE x.channel_id = $2 AND o.owner_id = $1)
              AND m.commit_seq < $3 ORDER BY m.commit_seq DESC LIMIT $4",
-            &[&a, &b, &before, &limit],
+            &[&owner_id, &channel_id, &before, &limit],
         )
     }
 
-    fn channel_history(&self, channel_id: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>> {
-        self.msgs(
-            "m.channel_id = $1 AND m.commit_seq < $2 ORDER BY m.commit_seq DESC LIMIT $3",
-            &[&channel_id, &before, &limit],
-        )
-    }
-
-    fn unread_dms_from(&self, agent_id: &str, sender: &str, up_to: i64) -> StoreResult<Vec<String>> {
+    fn owner_message(&self, owner_id: i64, message_id: &str) -> StoreResult<Option<Message>> {
         Ok(self
-            .query(
-                "SELECT m.message_id FROM messages m
-                 WHERE m.recipient_agent_id = $1 AND m.sender_agent_id = $2 AND m.commit_seq <= $3
-                 AND NOT EXISTS (SELECT 1 FROM dm_read d WHERE d.message_id = m.message_id AND d.agent_id = $1)
-                 ORDER BY m.commit_seq",
-                &[&agent_id, &sender, &up_to],
+            .query_opt(
+                &format!(
+                    "{MSG_SELECT} WHERE m.message_id = $2 AND (
+                        s.owner_id = $1 OR r.owner_id = $1
+                        OR EXISTS (SELECT 1 FROM memberships x JOIN agents o ON o.agent_id = x.agent_id
+                            WHERE x.channel_id = m.channel_id AND o.owner_id = $1))"
+                ),
+                &[&owner_id, &message_id],
             )?
-            .iter()
-            .map(|r| r.get(0))
-            .collect())
+            .map(|r| msg_row(&r)))
     }
 
     fn deliveries(&self, message_id: &str) -> StoreResult<Vec<Delivery>> {

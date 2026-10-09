@@ -314,7 +314,7 @@ impl Dispatcher {
             retry_ms: self.retry_ms.load(Ordering::Relaxed),
         };
         let result = (spec.run)(&ctx, &req.body)?;
-        if spec.mutation && !spec.bridge_only && spec.name != "conversation.read" {
+        if spec.mutation && !spec.bridge_only {
             tx.announce(board_topics(spec.name));
         }
         if let (Some(key), Some(hash)) = (key, request_hash) {

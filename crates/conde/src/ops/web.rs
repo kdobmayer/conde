@@ -1,20 +1,28 @@
-//! Queries and the one mutation behind the web UI: the conversation rail, a conversation's
-//! history with per-message delivery state, marking a conversation read, and the fleet.
-//! Every rule of the other ops holds: DMs by sender or recipient, channels by membership,
-//! delivery state of messages the caller's own agents sent (or addressed to the caller).
+//! The web UI's reads: what the signed-in owner's own agents can read, derived from ownership
+//! and enforced in the store's SQL (an agent of the owner is a DM party or a channel member),
+//! plus the fleet. Nothing here writes; nothing needs an actor.
+//!
+//! - `owner.list`: per agent of the owner, its DM conversations (any counterpart) and the
+//!   channels it belongs to.
+//! - `owner.history`: one of those conversations in full, paged, with per-message delivery
+//!   state for messages the owner's agents sent (every recipient) or received (theirs).
+//! - `owner.message`, `owner.attachment`: one message or attachment under the same rule.
+//! - `fleet.list`: every bound agent with host bridge state; delivery health for own agents.
 
 use std::collections::{BTreeMap, HashMap};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 use super::agents::{self, Agent};
 use super::channels;
 use super::messages::{self, MsgRow};
-use crate::address::Kind;
-use crate::dispatch::{Ctx, OpResult, bad_request, not_found, opt_i64, opt_str};
+use crate::address::{Kind, split_qualified};
+use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, not_found, opt_i64, opt_str, str_param};
 use crate::protocol::PAGE;
 use crate::store::{Delivery, Tx};
-use crate::util::iso_from_ms;
+use crate::util::{iso_from_ms, is_ulid};
 
 /// A bridge is online while its last heartbeat is younger than this (three ping periods).
 pub const ONLINE_TTL_MS: i64 = 90_000;
@@ -26,61 +34,72 @@ const HISTORY_PAGE: i64 = 100;
 /// Attempt outcomes that end an attempt without reaching the recipient.
 const FAILED: &[&str] = &["expired", "dropped", "failed", "abandoned", "denied", "refused"];
 
-/// `conversation.list`: the caller's DM partners and channels with unread counts.
+/// The owner view is the signed-in human's, never an agent's: an agent reads its own
+/// conversations only (DESIGN §3), so a request with an actor or from a real host is refused.
+fn browser_only(ctx: &Ctx) -> OpResult<()> {
+    if ctx.actor.is_some() || ctx.p.host != conde_remote::web::BROWSER_HOST {
+        return Err(forbidden("the owner view is for the signed-in owner in the browser, not for agents"));
+    }
+    Ok(())
+}
+
+/// `owner.list`: every agent of the owner with its DMs and channels.
 pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
-    let me = ctx.me()?;
-    let dms: Vec<Value> = ctx
-        .db
-        .dm_threads(&me.id)?
-        .into_iter()
-        .map(|t| json!({"with": t.partner, "last_seq": t.last_seq, "last_at": t.last_at, "unread": t.unread}))
-        .collect();
-    let channels: Vec<Value> = ctx
-        .db
-        .channel_threads(&me.id)?
-        .into_iter()
-        .map(|c| {
-            json!({"channel": format!("#{}", c.name), "topic": c.topic, "last_seq": c.last_seq,
-                   "last_at": c.last_at, "unread": c.unread})
-        })
-        .collect();
-    Ok(json!({"me": me.canonical(), "dms": dms, "channels": channels}))
-}
-
-/// The conversation a request names: `{"channel": "#name"}` or `{"with": "owner/name"}`.
-enum Conversation {
-    Channel(channels::Channel),
-    Dm(Agent),
-}
-
-fn conversation(ctx: &Ctx, me: &Agent, body: &Value) -> OpResult<Conversation> {
-    if let Some(raw) = opt_str(body, "channel")? {
-        return Ok(Conversation::Channel(channels::member_channel(ctx, me, raw)?));
+    browser_only(ctx)?;
+    let owner = ctx.p.user_id;
+    let mut agents: BTreeMap<String, Value> = BTreeMap::new();
+    for a in ctx.db.owner_agents(owner)? {
+        agents.insert(
+            a.id.clone(),
+            json!({"name": a.canonical(), "kind": a.address.as_ref().map(|x| x.kind.as_str()),
+                   "address": a.address.as_ref().map(ToString::to_string), "dms": [], "channels": []}),
+        );
     }
-    if let Some(name) = opt_str(body, "with")? {
-        let partner = agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent named '{name}'")))?;
-        return Ok(Conversation::Dm(partner));
+    for t in ctx.db.owner_dm_threads(owner)? {
+        if let Some(Value::Array(dms)) = agents.get_mut(&t.agent_id).map(|a| &mut a["dms"]) {
+            dms.push(json!({"with": t.partner, "last_seq": t.last_seq, "last_at": t.last_at, "unread": t.unread}));
+        }
     }
-    Err(bad_request("name the conversation: {\"channel\": \"#name\"} or {\"with\": \"owner/name\"}"))
+    for c in ctx.db.owner_channel_threads(owner)? {
+        if let Some(Value::Array(chs)) = agents.get_mut(&c.agent_id).map(|a| &mut a["channels"]) {
+            chs.push(json!({"channel": format!("#{}", c.name), "topic": c.topic, "last_seq": c.last_seq,
+                            "last_at": c.last_at, "unread": c.unread}));
+        }
+    }
+    let mut agents: Vec<Value> = agents.into_values().collect();
+    agents.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(json!({"owner": ctx.p.user, "agents": agents}))
 }
 
-/// `conversation.history`: one DM thread or channel, oldest first, a page before `before`.
+/// The owner's agent a request names (`"agent": "name"` or `"owner/name"` in the owner's namespace).
+fn own_agent(ctx: &Ctx, body: &Value) -> OpResult<Agent> {
+    let raw = str_param(body, "agent")?;
+    let (owner, name) = split_qualified(raw).ok_or_else(|| bad_request(format!("invalid name '{raw}'")))?;
+    if owner.as_deref().is_some_and(|o| o != ctx.p.user) {
+        return Err(forbidden(format!("'{raw}' is not one of your agents")));
+    }
+    agents::by_name(ctx.db, ctx.p.user_id, &name)?.ok_or_else(|| not_found(format!("you have no agent named '{name}'")))
+}
+
+/// `owner.history`: `{"agent", "with"}` (a DM thread) or `{"agent", "channel"}` (a channel the
+/// agent belongs to), oldest first, a page before `before`.
 pub fn history(ctx: &Ctx, body: &Value) -> OpResult<Value> {
-    let me = ctx.me()?;
+    browser_only(ctx)?;
+    let owner = ctx.p.user_id;
+    let agent = own_agent(ctx, body)?;
     let before = opt_i64(body, "before")?.unwrap_or(i64::MAX);
     let limit = opt_i64(body, "limit")?.unwrap_or(HISTORY_PAGE).clamp(1, PAGE as i64);
-    let (mut rows, head) = match conversation(ctx, &me, body)? {
-        Conversation::Channel(c) => {
-            let read_seq = channels::read_seq(ctx.db, &c.id, &me.id)?;
-            let rows = ctx.db.channel_history(&c.id, before, limit + 1)?;
-            (rows, json!({"channel": format!("#{}", c.name), "topic": c.topic, "read_seq": read_seq}))
-        }
-        Conversation::Dm(partner) => {
-            let rows = ctx.db.dm_history(&me.id, &partner.id, before, limit + 1)?;
-            let unread = ctx.db.unread_dms_from(&me.id, &partner.id, i64::MAX)?.len();
-            let kind = partner.address.as_ref().map(|a| a.kind.as_str());
-            (rows, json!({"with": partner.canonical(), "kind": kind, "unread": unread}))
-        }
+    let (mut rows, mut head) = if let Some(raw) = opt_str(body, "channel")? {
+        let channel = channels::member_channel(ctx, &agent, raw)?;
+        let rows = ctx.db.owner_channel_history(owner, &channel.id, before, limit + 1)?;
+        (rows, json!({"channel": format!("#{}", channel.name), "topic": channel.topic}))
+    } else if let Some(name) = opt_str(body, "with")? {
+        let partner = agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent named '{name}'")))?;
+        let rows = ctx.db.owner_dm_history(owner, &agent.id, &partner.id, before, limit + 1)?;
+        let kind = partner.address.as_ref().map(|a| a.kind.as_str());
+        (rows, json!({"with": partner.canonical(), "kind": kind}))
+    } else {
+        return Err(bad_request("name the conversation: {\"agent\", \"with\": \"owner/name\"} or {\"agent\", \"channel\": \"#name\"}"));
     };
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
@@ -88,33 +107,65 @@ pub fn history(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let mut out = Vec::with_capacity(rows.len());
     for m in &rows {
         let mut v = messages::view(ctx.db, m)?;
-        v["delivery"] = delivery(ctx, &me, m)?;
+        v["delivery"] = delivery(ctx, m)?;
         out.push(v);
     }
-    let mut result = head;
-    result["me"] = json!(me.canonical());
-    result["messages"] = Value::Array(out);
-    result["more"] = json!(more);
-    Ok(result)
+    head["agent"] = json!(agent.canonical());
+    head["messages"] = Value::Array(out);
+    head["more"] = json!(more);
+    Ok(head)
 }
 
-/// Per-recipient delivery state of `m`: every recipient when one of the caller's agents sent
-/// it, else only the caller's own notification. Channel posts by the caller's agents also
+/// `owner.message`: one message an agent of the owner can read.
+pub fn message(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    browser_only(ctx)?;
+    let id = str_param(body, "id")?;
+    let m = visible(ctx, id)?;
+    let mut v = messages::view(ctx.db, &m)?;
+    v["delivery"] = delivery(ctx, &m)?;
+    Ok(json!({"message": v}))
+}
+
+/// `owner.attachment`: one attachment of a message an agent of the owner can read.
+pub fn attachment(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    browser_only(ctx)?;
+    let id = str_param(body, "attachment_id")?;
+    let missing = || not_found(format!("no attachment '{id}' visible to your agents"));
+    let att = ctx.db.attachment(id)?.ok_or_else(missing)?;
+    visible(ctx, &att.message_id).map_err(|_| missing())?;
+    Ok(json!({"attachment_id": id, "message_id": att.message_id, "filename": att.filename,
+              "size": att.bytes.len(), "data": B64.encode(&att.bytes)}))
+}
+
+fn visible(ctx: &Ctx, id: &str) -> OpResult<MsgRow> {
+    let missing = || not_found(format!("no message '{id}' visible to your agents"));
+    if !is_ulid(id) {
+        return Err(missing());
+    }
+    ctx.db.owner_message(ctx.p.user_id, id)?.ok_or_else(missing)
+}
+
+fn owned(ctx: &Ctx, canonical: &str) -> bool {
+    canonical.split_once('/').is_some_and(|(owner, _)| owner == ctx.p.user)
+}
+
+/// Per-recipient delivery state of `m`: every recipient when one of the owner's agents sent
+/// it, else the notifications of the owner's agents. Channel posts by the owner's agents also
 /// carry how many members have read past them.
-fn delivery(ctx: &Ctx, me: &Agent, m: &MsgRow) -> OpResult<Value> {
-    let own = m.sender.split_once('/').is_some_and(|(owner, _)| owner == ctx.p.user);
+fn delivery(ctx: &Ctx, m: &MsgRow) -> OpResult<Value> {
+    let own = owned(ctx, &m.sender);
     let mut recipients = Vec::new();
     let mut seen = Vec::new();
     for d in ctx.db.deliveries(&m.id)? {
-        if !own && d.recipient_id != me.id {
+        if !own && !owned(ctx, &d.recipient) {
             continue;
         }
         seen.push(d.recipient_id.clone());
         recipients.push(recipient_state(ctx.db, m, &d)?);
     }
     // A DM without a notification (imported history): its read state alone.
-    if own
-        && let (None, Some(rcpt), Some(name)) = (&m.channel_id, &m.recipient_id, &m.recipient)
+    if let (None, Some(rcpt), Some(name)) = (&m.channel_id, &m.recipient_id, &m.recipient)
+        && (own || owned(ctx, name))
         && !seen.contains(rcpt)
     {
         let read_at = ctx.db.dm_read_at(&m.id, rcpt)?;
@@ -143,7 +194,7 @@ fn recipient_state(db: &dyn Tx, m: &MsgRow, d: &Delivery) -> OpResult<Value> {
             None => false,
         };
     // A human has no push transport: until read, their notification is the unread badge
-    // (a bridge marks it so; one on the browser's host never runs).
+    // (a bridge marks it so; a human on a host without a bridge stays pending).
     let human = || -> OpResult<bool> { Ok(agents::by_id(db, &d.recipient_id)?.is_some_and(|a| a.is_human())) };
     let state = match d.status.as_str() {
         _ if read => "read",
@@ -164,35 +215,6 @@ fn recipient_state(db: &dyn Tx, m: &MsgRow, d: &Delivery) -> OpResult<Value> {
         "recipient": d.recipient, "kind": d.kind, "state": state, "status": d.status,
         "attempts": d.attempts, "retry_at": retry_at, "last_error": last_error, "read_at": read_at,
     }))
-}
-
-/// `conversation.read`: marks the conversation read up to `up_to` (a commit_seq): DMs from
-/// the partner to the caller, or the caller's channel read position (forward only).
-pub fn read(ctx: &Ctx, body: &Value) -> OpResult<Value> {
-    let me = ctx.me()?;
-    let up_to = opt_i64(body, "up_to")?.ok_or_else(|| bad_request("missing integer field 'up_to'"))?;
-    let marked = match conversation(ctx, &me, body)? {
-        Conversation::Channel(c) => {
-            let last = ctx.db.channel_last_seq(&c.id)?;
-            let before = channels::read_seq(ctx.db, &c.id, &me.id)?.unwrap_or(0);
-            let to = up_to.min(last);
-            channels::advance_cursor(ctx.db, &c.id, &me.id, to)?;
-            if to > before { 1 } else { 0 }
-        }
-        Conversation::Dm(partner) => {
-            let ids = ctx.db.unread_dms_from(&me.id, &partner.id, up_to)?;
-            let now = ctx.now_iso();
-            for id in &ids {
-                ctx.db.mark_dm_read(id, &me.id, &now)?;
-            }
-            ids.len()
-        }
-    };
-    // Self-announcing (the dispatcher leaves it out): a read that marks nothing wakes no browser.
-    if marked > 0 {
-        ctx.db.announce(crate::store::topics::MESSAGES | crate::store::topics::DELIVERY);
-    }
-    Ok(json!({"marked": marked}))
 }
 
 /// `fleet.list`: every bound agent with its host's bridge state, whether the bridge reports

@@ -1,6 +1,6 @@
 //! The web app's server side over the board's real stores: the app shell at `/`, the browser
-//! session principal on `/v1/rpc` (CSRF, origin, op allow-list, the user's human as actor),
-//! the conversation and fleet ops under DESIGN §3's visibility rules, attachment downloads and
+//! session on `/v1/rpc` (CSRF, origin, a read-only op allow-list), the owner view (what the
+//! signed-in user's own agents can read, nothing else), the fleet, attachment downloads and
 //! the event socket. Each case runs on SQLite and, with CONDE_TEST_PG, on Postgres (where the
 //! board events travel through LISTEN/NOTIFY). Sign-in goes through conde-remote's fake
 //! OpenID provider.
@@ -93,20 +93,21 @@ macro_rules! on_both {
     };
 }
 
+
 on_both!(
-    a_name_held_by_an_agent_session_is_never_taken_by_the_browser,
-    two_names_on_one_human_address_both_stay_usable,
-    the_browser_host_is_never_minted_as_a_real_host,
-    a_connected_bridge_keeps_its_host_online,
     the_root_serves_the_app_to_a_signed_in_browser_only,
     browser_rpc_needs_the_session_its_csrf_token_and_this_origin,
-    the_browser_acts_as_the_users_existing_human,
-    a_user_without_a_human_gets_one_named_after_them,
-    conversations_follow_dm_and_channel_visibility,
+    the_browser_is_read_only_and_names_nobody,
+    the_owner_sees_what_their_agents_can_read_and_nothing_else,
+    another_owner_sees_only_their_own_agents,
     delivery_state_shows_the_retry_clock_the_hold_and_the_last_error,
-    attachments_download_only_where_the_message_is_visible,
+    history_pages_back_in_chronological_order,
+    attachments_download_only_where_an_own_agent_can_read,
+    channel_members_shows_read_positions_to_members_only,
     the_fleet_shows_online_discovery_and_own_delivery_health,
     the_event_socket_says_when_the_board_changed,
+    the_browser_host_is_never_minted_as_a_real_host,
+    a_connected_bridge_keeps_its_host_online,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -153,14 +154,6 @@ async fn ui_with(d: &Arc<Dispatcher>, config: ServerConfig) -> Ui {
 impl Ui {
     /// A browser signed in as the provider's current person, with its CSRF token.
     async fn browser(&self) -> (Browser, String) {
-        let (b, csrf) = self.bare_browser().await;
-        // The app's first call: names the human of a user who has none.
-        self.rpc(&b, &csrf, "agent.whoami", json!({})).await;
-        (b, csrf)
-    }
-
-    /// Signed in, with its CSRF token, before the app's first call.
-    async fn bare_browser(&self) -> (Browser, String) {
         let b = Browser::new();
         b.sign_in(&self.env).await;
         let s = self.session(&b).await;
@@ -173,8 +166,7 @@ impl Ui {
 
     /// One browser RPC with the CSRF header and this origin.
     async fn rpc(&self, b: &Browser, csrf: &str, op: &str, body: Value) -> (StatusCode, Value) {
-        let request = json!({"v": 1, "type": "request", "request_id": "r1", "op": op, "body": body,
-                             "idempotency_key": conde::util::new_ulid()});
+        let request = json!({"v": 1, "type": "request", "request_id": "r1", "op": op, "body": body});
         let r = b
             .step
             .post(self.env.url("/v1/rpc"))
@@ -241,6 +233,62 @@ async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>)
     ui.server.shutdown().await.unwrap();
 }
 
+// --- the board as the tests set it up ------------------------------------------------------------
+
+/// The signed-in user's agents `worker` (Claude, k-host) and `helper` (Codex, k-host); david's
+/// `scout` (Codex) and `ranger` (Claude) on d-host. DMs: scout<->worker (with an attachment),
+/// helper->worker, and scout->ranger (between david's agents, with an attachment). Channels:
+/// #team (worker and scout) and #secret (scout and ranger).
+struct Cast {
+    k: Principal,
+    worker: String,
+    helper: String,
+    dv: Principal,
+    scout: String,
+    ranger: String,
+    /// worker -> scout, with an attachment.
+    worker_dm: Value,
+    /// scout -> ranger, with an attachment.
+    private_dm: Value,
+    team_post: Value,
+    secret_post: Value,
+}
+
+async fn cast(ui: &Ui) -> Cast {
+    let k = ui.principal(USER, "k-host").await;
+    let (worker, helper) = ("claude:sess-worker".to_string(), "codex:thread-helper".to_string());
+    ui.op(&k, &worker, "agent.register", json!({"name": "worker"})).await;
+    ui.op(&k, &helper, "agent.register", json!({"name": "helper"})).await;
+    let dv = ui.principal("david", "d-host").await;
+    let (scout, ranger) = ("codex:thread-scout".to_string(), "claude:sess-ranger".to_string());
+    ui.op(&dv, &scout, "agent.register", json!({"name": "scout"})).await;
+    ui.op(&dv, &ranger, "agent.register", json!({"name": "ranger"})).await;
+    let file = |name: &str| json!([{"filename": name, "data": STANDARD.encode(format!("bytes of {name}"))}]);
+
+    ui.op(&dv, &scout, "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "status?"})).await;
+    let worker_dm = ui
+        .op(&k, &worker, "message.send",
+            json!({"to": {"agent": "david/scout"}, "text": "green, report attached", "attachments": file("report.txt")}))
+        .await;
+    ui.op(&k, &helper, "message.send", json!({"to": {"agent": "worker"}, "text": "handoff to worker"})).await;
+    let private_dm = ui
+        .op(&dv, &scout, "message.send",
+            json!({"to": {"agent": "ranger"}, "text": "private between david's agents", "attachments": file("secret.txt")}))
+        .await;
+    ui.op(&k, &worker, "channel.create", json!({"channel": "#team", "topic": "daily status"})).await;
+    ui.op(&dv, &scout, "channel.join", json!({"channel": "#team"})).await;
+    let team_post = ui.op(&dv, &scout, "message.send", json!({"to": {"channel": "#team"}, "text": "scout here"})).await;
+    ui.op(&dv, &scout, "channel.create", json!({"channel": "#secret"})).await;
+    ui.op(&dv, &ranger, "channel.join", json!({"channel": "#secret"})).await;
+    let secret_post =
+        ui.op(&dv, &ranger, "message.send", json!({"to": {"channel": "#secret"}, "text": "members only"})).await;
+    Cast { k, worker, helper, dv, scout, ranger, worker_dm, private_dm, team_post, secret_post }
+}
+
+fn texts(h: &Value) -> Vec<String> {
+    h["messages"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap().to_string()).collect()
+}
+
 // --- the browser principal ----------------------------------------------------------------------
 
 async fn browser_rpc_needs_the_session_its_csrf_token_and_this_origin(d: Arc<Dispatcher>) {
@@ -254,13 +302,10 @@ async fn browser_rpc_needs_the_session_its_csrf_token_and_this_origin(d: Arc<Dis
     let r = anon.get(ui.env.url("/v1/session")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
-    let (b, csrf) = ui.bare_browser().await;
+    let (b, csrf) = ui.browser().await;
     let s = ui.session(&b).await;
     assert_eq!(s["user"], USER);
-    assert!(s["name"].is_null(), "a GET names nobody: {s}");
     assert_eq!(s["csrf_header"], "x-csrf-token");
-    ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(ui.session(&b).await["name"], format!("{USER}/{USER}"));
 
     let r = b.step.post(&rpc).json(&request).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "no CSRF token");
@@ -278,31 +323,8 @@ async fn browser_rpc_needs_the_session_its_csrf_token_and_this_origin(d: Arc<Dis
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "another origin");
-
-    let list = ui.ok(&b, &csrf, "agent.list", json!({})).await;
-    assert!(list["agents"].as_array().unwrap().iter().any(|a| a["name"] == format!("{USER}/{USER}")));
-
-    // Only the human's ops: no registration, pins or bridge ops from a browser.
-    for op in ["agent.register", "agent.pin", "agent.unregister", "bridge.claim", "doctor"] {
-        let (status, v) = ui.rpc(&b, &csrf, op, json!({"name": "x"})).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{op}: {v}");
-    }
-    // An actor in the request is the server's to set, never the browser's.
-    let request = json!({"v": 1, "type": "request", "request_id": "r", "op": "agent.whoami", "body": {},
-                         "actor": "claude:someone-else@elsewhere"});
-    let v: Value = b
-        .step
-        .post(&rpc)
-        .header("x-csrf-token", &csrf)
-        .json(&request)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(v["result"]["name"], format!("{USER}/{USER}"), "{v}");
-    assert_eq!(v["request_id"], "r");
+    let v: Value = b.step.post(&rpc).header("x-csrf-token", &csrf).json(&request).send().await.unwrap().json().await.unwrap();
+    assert_eq!((v["ok"].as_bool(), v["request_id"].as_str()), (Some(true), Some("r")), "{v}");
 
     // A signed-out session is refused at once.
     let r = b.post_form(&ui.env.url("/auth/logout"), &[("csrf", csrf.as_str())]).await;
@@ -312,238 +334,256 @@ async fn browser_rpc_needs_the_session_its_csrf_token_and_this_origin(d: Arc<Dis
     ui.server.shutdown().await.unwrap();
 }
 
-async fn the_browser_acts_as_the_users_existing_human(d: Arc<Dispatcher>) {
-    let ui = ui(&d).await;
-    // The first visit named the human after the user, on the browser's own host.
-    let (b, csrf) = ui.browser().await;
-    let me = ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(me["address"], format!("human:{USER}@web"));
-    // The human registers from a terminal on their laptop: the browser now writes as that name.
-    let laptop = ui.principal(USER, "laptop").await;
-    ui.op(&laptop, &format!("human:{USER}"), "agent.register", json!({"name": "krisztian"})).await;
-    let me = ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(me["name"], format!("{USER}/krisztian"));
-    assert_eq!(me["address"], format!("human:{USER}@laptop"));
-    // Two terminal names are ambiguous unless one is named after the user.
-    let desk = ui.principal(USER, "desk-pc").await;
-    ui.op(&desk, &format!("human:{USER}"), "agent.register", json!({"name": "kd"})).await;
-    let (status, v) = ui.rpc(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["error"]["code"], "conflict", "{v}");
-    let tower = ui.principal(USER, "tower").await;
-    ui.op(&tower, &format!("human:{USER}"), "agent.register", json!({"name": USER})).await;
-    let me = ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(me["name"], format!("{USER}/{USER}"));
-    assert_eq!(me["address"], format!("human:{USER}@tower"));
-    ui.server.shutdown().await.unwrap();
-}
-
-async fn a_user_without_a_human_gets_one_named_after_them(d: Arc<Dispatcher>) {
+async fn the_browser_is_read_only_and_names_nobody(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let (b, csrf) = ui.browser().await;
-    let me = ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(me["name"], format!("{USER}/{USER}"));
-    assert_eq!(me["address"], format!("human:{USER}@web"));
-    // Stable across calls: the same name, no second registration.
-    let again = ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(again, me);
-    ui.server.shutdown().await.unwrap();
-}
-
-// --- conversations ------------------------------------------------------------------------------
-
-/// The user's agent `worker` (a Claude session on `k-host`) and another owner's agent
-/// `david/scout`; returns (worker's principal and actor, scout's).
-async fn cast(ui: &Ui) -> ((Principal, String), (Principal, String)) {
-    let k = ui.principal(USER, "k-host").await;
-    let worker = "claude:sess-worker".to_string();
-    ui.op(&k, &worker, "agent.register", json!({"name": "worker"})).await;
-    let dv = ui.principal("david", "d-host").await;
-    let scout = "codex:thread-scout".to_string();
-    ui.op(&dv, &scout, "agent.register", json!({"name": "scout"})).await;
-    ((k, worker), (dv, scout))
-}
-
-async fn conversations_follow_dm_and_channel_visibility(d: Arc<Dispatcher>) {
-    let ui = ui(&d).await;
-    let (b, csrf) = ui.browser().await;
-    let human = format!("{USER}/{USER}");
-    ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    let ((k, worker), (dv, scout)) = cast(&ui).await;
-
-    let to_human = ui.op(&k, &worker, "message.send", json!({"to": {"agent": human}, "text": "done, see #team"})).await;
-    ui.op(&dv, &scout, "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "private to worker"}))
-        .await;
-    ui.op(&k, &worker, "channel.create", json!({"channel": "#team"})).await;
-    ui.op(&k, &worker, "channel.invite", json!({"channel": "#team", "name": human})).await;
-    ui.op(&dv, &scout, "channel.create", json!({"channel": "#secret"})).await;
-    ui.op(&dv, &scout, "message.send", json!({"to": {"channel": "#secret"}, "text": "members only"})).await;
-    let post = ui.op(&k, &worker, "message.send", json!({"to": {"channel": "#team"}, "text": "status: green"})).await;
-
-    let rail = ui.ok(&b, &csrf, "conversation.list", json!({})).await;
-    assert_eq!(rail["me"], human);
-    let dms = rail["dms"].as_array().unwrap();
-    assert_eq!(dms.len(), 1, "{rail}");
-    assert_eq!(dms[0]["with"], format!("{USER}/worker"));
-    assert_eq!(dms[0]["unread"], 1);
-    let channels: Vec<&Value> = rail["channels"].as_array().unwrap().iter().collect();
-    assert_eq!(channels.len(), 1, "{rail}");
-    assert_eq!(channels[0]["channel"], "#team");
-    assert_eq!(channels[0]["unread"], 2, "the invite notice and the post");
-
-    // The DM thread with worker: only the human's own DMs, never worker's DMs with others.
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
-    let texts: Vec<&str> = h["messages"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
-    assert_eq!(texts, vec!["done, see #team"]);
-    assert_eq!(h["unread"], 1);
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "david/scout"})).await;
-    assert!(h["messages"].as_array().unwrap().is_empty(), "{h}");
-    // A channel by membership only.
-    let (_, v) = ui.rpc(&b, &csrf, "conversation.history", json!({"channel": "#secret"})).await;
-    assert_eq!(v["error"]["code"], "forbidden", "{v}");
-    // Who is in a channel is public; how far each member has read is for members only.
-    let m = ui.ok(&b, &csrf, "channel.members", json!({"channel": "#secret"})).await;
-    assert_eq!(m["members"], json!([{"name": "david/scout"}]), "{m}");
-    let m = ui.ok(&b, &csrf, "channel.members", json!({"channel": "#team"})).await;
-    assert!(m["members"].as_array().unwrap().iter().all(|x| x["behind"].is_i64()), "{m}");
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"channel": "#team"})).await;
-    let posts = h["messages"].as_array().unwrap();
-    assert!(posts[0]["text"].as_str().unwrap().contains("was added to #team"), "{h}");
-    assert_eq!(posts[1]["message_id"], post["message_id"]);
-    assert!(h["read_seq"].as_i64().unwrap() < post["seq"].as_i64().unwrap());
-
-    // Reading marks the DM and the channel read (and tells the browsers); a reply links to its
-    // message.
-    let mut wakes = ui.d.store().pending().events();
-    ui.ok(&b, &csrf, "conversation.read", json!({"with": "worker", "up_to": to_human["seq"]})).await;
-    assert!(next_board(&mut wakes).await, "a read that marks something announces it");
-    let quiet = ui.ok(&b, &csrf, "conversation.read", json!({"with": "worker", "up_to": to_human["seq"]})).await;
-    assert_eq!(quiet["marked"], 0);
-    assert!(!next_board(&mut wakes).await, "a read that marks nothing wakes no browser");
-    ui.ok(&b, &csrf, "conversation.read", json!({"channel": "#team", "up_to": i64::MAX})).await;
-    let rail = ui.ok(&b, &csrf, "conversation.list", json!({})).await;
-    assert_eq!(rail["dms"][0]["unread"], 0, "{rail}");
-    assert_eq!(rail["channels"][0]["unread"], 0, "{rail}");
-    let receipts = ui.op(&k, &worker, "receipt.list", json!({})).await;
-    assert!(receipts.to_string().contains("read "), "{receipts}");
-    let sent = ui
-        .ok(&b, &csrf, "message.send", json!({"to": {"agent": "worker"}, "text": "thanks", "reply_to": to_human["message_id"]}))
-        .await;
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
-    let last = h["messages"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!(last["message_id"], sent["message_id"]);
-    assert_eq!(last["reply_to"], to_human["message_id"]);
-    assert_eq!(last["from"], human);
-
-    // Paging back: `before` returns the older page in chronological order.
-    for i in 0..3 {
-        ui.op(&k, &worker, "message.send", json!({"to": {"agent": human}, "text": format!("n{i}")})).await;
+    let c = cast(&ui).await;
+    let bound = |d: Arc<Dispatcher>| async move { blocking(move || d.with_conn(|t| t.bound_agents()).unwrap().len()).await };
+    let before = bound(ui.d.clone()).await;
+    for (op, body) in [
+        ("message.send", json!({"to": {"agent": "david/scout"}, "text": "x"})),
+        ("message.read", json!({})),
+        ("reaction.set", json!({"message_id": c.worker_dm["message_id"], "emoji": "+1", "present": true})),
+        ("channel.join", json!({"channel": "#secret"})),
+        ("channel.create", json!({"channel": "#new"})),
+        ("agent.register", json!({"name": "x"})),
+        ("agent.whoami", json!({})),
+        ("profile.set", json!({"name": "worker", "key": "display", "value": "W"})),
+        ("message.get", json!({"id": c.private_dm["message_id"]})),
+        ("attachment.get", json!({"attachment_id": "x"})),
+        ("search", json!({"pattern": "."})),
+        ("inbox.list", json!({})),
+        ("bridge.claim", json!({})),
+    ] {
+        let (status, v) = ui.rpc(&b, &csrf, op, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{op}: {v}");
     }
-    let page = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker", "limit": 2})).await;
-    assert_eq!(page["more"], true);
-    let texts: Vec<&str> = page["messages"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
-    assert_eq!(texts, vec!["n1", "n2"]);
-    let before = page["messages"][0]["seq"].clone();
-    let older = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker", "limit": 2, "before": before})).await;
-    let texts: Vec<&str> = older["messages"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
-    assert_eq!(texts, vec!["thanks", "n0"]);
+    ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    ui.ok(&b, &csrf, "fleet.list", json!({})).await;
+    assert!(ui.session(&b).await.get("name").is_none(), "no browser identity");
+    assert_eq!(bound(ui.d.clone()).await, before, "no request names or binds anything");
+    let d2 = ui.d.clone();
+    let web = blocking(move || d2.with_conn(|t| t.bound_agents()).unwrap()).await;
+    assert!(web.iter().all(|a| a.address.as_ref().is_none_or(|x| x.host != "web")), "{web:?}");
+    ui.server.shutdown().await.unwrap();
+}
+
+// --- the owner view -----------------------------------------------------------------------------
+
+async fn the_owner_sees_what_their_agents_can_read_and_nothing_else(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+
+    let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    assert_eq!(rail["owner"], USER);
+    let agents = rail["agents"].as_array().unwrap();
+    let names: Vec<&str> = agents.iter().map(|a| a["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec![format!("{USER}/helper"), format!("{USER}/worker")]);
+    let worker = &agents[1];
+    let partners: Vec<&str> = worker["dms"].as_array().unwrap().iter().map(|t| t["with"].as_str().unwrap()).collect();
+    assert_eq!(partners, vec![format!("{USER}/helper").as_str(), "david/scout"], "newest first: {worker}");
+    let scout_thread = &worker["dms"][1];
+    assert_eq!(scout_thread["unread"], 1, "scout's question is unread by worker: {worker}");
+    assert_eq!(worker["channels"], json!([{"channel": "#team", "topic": "daily status", "last_seq": c.team_post["seq"],
+        "last_at": worker["channels"][0]["last_at"], "unread": 2}]), "scout's join notice and post");
+    let helper = &agents[0];
+    assert_eq!(helper["dms"][0]["with"], format!("{USER}/worker"));
+    assert_eq!(helper["channels"], json!([]));
+    let all = rail.to_string();
+    for hidden in ["ranger", "#secret", "private between", "members only"] {
+        assert!(!all.contains(hidden), "{hidden} leaked: {all}");
+    }
+
+    // A thread of an own agent with another owner's agent, in full and in order.
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "worker", "with": "david/scout"})).await;
+    assert_eq!(texts(&h), vec!["status?", "green, report attached"]);
+    assert_eq!(h["agent"], format!("{USER}/worker"));
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "helper", "with": "worker"})).await;
+    assert_eq!(texts(&h), vec!["handoff to worker"]);
+    // Never a DM between two other owners' agents, whichever way it is asked for.
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "worker", "with": "david/ranger"})).await;
+    assert!(texts(&h).is_empty(), "{h}");
+    for body in [
+        json!({"agent": "david/scout", "with": "david/ranger"}),
+        json!({"agent": "scout", "with": "david/ranger"}),
+    ] {
+        let (_, v) = ui.rpc(&b, &csrf, "owner.history", body.clone()).await;
+        assert!(["forbidden", "not_found"].contains(&v["error"]["code"].as_str().unwrap()), "{body}: {v}");
+    }
+    // Channels by an own agent's membership only.
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "worker", "channel": "#team"})).await;
+    assert_eq!(texts(&h).last().map(String::as_str), Some("scout here"));
+    for body in [json!({"agent": "worker", "channel": "#secret"}), json!({"agent": "helper", "channel": "#team"})] {
+        let (_, v) = ui.rpc(&b, &csrf, "owner.history", body.clone()).await;
+        assert_eq!(v["error"]["code"], "forbidden", "{body}: {v}");
+    }
+    // One message (reply quotes) under the same rule.
+    let m = ui.ok(&b, &csrf, "owner.message", json!({"id": c.team_post["message_id"]})).await;
+    assert_eq!(m["message"]["text"], "scout here");
+    for id in [&c.private_dm["message_id"], &c.secret_post["message_id"]] {
+        let (_, v) = ui.rpc(&b, &csrf, "owner.message", json!({"id": id})).await;
+        assert_eq!(v["error"]["code"], "not_found", "{v}");
+    }
+    // The owner view is the owner's: an agent of the same owner reads only its own conversations.
+    let (d2, mut req) = (ui.d.clone(), Request::new("r", "owner.history", json!({"agent": "worker", "with": "david/scout"})));
+    req.actor = Some(c.helper.clone());
+    let k = c.k.clone();
+    let resp = blocking(move || d2.dispatch(&k, &req)).await;
+    assert_eq!(resp.error.map(|e| e.code), Some(conde::protocol::ErrorCode::Forbidden));
+    let _ = &c.ranger;
+    ui.server.shutdown().await.unwrap();
+}
+
+async fn another_owner_sees_only_their_own_agents(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    ui.browser().await;
+    let c = cast(&ui).await;
+    // A second owner signs in; their agent `probe` writes to worker and joins #team.
+    ui.env.idp.person.lock().unwrap().oid = "oid-dp".into();
+    ui.env.idp.person.lock().unwrap().upn = "dpacsuta@dakai.example".into();
+    let (b, csrf) = ui.browser().await;
+    let p = ui.principal("dpacsuta", "p-host").await;
+    let probe = "codex:thread-probe";
+    ui.op(&p, probe, "agent.register", json!({"name": "probe"})).await;
+    ui.op(&p, probe, "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "hello worker"})).await;
+    ui.op(&p, probe, "channel.join", json!({"channel": "#team"})).await;
+
+    let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    assert_eq!(rail["agents"].as_array().unwrap().len(), 1, "{rail}");
+    let a = &rail["agents"][0];
+    assert_eq!(a["name"], "dpacsuta/probe");
+    assert_eq!(a["dms"].as_array().unwrap().iter().map(|t| t["with"].clone()).collect::<Vec<_>>(), vec![json!(format!("{USER}/worker"))]);
+    assert_eq!(a["channels"][0]["channel"], "#team");
+    let all = rail.to_string();
+    for hidden in ["helper", "ranger", "#secret", "scout", "handoff", "status?"] {
+        assert!(!all.contains(hidden), "{hidden} leaked: {all}");
+    }
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "probe", "with": format!("{USER}/worker")})).await;
+    assert_eq!(texts(&h), vec!["hello worker"]);
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "probe", "with": format!("{USER}/helper")})).await;
+    assert!(texts(&h).is_empty(), "worker and helper's DMs stay theirs: {h}");
+    let (_, v) = ui.rpc(&b, &csrf, "owner.history", json!({"agent": format!("{USER}/worker"), "with": "david/scout"})).await;
+    assert_eq!(v["error"]["code"], "forbidden", "{v}");
+    let (_, v) = ui.rpc(&b, &csrf, "owner.message", json!({"id": c.worker_dm["message_id"]})).await;
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
     ui.server.shutdown().await.unwrap();
 }
 
 async fn delivery_state_shows_the_retry_clock_the_hold_and_the_last_error(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let (b, csrf) = ui.browser().await;
-    let ((k, worker), (dv, scout)) = cast(&ui).await;
-    let sent = ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "worker"}, "text": "ping"})).await;
+    let c = cast(&ui).await;
+    let sent = ui.op(&c.k, &c.worker, "message.send", json!({"to": {"agent": "david/scout"}, "text": "ping"})).await;
+    let thread = json!({"agent": "worker", "with": "david/scout"});
     let state = |h: &Value| h["messages"].as_array().unwrap().last().unwrap()["delivery"]["recipients"][0].clone();
 
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
+    let h = ui.ok(&b, &csrf, "owner.history", thread.clone()).await;
     let r = state(&h);
-    assert_eq!(r["recipient"], format!("{USER}/worker"));
-    assert_eq!(r["state"], "queued", "{r}");
+    assert_eq!((r["recipient"].as_str(), r["state"].as_str()), (Some("david/scout"), Some("queued")), "{r}");
     assert!(r["retry_at"].is_null(), "no retry clock before a failure: {r}");
 
-    // The host's bridge claims it and the session holds it for approval.
-    let bridge = ui.d.bridge_principal(&k);
+    // Scout's bridge claims it and the thread holds it for approval.
+    let bridge = ui.d.bridge_principal(&c.dv);
     let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
-    let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
-    assert_eq!(state(&h)["state"], "sending");
+    let job = claim["jobs"].as_array().unwrap().iter().find(|j| j["message_id"] == sent["message_id"]).unwrap().clone();
+    let attempt = job["attempt_id"].as_str().unwrap().to_string();
+    assert_eq!(state(&ui.ok(&b, &csrf, "owner.history", thread.clone()).await)["state"], "sending");
     ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempt, "outcome": "held"})).await;
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
-    assert_eq!(state(&h)["state"], "held");
+    assert_eq!(state(&ui.ok(&b, &csrf, "owner.history", thread.clone()).await)["state"], "held");
 
-    // The hold ends in an expiry: a retry is due after the backoff, with the error shown.
-    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempt, "outcome": "expired", "reason": "no answer in 10 min"}))
-        .await;
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
+    // The hold expires: a retry is due after the backoff, with the error shown.
+    ui.op(&bridge, "", "bridge.report",
+          json!({"attempt_id": attempt, "outcome": "expired", "reason": "no answer in 10 min"})).await;
+    let h = ui.ok(&b, &csrf, "owner.history", thread.clone()).await;
     let r = state(&h);
     assert_eq!(r["state"], "retrying", "{r}");
     assert_eq!(r["attempts"], 1);
     assert_eq!(r["last_error"], json!({"status": "expired", "reason": "no answer in 10 min"}));
-    let retry_at = r["retry_at"].as_str().unwrap().to_string();
-    assert!(retry_at.as_str() > h["messages"][0]["date"].as_str().unwrap(), "{r}");
+    assert!(r["retry_at"].as_str().unwrap() > h["messages"][0]["date"].as_str().unwrap(), "{r}");
 
     // Read wins over the delivery state.
-    ui.op(&k, &worker, "message.read", json!({"id": sent["message_id"]})).await;
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
-    let r = state(&h);
+    ui.op(&c.dv, &c.scout, "message.read", json!({"id": sent["message_id"]})).await;
+    let r = state(&ui.ok(&b, &csrf, "owner.history", thread.clone()).await);
     assert_eq!(r["state"], "read", "{r}");
     assert!(r["read_at"].is_string());
 
-    // Another owner's message to the human shows only the human's own notification state.
-    ui.op(&dv, &scout, "message.send", json!({"to": {"agent": format!("{USER}/{USER}")}, "text": "hi"})).await;
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "david/scout"})).await;
-    let recipients = h["messages"][0]["delivery"]["recipients"].as_array().unwrap().clone();
-    assert_eq!(recipients.len(), 1, "{h}");
-    assert_eq!(recipients[0]["recipient"], format!("{USER}/{USER}"));
-    assert_eq!(recipients[0]["state"], "unread", "a human's notification is the unread badge");
+    // Scout's question to worker: only worker's own notification, never scout's other recipients.
+    let h = ui.ok(&b, &csrf, "owner.history", thread).await;
+    let first = &h["messages"][0];
+    assert_eq!(first["from"], "david/scout");
+    let rs = first["delivery"]["recipients"].as_array().unwrap();
+    assert_eq!(rs.len(), 1, "{first}");
+    assert_eq!(rs[0]["recipient"], format!("{USER}/worker"));
+    ui.server.shutdown().await.unwrap();
+}
+
+async fn history_pages_back_in_chronological_order(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    for i in 0..3 {
+        ui.op(&c.k, &c.worker, "message.send", json!({"to": {"agent": "david/scout"}, "text": format!("n{i}")})).await;
+    }
+    let page = ui.ok(&b, &csrf, "owner.history", json!({"agent": "worker", "with": "david/scout", "limit": 2})).await;
+    assert_eq!(page["more"], true);
+    assert_eq!(texts(&page), vec!["n1", "n2"]);
+    let before = page["messages"][0]["seq"].clone();
+    let older = ui
+        .ok(&b, &csrf, "owner.history", json!({"agent": "worker", "with": "david/scout", "limit": 2, "before": before}))
+        .await;
+    assert_eq!(texts(&older), vec!["green, report attached", "n0"]);
+    let oldest = ui
+        .ok(&b, &csrf, "owner.history",
+            json!({"agent": "worker", "with": "david/scout", "limit": 2, "before": older["messages"][0]["seq"]}))
+        .await;
+    assert_eq!((texts(&oldest), oldest["more"].as_bool()), (vec!["status?".to_string()], Some(false)));
     ui.server.shutdown().await.unwrap();
 }
 
 // --- attachments --------------------------------------------------------------------------------
 
-async fn attachments_download_only_where_the_message_is_visible(d: Arc<Dispatcher>) {
+async fn attachments_download_only_where_an_own_agent_can_read(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let (b, csrf) = ui.browser().await;
-    let ((_k, _worker), _) = cast(&ui).await;
-    let bytes = b"%PDF-1.7 not really\n\x00\x01";
-    let sent = ui
-        .ok(
-            &b,
-            &csrf,
-            "message.send",
-            json!({"to": {"agent": "worker"}, "text": "the report",
-                   "attachments": [{"filename": "q3 \"final\" é.pdf", "data": STANDARD.encode(bytes)}]}),
-        )
-        .await;
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "worker"})).await;
-    let att = h["messages"][0]["attachments"][0].clone();
-    assert_eq!(att["filename"], "q3 \"final\" é.pdf");
-    assert_eq!(att["size"], bytes.len());
+    let c = cast(&ui).await;
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "worker", "with": "david/scout"})).await;
+    let att = h["messages"][1]["attachments"][0].clone();
+    assert_eq!(att["filename"], "report.txt");
     let url = ui.env.url(&format!("/v1/attachments/{}", att["attachment_id"].as_str().unwrap()));
-
     let r = b.step.get(&url).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(r.headers()[header::CONTENT_TYPE], "application/octet-stream");
     assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-    assert_eq!(
-        r.headers()[header::CONTENT_DISPOSITION],
-        "attachment; filename=\"q3 _final_ _.pdf\"; filename*=UTF-8''q3%20%22final%22%20%C3%A9.pdf"
-    );
-    assert_eq!(r.bytes().await.unwrap().as_ref(), bytes);
-    assert_eq!(sent["to"], format!("{USER}/worker"));
+    assert_eq!(r.headers()[header::CONTENT_DISPOSITION], "attachment; filename=\"report.txt\"; filename*=UTF-8''report.txt");
+    assert_eq!(r.bytes().await.unwrap().as_ref(), b"bytes of report.txt");
+    assert_eq!(reqwest::get(&url).await.unwrap().status(), StatusCode::UNAUTHORIZED, "signed out");
 
-    // Signed out: refused; another user who is neither sender nor recipient: not found.
-    assert_eq!(reqwest::get(&url).await.unwrap().status(), StatusCode::UNAUTHORIZED);
-    ui.env.idp.person.lock().unwrap().oid = "oid-david".into();
-    ui.env.idp.person.lock().unwrap().upn = "dpacsuta@dakai.example".into();
-    let (other, _) = ui.browser().await;
-    let r = other.step.get(&url).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::NOT_FOUND);
-    let r = other.step.get(ui.env.url("/v1/attachments/not-an-id")).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    // The attachment of a DM between two of david's agents: not found for this owner.
+    let d2 = ui.d.clone();
+    let mid = c.private_dm["message_id"].as_str().unwrap().to_string();
+    let secret = blocking(move || d2.with_conn(|t| t.attachment_list(&mid)).unwrap()).await;
+    let url = ui.env.url(&format!("/v1/attachments/{}", secret[0].id));
+    assert_eq!(b.step.get(&url).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(b.step.get(ui.env.url("/v1/attachments/not-an-id")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    ui.server.shutdown().await.unwrap();
+}
+
+// --- channel members ------------------------------------------------------------------------------
+
+async fn channel_members_shows_read_positions_to_members_only(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    // Who is in a channel is public; how far each member has read is for members only.
+    let m = ui.op(&c.k, &c.worker, "channel.members", json!({"channel": "#secret"})).await;
+    assert_eq!(m["members"], json!([{"name": "david/ranger"}, {"name": "david/scout"}]), "{m}");
+    let m = ui.op(&c.dv, &c.ranger, "channel.members", json!({"channel": "#secret"})).await;
+    assert!(m["members"].as_array().unwrap().iter().all(|x| x["behind"].is_i64()), "{m}");
+    // The browser is no member of anything.
+    let m = ui.ok(&b, &csrf, "channel.members", json!({"channel": "#team"})).await;
+    assert!(m["members"].as_array().unwrap().iter().all(|x| x.get("behind").is_none()), "{m}");
     ui.server.shutdown().await.unwrap();
 }
 
@@ -552,46 +592,42 @@ async fn attachments_download_only_where_the_message_is_visible(d: Arc<Dispatche
 async fn the_fleet_shows_online_discovery_and_own_delivery_health(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let (b, csrf) = ui.browser().await;
-    let ((k, worker), (dv, _scout)) = cast(&ui).await;
+    let c = cast(&ui).await;
     let agent = |f: &Value, name: &str| {
         f["agents"].as_array().unwrap().iter().find(|a| a["name"] == name).cloned().unwrap_or(Value::Null)
     };
     let host = |f: &Value, name: &str| {
         f["hosts"].as_array().unwrap().iter().find(|h| h["host"] == name).cloned().unwrap_or(Value::Null)
     };
+    let worker = format!("{USER}/worker");
 
     let f = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
     assert_eq!(f["online_ttl_s"], 90);
     assert_eq!(host(&f, "k-host")["online"], false, "no bridge yet: {f}");
-    assert_eq!(host(&f, "web")["bridge"], false, "the browser's human: {f}");
-    let w = agent(&f, &format!("{USER}/worker"));
+    let w = agent(&f, &worker);
     assert_eq!((w["kind"].as_str(), w["discovered"].is_null(), w["own"].as_bool()), (Some("claude"), true, Some(true)));
-    assert_eq!((w["held"].as_i64(), w["stuck"].as_i64()), (Some(0), Some(0)));
     let s = agent(&f, "david/scout");
     assert!(s["held"].is_null() && s["stuck"].is_null() && s["last_reached"].is_null(), "another owner's health: {s}");
 
-    // The bridge connects (fence), reports worker's session live, then delivers a DM.
-    let bridge = ui.d.bridge_principal(&k);
+    // k-host's bridge connects, reports worker's session live, then delivers helper's DM to it.
+    let bridge = ui.d.bridge_principal(&c.k);
     ui.op(&bridge, "", "bridge.fence", json!({})).await;
     ui.op(&bridge, "", "bridge.endpoints", json!({"endpoints": [{"kind": "claude", "target": "sess-worker"}]})).await;
-    ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "worker"}, "text": "one"})).await;
     let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
-    let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
+    let attempts: Vec<String> =
+        claim["jobs"].as_array().unwrap().iter().map(|j| j["attempt_id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(attempts.len(), 2, "scout's and helper's DMs to worker: {claim}");
     // The delivery receipt comes 30 s after the claim: "reached" is the receipt's time.
     let claimed_at = ui.ok(&b, &csrf, "fleet.list", json!({})).await["now"].as_str().unwrap().to_string();
     ui.d.advance_clock(30_000);
-    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempt, "outcome": "delivered"})).await;
+    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempts[0], "outcome": "delivered"})).await;
     let reported_at = ui.ok(&b, &csrf, "fleet.list", json!({})).await["now"].as_str().unwrap().to_string();
-    // A second DM is held at the session.
-    ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "worker"}, "text": "two"})).await;
-    let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
-    let held = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
-    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": held, "outcome": "held"})).await;
+    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempts[1], "outcome": "held"})).await;
 
     let f = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
     let h = host(&f, "k-host");
     assert_eq!((h["online"].as_bool(), h["owner"].as_str()), (Some(true), Some(USER)), "{h}");
-    let w = agent(&f, &format!("{USER}/worker"));
+    let w = agent(&f, &worker);
     assert!(w["discovered"].is_string(), "{w}");
     assert_eq!(w["held"], 1, "{w}");
     let reached = w["last_reached"].as_str().unwrap().to_string();
@@ -607,13 +643,12 @@ async fn the_fleet_shows_online_discovery_and_own_delivery_health(d: Arc<Dispatc
     let f = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
     assert_eq!(host(&f, "k-host")["online"], true, "{f}");
 
-    // An undelivered DM older than a minute is stuck (scout's host has no bridge).
-    ui.op(&k, &worker, "message.send", json!({"to": {"agent": format!("{USER}/{USER}")}, "text": "to the human"})).await;
-    ui.op(&dv, &_scout, "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "to worker"})).await;
+    // An undelivered DM older than a minute is stuck (helper is never claimed: Codex, no endpoint
+    // matters; the claim above happened before this DM).
+    ui.op(&c.dv, &c.scout, "message.send", json!({"to": {"agent": format!("{USER}/helper")}, "text": "to helper"})).await;
     ui.d.advance_clock(61_000);
     let f = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
-    assert_eq!(agent(&f, &format!("{USER}/worker"))["stuck"], 1, "{f}");
-    assert_eq!(agent(&f, &format!("{USER}/{USER}"))["stuck"], 0, "a human is never stuck: {f}");
+    assert_eq!(agent(&f, &format!("{USER}/helper"))["stuck"], 1, "{f}");
     ui.server.shutdown().await.unwrap();
 }
 
@@ -657,20 +692,20 @@ async fn the_event_socket_says_when_the_board_changed(d: Arc<Dispatcher>) {
     let hello = next_frame(&mut ws).await.expect("a hello");
     assert_eq!(hello["type"], "hello");
 
-    ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": format!("{USER}/{USER}")}, "text": "note to self"})).await;
+    let c = cast(&ui).await;
+    ui.op(&c.dv, &c.scout, "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "note to worker"})).await;
     let changed = loop {
         let f = next_frame(&mut ws).await.expect("a change");
         if f["type"] == "changed" && f["topics"].as_array().unwrap().contains(&json!("messages")) {
             break f;
         }
     };
-    assert!(!changed.to_string().contains("note to self"), "events carry no content: {changed}");
+    assert!(!changed.to_string().contains("note to worker"), "events carry no content: {changed}");
+    // The browser itself writes nothing, so it announces nothing.
+    ui.ok(&b, &csrf, "owner.list", json!({})).await;
 
     // A bridge outcome on another connection reaches the browser as a delivery change.
-    let ((k, _worker), _) = cast(&ui).await;
-    ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "worker"}, "text": "x"})).await;
-    let bridge = ui.d.bridge_principal(&k);
+    let bridge = ui.d.bridge_principal(&c.k);
     let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
     let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
     // Everything up to the claim is announced and consumed first, so the next frame can only
@@ -697,66 +732,6 @@ async fn quiet_frame(ws: &mut Ws) -> Option<Value> {
     tokio::time::timeout(Duration::from_millis(800), read).await.ok().flatten()
 }
 
-/// Whether a board wake arrives within a moment (other wakes skipped).
-async fn next_board(wakes: &mut tokio::sync::broadcast::Receiver<conde::store::Wake>) -> bool {
-    let wait = async {
-        loop {
-            if let Ok(conde::store::Wake::Board(_)) = wakes.recv().await {
-                return;
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_millis(700), wait).await.is_ok()
-}
-
-async fn a_name_held_by_an_agent_session_is_never_taken_by_the_browser(d: Arc<Dispatcher>) {
-    let ui = ui(&d).await;
-    let (b, csrf) = ui.bare_browser().await;
-    // A GET names nobody.
-    assert!(ui.session(&b).await["name"].is_null());
-    let d2 = ui.d.clone();
-    let bound = blocking(move || d2.with_conn(|c| c.bound_agents()).unwrap()).await;
-    assert!(bound.is_empty(), "{bound:?}");
-    // The user's own Claude session holds the name the browser would take.
-    let k = ui.principal(USER, "k-host").await;
-    ui.op(&k, "claude:sess-1", "agent.register", json!({"name": USER})).await;
-    let (status, v) = ui.rpc(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["error"]["code"], "not_found", "{v}");
-    assert!(v["error"]["message"].as_str().unwrap().contains("conde register"), "{v}");
-    let me = ui.op(&k, "claude:sess-1", "agent.whoami", json!({})).await;
-    assert_eq!(me["address"], "claude:sess-1@k-host", "the session keeps its name");
-    // The race: the session registered after the browser read the registry. The browser's
-    // registration re-checks in its own write transaction and refuses.
-    let web = ui.principal(USER, "web-race").await;
-    let (d2, mut p) = (ui.d.clone(), web.clone());
-    p.host = "web".into();
-    let mut req = Request::new("r", "agent.register", json!({"name": USER, "keep_sessions": true}));
-    req.actor = Some(format!("human:{USER}@web"));
-    req.idempotency_key = Some(conde::util::new_ulid());
-    let resp = blocking(move || d2.dispatch(&p, &req)).await;
-    assert_eq!(resp.error.map(|e| e.code), Some(conde::protocol::ErrorCode::Conflict));
-    let me = ui.op(&k, "claude:sess-1", "agent.whoami", json!({})).await;
-    assert_eq!(me["address"], "claude:sess-1@k-host", "the binding is untouched");
-    ui.server.shutdown().await.unwrap();
-}
-
-async fn two_names_on_one_human_address_both_stay_usable(d: Arc<Dispatcher>) {
-    let ui = ui(&d).await;
-    let (b, csrf) = ui.bare_browser().await;
-    let laptop = ui.principal(USER, "laptop").await;
-    ui.op(&laptop, &format!("human:{USER}"), "agent.register", json!({"name": "kd"})).await;
-    ui.op(&laptop, &format!("human:{USER}"), "agent.register", json!({"name": USER})).await;
-    // The terminal's own `whoami` sees two names on one address; the browser acts by name.
-    let me = ui.ok(&b, &csrf, "agent.whoami", json!({})).await;
-    assert_eq!(me["name"], format!("{USER}/{USER}"));
-    let sent = ui.ok(&b, &csrf, "message.send", json!({"to": {"agent": "kd"}, "text": "to my other name"})).await;
-    assert_eq!(sent["to"], format!("{USER}/kd"));
-    let h = ui.ok(&b, &csrf, "conversation.history", json!({"with": "kd"})).await;
-    assert_eq!(h["messages"][0]["from"], format!("{USER}/{USER}"));
-    ui.server.shutdown().await.unwrap();
-}
-
 async fn the_browser_host_is_never_minted_as_a_real_host(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let b = Browser::new();
@@ -766,6 +741,12 @@ async fn the_browser_host_is_never_minted_as_a_real_host(d: Arc<Dispatcher>) {
     let d2 = ui.d.clone();
     let owner = blocking(move || d2.with_conn(|c| c.host_owner("web")).unwrap()).await;
     assert!(owner.is_none(), "{owner:?}");
+    let d2 = ui.d.clone();
+    let admin = blocking(move || {
+        d2.with_tx(|c| conde::ops::hosts::insert_key(c, USER, "web", "digest", "admin", "2026-10-09T00:00:00.000Z"))
+    })
+    .await;
+    assert!(admin.unwrap_err().to_string().contains("reserved"));
     ui.server.shutdown().await.unwrap();
 }
 

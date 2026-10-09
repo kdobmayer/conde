@@ -224,9 +224,12 @@ pub struct DmDelivery {
     pub reason: Option<String>,
 }
 
-/// One conversation partner of an agent's DMs, for the web UI's rail.
+/// One DM conversation of one of an owner's agents, for the web UI's rail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DmThread {
+    /// The owner's agent and its canonical name.
+    pub agent_id: String,
+    pub agent: String,
     pub partner_id: String,
     /// The partner's canonical name.
     pub partner: String,
@@ -236,9 +239,12 @@ pub struct DmThread {
     pub unread: i64,
 }
 
-/// A channel the agent belongs to, for the web UI's rail.
+/// A channel one of an owner's agents belongs to, for the web UI's rail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelThread {
+    /// The owner's agent and its canonical name.
+    pub agent_id: String,
+    pub agent: String,
     pub name: String,
     pub topic: Option<String>,
     /// 0 for an empty channel.
@@ -565,17 +571,24 @@ pub trait Tx {
     -> StoreResult<()>;
     fn count_endpoints(&self) -> StoreResult<i64>;
 
-    // web UI
-    /// The agent's DM partners, most recent conversation first.
-    fn dm_threads(&self, agent_id: &str) -> StoreResult<Vec<DmThread>>;
-    /// The channels the agent belongs to, by name.
-    fn channel_threads(&self, agent_id: &str) -> StoreResult<Vec<ChannelThread>>;
-    /// DMs between `a` and `b` (either way) before `before`, newest first.
-    fn dm_history(&self, a: &str, b: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>>;
-    /// Messages of a channel before `before`, newest first.
-    fn channel_history(&self, channel_id: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>>;
-    /// Ids of DMs from `sender` to `agent_id` up to `up_to` that the agent has not read.
-    fn unread_dms_from(&self, agent_id: &str, sender: &str, up_to: i64) -> StoreResult<Vec<String>>;
+    // web UI: owner-scoped reads (what the owner's own agents can read)
+    /// Every agent of the owner, bound or not, by name.
+    fn owner_agents(&self, owner_id: i64) -> StoreResult<Vec<Agent>>;
+    /// The DM conversations of the owner's agents, one row per (agent, counterpart), newest first.
+    fn owner_dm_threads(&self, owner_id: i64) -> StoreResult<Vec<DmThread>>;
+    /// The channels the owner's agents belong to, one row per (agent, channel), by agent then name.
+    fn owner_channel_threads(&self, owner_id: i64) -> StoreResult<Vec<ChannelThread>>;
+    /// DMs between `agent_id` and `partner_id` (either way) before `before`, newest first; none
+    /// unless `agent_id` belongs to `owner_id`.
+    fn owner_dm_history(&self, owner_id: i64, agent_id: &str, partner_id: &str, before: i64, limit: i64)
+    -> StoreResult<Vec<Message>>;
+    /// A channel's messages before `before`, newest first; none unless one of the owner's
+    /// agents is a member.
+    fn owner_channel_history(&self, owner_id: i64, channel_id: &str, before: i64, limit: i64)
+    -> StoreResult<Vec<Message>>;
+    /// The message, when one of the owner's agents sent it, received it as a DM, or is a member
+    /// of its channel.
+    fn owner_message(&self, owner_id: i64, message_id: &str) -> StoreResult<Option<Message>>;
     /// The message's notifications with their latest attempts, by recipient name.
     fn deliveries(&self, message_id: &str) -> StoreResult<Vec<Delivery>>;
     /// Every host with its owner and bridge activity, by owner then host.

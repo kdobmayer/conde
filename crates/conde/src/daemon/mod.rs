@@ -296,6 +296,7 @@ impl Daemon {
             local: local.clone(),
             bridge: local.bridge_principal(&principal),
             interval: opts.interval,
+            pending: Mutex::default(),
         };
         let stop = stop_delivery.clone();
         let delivery = std::thread::Builder::new().name("deliver".into()).spawn(move || delivery.run(notifier, stop))?;
@@ -601,18 +602,43 @@ impl Core {
                 if items.is_empty() {
                     return (alias, Some(json!({"messages": [], "more": false})));
                 }
-                let read = forward(&conn, &shared, Some(actor), left()).await;
-                match read.ok.then_some(read.result).flatten() {
-                    Some(r) => (alias, Some(r)),
-                    None => {
-                        let rows: Vec<Value> = items
-                            .iter()
-                            .map(|i| json!({"message_id": i["message_id"], "from": i["from"], "date": i["date"], "place": i["kind"],
-                                            "text": i["preview"], "board": alias, "unconfirmed": true}))
-                            .collect();
-                        (alias, Some(json!({"messages": rows, "more": false, "unconfirmed": true})))
-                    }
+                // Read exactly the listed messages, each by id: one that arrives meanwhile
+                // stays unread, and an answer that does not come in time leaves its message
+                // shown unconfirmed with the command that reads it again.
+                let mut reads = JoinSet::new();
+                for (i, item) in items.iter().enumerate() {
+                    let qualified = item["message_id"].as_str().unwrap_or_default().to_string();
+                    let one = Request {
+                        body: json!({"id": resolve::split_ref(&qualified).1}),
+                        idempotency_key: Some(crate::util::new_ulid()),
+                        ..shared.clone()
+                    };
+                    let (conn, actor, wait) = (conn.clone(), actor.clone(), left());
+                    reads.spawn(async move {
+                        let resp = forward(&conn, &one, Some(actor), wait).await;
+                        (i, resp.ok.then_some(resp.result).flatten())
+                    });
                 }
+                let mut answered: Vec<Option<Value>> = vec![None; items.len()];
+                while let Some(Ok((i, result))) = reads.join_next().await {
+                    answered[i] = result.and_then(|r| r["messages"].as_array().and_then(|m| m.first().cloned()));
+                }
+                let mut unconfirmed = false;
+                let rows: Vec<Value> = items
+                    .iter()
+                    .zip(answered)
+                    .map(|(i, read)| {
+                        read.unwrap_or_else(|| {
+                            unconfirmed = true;
+                            let id = i["message_id"].as_str().unwrap_or_default();
+                            json!({"message_id": id, "from": i["from"], "date": i["date"], "place": i["kind"],
+                                   "text": i["preview"], "board": alias, "unconfirmed": true,
+                                   "recover": format!("conde read {id}")})
+                        })
+                    })
+                    .collect();
+                let more = listed["next_cursor"].as_i64().is_some();
+                (alias, Some(json!({"messages": rows, "more": more, "unconfirmed": unconfirmed})))
             });
         }
         while !calls.is_empty() {
@@ -651,7 +677,16 @@ impl Core {
         for r in rows.iter_mut() {
             label(r, LOCAL_BOARD);
         }
-        let mut board_parts = vec![json!(BoardPart { board: LOCAL_BOARD.into(), available: true })];
+        // Each part carries its own continuation: `next_cursor` (paged with --board <alias>
+        // --after N) and `more` (read again).
+        let mut local_part = json!(BoardPart { board: LOCAL_BOARD.into(), available: true });
+        if let Some(next) = result.get("next_cursor").filter(|v| !v.is_null()) {
+            local_part["next_cursor"] = next.clone();
+        }
+        if result.get("more").and_then(Value::as_bool) == Some(true) {
+            local_part["more"] = json!(true);
+        }
+        let mut board_parts = vec![local_part];
         for (alias, part) in parts {
             let available = part.is_some();
             let mut entry = json!(BoardPart { board: alias.clone(), available });
@@ -662,6 +697,7 @@ impl Core {
                 }
                 if part.get("more").and_then(Value::as_bool) == Some(true) {
                     result["more"] = json!(true);
+                    entry["more"] = json!(true);
                 }
                 if part.get("unconfirmed").and_then(Value::as_bool) == Some(true) {
                     entry["unconfirmed"] = json!(true);
@@ -1017,6 +1053,30 @@ impl Running {
 impl Drop for Running {
     fn drop(&mut self) {
         self.halt();
+    }
+}
+
+#[cfg(test)]
+impl Core {
+    /// A core over a fresh local board in `dir`, with `boards` registered but not connected.
+    pub(crate) fn for_tests(dir: &Path, rt: tokio::runtime::Handle, boards: Vec<BoardConn>) -> Arc<Core> {
+        let local = Arc::new(Dispatcher::open(&dir.join("conde.db")).unwrap());
+        let principal = local.principal("krisz", "homepc", true).unwrap();
+        let core = Arc::new(Core {
+            local,
+            principal,
+            mux: Arc::new(Mux::new(Tuning::default())),
+            boards: Mutex::default(),
+            config_dir: dir.join("config"),
+            db_path: dir.join("conde.db"),
+            claude_config: None,
+            rt,
+            legacy: Mutex::default(),
+        });
+        for b in boards {
+            core.add_board(Arc::new(b));
+        }
+        core
     }
 }
 

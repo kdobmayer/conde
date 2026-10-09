@@ -2,6 +2,7 @@
 //! of routes, the resumable board ops, and the task that hands outcomes to the client's book.
 //! A board that is fenced, revoked or refused stops alone; the daemon keeps running.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -41,6 +42,9 @@ pub struct BoardConn {
     pub removed: Mutex<Vec<String>>,
     /// The last reconciliation failure, if any (doctor).
     pub note: Mutex<Option<String>>,
+    /// Per local agent: the frame order (see `BridgeClient::call_ordered`) of the response
+    /// that last completed its publication; a routes snapshot received earlier never undoes it.
+    completions: Mutex<HashMap<String, u64>>,
 }
 
 impl BoardConn {
@@ -56,6 +60,7 @@ impl BoardConn {
             client: Mutex::new(None),
             removed: Mutex::default(),
             note: Mutex::default(),
+            completions: Mutex::default(),
         }
     }
 
@@ -92,6 +97,11 @@ impl BoardConn {
 
     /// One request over the connection, with the board's answer as a response object.
     pub async fn call(&self, request: Value, wait: Duration) -> Result<Response, String> {
+        self.call_ordered(request, wait).await.map(|(r, _)| r)
+    }
+
+    /// [`call`](Self::call) with the response's place in the order of received frames.
+    pub async fn call_ordered(&self, request: Value, wait: Duration) -> Result<(Response, u64), String> {
         let Some(client) = self.client() else {
             return Err(match self.status() {
                 Status::NotMigrated => format!("{}: not migrated (run conde setup)", self.alias),
@@ -99,8 +109,10 @@ impl BoardConn {
                 Status::Running => format!("{}: not connected", self.alias),
             });
         };
-        match tokio::time::timeout(wait, client.call(request)).await {
-            Ok(Ok(v)) => serde_json::from_value(v).map_err(|e| format!("{}: bad response frame: {e}", self.alias)),
+        match tokio::time::timeout(wait, client.call_ordered(request)).await {
+            Ok(Ok((v, seq))) => serde_json::from_value(v)
+                .map(|r| (r, seq))
+                .map_err(|e| format!("{}: bad response frame: {e}", self.alias)),
             Ok(Err(e)) => Err(format!("{}: {}", self.alias, describe_call(&e))),
             Err(_) => Err(format!("{}: no answer within {wait:?}", self.alias)),
         }
@@ -162,8 +174,11 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
         let Some(core) = weak.upgrade() else { return };
         match event {
             Inbound::Connected => core.mux.connected(&alias),
-            Inbound::Routes(r) => {
-                reconcile(&core, &alias, &r.mailboxes, None);
+            Inbound::Routes { routes, seq } => {
+                if let Some(d) = core.mux.tuning.routes_delay {
+                    std::thread::sleep(d);
+                }
+                reconcile(&core, &alias, &routes.mailboxes, seq);
                 core.mux.reconciled(&alias);
             }
             Inbound::Notify(n) => core.mux.push(&alias, *n),
@@ -207,20 +222,19 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
             }
         }
         if mine_due && tokio::time::Instant::now() >= mine_retry {
-            let since = iso_from_ms(now_ms());
-            match conn.call(json!({"op": op::MAILBOX_MINE, "body": {}}), core.mux.tuning.call_timeout).await {
-                Ok(resp) if resp.ok => {
+            match conn.call_ordered(json!({"op": op::MAILBOX_MINE, "body": {}}), core.mux.tuning.call_timeout).await {
+                Ok((resp, seq)) if resp.ok => {
                     let mine: Mine = resp.result.and_then(|r| serde_json::from_value(r).ok()).unwrap_or_default();
                     let routes: Vec<Route> = mine
                         .mailboxes
                         .into_iter()
                         .map(|m| Route { mailbox_id: m.mailbox_id, route_generation: m.route_generation })
                         .collect();
-                    reconcile(&core, &conn.alias, &routes, Some(&since));
+                    reconcile(&core, &conn.alias, &routes, seq);
                     core.mux.reconciled(&conn.alias);
                     mine_due = false;
                 }
-                Ok(resp) => {
+                Ok((resp, _)) => {
                     let why = resp.error.map(|e| e.message).unwrap_or_default();
                     *conn.note.lock().unwrap_or_else(|p| p.into_inner()) = Some(format!("mailbox.mine refused: {why}"));
                     // Routes frames still reconcile; nothing better is known.
@@ -264,15 +278,17 @@ fn drain(core: &Core, alias: &str, client: &BridgeClient) {
     }
 }
 
-/// Applies the board's current routes for this host: a published row the board no longer
-/// routes here is deleted (and kept for doctor); a newer generation is adopted. Rows changed
-/// after `since` (the snapshot's time, for `mailbox.mine`) are left alone.
-pub fn reconcile(core: &Core, alias: &str, routes: &[Route], since: Option<&str>) {
+/// Applies a routes snapshot received as frame `seq`: a published row the board no longer
+/// routes here is deleted (and kept for doctor); a newer generation is adopted. A row whose
+/// publication completed by a response received after the snapshot is left alone: the snapshot
+/// predates it, whatever order the two were handled in.
+pub fn reconcile(core: &Core, alias: &str, routes: &[Route], seq: u64) {
     let now = iso_from_ms(now_ms());
+    let completions = core.board(alias).map(|c| c.completions.lock().unwrap_or_else(|p| p.into_inner()).clone()).unwrap_or_default();
     let result = core.local_tx(|tx| {
         let mut removed = Vec::new();
         for p in tx.publications(Some(alias))? {
-            if p.state != PublicationState::Published || since.is_some_and(|s| p.updated_at.as_str() > s) {
+            if p.state != PublicationState::Published || completions.get(&p.agent_id).is_some_and(|done| *done > seq) {
                 continue;
             }
             let Some(mailbox) = p.mailbox_id.as_deref() else { continue };
@@ -304,7 +320,8 @@ pub fn reconcile(core: &Core, alias: &str, routes: &[Route], since: Option<&str>
 
 /// What one send of a board op came to.
 pub enum OpOutcome {
-    Done(Value),
+    /// The board's answer, with the frame order of its response (None over HTTPS).
+    Done(Value, Option<u64>),
     /// The board refused it for good.
     Refused(ErrorCode, String),
     /// Not answered (offline, lost response): stays pending and is resumed on connect.
@@ -315,13 +332,13 @@ pub enum OpOutcome {
 pub async fn send_op(conn: &BoardConn, op: &BoardOp, wait: Duration) -> OpOutcome {
     let request = json!({"op": op.kind.op_name(), "body": op.request, "idempotency_key": op.op_id});
     let response = if op.kind == BoardOpKind::Migrate {
-        rpc(conn, request, wait).await
+        rpc(conn, request, wait).await.map(|r| (r, None))
     } else {
-        conn.call(request, wait).await
+        conn.call_ordered(request, wait).await.map(|(r, seq)| (r, Some(seq)))
     };
     match response {
-        Ok(r) if r.ok => OpOutcome::Done(r.result.unwrap_or(Value::Null)),
-        Ok(r) => match r.error {
+        Ok((r, seq)) if r.ok => OpOutcome::Done(r.result.unwrap_or(Value::Null), seq),
+        Ok((r, _)) => match r.error {
             Some(e) if e.code == ErrorCode::Internal => OpOutcome::Pending(e.message),
             Some(e) => OpOutcome::Refused(e.code, e.message),
             None => OpOutcome::Pending("empty response".into()),
@@ -340,15 +357,43 @@ pub async fn rpc(conn: &BoardConn, request: Value, wait: Duration) -> Result<Res
     }
 }
 
-/// Applies a publish or unpublish answer locally (migrate answers are applied by
-/// [`super::publish::apply_manifest`]). Returns the state the publication ended in.
+/// What an op that is no longer pending already came to, from its stored record.
+fn settled(op: &BoardOp) -> Result<String, (ErrorCode, String)> {
+    match (op.kind, op.state) {
+        (_, BoardOpState::Failed) => {
+            let message = op.result.as_ref().and_then(|r| r["error"]["message"].as_str()).unwrap_or("refused").to_string();
+            Err((ErrorCode::Conflict, format!("{}: {message}", op.board)))
+        }
+        (BoardOpKind::Publish, _) => Ok("published".into()),
+        (BoardOpKind::Unpublish, _) => Ok("unpublished".into()),
+        (BoardOpKind::Migrate, _) => Ok("migrated".into()),
+    }
+}
+
+/// Applies a board's answer to `op` locally, once: the originating request and the reconnect
+/// worker may both finish the same op, so the op's state is reread inside the transaction and
+/// an op that is no longer pending returns its stored result and changes nothing. A transition
+/// touches only the row state its own op created (`publishing` for a publish, `unpublishing`
+/// for an unpublish), never a newer one. Migrate answers go to
+/// [`super::publish::apply_manifest`]. Returns the state the publication ended in.
 pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome) -> Result<String, (ErrorCode, String)> {
     let alias = &conn.alias;
     let agent = op.agent_id.clone().unwrap_or_default();
     let now = iso_from_ms(now_ms());
+    let internal = |e: anyhow::Error| (ErrorCode::Internal, format!("{e:#}"));
+    // The stored op when it is no longer pending (a duplicate completion).
+    let stored = |tx: &crate::store::sqlite::SqliteTx| -> anyhow::Result<Option<BoardOp>> {
+        Ok(tx.op(&op.op_id)?.filter(|o| o.state != BoardOpState::Pending))
+    };
+    let owned = |tx: &crate::store::sqlite::SqliteTx, state: PublicationState| -> anyhow::Result<bool> {
+        Ok(tx.publication(alias, &agent)?.is_some_and(|p| p.state == state))
+    };
     match (op.kind, outcome) {
         (kind, OpOutcome::Pending(why)) => {
             tracing::info!(board = alias, op = op.op_id, "board op pending: {why}");
+            if let Some(done) = core.local_tx(|tx| stored(tx)).map_err(internal)? {
+                return settled(&done);
+            }
             Ok(match kind {
                 BoardOpKind::Publish => "publishing",
                 BoardOpKind::Unpublish => "unpublishing",
@@ -356,71 +401,98 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
             }
             .into())
         }
-        (BoardOpKind::Publish, OpOutcome::Done(result)) => {
+        (BoardOpKind::Migrate, OpOutcome::Done(result, _)) => {
+            if let Some(done) = core.local_tx(|tx| stored(tx)).map_err(internal)? {
+                return settled(&done);
+            }
+            super::publish::apply_manifest(core, conn, op, &result)
+        }
+        (BoardOpKind::Publish, OpOutcome::Done(result, seq)) => {
             let published: Option<Published> = serde_json::from_value(result.clone()).ok();
-            core.local_tx(|tx| {
-                if let Some(p) = &published
-                    && tx.publication(alias, &agent)?.is_some()
-                {
-                    tx.update_publication(alias, &agent, Some((&p.mailbox_id, p.route_generation)), PublicationState::Published, &now)?;
-                }
-                tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
-                Ok(())
-            })
-            .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
+            let duplicate = core
+                .local_tx(|tx| {
+                    if let Some(done) = stored(tx)? {
+                        return Ok(Some(done));
+                    }
+                    if let Some(p) = &published
+                        && owned(tx, PublicationState::Publishing)?
+                    {
+                        tx.update_publication(alias, &agent, Some((&p.mailbox_id, p.route_generation)), PublicationState::Published, &now)?;
+                    }
+                    tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
+                    Ok(None)
+                })
+                .map_err(internal)?;
+            if let Some(done) = duplicate {
+                return settled(&done);
+            }
+            if let Some(seq) = seq {
+                conn.completions.lock().unwrap_or_else(|p| p.into_inner()).insert(agent, seq);
+            }
             Ok("published".into())
         }
-        (BoardOpKind::Publish, OpOutcome::Refused(code, message)) => {
-            core.local_tx(|tx| {
-                if tx.publication(alias, &agent)?.is_some_and(|p| p.state == PublicationState::Publishing) {
-                    tx.delete_publication(alias, &agent)?;
-                }
-                tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&json!({"error": {"code": code, "message": message}})), &now)?;
-                Ok(())
-            })
-            .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
-            Err((code, format!("{alias}: {message}")))
+        (BoardOpKind::Unpublish, OpOutcome::Done(result, _)) => {
+            let mailbox = op.request["mailbox_id"].as_str().unwrap_or_default().to_string();
+            let duplicate = core
+                .local_tx(|tx| {
+                    if let Some(done) = stored(tx)? {
+                        return Ok(Some(done));
+                    }
+                    if tx.publication(alias, &agent)?.is_some_and(|p| p.state == PublicationState::Unpublishing && p.mailbox_id.as_deref() == Some(mailbox.as_str())) {
+                        tx.delete_publication(alias, &agent)?;
+                    }
+                    tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
+                    Ok(None)
+                })
+                .map_err(internal)?;
+            match duplicate {
+                Some(done) => settled(&done),
+                None => Ok("unpublished".into()),
+            }
         }
-        (BoardOpKind::Unpublish, OpOutcome::Done(result)) => {
-            core.local_tx(|tx| {
-                tx.delete_publication(alias, &agent)?;
-                tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
-                Ok(())
-            })
-            .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
-            Ok("unpublished".into())
-        }
-        (BoardOpKind::Unpublish, OpOutcome::Refused(ErrorCode::Conflict | ErrorCode::NotFound, message)) => {
-            // The mailbox moved (or is gone) meanwhile: the local row goes, the new route stays.
-            core.local_tx(|tx| {
-                tx.delete_publication(alias, &agent)?;
-                tx.finish_op(&op.op_id, BoardOpState::Done, Some(&json!({"moved": true, "message": message})), &now)?;
-                Ok(())
-            })
-            .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
-            Ok("unpublished".into())
-        }
-        (BoardOpKind::Unpublish, OpOutcome::Refused(code, message)) => {
+        (kind, OpOutcome::Refused(code, message)) => {
+            let moved = kind == BoardOpKind::Unpublish && matches!(code, ErrorCode::Conflict | ErrorCode::NotFound);
             let mailbox = op.request["mailbox_id"].as_str().unwrap_or_default().to_string();
             let generation = op.request["expected_generation"].as_u64().unwrap_or_default();
-            core.local_tx(|tx| {
-                if tx.publication(alias, &agent)?.is_some() {
-                    tx.update_publication(alias, &agent, Some((&mailbox, generation)), PublicationState::Published, &now)?;
-                }
-                tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&json!({"error": {"code": code, "message": message}})), &now)?;
-                Ok(())
-            })
-            .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
-            Err((code, format!("{alias}: {message}")))
-        }
-        (BoardOpKind::Migrate, OpOutcome::Done(result)) => super::publish::apply_manifest(core, conn, op, &result),
-        (BoardOpKind::Migrate, OpOutcome::Refused(code, message)) => {
-            core.local_tx(|tx| {
-                tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&json!({"error": {"code": code, "message": message}})), &now)?;
-                Ok(())
-            })
-            .map_err(|e| (ErrorCode::Internal, format!("{e:#}")))?;
-            Err((code, format!("{alias}: {message}")))
+            let duplicate = core
+                .local_tx(|tx| {
+                    if let Some(done) = stored(tx)? {
+                        return Ok(Some(done));
+                    }
+                    let error = json!({"error": {"code": code, "message": message}});
+                    match kind {
+                        BoardOpKind::Publish => {
+                            if owned(tx, PublicationState::Publishing)? {
+                                tx.delete_publication(alias, &agent)?;
+                            }
+                            tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&error), &now)?;
+                        }
+                        // The mailbox moved (or is gone) meanwhile: the local row goes, the new
+                        // route stays.
+                        BoardOpKind::Unpublish if moved => {
+                            if owned(tx, PublicationState::Unpublishing)? {
+                                tx.delete_publication(alias, &agent)?;
+                            }
+                            tx.finish_op(&op.op_id, BoardOpState::Done, Some(&json!({"moved": true, "message": message})), &now)?;
+                        }
+                        BoardOpKind::Unpublish => {
+                            if owned(tx, PublicationState::Unpublishing)? {
+                                tx.update_publication(alias, &agent, Some((&mailbox, generation)), PublicationState::Published, &now)?;
+                            }
+                            tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&error), &now)?;
+                        }
+                        BoardOpKind::Migrate => {
+                            tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&error), &now)?;
+                        }
+                    }
+                    Ok(None)
+                })
+                .map_err(internal)?;
+            match duplicate {
+                Some(done) => settled(&done),
+                None if moved => Ok("unpublished".into()),
+                None => Err((code, format!("{alias}: {message}"))),
+            }
         }
     }
 }
@@ -516,5 +588,101 @@ pub async fn probe_migrated(core: Weak<Core>, conn: Arc<BoardConn>) {
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(300));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::local::Publication;
+
+    fn op(id: &str, kind: BoardOpKind, agent: &str, request: Value) -> BoardOp {
+        BoardOp {
+            op_id: id.into(),
+            board: "dakai".into(),
+            kind,
+            agent_id: Some(agent.into()),
+            request,
+            state: BoardOpState::Pending,
+            result: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        }
+    }
+
+    fn setup() -> (tempfile::TempDir, tokio::runtime::Runtime, Arc<Core>, Arc<BoardConn>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let cfg = BoardConfig { server: "https://b.example".into(), host_id: "homepc".into(), owner: "krisz".into(), key: "k".into() };
+        let core = Core::for_tests(dir.path(), rt.handle().clone(), vec![BoardConn::new("dakai", Ok(cfg))]);
+        let conn = core.board("dakai").unwrap();
+        let agent = crate::util::new_ulid();
+        core.local.with_tx(|tx| Ok(tx.insert_agent(&agent, core.principal.user_id, "worker")?)).unwrap();
+        (dir, rt, core, conn, agent)
+    }
+
+    fn state(core: &Core, agent: &str) -> Option<PublicationState> {
+        core.local_tx(|tx| Ok(tx.publication("dakai", agent)?)).unwrap().map(|p| p.state)
+    }
+
+    fn begin(core: &Core, o: &BoardOp, row: Option<Publication>, update: Option<(&str, u64, PublicationState)>) {
+        core.local_tx(|tx| {
+            tx.insert_op(o)?;
+            if let Some(p) = &row {
+                tx.insert_publication(p)?;
+            }
+            if let Some((mailbox, generation, s)) = update {
+                tx.update_publication("dakai", o.agent_id.as_deref().unwrap(), Some((mailbox, generation)), s, "t")?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn publishing(agent: &str) -> Publication {
+        Publication {
+            board: "dakai".into(),
+            agent_id: agent.into(),
+            shared_name: "worker".into(),
+            mailbox_id: None,
+            route_generation: None,
+            state: PublicationState::Publishing,
+            updated_at: "t".into(),
+        }
+    }
+
+    #[test]
+    fn a_repeated_publish_completion_leaves_a_newer_unpublish_alone() {
+        let (_dir, _rt, core, conn, agent) = setup();
+        let answer = json!({"name": "worker", "mailbox_id": "01MB", "route_generation": 2});
+        let publish = op("01P", BoardOpKind::Publish, &agent, json!({"name": "worker"}));
+        begin(&core, &publish, Some(publishing(&agent)), None);
+        assert_eq!(finish_op(&core, &conn, &publish, OpOutcome::Done(answer.clone(), Some(5))), Ok("published".into()));
+        assert_eq!(state(&core, &agent), Some(PublicationState::Published));
+        // a newer unpublish is in flight
+        let unpublish = op("01U", BoardOpKind::Unpublish, &agent, json!({"mailbox_id": "01MB", "expected_generation": 2}));
+        begin(&core, &unpublish, None, Some(("01MB", 2, PublicationState::Unpublishing)));
+        // the reconnect worker finishes the old publish again
+        assert_eq!(finish_op(&core, &conn, &publish, OpOutcome::Done(answer, Some(9))), Ok("published".into()));
+        assert_eq!(state(&core, &agent), Some(PublicationState::Unpublishing), "admission stays closed");
+    }
+
+    #[test]
+    fn a_repeated_unpublish_completion_leaves_a_newer_publish_alone() {
+        let (_dir, _rt, core, conn, agent) = setup();
+        let publish = op("01P", BoardOpKind::Publish, &agent, json!({"name": "worker"}));
+        begin(&core, &publish, Some(publishing(&agent)), None);
+        finish_op(&core, &conn, &publish, OpOutcome::Done(json!({"name": "worker", "mailbox_id": "01MB", "route_generation": 2}), Some(1))).unwrap();
+        let unpublish = op("01U", BoardOpKind::Unpublish, &agent, json!({"mailbox_id": "01MB", "expected_generation": 2}));
+        begin(&core, &unpublish, None, Some(("01MB", 2, PublicationState::Unpublishing)));
+        let gone = json!({"mailbox_id": "01MB", "route_generation": 3});
+        assert_eq!(finish_op(&core, &conn, &unpublish, OpOutcome::Done(gone.clone(), Some(2))), Ok("unpublished".into()));
+        assert_eq!(state(&core, &agent), None);
+        // published again, still in flight
+        let again = op("01Q", BoardOpKind::Publish, &agent, json!({"name": "worker"}));
+        begin(&core, &again, Some(publishing(&agent)), None);
+        // the reconnect worker finishes the old unpublish again
+        assert_eq!(finish_op(&core, &conn, &unpublish, OpOutcome::Done(gone, Some(3))), Ok("unpublished".into()));
+        assert_eq!(state(&core, &agent), Some(PublicationState::Publishing), "the newer publication stays");
     }
 }

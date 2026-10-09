@@ -100,8 +100,9 @@ pub enum Inbound {
     /// A new connection's hello was sent; every later event belongs to it.
     Connected,
     Notify(Box<Notify>),
-    /// This host's full mailbox route set (v2).
-    Routes(Routes),
+    /// This host's full mailbox route set (v2), with its place in the order of frames
+    /// received (see [`BridgeClient::call_ordered`]).
+    Routes { routes: Routes, seq: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,7 +203,7 @@ enum Cmd {
     Request { request_id: String, frame: String },
 }
 
-type Reply = oneshot::Sender<Result<Value, CallError>>;
+type Reply = oneshot::Sender<Result<(Value, u64), CallError>>;
 
 #[derive(Default)]
 struct Book {
@@ -251,6 +252,8 @@ struct Inner {
     /// The current live endpoints: sent whole in each hello, as diffs in between.
     endpoints: Mutex<Vec<Endpoint>>,
     connects: AtomicU64,
+    /// Text frames received from the server, ever: the order of routes frames and responses.
+    frames: AtomicU64,
     /// event_seq source for every outcome of this instance: strictly increasing and never
     /// reused within the process lifetime, so it is monotonic per attempt without per-attempt
     /// state. Seeded from the clock (microseconds) so a reused `bridge_instance` usually
@@ -330,6 +333,7 @@ impl BridgeClient {
             stop: Mutex::new(None),
             endpoints: Mutex::new(config_endpoints),
             connects: AtomicU64::new(0),
+            frames: AtomicU64::new(0),
             next_seq: AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -484,6 +488,13 @@ impl BridgeClient {
     /// generated one when the request had none). A request queued while
     /// disconnected is sent after the next connect.
     pub async fn call(&self, request: Value) -> Result<Value, CallError> {
+        self.call_ordered(request).await.map(|(v, _)| v)
+    }
+
+    /// Like [`call`](Self::call), with the response's place in the order of frames received:
+    /// a `routes` frame ([`Inbound::Routes`]) with a lower `seq` was received before this
+    /// response, whatever order the two reach their handlers in.
+    pub async fn call_ordered(&self, request: Value) -> Result<(Value, u64), CallError> {
         let Value::Object(mut obj) = request else {
             return Err(CallError::BadRequest);
         };
@@ -512,11 +523,11 @@ impl BridgeClient {
             return Err(CallError::Stopped(StopReason::Shutdown));
         }
         match tokio::time::timeout(self.inner.config.call_timeout, rx).await {
-            Ok(Ok(Ok(mut response))) => {
+            Ok(Ok(Ok((mut response, seq)))) => {
                 if let (Some(id), Some(obj)) = (caller_id, response.as_object_mut()) {
                     obj.insert("request_id".into(), id);
                 }
-                Ok(response)
+                Ok((response, seq))
             }
             Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err(CallError::Disconnected),
@@ -799,7 +810,8 @@ async fn run_session(
                     // tungstenite answers pings itself while reading.
                     Some(Ok(_)) => continue,
                 };
-                if let Some(end) = handle_frame(inner, &text, notify_tx, seen, inflight) {
+                let seq = inner.frames.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Some(end) = handle_frame(inner, &text, seq, notify_tx, seen, inflight) {
                     return end;
                 }
             }
@@ -856,6 +868,7 @@ fn due_outcomes(
 fn handle_frame(
     inner: &Inner,
     text: &str,
+    seq: u64,
     notify_tx: &std::sync::mpsc::Sender<Inbound>,
     seen: &mut Seen,
     inflight: &mut HashSet<String>,
@@ -878,7 +891,7 @@ fn handle_frame(
         },
         "routes" => match serde_json::from_value::<Routes>(value) {
             Ok(r) => {
-                if notify_tx.send(Inbound::Routes(r)).is_err() {
+                if notify_tx.send(Inbound::Routes { routes: r, seq }).is_err() {
                     tracing::error!("notify handler thread is gone");
                 }
             }
@@ -926,7 +939,7 @@ fn handle_frame(
                 .to_owned();
             inflight.remove(&id);
             if let Some(reply) = inner.book().calls.remove(&id) {
-                let _ = reply.send(Ok(value));
+                let _ = reply.send(Ok((value, seq)));
             }
         }
         "error" => {

@@ -59,6 +59,9 @@ pub struct Tuning {
     /// The board clients' delay before resending an outcome the board asked to retry
     /// (`None`: the client's default backoff).
     pub outcome_resend: Option<Duration>,
+    /// Tests only: how long the routes callback waits before applying a snapshot.
+    #[doc(hidden)]
+    pub routes_delay: Option<Duration>,
 }
 
 impl Default for Tuning {
@@ -75,6 +78,7 @@ impl Default for Tuning {
             idle_timeout: None,
             outcome_ack_timeout: None,
             outcome_resend: None,
+            routes_delay: None,
         }
     }
 }
@@ -440,6 +444,29 @@ pub struct Delivery {
     /// The local board's bridge principal (its own instance).
     pub bridge: Principal,
     pub interval: Duration,
+    /// Local outcomes not recorded yet, in order; each is retried until the local board
+    /// records it, and its reservation is released only then.
+    pub pending: Mutex<VecDeque<LocalOutcome>>,
+}
+
+/// An outcome for the local board, kept until it is recorded.
+#[derive(Clone, Debug)]
+pub struct LocalOutcome {
+    token: String,
+    attempt_id: String,
+    status: String,
+    reason: Option<String>,
+    /// The attempt resolves when this is recorded: release its slot and mapping.
+    release: bool,
+}
+
+/// What recording a local outcome came to.
+enum Recording {
+    Recorded,
+    /// The local board refused it for good (not this bridge's attempt, bad input).
+    Refused,
+    /// Storage did not take it; tried again later.
+    Retry,
 }
 
 impl Delivery {
@@ -452,15 +479,59 @@ impl Delivery {
         }
     }
 
-    /// Reports a local attempt's outcome to the local board (v1 statuses and details).
-    fn local_report(&self, attempt_id: &str, outcome: &str, reason: Option<&str>) {
+    /// Records a local attempt's outcome on the local board (v1 statuses and details).
+    fn local_report(&self, attempt_id: &str, outcome: &str, reason: Option<&str>) -> Recording {
         let body = json!({"attempt_id": attempt_id, "outcome": outcome, "reason": reason});
-        match self.local_call("bridge.report", body) {
-            Ok(r) => match r.get("ignored").and_then(Value::as_str) {
-                Some(why) => tracing::info!(attempt = attempt_id, outcome, "receipt ignored: {why}"),
-                None => tracing::info!(attempt = attempt_id, outcome, reason = reason.unwrap_or_default(), "attempt settled"),
-            },
-            Err(e) => tracing::warn!(attempt = attempt_id, outcome, "report refused: {e:#}"),
+        let resp = self.local.dispatch(&self.bridge, &Request::new(new_ulid(), "bridge.report", body));
+        match (resp.result, resp.error) {
+            (Some(r), None) => {
+                match r.get("ignored").and_then(Value::as_str) {
+                    Some(why) => tracing::info!(attempt = attempt_id, outcome, "receipt ignored: {why}"),
+                    None => tracing::info!(attempt = attempt_id, outcome, reason = reason.unwrap_or_default(), "attempt settled"),
+                }
+                Recording::Recorded
+            }
+            (_, Some(e)) if e.code == crate::protocol::ErrorCode::Internal => {
+                tracing::warn!(attempt = attempt_id, outcome, "outcome not recorded yet: {}", e.message);
+                Recording::Retry
+            }
+            (_, Some(e)) => {
+                tracing::warn!(attempt = attempt_id, outcome, "report refused: {}", e.message);
+                Recording::Refused
+            }
+            _ => Recording::Retry,
+        }
+    }
+
+    /// Queues a local outcome; a releasing one resolves its attempt now (later receipts are
+    /// ignored) and frees the slot once recorded.
+    fn queue_local(&self, token: &str, attempt_id: &str, status: &str, reason: Option<&str>, release: bool) {
+        if release && let Some(e) = self.mux.lock().entries.get_mut(token) {
+            e.resolved = true;
+        }
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).push_back(LocalOutcome {
+            token: token.to_string(),
+            attempt_id: attempt_id.to_string(),
+            status: status.to_string(),
+            reason: reason.map(str::to_string),
+            release,
+        });
+        self.flush_local();
+    }
+
+    /// Records the queued local outcomes in order; stops at the first one storage did not take.
+    fn flush_local(&self) {
+        loop {
+            let Some(next) = self.pending.lock().unwrap_or_else(|p| p.into_inner()).front().cloned() else { return };
+            match self.local_report(&next.attempt_id, &next.status, next.reason.as_deref()) {
+                Recording::Retry => return,
+                Recording::Recorded | Recording::Refused => {
+                    self.pending.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+                    if next.release {
+                        self.mux.release_now(&next.token);
+                    }
+                }
+            }
         }
     }
 
@@ -605,12 +676,9 @@ impl Delivery {
                 let token = self.reserve(origin, &j.attempt_id, AgentRef::Name(j.recipient.clone()), j.binding_version, &j.address);
                 let result = notifier.notify(&j.address, &j.text, &token);
                 let (status, reason) = result.report();
-                self.local_report(&j.attempt_id, status, reason);
                 // A receipt can follow only a Claude acceptance.
                 let awaits_receipt = j.address.kind == Kind::Claude && result == NotifyOutcome::Accepted;
-                if !awaits_receipt {
-                    self.mux.release_now(&token);
-                }
+                self.queue_local(&token, &j.attempt_id, status, reason, !awaits_receipt);
             }
             Job::Board(n) => match self.admit(origin, &n, notifier) {
                 Admission::Settle(status, reason) => {
@@ -658,12 +726,10 @@ impl Delivery {
             let terminal = !matches!(r.status, ReceiptStatus::Held);
             if origin == LOCAL_BOARD {
                 let (status, reason) = r.status.report();
-                self.local_report(&attempt_id, status, reason);
-                if terminal {
-                    self.mux.release_now(&r.attempt_id);
-                } else if let Some(e) = self.mux.lock().entries.get_mut(&r.attempt_id) {
+                if !terminal && let Some(e) = self.mux.lock().entries.get_mut(&r.attempt_id) {
                     e.status = OutcomeStatus::Held;
                 }
+                self.queue_local(&r.attempt_id, &attempt_id, status, reason, terminal);
                 continue;
             }
             let (status, reason) = match &r.status {
@@ -753,9 +819,10 @@ impl Delivery {
                     Some((version, _)) if version == incarnation => {
                         if !notifier.is_live(&address) {
                             if status == OutcomeStatus::Held {
-                                self.local_report(&attempt_id, "abandoned", Some("recipient session gone"));
+                                self.queue_local(&token, &attempt_id, "abandoned", Some("recipient session gone"), true);
+                            } else {
+                                self.mux.release_now(&token);
                             }
-                            self.mux.release_now(&token);
                         }
                     }
                     _ => self.mux.release_now(&token),
@@ -795,6 +862,7 @@ impl Delivery {
             for token in released {
                 notifier.forget(&token);
             }
+            self.flush_local();
             let receipts = self.receipts(&mut notifier);
             if Instant::now() >= next_rescan {
                 self.rescan(&mut notifier);

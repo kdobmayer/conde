@@ -117,6 +117,16 @@ struct St {
     lose_response: HashSet<String>,
     /// Ops committed without an answer.
     silent: HashSet<String>,
+    /// Ops whose answer follows a routes snapshot taken before the op ran.
+    stale_routes_before: HashSet<String>,
+    /// Hosts whose connection closes right after the next notify pushed to them; they are
+    /// then refused new connections until [`FakeBoard::blackout`] lifts it.
+    drop_after_push: HashSet<String>,
+    blackout: HashSet<String>,
+    /// `inbox.list` page size (200 when unset).
+    inbox_page: Option<usize>,
+    /// After the next answer of an op: a DM (from, to owner, to name, text) arrives.
+    dm_after: HashMap<String, (String, String, String, String)>,
     windows: HashMap<String, u32>,
     seq: u64,
     /// No `routes` frame on connect (the daemon then reconciles with `mailbox.mine`).
@@ -362,6 +372,13 @@ impl FakeBoard {
             for n in st.claim(&host, &instance) {
                 st.pushed.push((host.clone(), n.clone()));
                 st.send_to(&host, n.to_string());
+                if st.drop_after_push.remove(&host) {
+                    st.blackout.insert(host.clone());
+                    if let Some((_, tx, _)) = st.conns.remove(&host) {
+                        let _ = tx.send(Cmd::Close);
+                    }
+                    break;
+                }
             }
         }
     }
@@ -465,6 +482,20 @@ impl FakeBoard {
         self.lock().silent.insert(op.into());
     }
 
+    /// The answer to `op` is preceded by a routes snapshot from before it ran.
+    pub fn stale_routes_before(&self, op: &str) {
+        self.lock().stale_routes_before.insert(op.into());
+    }
+
+    pub fn inbox_page(&self, n: usize) {
+        self.lock().inbox_page = Some(n);
+    }
+
+    /// Right after the next answer to `op`, a DM from `from` to `owner/name` arrives.
+    pub fn dm_after(&self, op: &str, from: &str, owner: &str, name: &str, text: &str) {
+        self.lock().dm_after.insert(op.into(), (from.into(), owner.into(), name.into(), text.into()));
+    }
+
     pub fn answer(&self, op: &str) {
         self.lock().silent.remove(op);
     }
@@ -511,6 +542,21 @@ impl FakeBoard {
         if let Some((_, tx, _)) = st.conns.remove(host) {
             let _ = tx.send(Cmd::Frame(frame("error", &json!({"code": "fenced", "message": "a newer bridge took over"}))));
             let _ = tx.send(Cmd::Close);
+        }
+    }
+
+    /// The host's connection closes right after its next notify, and stays refused.
+    pub fn drop_after_next_push(&self, host: &str) {
+        self.lock().drop_after_push.insert(host.into());
+    }
+
+    /// Refuse (or admit again) the host's connections.
+    pub fn blackout(&self, host: &str, on: bool) {
+        let mut st = self.lock();
+        if on {
+            st.blackout.insert(host.into());
+        } else {
+            st.blackout.remove(host);
         }
     }
 
@@ -619,6 +665,9 @@ async fn bridge(State(st): State<Arc<Mutex<St>>>, headers: HeaderMap, ws: WebSoc
         host_of(&s, &headers)
     };
     let Some(host) = host else { return StatusCode::UNAUTHORIZED.into_response() };
+    if st.lock().unwrap().blackout.contains(&host) {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     ws.on_upgrade(move |socket| session(st, host, socket))
 }
 
@@ -792,6 +841,7 @@ fn handle_frame(s: &mut St, host: &str, instance: &str, text: &str) -> Vec<Reply
         }
         "request" => {
             let op = v["op"].as_str().unwrap_or_default().to_string();
+            let stale = s.stale_routes_before.contains(&op).then(|| s.routes_frame(host));
             let resp = dispatch(s, host, &v);
             if s.lose_response.remove(&op) {
                 return vec![Reply::Drop];
@@ -799,7 +849,15 @@ fn handle_frame(s: &mut St, host: &str, instance: &str, text: &str) -> Vec<Reply
             if s.silent.contains(&op) {
                 return Vec::new();
             }
-            vec![Reply::Frame(resp.to_string())]
+            if let Some((from, owner, name, text)) = s.dm_after.remove(&op) {
+                let to = s.mailboxes.iter().find(|m| m.owner == owner && m.name == name).unwrap().id.clone();
+                let id = s.ulid();
+                s.messages.push(Msg { id: id.clone(), from, to: to.clone(), text, reply_to: None, read: false });
+                s.notes.insert(id.clone(), Note { msg: id, mailbox: to, status: "pending".into(), next_at: Instant::now() + Duration::from_secs(3600), current: None, raw: false });
+            }
+            let mut out: Vec<Reply> = stale.into_iter().map(Reply::Frame).collect();
+            out.push(Reply::Frame(resp.to_string()));
+            out
         }
         _ => Vec::new(),
     }
@@ -970,13 +1028,16 @@ fn read_op(s: &mut St, id: &Value, op: &str, body: &Value, me: &str) -> Value {
             ok(id, json!({"messages": out, "more": false}))
         }
         "inbox.list" => {
-            let items: Vec<Value> = s
+            let mut items: Vec<Value> = s
                 .messages
                 .iter()
                 .filter(|m| m.to == me && !m.read)
                 .map(|m| json!({"kind": "dm", "message_id": m.id, "from": s.canonical(&m.from), "date": m.id, "preview": m.text}))
                 .collect();
-            ok(id, json!({"items": items, "next_cursor": null}))
+            let page = s.inbox_page.unwrap_or(200);
+            let next = (items.len() > page).then_some(page);
+            items.truncate(page);
+            ok(id, json!({"items": items, "next_cursor": next}))
         }
         "receipt.list" => {
             let rows: Vec<Value> = s

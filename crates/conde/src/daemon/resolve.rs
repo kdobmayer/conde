@@ -131,10 +131,21 @@ pub fn resolve(req: &Request, default_board: &str, enrolled: &[String]) -> Resul
         ));
     }
     let board = explicit.unwrap_or(default_board);
-    Ok((
-        if board == LOCAL_BOARD || !known(board) { Target::Local } else { Target::Board(board.to_string()) },
-        out,
-    ))
+    if board == LOCAL_BOARD {
+        return Ok((Target::Local, out));
+    }
+    if !known(board) {
+        // Never another destination than the one configured.
+        return Err((
+            ErrorCode::NotFound,
+            format!(
+                "the default board '{board}' is not enrolled on this host; name the board with --board, \
+                 or set the default with conde setup ({})",
+                crate::surface::unknown_board(board, enrolled)
+            ),
+        ));
+    }
+    Ok((Target::Board(board.to_string()), out))
 }
 
 /// Keys whose string values are board-local ids, printed qualified for a shared board.
@@ -189,6 +200,10 @@ mod tests {
         assert_eq!(target("message.send", send.clone(), Some("local"), "dakai"), Ok(Target::Local));
         assert_eq!(target("channel.join", json!({"channel": "#dev"}), None, "local"), Ok(Target::Local));
         assert_eq!(target("message.send", send, Some("nope"), "local").unwrap_err().0, ErrorCode::NotFound);
+        // a default board this host does not have is refused, never replaced by local
+        let e = target("message.send", json!({"to": {"agent": "x"}, "text": "t"}), None, "gone").unwrap_err();
+        assert_eq!(e.0, ErrorCode::NotFound);
+        assert!(e.1.starts_with("the default board 'gone' is not enrolled on this host"), "{}", e.1);
     }
 
     #[test]

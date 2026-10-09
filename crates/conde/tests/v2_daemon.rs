@@ -281,6 +281,27 @@ impl Host {
         wait_for("mailbox.mine", || board.capture(&self.host).iter().any(|f| f.contains("mailbox.mine")).then_some(()));
     }
 
+    /// Enrolls with `board` under `alias` (before the daemon starts).
+    fn enroll_as(&self, board: &FakeBoard, alias: &str) {
+        let key = board.enroll(&self.user, &self.host);
+        boards::store(
+            &boards::path_in(&self.config(), alias),
+            alias,
+            &BoardConfig { server: board.url(), host_id: self.host.clone(), owner: self.user.clone(), key },
+        )
+        .unwrap();
+    }
+
+    /// Migrates the board under `alias` and waits for its connection.
+    fn migrate_as(&self, alias: &str) {
+        self.ok(&self.human(), op::HOST_MIGRATE_V2, json!({"publish": []}), Some(alias));
+        wait_for("the board connected", || (self.core().board_status(alias).as_deref() == Some("connected")).then_some(()));
+    }
+
+    fn publish_on(&self, name: &str, alias: &str) -> Value {
+        self.ok(&self.human(), op::MAILBOX_PUBLISH, json!({"agent": name, "name": name}), Some(alias))
+    }
+
     fn status(&self) -> String {
         self.core().board_status("dakai").unwrap_or_default()
     }
@@ -700,14 +721,17 @@ fn g6_interruptions_keep_the_delivery_contract() {
     assert_eq!(board.attempts(&m)[0].history, ["accepted"], "settled once");
     assert_eq!(a.harness.pushes_of(&m).len(), 1, "no repeated push");
 
-    // 2. killed after the report was taken into the client's memory, before it was sent
-    board.set_acks("homepc", Acks::Stall);
+    // 2. killed after the report was taken into the client's memory, before it was sent: the
+    // connection closes right after the notify and stays refused, so the report the daemon
+    // makes can only sit in the client's book
+    board.drop_after_next_push("homepc");
     let m = board.dm(&relay_mb, "kdobmayer", "worker", "case 2");
     a.harness.wait_pushes(&m, 1);
     let first = wait_for("the first attempt", || board.attempts(&m).first().cloned());
-    wait_outcome(&board, "homepc", &first.id, "accepted");
+    wait_for("the report in the client's book", || a.doctor().contains("book 1").then_some(()));
+    assert!(board.outcomes_of("homepc", &first.id).is_empty(), "the report never reached the board");
     a.kill();
-    board.set_acks("homepc", Acks::Normal);
+    board.blackout("homepc", false);
     a.start();
     let again = a.harness.wait_pushes(&m, 2);
     assert_eq!(board.attempts(&m)[0].history, ["abandoned"], "the old instance's attempt is abandoned");
@@ -816,37 +840,54 @@ fn g11_a_stalled_board_only_keeps_its_window_full() {
     let _ = worker;
 }
 
-/// G11b retention under healthy acks (R = 2): a held attempt keeps its mapping; first-outcome
-/// traffic continues beyond R; the origin pauses at R while local delivery continues; the late
-/// terminal receipt is settled and the origin resumes, without a restart.
+/// G11b retention under healthy acks (R = 2), across two shared boards and the local one: a
+/// held attempt keeps its mapping and the first board pauses at R; the second board takes
+/// traffic beyond R while the first stays paused, and local delivery continues; the late
+/// terminal receipt is settled and the first board resumes, without a restart.
 #[test]
 fn g11b_a_held_attempt_pauses_only_its_origin() {
     let tuning = Tuning { receipt_budget: 2, window: 8, ..fast() };
-    let board = FakeBoard::start();
-    let (a, worker) = published_host(&board, "kdobmayer", "homepc", "worker", "s-worker", tuning);
+    let (one, two) = (FakeBoard::start(), FakeBoard::start());
+    let mut a = Host::tuned("kdobmayer", "homepc", tuning);
+    a.enroll(&one);
+    a.enroll_as(&two, "other");
+    a.start();
+    a.migrate(&one);
+    a.migrate_as("other");
+    let worker = a.claude("worker", "s-worker");
+    a.publish("worker");
     a.codex("coder", "t-coder");
     a.publish("coder");
+    a.publish_on("worker", "other");
+    a.publish_on("coder", "other");
     a.claude("reviewer", "s-reviewer");
-    let relay = board.mailbox("balazs", "relay", "box-b");
+    let (relay1, relay2) = (one.mailbox("balazs", "relay", "box-b"), two.mailbox("balazs", "relay", "box-b"));
 
-    let held = board.dm(&relay, "kdobmayer", "worker", "held");
+    // the first board: a held attempt and an open one fill its R
+    let held = one.dm(&relay1, "kdobmayer", "worker", "held");
     let p_held = a.harness.wait_pushes(&held, 1).remove(0);
-    wait_history(&board, &held, 0, &["accepted"]);
+    wait_history(&one, &held, 0, &["accepted"]);
     a.harness.receipt(&p_held.token, ReceiptStatus::Held);
-    wait_history(&board, &held, 0, &["accepted", "held"]);
-
-    for i in 0..5 {
-        let m = board.dm(&relay, "kdobmayer", "coder", &format!("codex {i}"));
-        wait_for("codex reach", || board.reached(&m).then_some(()));
-    }
-    let open = board.dm(&relay, "kdobmayer", "worker", "open");
+    wait_history(&one, &held, 0, &["accepted", "held"]);
+    let open = one.dm(&relay1, "kdobmayer", "worker", "open");
     let p_open = a.harness.wait_pushes(&open, 1).remove(0);
-    wait_for("both slots used", || (slots(&a, "dakai").used == 2).then_some(()));
-
-    let waiting = board.dm(&relay, "kdobmayer", "coder", "waits");
+    wait_for("the first board's slots used", || (slots(&a, "dakai").used == 2).then_some(()));
+    let waiting = one.dm(&relay1, "kdobmayer", "coder", "waits");
     wait_for("the job queued", || (slots(&a, "dakai").queued == 1).then_some(()));
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(a.harness.pushes_of(&waiting).is_empty(), "the origin pauses at R");
+
+    // the second board takes traffic beyond R while the first stays paused
+    let mut second = Vec::new();
+    for i in 0..5 {
+        let m = two.dm(&relay2, "kdobmayer", "coder", &format!("other board {i}"));
+        wait_for("reached on the second board", || two.reached(&m).then_some(()));
+        second.push(m);
+    }
+    let claude_two = two.dm(&relay2, "kdobmayer", "worker", "claude on the second board");
+    let p_two = a.harness.wait_pushes(&claude_two, 1).remove(0);
+    a.harness.receipt(&p_two.token, ReceiptStatus::Delivered);
+    wait_for("delivered on the second board", || (two.note(&claude_two).status == "delivered").then_some(()));
+    assert!(a.harness.pushes_of(&waiting).is_empty(), "the first board stays paused at R");
+    assert_eq!(slots(&a, "dakai").used, 2);
     assert!(a.doctor().contains("slots: dakai 2/2 used"), "{}", a.doctor());
 
     let local = id_of(&a.send(&worker, "reviewer", "local continues", None).unwrap());
@@ -854,8 +895,8 @@ fn g11b_a_held_attempt_pauses_only_its_origin() {
     assert!(a.harness.mapped(&p_held.token) && a.harness.mapped(&p_open.token), "no unresolved mapping is evicted");
 
     a.harness.receipt(&p_held.token, ReceiptStatus::Delivered);
-    wait_for("the late receipt settled", || (board.note(&held).status == "delivered").then_some(()));
-    wait_for("the origin resumes", || board.reached(&waiting).then_some(()));
+    wait_for("the late receipt settled", || (one.note(&held).status == "delivered").then_some(()));
+    wait_for("the first board resumes", || one.reached(&waiting).then_some(()));
     wait_for("the held mapping released", || (!a.harness.mapped(&p_held.token)).then_some(()));
     assert!(a.harness.mapped(&p_open.token));
 }
@@ -1109,6 +1150,85 @@ fn g17_claude_and_codex_outcomes_are_normalized() {
     }
 }
 
+/// A routes snapshot received before a publish's answer but handled after it (its callback is
+/// slow) is older than the publication and does not delete it.
+#[test]
+fn a_routes_snapshot_older_than_a_publish_never_deletes_it() {
+    let tuning = Tuning { routes_delay: Some(Duration::from_millis(400)), ..fast() };
+    let board = FakeBoard::start();
+    let mut a = Host::tuned("kdobmayer", "homepc", tuning);
+    a.enroll(&board);
+    a.start();
+    a.migrate(&board);
+    a.claude("worker", "s-worker");
+    board.stale_routes_before("mailbox.publish");
+    assert_eq!(a.publish("worker")["state"], "published");
+    std::thread::sleep(Duration::from_millis(1200));
+    let state: Option<String> =
+        sql(&a).query_row("SELECT state FROM publications WHERE shared_name = 'worker'", [], |r| r.get(0)).ok();
+    assert_eq!(state.as_deref(), Some("published"), "{}", a.doctor());
+    let relay = board.mailbox("balazs", "relay", "box-b");
+    let m = board.dm(&relay, "kdobmayer", "worker", "after the publish");
+    let p = a.harness.wait_pushes(&m, 1).remove(0);
+    a.harness.receipt(&p.token, ReceiptStatus::Delivered);
+    wait_for("delivered", || (board.note(&m).status == "delivered").then_some(()));
+}
+
+/// A local terminal receipt the local board cannot record yet (storage refuses the write) is
+/// kept, with its slot and its mapping, and recorded once storage takes it again.
+#[test]
+fn a_local_receipt_survives_a_failed_record() {
+    let mut a = Host::new("kdobmayer", "homepc");
+    a.start();
+    let worker = a.claude("worker", "s-worker");
+    let reviewer = a.claude("reviewer", "s-reviewer");
+    let c = sql(&a);
+    c.execute_batch(
+        "CREATE TRIGGER probe_refuse_delivered BEFORE UPDATE ON attempts WHEN NEW.status = 'delivered'
+         BEGIN SELECT RAISE(ABORT, 'probe: storage unavailable'); END;",
+    )
+    .unwrap();
+    let id = id_of(&a.send(&reviewer, "worker", "keep my receipt", None).unwrap());
+    let p = a.harness.wait_pushes(&id, 1).remove(0);
+    a.harness.receipt(&p.token, ReceiptStatus::Delivered);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(slots(&a, "local").used, 1, "the reservation stays until the outcome is recorded");
+    assert!(a.harness.mapped(&p.token), "the mapping stays too");
+    c.execute_batch("DROP TRIGGER probe_refuse_delivered;").unwrap();
+    wait_for("the receipt recorded", || {
+        let r = a.ok(&reviewer, "receipt.list", json!({}), Some("local"));
+        let row = r["receipts"].as_array().unwrap().iter().find(|x| x["message_id"] == json!(id)).cloned();
+        row.and_then(|x| x["delivery"].as_str().filter(|d| d.contains("delivered")).map(str::to_string))
+    });
+    wait_for("released", || (slots(&a, "local").used == 0 && !a.harness.mapped(&p.token)).then_some(()));
+    let _ = worker;
+}
+
+/// Forgetting the default board resets the default to local and says so; a default naming a
+/// board the host does not have is refused, never replaced by another destination.
+#[test]
+fn forgetting_the_default_board_resets_it_and_says_so() {
+    let board = FakeBoard::start();
+    let (a, worker) = published_host(&board, "kdobmayer", "homepc", "worker", "s-worker", fast());
+    let reviewer = a.claude("reviewer", "s-reviewer");
+    std::fs::write(a.config().join("default-board"), "dakai\n").unwrap();
+    board.mailbox("kdobmayer", "reviewer", "laptop");
+    let shared = id_of(&a.send(&worker, "reviewer", "to the default board", None).unwrap());
+    assert!(shared.starts_with("dakai:"), "{shared}");
+
+    let forgot = a.ok(&a.human(), conde::surface::BOARD_FORGET, json!({}), Some("dakai"));
+    assert_eq!((forgot["default_reset"].clone(), forgot["default"].clone()), (json!(true), json!("local")), "{forgot}");
+    assert_eq!(std::fs::read_to_string(a.config().join("default-board")).unwrap().trim(), "local");
+
+    // a default that names a board this host does not have
+    std::fs::write(a.config().join("default-board"), "elsewhere\n").unwrap();
+    let e = a.send(&worker, "reviewer", "where to?", None).unwrap_err();
+    assert_eq!(e.0, ErrorCode::NotFound);
+    assert!(e.1.contains("the default board 'elsewhere' is not enrolled"), "{e:?}");
+    let inbox = a.ok(&reviewer, "inbox.list", json!({}), Some("local"));
+    assert!(inbox["items"].as_array().unwrap().is_empty(), "nothing went to the local board: {inbox}");
+}
+
 // --- publication rules, the v1 credential, reconciliation on connect ------------------
 
 /// Publishing again under the same name is a no-op; a different `--as` while published is
@@ -1201,6 +1321,13 @@ fn aggregate_views_merge_and_narrow() {
     assert_eq!(only(Some("local")), [(String::new(), local.clone())]);
     let both = only(None);
     assert!(both.contains(&("dakai".to_string(), format!("dakai:{shared}"))) && both.contains(&("local".to_string(), local.clone())), "{both:?}");
+    // each board's part carries its continuation, for the per-board paging hint
+    board.inbox_page(1);
+    board.dm(&relay, "kdobmayer", "worker", "second page");
+    let paged = a.ok(&worker, "inbox.list", json!({}), None);
+    let part = paged["boards"].as_array().unwrap().iter().find(|p| p["board"] == "dakai").cloned().unwrap();
+    assert_eq!(part["next_cursor"], json!(1), "{paged}");
+    board.inbox_page(200);
     let read = a.ok(&worker, "message.read", json!({}), None);
     let ids: Vec<&str> = read["messages"].as_array().unwrap().iter().map(|m| m["message_id"].as_str().unwrap()).collect();
     assert!(ids.contains(&local.as_str()) && ids.contains(&format!("dakai:{shared}").as_str()), "{read}");
@@ -1217,6 +1344,21 @@ fn aggregate_views_merge_and_narrow() {
     let row = read["messages"].as_array().unwrap().iter().find(|m| m["message_id"] == json!(format!("dakai:{late}"))).cloned();
     assert_eq!(row.map(|r| (r["unconfirmed"].clone(), r["text"].clone())), Some((json!(true), json!("late read"))), "{read}");
     assert!(read["boards"].as_array().unwrap().iter().any(|b| b["board"] == "dakai" && b["unconfirmed"] == true), "{read}");
+    let row = read["messages"].as_array().unwrap().iter().find(|m| m["message_id"] == json!(format!("dakai:{late}"))).unwrap();
+    assert_eq!(row["recover"], json!(format!("conde read dakai:{late}")));
+    board.answer("message.read");
+
+    // a message that arrives between the listing and the read is not consumed by the read
+    let listed = board.dm(&relay, "kdobmayer", "worker", "listed");
+    board.dm_after("inbox.list", &relay, "kdobmayer", "worker", "arrived meanwhile");
+    let read = a.ok(&worker, "message.read", json!({}), None);
+    let texts: Vec<&str> = read["messages"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, ["listed"], "{read}");
+    let meanwhile = board.messages().into_iter().find(|m| m.text == "arrived meanwhile").unwrap();
+    assert!(!meanwhile.read, "the read is bound to what was listed");
+    assert!(board.messages().iter().find(|m| m.id == listed).unwrap().read);
+    let next = a.ok(&worker, "inbox.list", json!({}), Some("dakai"));
+    assert_eq!(next["items"][0]["message_id"], json!(format!("dakai:{}", meanwhile.id)));
 }
 
 // --- against the real shared board (the V1 server, SQLite or CONDE_TEST_PG) ------------
@@ -1355,9 +1497,24 @@ impl Host {
         wait_for("the real board connection", || (self.status() == "connected").then_some(()));
     }
 
+    /// Enrolled with the real board under `alias` (before the daemon starts).
+    fn enroll_real(&self, board: &RealBoard, alias: &str) {
+        let key = board.key(&self.user, &self.host);
+        boards::store(
+            &boards::path_in(&self.config(), alias),
+            alias,
+            &BoardConfig { server: board.url(), host_id: self.host.clone(), owner: self.user.clone(), key },
+        )
+        .unwrap();
+    }
+
     /// The board's delivery state of a message this host sent there.
     fn delivery(&self, actor: &str, id: &str) -> Option<String> {
-        let r = self.ok(actor, "receipt.list", json!({}), Some("dakai"));
+        self.delivery_on(actor, id, "dakai")
+    }
+
+    fn delivery_on(&self, actor: &str, id: &str, alias: &str) -> Option<String> {
+        let r = self.ok(actor, "receipt.list", json!({}), Some(alias));
         r["receipts"].as_array()?.iter().find(|x| x["message_id"] == json!(id)).and_then(|x| x["delivery"].as_str().map(str::to_string))
     }
 }
@@ -1455,36 +1612,55 @@ fn integrated_g11_a_stalled_board_only_keeps_its_window_full() {
     let _ = worker;
 }
 
-/// G11b on the real board (R = 2): a held attempt keeps its slot and mapping, Codex traffic
-/// continues beyond R, the origin pauses at R while local delivery continues, and the late
-/// terminal receipt resumes it without a restart.
+/// G11b on two real boards and the local one (R = 2): a held attempt keeps its slot and
+/// mapping and pauses the first board; the second board takes traffic beyond R while the first
+/// stays paused; local delivery continues; the late terminal receipt resumes the first board,
+/// without a restart.
 #[test]
 fn integrated_g11b_a_held_attempt_pauses_only_its_origin() {
     let tuning = Tuning { receipt_budget: 2, window: 8, ..fast() };
-    let board = RealBoard::start();
-    let (a, worker) = real_host(&board, "kdobmayer", "homepc", "worker", "s-worker", tuning);
+    let (one, two) = (RealBoard::start(), RealBoard::start());
+    let mut a = Host::tuned("kdobmayer", "homepc", tuning);
+    a.enroll_real(&one, "dakai");
+    a.enroll_real(&two, "other");
+    a.start();
+    let mut b = Host::tuned("balazs", "box-b", fast());
+    b.enroll_real(&one, "dakai");
+    b.enroll_real(&two, "other");
+    b.start();
+    for h in [&a, &b] {
+        for alias in ["dakai", "other"] {
+            h.migrate_as(alias);
+        }
+    }
+    let worker = a.claude("worker", "s-worker");
     a.codex("coder", "t-coder");
-    a.publish("coder");
     a.claude("reviewer", "s-reviewer");
-    let (b, relay) = real_host(&board, "balazs", "box-b", "relay", "s-relay", fast());
+    for alias in ["dakai", "other"] {
+        a.publish_on("worker", alias);
+        a.publish_on("coder", alias);
+    }
+    let relay = b.claude("relay", "s-relay");
+    b.publish_on("relay", "dakai");
+    b.publish_on("relay", "other");
+    let send = |to: &str, text: &str, alias: &str| id_of(&b.send(&relay, to, text, Some(alias)).unwrap());
 
-    let held = id_of(&b.send(&relay, "kdobmayer/worker", "held", Some("dakai")).unwrap());
+    let held = send("kdobmayer/worker", "held", "dakai");
     let p_held = a.harness.wait_pushes(bare(&held), 1).remove(0);
     wait_for("accepted", || b.delivery(&relay, &held).filter(|d| !d.contains("pending") && !d.contains("dispatching")));
     a.harness.receipt(&p_held.token, ReceiptStatus::Held);
     wait_for("held", || b.delivery(&relay, &held).filter(|d| d.contains("held")));
+    let open = send("kdobmayer/worker", "open", "dakai");
+    let p_open = a.harness.wait_pushes(bare(&open), 1).remove(0);
+    wait_for("the first board's slots used", || (slots(&a, "dakai").used == 2).then_some(()));
+    let waiting = send("kdobmayer/coder", "waits", "dakai");
+    wait_for("the job queued", || (slots(&a, "dakai").queued == 1).then_some(()));
 
     for i in 0..5 {
-        let m = id_of(&b.send(&relay, "kdobmayer/coder", &format!("codex {i}"), Some("dakai")).unwrap());
-        wait_for("codex reach", || b.delivery(&relay, &m).filter(|d| d.contains("delivered")));
+        let m = send("kdobmayer/coder", &format!("other board {i}"), "other");
+        wait_for("reached on the second board", || b.delivery_on(&relay, &m, "other").filter(|d| d.contains("delivered")));
     }
-    let open = id_of(&b.send(&relay, "kdobmayer/worker", "open", Some("dakai")).unwrap());
-    let p_open = a.harness.wait_pushes(bare(&open), 1).remove(0);
-    wait_for("both slots used", || (slots(&a, "dakai").used == 2).then_some(()));
-    let waiting = id_of(&b.send(&relay, "kdobmayer/coder", "waits", Some("dakai")).unwrap());
-    wait_for("the job queued", || (slots(&a, "dakai").queued == 1).then_some(()));
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(a.harness.pushes_of(bare(&waiting)).is_empty(), "the origin pauses at R");
+    assert!(a.harness.pushes_of(bare(&waiting)).is_empty(), "the first board stays paused at R");
 
     let local = id_of(&a.send(&worker, "reviewer", "local continues", None).unwrap());
     a.harness.wait_pushes(&local, 1);
@@ -1492,7 +1668,7 @@ fn integrated_g11b_a_held_attempt_pauses_only_its_origin() {
 
     a.harness.receipt(&p_held.token, ReceiptStatus::Delivered);
     wait_for("the late receipt settled", || b.delivery(&relay, &held).filter(|d| d.contains("delivered")));
-    wait_for("the origin resumes", || b.delivery(&relay, &waiting).filter(|d| d.contains("delivered")));
+    wait_for("the first board resumes", || b.delivery(&relay, &waiting).filter(|d| d.contains("delivered")));
 }
 
 impl RealBoard {

@@ -235,12 +235,20 @@ pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     require_human(core, req, "a board's configuration")?;
     let conn = board_of(core, req)?;
     let alias = conn.alias.clone();
+    // A default that names this board would point bare names nowhere: it goes back to the
+    // local board first, and the answer says so.
+    let default_reset = core.default_board() == alias;
+    if default_reset {
+        let config = &core.config_dir;
+        boards::write_default(&config.join("default-board"), &config.join("boards"), LOCAL_BOARD).map_err(internal)?;
+    }
     conn.shutdown();
     core.mux.stop_board(&alias, "forgotten");
     core.remove_board(&alias);
     let (publications, ops) = core.local_tx(|tx| Ok(tx.forget_board(&alias)?)).map_err(internal)?;
     let file = boards::forget_in(&core.config_dir, &alias).map_err(internal)?;
-    Ok(json!({"board": alias, "file_removed": file, "publications_removed": publications, "ops_removed": ops}))
+    Ok(json!({"board": alias, "file_removed": file, "publications_removed": publications, "ops_removed": ops,
+              "default_reset": default_reset, "default": core.default_board()}))
 }
 
 /// `host.migrate_preview` (alias in the envelope): the board's read-only preview, over HTTPS.

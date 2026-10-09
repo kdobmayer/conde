@@ -248,6 +248,9 @@ pub struct NotifyFields {
     pub place: String,
     /// The recipient's other unread channels.
     pub badges: Vec<Badge>,
+    /// The recipient is a member of `place` (always true for a DM); when false the text adds
+    /// the join hint, as v1 does.
+    pub member: bool,
 }
 
 /// Why the recipient is notified: a direct message, an @mention, or a channel post.

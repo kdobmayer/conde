@@ -174,9 +174,9 @@ has none. v1 idempotency rows are never purged, which the `migrate` replay relie
 - `conde_remote::Endpoint::Mailbox { mailbox_id }`.
 - `hello` gains `"proto": 2` and `"window": W`, the admission window (section 5); a v2 hello lists
   only `Mailbox` endpoints.
-- `Notify` gains `kind` (dm | mention | post), `sender`, `place`, `badges`, so the daemon renders the
-  notification text with the board alias. They are required on a v2 connection; `text` stays for v1
-  bridges only, and a v2 daemon never injects it.
+- `Notify` gains `kind` (dm | mention | post), `sender`, `place`, `badges`, `member`, so the daemon
+  renders the notification text with the board alias. They are required on a v2 connection; `text`
+  stays for v1 bridges only, and a v2 daemon never injects it.
 - New server-to-daemon frame `routes {mailboxes: [{mailbox_id, route_generation}]}`: this host's
   current routes, sent on connect and after any change to them (takeover by another host, unpublish,
   admin unbind).
@@ -194,8 +194,10 @@ only. Types: `conde_remote` (`Hello`, `Endpoint`, `Notify`, `Routes`, `OutcomeSt
   mailbox endpoint is `{"kind":"mailbox","mailbox_id":"<agent_id>"}`.
 - `notify` (v2): the structured fields sit at the top level of the frame beside the v1 ones:
   `"kind":"dm"|"mention"|"post"`, `"sender":"<owner/name>"`, `"place":"dm"|"#<channel>"`,
-  `"badges":[{"place":"#<channel>","unread":N}]`. A notify missing any of the four, or with
-  another `kind`, counts as a notify without the structured fields. `text` stays in the frame (a
+  `"badges":[{"place":"#<channel>","unread":N}]`, `"member":true|false` (whether the recipient is
+  a member of the place, always true for a DM; when false the daemon adds the v1 hint "after
+  joining: conde join '<place>'"). A notify missing any of the five, or with another `kind`,
+  counts as a notify without the structured fields. `text` stays in the frame (a
   v1 client requires the key) and is `""` on v2; the daemon never reads it. `binding_version`
   carries the route generation.
 - `routes`: `{"mailboxes":[{"mailbox_id","route_generation"}]}`, always the full set for the host.

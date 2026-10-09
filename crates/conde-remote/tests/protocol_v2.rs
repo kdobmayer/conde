@@ -147,6 +147,7 @@ fn fields() -> NotifyFields {
             place: "#ops".into(),
             unread: 3,
         }],
+        member: false,
     }
 }
 
@@ -183,12 +184,23 @@ fn v2_notify_round_trip() {
         json!({"notification_id": "n1", "attempt_id": "a1", "recipient": "u/r", "binding_version": 7,
                "endpoint": {"kind": "mailbox", "mailbox_id": "01MBX"}, "message_id": "m1", "text": "",
                "kind": "mention", "sender": "balazs/relay", "place": "#dev",
-               "badges": [{"place": "#ops", "unread": 3}]}),
+               "badges": [{"place": "#ops", "unread": 3}], "member": false}),
     );
     let mut without_text = serde_json::to_value(&n).unwrap();
     without_text.as_object_mut().unwrap().remove("text");
     assert_eq!(serde_json::from_value::<Notify>(without_text).unwrap(), n);
     assert_eq!(n.structured(), Some(&fields()));
+    let dm = NotifyFields {
+        kind: NotifyKind::Dm,
+        place: "dm".into(),
+        badges: vec![],
+        member: true,
+        ..fields()
+    };
+    round_trip(
+        &dm,
+        json!({"kind": "dm", "sender": "balazs/relay", "place": "dm", "badges": [], "member": true}),
+    );
     for kind in [NotifyKind::Dm, NotifyKind::Mention, NotifyKind::Post] {
         let s = serde_json::to_value(kind).unwrap();
         assert_eq!(serde_json::from_value::<NotifyKind>(s).unwrap(), kind);
@@ -200,19 +212,27 @@ fn v2_notify_round_trip() {
 fn a_notify_missing_any_structured_field_has_none() {
     let full = json!({"notification_id": "n1", "attempt_id": "a1", "recipient": "u/r", "binding_version": 7,
                       "endpoint": {"kind": "mailbox", "mailbox_id": "01MBX"}, "message_id": "m1",
-                      "kind": "dm", "sender": "u/x", "place": "dm", "badges": []});
+                      "kind": "dm", "sender": "u/x", "place": "dm", "badges": [], "member": true});
     assert!(
         serde_json::from_value::<Notify>(full.clone())
             .unwrap()
             .structured()
             .is_some()
     );
-    for missing in ["kind", "sender", "place", "badges"] {
+    for missing in ["kind", "sender", "place", "badges", "member"] {
         let mut partial = full.clone();
         partial.as_object_mut().unwrap().remove(missing);
         let n: Notify = serde_json::from_value(partial).unwrap();
         assert_eq!(n.structured(), None, "without {missing}");
     }
+    let mut not_bool = full.clone();
+    not_bool["member"] = json!("yes");
+    assert_eq!(
+        serde_json::from_value::<Notify>(not_bool)
+            .unwrap()
+            .structured(),
+        None
+    );
     let mut unknown_kind = full.clone();
     unknown_kind["kind"] = json!("reaction");
     assert_eq!(

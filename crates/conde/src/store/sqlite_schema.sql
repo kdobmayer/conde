@@ -144,3 +144,33 @@ CREATE TABLE IF NOT EXISTS web_tokens(
     created_at INTEGER NOT NULL,
     PRIMARY KEY (kind, digest)
 );
+-- Local board only (DESIGN-v2.md §4): publications of local agents on shared boards, and
+-- one operation record per remote mutation, written before the first remote call.
+CREATE TABLE IF NOT EXISTS publications(
+    board TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    shared_name TEXT NOT NULL,
+    mailbox_id TEXT,
+    route_generation INTEGER,
+    state TEXT NOT NULL CHECK (state IN ('publishing', 'published', 'unpublishing')),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (board, agent_id),
+    UNIQUE (board, mailbox_id),
+    UNIQUE (board, shared_name),
+    CHECK ((mailbox_id IS NULL) = (state = 'publishing')),
+    CHECK ((route_generation IS NULL) = (mailbox_id IS NULL))
+);
+CREATE TABLE IF NOT EXISTS board_ops(
+    op_id TEXT PRIMARY KEY,
+    board TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('publish', 'unpublish', 'migrate')),
+    agent_id TEXT,
+    request_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'done', 'failed')),
+    result_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((agent_id IS NULL) = (kind = 'migrate'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS board_ops_one_pending ON board_ops(board, agent_id) WHERE state = 'pending' AND agent_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS board_ops_one_migrate ON board_ops(board) WHERE kind = 'migrate' AND state <> 'failed';

@@ -93,7 +93,7 @@ impl Ctx<'_> {
         let raw = self
             .actor
             .ok_or_else(|| unauthenticated("this request needs the caller's identity (actor)"))?;
-        let address = Address::parse(raw, &self.p.host).map_err(|e| bad_request(e.to_string()))?;
+        let address = Address::parse_v1(raw, &self.p.host).map_err(|e| bad_request(e.to_string()))?;
         if address.host != self.p.host {
             return Err(forbidden(format!(
                 "actor host '{}' is not this connection's host '{}'",

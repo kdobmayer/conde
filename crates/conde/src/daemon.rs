@@ -13,7 +13,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use conde_remote::{BridgeClient, BridgeConfig, BridgeState, Endpoint, Notify};
+use conde_remote::{BridgeClient, BridgeConfig, BridgeState, Endpoint, Notify, OutcomeReason};
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -433,12 +433,19 @@ fn deliver<N: Notifier>(
             }
             Ok(n) => {
                 let address = match &n.endpoint {
-                    Endpoint::Claude { session_id } => Address::new(Kind::Claude, session_id, &host),
-                    Endpoint::Codex { thread_id } => Address::new(Kind::Codex, thread_id, &host),
+                    Endpoint::Claude { session_id } => Some(Address::new(Kind::Claude, session_id, &host)),
+                    Endpoint::Codex { thread_id } => Some(Address::new(Kind::Codex, thread_id, &host)),
+                    // A v1 daemon publishes nothing, so no mailbox is routed here.
+                    Endpoint::Mailbox { .. } => None,
                 };
-                let result = notifier.notify(&address, &n.text, &n.attempt_id);
-                let (status, reason) = result.report();
-                report(&n.attempt_id, status, reason);
+                match address {
+                    Some(address) => {
+                        let result = notifier.notify(&address, &n.text, &n.attempt_id);
+                        let (status, reason) = result.report();
+                        report(&n.attempt_id, status, reason);
+                    }
+                    None => report(&n.attempt_id, "refused", Some(OutcomeReason::RecipientUnavailable.as_str())),
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -526,6 +533,7 @@ mod tests {
             endpoint: Endpoint::Claude { session_id: "s".into() },
             message_id: format!("m-{attempt}"),
             text: "t".into(),
+            fields: None,
         }
     }
 

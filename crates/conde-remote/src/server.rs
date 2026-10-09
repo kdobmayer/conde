@@ -27,7 +27,7 @@ use tokio::time::{MissedTickBehavior, interval_at, timeout};
 
 use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HOST_MISMATCH};
 use crate::{
-    Authentication, Authenticator, Dispatcher, Endpoint, FenceResult, NotificationSource, Outcome, Polled, Principal,
+    Authentication, Authenticator, Dispatcher, Endpoint, FenceResult, Hello, NotificationSource, Outcome, Polled, Principal,
     Recorded, SourceEvent,
 };
 
@@ -586,14 +586,6 @@ struct EndpointsDiff {
     removed: Vec<Endpoint>,
 }
 
-#[derive(Deserialize)]
-struct Hello {
-    host_id: String,
-    bridge_instance: String,
-    #[serde(default)]
-    endpoints: Vec<Endpoint>,
-}
-
 type Sink = SplitSink<WebSocket, Message>;
 
 async fn close_with_error(tx: &mut Sink, code: &str, message: &str) {
@@ -618,9 +610,9 @@ async fn run_bridge(
 
     let hello = match timeout(shared.config.hello_timeout, rx.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => match protocol::parse(&text) {
-            Ok((kind, value)) if kind == "hello" => {
-                serde_json::from_value::<Hello>(value).map_err(|e| e.to_string())
-            }
+            Ok((kind, value)) if kind == "hello" => serde_json::from_value::<Hello>(value)
+                .map_err(|e| e.to_string())
+                .and_then(|h| h.check().map(|()| h)),
             Ok((kind, _)) => Err(format!("expected hello, got {kind}")),
             Err(e) => Err(e),
         },

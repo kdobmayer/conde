@@ -1,5 +1,7 @@
 //! Wire frames: one JSON object per frame (NDJSON on the unix socket).
 
+pub mod v2;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

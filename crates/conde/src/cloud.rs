@@ -208,6 +208,7 @@ fn endpoint_of(address: &str) -> Option<Endpoint> {
     match a.kind {
         Kind::Claude => Some(Endpoint::Claude { session_id: a.target }),
         Kind::Codex => Some(Endpoint::Codex { thread_id: a.target }),
+        Kind::Mailbox => Some(Endpoint::Mailbox { mailbox_id: a.target }),
         Kind::Human => None,
     }
 }
@@ -250,6 +251,7 @@ impl NotificationSource for Board {
                     endpoint: endpoint_of(j["address"].as_str()?)?,
                     message_id: s(j, "message_id"),
                     text: s(j, "text"),
+                    fields: None,
                 })
             })
             .collect())
@@ -319,9 +321,11 @@ impl NotificationSource for Board {
     fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) {
         let list: Vec<Value> = endpoints
             .iter()
-            .map(|e| match e {
-                Endpoint::Claude { session_id } => json!({"kind": "claude", "target": session_id}),
-                Endpoint::Codex { thread_id } => json!({"kind": "codex", "target": thread_id}),
+            .filter_map(|e| match e {
+                Endpoint::Claude { session_id } => Some(json!({"kind": "claude", "target": session_id})),
+                Endpoint::Codex { thread_id } => Some(json!({"kind": "codex", "target": thread_id})),
+                // A v1 board keeps harness endpoints only.
+                Endpoint::Mailbox { .. } => None,
             })
             .collect();
         match self.bridge_op(host_id, bridge_instance, "bridge.endpoints", json!({"endpoints": list})) {

@@ -174,7 +174,7 @@ pub fn endpoints(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let mut live: Vec<(&str, &str)> = Vec::with_capacity(list.len());
     for e in list {
         let (kind, target) = (str_param(e, "kind")?, str_param(e, "target")?);
-        if Kind::parse(kind).is_none() {
+        if Kind::parse(kind).is_none_or(|k| k == Kind::Mailbox) {
             return Err(bad_request(format!("unknown endpoint kind '{kind}'")));
         }
         live.push((kind, target));

@@ -114,6 +114,7 @@ impl Notifier for HarnessNotifier {
                 Err(e) => NotifyOutcome::Failed(e.to_string()),
             },
             Kind::Human => NotifyOutcome::Failed("no push transport for humans".into()),
+            Kind::Mailbox => NotifyOutcome::Failed("a mailbox is not a harness".into()),
         };
         if let NotifyOutcome::Failed(why) = &outcome {
             tracing::warn!(%address, attempt = attempt_id, "notify failed: {why}");
@@ -144,6 +145,7 @@ impl Notifier for HarnessNotifier {
         match address.kind {
             Kind::Claude => self.claude_sessions().iter().any(|s| s.session_id == address.target),
             Kind::Codex | Kind::Human => true,
+            Kind::Mailbox => false,
         }
     }
 }

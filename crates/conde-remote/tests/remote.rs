@@ -162,6 +162,7 @@ fn notify(attempt: &str) -> Notify {
         },
         message_id: format!("m-{attempt}"),
         text: format!("hello {attempt}"),
+        fields: None,
     }
 }
 
@@ -387,6 +388,34 @@ async fn hello_with_foreign_host_is_rejected() {
         matches!(reason, StopReason::Rejected { ref code, .. } if code == "host_mismatch"),
         "{reason:?}"
     );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hello_breaking_its_protocol_shape_is_refused() {
+    let source = Arc::new(FakeSource::default());
+    let server = start_server(local(), test_config(), source.clone()).await;
+    let addr = server.local_addr();
+    let mailbox = json!([{"kind": "mailbox", "mailbox_id": "01MBX"}]);
+    let codex = json!([{"kind": "codex", "thread_id": "th-1"}]);
+    let bad = [
+        json!({"endpoints": mailbox}),
+        json!({"window": 32}),
+        json!({"proto": 2, "endpoints": mailbox}),
+        json!({"proto": 2, "window": 32, "endpoints": codex}),
+        json!({"proto": 2, "window": 0}),
+        json!({"proto": 3, "window": 32}),
+    ];
+    for extra in bad {
+        let mut frame = hello("host-a", "i-1");
+        frame.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let mut ws = raw_ws(addr, "tok-a").await.unwrap();
+        send_json(&mut ws, frame).await;
+        let err = recv_json(&mut ws).await.expect("error frame");
+        assert_eq!((err["type"].as_str(), err["code"].as_str()), (Some("error"), Some("bad_hello")), "{extra}");
+        assert_eq!(recv_json(&mut ws).await, None, "connection closed after the error");
+    }
+    assert!(source.state().fence_calls.is_empty(), "no fence for a refused hello");
     server.shutdown().await.unwrap();
 }
 

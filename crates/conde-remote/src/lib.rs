@@ -153,29 +153,147 @@ pub enum FenceResult {
     Fenced,
 }
 
+/// The bridge protocol a hello declares: 1 (harness endpoints) when `proto` is absent.
+pub const PROTO_V1: u32 = 1;
+/// Mailbox endpoints, an admission window and structured notifies (DESIGN-v2.md §4, §5).
+pub const PROTO_V2: u32 = 2;
+/// The admission window a v2 daemon declares unless configured otherwise.
+pub const DEFAULT_WINDOW: u32 = 32;
+/// The largest admission window a v2 hello may declare (`bridge.claim`'s limit ceiling).
+pub const MAX_WINDOW: u32 = 1000;
+
+/// The bridge's first frame (`{"v":1,"type":"hello",...}`). A v1 hello carries neither
+/// `proto` nor `window` and lists harness endpoints; a v2 hello carries `"proto":2` and its
+/// admission `window` and lists only mailbox endpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hello {
+    pub host_id: String,
+    pub bridge_instance: String,
+    #[serde(default)]
+    pub endpoints: Vec<Endpoint>,
+    #[serde(default = "proto_v1", skip_serializing_if = "is_proto_v1")]
+    pub proto: u32,
+    /// Attempts the server may have in `dispatching` for this instance at once (v2 only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
+}
+
+fn proto_v1() -> u32 {
+    PROTO_V1
+}
+
+fn is_proto_v1(proto: &u32) -> bool {
+    *proto == PROTO_V1
+}
+
+impl Hello {
+    /// The shape rules of a hello for its declared protocol; the error is the refusal text.
+    pub fn check(&self) -> Result<(), String> {
+        let mailboxes = self
+            .endpoints
+            .iter()
+            .filter(|e| matches!(e, Endpoint::Mailbox { .. }))
+            .count();
+        match (self.proto, self.window) {
+            (PROTO_V1, None) if mailboxes == 0 => Ok(()),
+            (PROTO_V1, None) => Err("a v1 hello lists only harness endpoints".into()),
+            (PROTO_V1, Some(_)) => Err("a v1 hello has no window".into()),
+            (PROTO_V2, Some(w)) if !(1..=MAX_WINDOW).contains(&w) => {
+                Err(format!("window {w} is outside 1..={MAX_WINDOW}"))
+            }
+            (PROTO_V2, Some(_)) if mailboxes == self.endpoints.len() => Ok(()),
+            (PROTO_V2, Some(_)) => Err("a v2 hello lists only mailbox endpoints".into()),
+            (PROTO_V2, None) => Err("a v2 hello declares its window".into()),
+            (other, _) => Err(format!("unsupported bridge protocol {other}")),
+        }
+    }
+}
+
 /// One delivery attempt pushed to a bridge (`{"v":1,"type":"notify",...}`).
+///
+/// v1: `text` is the rendered notification and `fields` is absent. v2: `fields` is required
+/// (a notify without all of them is refused) and `text` is empty; the daemon renders the text
+/// from `fields` with the board's alias.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notify {
     pub notification_id: String,
     pub attempt_id: String,
     pub recipient: String,
+    /// The recipient row's `binding_version`; for a mailbox, its route generation.
     pub binding_version: u64,
     pub endpoint: Endpoint,
     pub message_id: String,
+    /// Always sent, since a v1 client requires it; may be absent from a v2 frame.
+    #[serde(default)]
     pub text: String,
+    /// Flattened into the frame; `None` unless every field is present and well formed.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<NotifyFields>,
 }
 
-/// A harness endpoint on the bridge's host. JSON: `{"kind":"claude","session_id":..}` or
-/// `{"kind":"codex","thread_id":..}`.
+impl Notify {
+    /// The structured fields a v2 notify must carry, or `None` when they are missing.
+    pub fn structured(&self) -> Option<&NotifyFields> {
+        self.fields.as_ref()
+    }
+}
+
+/// The structured part of a v2 notify, from which the daemon renders the text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyFields {
+    pub kind: NotifyKind,
+    /// The sender's `owner/name` on the board.
+    pub sender: String,
+    /// `dm`, or `#<channel>` for a channel post.
+    pub place: String,
+    /// The recipient's other unread channels.
+    pub badges: Vec<Badge>,
+}
+
+/// Why the recipient is notified: a direct message, an @mention, or a channel post.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyKind {
+    Dm,
+    Mention,
+    Post,
+}
+
+/// An unread channel of the recipient: `{"place":"#dev","unread":3}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Badge {
+    pub place: String,
+    pub unread: u64,
+}
+
+/// A delivery endpoint on the bridge's host. JSON: `{"kind":"claude","session_id":..}`,
+/// `{"kind":"codex","thread_id":..}`, or (v2) `{"kind":"mailbox","mailbox_id":..}`, a
+/// published mailbox whose session only the daemon knows.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Endpoint {
     Claude { session_id: String },
     Codex { thread_id: String },
+    Mailbox { mailbox_id: String },
+}
+
+/// This host's current mailbox routes (`{"v":1,"type":"routes","mailboxes":[..]}`), sent by
+/// the server to a v2 bridge on connect and after any change to them; always the whole set.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Routes {
+    pub mailboxes: Vec<Route>,
+}
+
+/// One mailbox routed to this host at its route generation (the row's `binding_version`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Route {
+    pub mailbox_id: String,
+    pub route_generation: u64,
 }
 
 /// An attempt outcome reported by a bridge (`{"v":1,"type":"outcome",...}`).
-/// `status` is one of held|delivered|expired|denied|refused|dropped|accepted|failed.
+/// `status` is an [`OutcomeStatus`]; on v1 `reason` is free text, on v2 an [`OutcomeReason`]
+/// (checked with [`Outcome::check_v2`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outcome {
     pub attempt_id: String,
@@ -183,6 +301,121 @@ pub struct Outcome {
     pub status: String,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+impl Outcome {
+    /// The status and reason of an outcome on a v2 connection; an unknown status or a reason
+    /// outside the closed set is refused.
+    pub fn check_v2(&self) -> Result<(OutcomeStatus, Option<OutcomeReason>), String> {
+        let status = OutcomeStatus::parse(&self.status)
+            .ok_or_else(|| format!("unknown outcome '{}'", self.status))?;
+        let reason = match self.reason.as_deref() {
+            None => None,
+            Some(r) => Some(
+                OutcomeReason::parse(r).ok_or_else(|| format!("unknown outcome reason '{r}'"))?,
+            ),
+        };
+        Ok((status, reason))
+    }
+}
+
+/// The statuses an attempt outcome reports, with their v1 meaning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutcomeStatus {
+    /// Handed over, no receipt yet (revisable).
+    Accepted,
+    /// Parked by the recipient's harness (revisable).
+    Held,
+    Delivered,
+    Expired,
+    Denied,
+    Refused,
+    Dropped,
+    Failed,
+    /// Given up by the bridge (session replaced or gone); re-attempted at once.
+    Abandoned,
+}
+
+impl OutcomeStatus {
+    pub const ALL: [OutcomeStatus; 9] = [
+        OutcomeStatus::Accepted,
+        OutcomeStatus::Held,
+        OutcomeStatus::Delivered,
+        OutcomeStatus::Expired,
+        OutcomeStatus::Denied,
+        OutcomeStatus::Refused,
+        OutcomeStatus::Dropped,
+        OutcomeStatus::Failed,
+        OutcomeStatus::Abandoned,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutcomeStatus::Accepted => "accepted",
+            OutcomeStatus::Held => "held",
+            OutcomeStatus::Delivered => "delivered",
+            OutcomeStatus::Expired => "expired",
+            OutcomeStatus::Denied => "denied",
+            OutcomeStatus::Refused => "refused",
+            OutcomeStatus::Dropped => "dropped",
+            OutcomeStatus::Failed => "failed",
+            OutcomeStatus::Abandoned => "abandoned",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<OutcomeStatus> {
+        OutcomeStatus::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
+    /// Whether the status closes its attempt (everything but accepted and held).
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, OutcomeStatus::Accepted | OutcomeStatus::Held)
+    }
+}
+
+/// The closed set of outcome reasons on a v2 connection (DESIGN-v2.md §5). Detailed
+/// diagnostics stay in the local log and `doctor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OutcomeReason {
+    #[serde(rename = "recipient unavailable")]
+    RecipientUnavailable,
+    #[serde(rename = "recipient offline")]
+    RecipientOffline,
+    #[serde(rename = "recipient session replaced")]
+    RecipientSessionReplaced,
+    #[serde(rename = "transport error")]
+    TransportError,
+    #[serde(rename = "duplicate")]
+    Duplicate,
+    #[serde(rename = "outcome too large")]
+    OutcomeTooLarge,
+}
+
+impl OutcomeReason {
+    pub const ALL: [OutcomeReason; 6] = [
+        OutcomeReason::RecipientUnavailable,
+        OutcomeReason::RecipientOffline,
+        OutcomeReason::RecipientSessionReplaced,
+        OutcomeReason::TransportError,
+        OutcomeReason::Duplicate,
+        OutcomeReason::OutcomeTooLarge,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutcomeReason::RecipientUnavailable => "recipient unavailable",
+            OutcomeReason::RecipientOffline => "recipient offline",
+            OutcomeReason::RecipientSessionReplaced => "recipient session replaced",
+            OutcomeReason::TransportError => "transport error",
+            OutcomeReason::Duplicate => "duplicate",
+            OutcomeReason::OutcomeTooLarge => "outcome too large",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<OutcomeReason> {
+        OutcomeReason::ALL.into_iter().find(|v| v.as_str() == s)
+    }
 }
 
 /// Lowercase hex SHA-256 of a bearer token: the form the store keeps and looks up.

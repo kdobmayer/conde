@@ -18,6 +18,7 @@
 //! A `Tx` rolls back when dropped without `commit`, so a failing op leaves no
 //! partial mutation, idempotency record, attachment or notification behind.
 
+pub mod local;
 pub mod postgres;
 pub mod sqlite;
 

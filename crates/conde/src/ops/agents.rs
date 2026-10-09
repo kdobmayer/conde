@@ -68,7 +68,7 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     let own = ctx.actor_address()?;
     if let Some(explicit) = opt_str(body, "address")? {
-        let explicit = Address::parse(explicit, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
+        let explicit = Address::parse_v1(explicit, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
         if explicit != own {
             return Err(forbidden(format!(
                 "registration is self-only: this shell is {own}, not {explicit}. \
@@ -126,7 +126,7 @@ pub fn unregister(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         )));
     }
     if let Some(expected) = opt_str(body, "if_address")? {
-        let expected = Address::parse(expected, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
+        let expected = Address::parse_v1(expected, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
         if expected != *current {
             return Err(conflict(format!(
                 "not removing {canonical}: registered as '{current}', not '{expected}'"
@@ -203,7 +203,7 @@ pub fn pin(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let agent = ensure_row(ctx, &name)?;
     match opt_str(body, "address")? {
         Some(raw) => {
-            let address = Address::parse(raw, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
+            let address = Address::parse_v1(raw, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
             ctx.db.set_pin(&agent.id, Some(&address.to_string()))?;
             if agent.address.as_ref() != Some(&address) {
                 set_binding(ctx.db, &agent.id, Some(&address))?;

@@ -9,6 +9,8 @@ pub enum Kind {
     Claude,
     Codex,
     Human,
+    /// A published mailbox on a shared board; its target is the board's own agent id.
+    Mailbox,
 }
 
 impl Kind {
@@ -17,6 +19,7 @@ impl Kind {
             Kind::Claude => "claude",
             Kind::Codex => "codex",
             Kind::Human => "human",
+            Kind::Mailbox => "mailbox",
         }
     }
 
@@ -25,6 +28,7 @@ impl Kind {
             "claude" => Some(Kind::Claude),
             "codex" => Some(Kind::Codex),
             "human" => Some(Kind::Human),
+            "mailbox" => Some(Kind::Mailbox),
             _ => None,
         }
     }
@@ -64,6 +68,13 @@ impl Address {
             return Err(bad());
         }
         Ok(Address::new(kind, target, host))
+    }
+
+    /// [`Address::parse`] limited to the v1 kinds (claude, codex, human): the address a
+    /// session registers or pins, and a v1 actor. A mailbox is refused with the same error.
+    pub fn parse_v1(s: &str, default_host: &str) -> Result<Address, AddressError> {
+        Address::parse(s, default_host)
+            .and_then(|a| if a.kind == Kind::Mailbox { Err(AddressError(s.to_string())) } else { Ok(a) })
     }
 }
 
@@ -117,6 +128,11 @@ mod tests {
         assert!(Address::parse("nats:x", "box").is_err());
         assert!(Address::parse("claude:", "box").is_err());
         assert!(Address::parse("claude:a b", "box").is_err());
+        let m = Address::parse("mailbox:01AGENT@Box", "x").unwrap();
+        assert_eq!((m.kind, m.to_string().as_str()), (Kind::Mailbox, "mailbox:01AGENT@box"));
+        assert_eq!(Kind::parse(Kind::Mailbox.as_str()), Some(Kind::Mailbox));
+        assert!(Address::parse_v1("mailbox:01AGENT@box", "box").is_err());
+        assert_eq!(Address::parse_v1("codex:t-1", "box"), Address::parse("codex:t-1", "box"));
     }
 
     #[test]

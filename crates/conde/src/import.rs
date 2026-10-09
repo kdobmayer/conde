@@ -553,7 +553,7 @@ fn map_names(names: &BTreeSet<String>, renames: &mut Vec<(String, String)>) -> B
 
 fn kond_address(raw: &str, host: &str) -> Result<Address, String> {
     let (scheme, target) = raw.split_once(':').ok_or_else(|| format!("bad address '{raw}'"))?;
-    let kind = Kind::parse(scheme).ok_or_else(|| format!("bad address '{raw}'"))?;
+    let kind = Kind::parse(scheme).filter(|k| *k != Kind::Mailbox).ok_or_else(|| format!("bad address '{raw}'"))?;
     let target = if kind == Kind::Human { target.to_lowercase() } else { target.to_string() };
     Address::parse(&format!("{}:{target}@{host}", kind.as_str()), host).map_err(|e| e.to_string())
 }
@@ -1105,7 +1105,7 @@ fn describe(plan: &Plan, target: &Existing, opts: &Options, r: &mut Report) {
                     }
                 }
                 Kind::Codex => r.codex_bindings += 1,
-                Kind::Human => {}
+                Kind::Human | Kind::Mailbox => {}
             }
         }
         if let Some((have, have_pin)) = target.agents.get(&plan.names[kond]) {

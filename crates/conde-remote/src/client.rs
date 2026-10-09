@@ -16,7 +16,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HOST_MISMATCH};
 use crate::server::MAX_FRAME_BYTES;
-use crate::{Endpoint, Notify, Outcome};
+use crate::{Endpoint, Hello, Notify, Outcome, PROTO_V1};
 
 /// An outcome's reason is cut to this many bytes, so a diagnostic can never make it too large.
 pub const MAX_REASON_BYTES: usize = 4096;
@@ -654,7 +654,13 @@ async fn run_session(
         .collect();
     let hello = protocol::frame(
         "hello",
-        &json!({"host_id": cfg.host_id, "bridge_instance": inner.instance, "endpoints": announced}),
+        &Hello {
+            host_id: cfg.host_id.clone(),
+            bridge_instance: inner.instance.clone(),
+            endpoints: announced.iter().cloned().collect(),
+            proto: PROTO_V1,
+            window: None,
+        },
     );
     if let Err(e) = tx.send(Message::text(hello)).await {
         return lost(e);

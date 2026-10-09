@@ -119,7 +119,9 @@ CREATE TABLE IF NOT EXISTS publications(
     updated_at TEXT NOT NULL,
     PRIMARY KEY (board, agent_id),
     UNIQUE (board, mailbox_id),
-    UNIQUE (board, shared_name)
+    UNIQUE (board, shared_name),
+    CHECK ((mailbox_id IS NULL) = (state = 'publishing')),
+    CHECK ((route_generation IS NULL) = (mailbox_id IS NULL))
 );
 -- One row per remote mutation, written before the first remote call, so a crash resumes it.
 CREATE TABLE IF NOT EXISTS board_ops(
@@ -131,11 +133,17 @@ CREATE TABLE IF NOT EXISTS board_ops(
     state TEXT NOT NULL CHECK (state IN ('pending', 'done', 'failed')),
     result_json TEXT,                    -- the board's answer, kept for audit
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    CHECK ((agent_id IS NULL) = (kind = 'migrate'))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS board_ops_one_pending ON board_ops(board, agent_id)
+    WHERE state = 'pending' AND agent_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS board_ops_one_migrate ON board_ops(board)
+    WHERE kind = 'migrate' AND state <> 'failed';
 ```
 
-At most one `pending` op exists per (board, agent), and one `migrate` op per board.
+At most one `pending` op exists per (board, agent), and one `migrate` op per board that has not
+failed (a refused migration is retried as a new op, with a new key). The schema enforces both.
 
 Board configuration stays in files, one per board, mode 0600 in a 0700 directory:
 `$XDG_CONFIG_HOME/conde/boards/<alias>.json` = `{server, host_id, owner, key}` (the v1 credential
@@ -173,6 +181,46 @@ has none. v1 idempotency rows are never purged, which the `migrate` replay relie
   current routes, sent on connect and after any change to them (takeover by another host, unpublish,
   admin unbind).
 - The outcome `reason` is a closed enum on a v2 connection (section 5).
+
+### Wire shapes (fixed in V0)
+
+Frames keep the v1 envelope (`"v":1`, `"type"`); the bridge protocol is negotiated by the hello
+only. Types: `conde_remote` (`Hello`, `Endpoint`, `Notify`, `Routes`, `OutcomeStatus`,
+`OutcomeReason`) and `conde::protocol::v2` (op names, bodies, board labels).
+
+- `hello`: no `proto` means 1. v1: no `window`, harness (and no mailbox) endpoints. v2:
+  `"proto":2` and `"window":W` with 1 <= W <= 1000 (`bridge.claim`'s limit ceiling), mailbox
+  endpoints only. Any other combination, or another `proto`, is refused with `bad_hello`. A
+  mailbox endpoint is `{"kind":"mailbox","mailbox_id":"<agent_id>"}`.
+- `notify` (v2): the structured fields sit at the top level of the frame beside the v1 ones:
+  `"kind":"dm"|"mention"|"post"`, `"sender":"<owner/name>"`, `"place":"dm"|"#<channel>"`,
+  `"badges":[{"place":"#<channel>","unread":N}]`. A notify missing any of the four, or with
+  another `kind`, counts as a notify without the structured fields. `text` stays in the frame (a
+  v1 client requires the key) and is `""` on v2; the daemon never reads it. `binding_version`
+  carries the route generation.
+- `routes`: `{"mailboxes":[{"mailbox_id","route_generation"}]}`, always the full set for the host.
+- `outcome`: the v1 frame. `status` is one of the v1 strings (`accepted`, `held`, `delivered`,
+  `expired`, `denied`, `refused`, `dropped`, `failed`, `abandoned`). On v2, `reason` is absent or
+  one of the closed set verbatim (`"recipient unavailable"` ...).
+- Ops: request frames as in v1. `mailbox.publish`, `mailbox.unpublish` and `host.migrate_v2` carry
+  the `board_ops.op_id` as `idempotency_key` and resend the identical body (`request_json`) on
+  resume.
+
+| Op | Body | Result |
+|---|---|---|
+| `board.info` | `{}` | `{name, owner, host, mailbox_only}` |
+| `mailbox.publish` | `{name, human?, take?}` (flags omitted when false) | `{name, mailbox_id, route_generation}` |
+| `mailbox.unpublish` | `{mailbox_id, expected_generation}` | `{mailbox_id, route_generation}` (the generation after the unbind); a mismatch is error `conflict` |
+| `mailbox.mine` | `{}` | `{mailboxes: [{name, mailbox_id, route_generation}]}` |
+| `host.migrate_preview` | `{}` | `{rows: [{agent_id, name, address, pin, candidate, evidence: [{via: dm\|channel, with, source: imported\|later, messages, last_at}]}]}` |
+| `host.migrate_v2` | `{publish: [agent_id]}` | `{bindings: [{agent_id, name, address, pin, published: {mailbox_id, route_generation} \| null}]}` |
+
+`name` is the name part without the owner; `with` is the other owner's `owner/name` for a DM and
+`#<channel>` for a channel; evidence has one entry per (via, with, source).
+
+- Board labels (daemon to CLI/MCP): every row of an aggregate view carries `"board":"<alias>"`
+  (`"local"` for the local board), and the result lists each board's part as
+  `"boards":[{"board":"dakai","available":false}]`. An unavailable board contributes no rows.
 
 ## 5. The daemon
 
@@ -298,9 +346,11 @@ board's outcome budget is full.
     fills), the notifier keeps polling receipts, and the board's task keeps handling `outcome_ack`
     and `routes`. Other origins and local delivery continue. A live session that keeps up to R
     attempts held pauses its origin, which is the honest bound; `doctor` shows slots used per
-    origin. Memory is bounded by the sum of W and R over the origins, and a late `held` or
-    `delivered` receipt of an injected attempt always finds its mapping: a full board can delay a
-    terminal receipt but cannot drop it.
+    origin. Memory is bounded by the sum of W and R over the origins, plus each board client's
+    outcome book, which has its own bound (the client's retained-outcome budget,
+    `max_unacked_outcomes` entries and `max_unacked_bytes`; the local origin has no book). A late
+    `held` or `delivered` receipt of an injected attempt always finds its mapping: a full board can
+    delay a terminal receipt but cannot drop it.
   - **Pause and recovery without a restart.** When the book stops draining (the server stops
     acking, or its budget is full), first outcomes stop reaching the server. The window then stays
     full and the server stops pushing, and the board pauses with bounded memory. The board's

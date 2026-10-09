@@ -22,6 +22,16 @@ fn register_is_self_only() {
 }
 
 #[test]
+fn a_mailbox_address_is_neither_a_v1_actor_nor_a_binding() {
+    let b = Board::new();
+    let err = b.call("mailbox:01MBX", "agent.register", json!({"name": "worker"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::BadRequest, "{}", err.1);
+    b.register(HUMAN, "krisz");
+    let err = b.call(HUMAN, "agent.pin", json!({"name": "role", "address": "mailbox:01MBX"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::BadRequest, "{}", err.1);
+}
+
+#[test]
 fn reregistering_moves_the_name_to_the_caller() {
     let b = Board::new();
     b.register(CAROL, "role");

@@ -152,3 +152,8 @@ finds. Until then: system-default account works; injected dirs do not.
 - DONE 9ea75a5: `conde search --after` takes an RFC 3339 time (or conde's own form, or the listing minute) as well as the cursor, CLI and MCP.
 - DONE 7a84ebc: the migration apply moves the session off a free local name (unpinned, unpublished, not in the manifest; history kept) or refuses before any write with the exact unregister command; board.info no longer connects past a pending local apply.
 - The offline gate (G1 on the real machine, network blocked for 30 s) was not run at the switch: run it once with the owner present.
+
+## H. From the first v2 installs (2026-10-09)
+
+- Headless hosts: `conde login --no-browser` makes the human finish the loopback callback by hand from another device. Add a pasted-code path (the keys page shows a one-time code; `conde login --code` redeems it) so a headless host needs no callback.
+- `conde setup` skips the skill/MCP step when an MCP server named `conde` is already registered for another instance; it should detect that and register under a second name (`conde-dakai`), pointing the skill at it.

@@ -149,6 +149,6 @@ finds. Until then: system-default account works; injected dirs do not.
 
 ## G. Found at the homepc switch (2026-10-09), small
 
-- `conde search --after` rejects an ISO timestamp ("invalid digit found in string"); accept RFC 3339 as well as the cursor.
-- `host.migrate_v2` local apply registers the published names at their session addresses without checking that the session already holds another local name (desk's kond-era name collided; fixed by hand with `conde unregister --if-address`). The apply should rename or refuse with the exact command.
+- DONE 9ea75a5: `conde search --after` takes an RFC 3339 time (or conde's own form, or the listing minute) as well as the cursor, CLI and MCP.
+- DONE 7a84ebc: the migration apply moves the session off a free local name (unpinned, unpublished, not in the manifest; history kept) or refuses before any write with the exact unregister command; board.info no longer connects past a pending local apply.
 - The offline gate (G1 on the real machine, network blocked for 30 s) was not run at the switch: run it once with the owner present.

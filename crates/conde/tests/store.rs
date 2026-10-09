@@ -710,10 +710,13 @@ fn notifications_and_attempts(s: &dyn Store) {
         let get = |id: &str| all.iter().find(|n| n.id == id).unwrap().clone();
         assert_eq!((get("z").status, get("z").next_attempt_at), ("pending".into(), 5000));
         assert_eq!((get("y").status, get("y").next_attempt_at), ("held".into(), 100));
-        assert_eq!(tx.count_notifications(&["pending"]).unwrap(), 5);
-        assert_eq!(tx.count_notifications(&["held", "denied"]).unwrap(), 1);
-        assert_eq!(tx.count_notifications(&[]).unwrap(), 0);
-        assert_eq!(tx.unbound_waiting().unwrap(), vec![("krisz/gone".to_string(), 1)]);
+        assert_eq!(tx.count_notifications(w.krisz, &["pending"]).unwrap(), 4);
+        assert_eq!(tx.count_notifications(w.ana, &["pending"]).unwrap(), 1);
+        assert_eq!(tx.count_notifications(w.krisz, &["held", "denied"]).unwrap(), 1);
+        assert_eq!(tx.count_notifications(w.ana, &["held", "denied"]).unwrap(), 0);
+        assert_eq!(tx.count_notifications(w.krisz, &[]).unwrap(), 0);
+        assert_eq!(tx.unbound_waiting(w.krisz).unwrap(), vec![("krisz/gone".to_string(), 1)]);
+        assert_eq!(tx.unbound_waiting(w.ana).unwrap(), vec![]);
 
         // attempts: "m2" created after "m9", so it is the latest
         tx.insert_attempt("m9", "x", "bridge-1", 1, "box", "text m9").unwrap();

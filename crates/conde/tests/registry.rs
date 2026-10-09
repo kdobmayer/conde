@@ -1,6 +1,7 @@
 mod common;
 
 use common::*;
+use conde::notify::{NotifyOutcome, ReceiptStatus};
 use conde::protocol::ErrorCode;
 use serde_json::json;
 
@@ -356,4 +357,52 @@ fn unregister_then_register_still_leaves_the_old_name_waiting() {
     let checks = b.ok(BOB, "doctor", json!({}))["checks"].to_string();
     assert!(checks.contains("unbound: krisz/old has 1 notification(s) waiting"), "{checks}");
     assert!(checks.contains("use conde rename"), "{checks}");
+}
+
+#[test]
+fn doctor_reports_only_the_callers_own_namespace() {
+    let b = Board::new();
+    let ben = b.other("ben", "benhost");
+    b.register(ALICE, "alice");
+    // ben: a live name whose recipient holds one message and refuses another, and an unbound name with two waiting
+    for (actor, name) in [("codex:t-live", "live"), ("codex:t-gone", "gone")] {
+        b.call_as(&ben, actor, "agent.register", json!({"name": name})).unwrap();
+    }
+    b.call_as(&ben, "codex:t-gone", "agent.unregister", json!({"name": "gone"})).unwrap();
+    b.send(ALICE, "ben/gone", "stranded 1");
+    b.send(ALICE, "ben/gone", "stranded 2");
+    let mut br = conde::bridge::Bridge::new(
+        b.d.clone(),
+        b.d.bridge_principal(&ben),
+        FakeNotifier { outcomes: [NotifyOutcome::Accepted, NotifyOutcome::Held].into(), ..Default::default() },
+    );
+    let refused = b.send(ALICE, "ben/live", "refused");
+    br.pass().unwrap();
+    let attempt = br.notifier().last_attempt();
+    br.notifier().receipt(&attempt, ReceiptStatus::Refused);
+    br.pass().unwrap();
+    assert_eq!(b.status_of(&refused, "live"), "refused");
+    let held = b.send(ALICE, "ben/live", "held");
+    br.pass().unwrap();
+    assert_eq!(b.status_of(&held, "live"), "held");
+    // krisz: an unbound name of its own with one waiting
+    b.register(BOB, "mine");
+    b.ok(BOB, "agent.unregister", json!({"name": "mine"}));
+    b.send(ALICE, "mine", "stranded at home");
+
+    let r = b.ok(ALICE, "doctor", json!({}));
+    let checks = r["checks"].to_string();
+    assert!(checks.contains("unbound: krisz/mine has 1 notification(s) waiting"), "{checks}");
+    assert!(!checks.contains("ben/"), "{checks}");
+    assert!(checks.contains("held: 0 notification(s)"), "{checks}");
+    assert!(checks.contains("refused: 0 notification(s)"), "{checks}");
+    assert_eq!(r["issues"], 1, "{checks}");
+
+    let r = b.call_as(&ben, "codex:t-live", "doctor", json!({})).unwrap();
+    let checks = r["checks"].to_string();
+    assert!(checks.contains("unbound: ben/gone has 2 notification(s) waiting"), "{checks}");
+    assert!(!checks.contains("krisz/"), "{checks}");
+    assert!(checks.contains("held: 1 notification(s)"), "{checks}");
+    assert!(checks.contains("refused: 1 notification(s)"), "{checks}");
+    assert_eq!(r["issues"], 2, "{checks}");
 }

@@ -1941,17 +1941,23 @@ impl Tx for PgTx {
         Ok(self.query_one("SELECT COUNT(*) FROM agents WHERE address_kind IS NOT NULL", &[])?.get(0))
     }
 
-    fn unbound_waiting(&self) -> StoreResult<Vec<(String, i64)>> {
+    fn unbound_waiting(&self, owner_id: i64) -> StoreResult<Vec<(String, i64)>> {
         self.pairs(
             "SELECT u.name || '/' || a.name_lower, COUNT(*) FROM notifications n
              JOIN agents a ON a.agent_id = n.recipient_agent_id JOIN users u ON u.user_id = a.owner_id
-             WHERE n.status = 'pending' AND a.address_kind IS NULL GROUP BY 1 ORDER BY 1",
-            &[],
+             WHERE n.status = 'pending' AND a.address_kind IS NULL AND a.owner_id = $1 GROUP BY 1 ORDER BY 1",
+            &[&owner_id],
         )
     }
 
-    fn count_notifications(&self, statuses: &[&str]) -> StoreResult<i64> {
-        Ok(self.query_one("SELECT COUNT(*) FROM notifications WHERE status = ANY($1)", &[&statuses])?.get(0))
+    fn count_notifications(&self, owner_id: i64, statuses: &[&str]) -> StoreResult<i64> {
+        Ok(self
+            .query_one(
+                "SELECT COUNT(*) FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
+                 WHERE a.owner_id = $1 AND n.status = ANY($2)",
+                &[&owner_id, &statuses],
+            )?
+            .get(0))
     }
 }
 

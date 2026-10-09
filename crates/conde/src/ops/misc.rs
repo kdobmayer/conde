@@ -18,15 +18,15 @@ pub fn doctor(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
             ctx.p.host
         ));
     }
-    for (name, n) in ctx.db.unbound_waiting()? {
+    for (name, n) in ctx.db.unbound_waiting(ctx.p.user_id)? {
         issue(false, format!(
             "unbound: {name} has {n} notification(s) waiting; the session that owns it should run: \
              conde register <name> (to change a name, use conde rename, which keeps its messages)"
         ));
     }
-    let held = ctx.db.count_notifications(&["held"])?;
+    let held = ctx.db.count_notifications(ctx.p.user_id, &["held"])?;
     issue(held == 0, format!("held: {held} notification(s) await their recipient user's approval"));
-    let refused = ctx.db.count_notifications(&["denied", "refused"])?;
+    let refused = ctx.db.count_notifications(ctx.p.user_id, &["denied", "refused"])?;
     issue(true, format!("refused: {refused} notification(s) denied or refused by recipients"));
     let issues = lines.iter().filter(|l| l["ok"] == false).count();
     Ok(json!({"checks": lines, "issues": issues}))

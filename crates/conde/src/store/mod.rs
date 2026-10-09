@@ -611,9 +611,10 @@ pub trait Tx {
     /// "ok" when the store is consistent, else the backend's finding.
     fn integrity_check(&self) -> StoreResult<String>;
     fn count_bound_agents(&self) -> StoreResult<i64>;
-    /// Unbound agents with pending notifications as (canonical name, count), by name.
-    fn unbound_waiting(&self) -> StoreResult<Vec<(String, i64)>>;
-    fn count_notifications(&self, statuses: &[&str]) -> StoreResult<i64>;
+    /// The owner's unbound agents with pending notifications as (canonical name, count), by name.
+    fn unbound_waiting(&self, owner_id: i64) -> StoreResult<Vec<(String, i64)>>;
+    /// Notifications in `statuses` whose recipient agent belongs to the owner.
+    fn count_notifications(&self, owner_id: i64, statuses: &[&str]) -> StoreResult<i64>;
 }
 
 // --- events -------------------------------------------------------------------

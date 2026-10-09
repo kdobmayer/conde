@@ -1374,24 +1374,29 @@ impl Tx for SqliteTx<'_> {
         self.one("SELECT COUNT(*) FROM agents WHERE address_kind IS NOT NULL", [], one_col)
     }
 
-    fn unbound_waiting(&self) -> StoreResult<Vec<(String, i64)>> {
+    fn unbound_waiting(&self, owner_id: i64) -> StoreResult<Vec<(String, i64)>> {
         self.rows(
             "SELECT u.name || '/' || a.name_lower, COUNT(*) FROM notifications n
              JOIN agents a ON a.agent_id = n.recipient_agent_id JOIN users u ON u.user_id = a.owner_id
-             WHERE n.status = 'pending' AND a.address_kind IS NULL GROUP BY 1 ORDER BY 1",
-            [],
+             WHERE n.status = 'pending' AND a.address_kind IS NULL AND a.owner_id = ?1 GROUP BY 1 ORDER BY 1",
+            [owner_id],
             pair,
         )
     }
 
-    fn count_notifications(&self, statuses: &[&str]) -> StoreResult<i64> {
+    fn count_notifications(&self, owner_id: i64, statuses: &[&str]) -> StoreResult<i64> {
         if statuses.is_empty() {
             return Ok(0);
         }
         let marks = vec!["?"; statuses.len()].join(", ");
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&owner_id];
+        args.extend(statuses.iter().map(|s| s as &dyn rusqlite::ToSql));
         self.one(
-            &format!("SELECT COUNT(*) FROM notifications WHERE status IN ({marks})"),
-            params_from_iter(statuses.iter()),
+            &format!(
+                "SELECT COUNT(*) FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
+                 WHERE a.owner_id = ? AND n.status IN ({marks})"
+            ),
+            args.as_slice(),
             one_col,
         )
     }

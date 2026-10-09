@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, pa
 
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt,
+    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt,
     PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes, WebSessionRow, address_of,
 };
 use crate::address::Address;
@@ -34,6 +34,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("channels", "topic", "TEXT"),
     ("users", "disabled", "INTEGER NOT NULL DEFAULT 0"),
     ("attempts", "settled_at", "TEXT"),
+    ("hosts", "mailbox_only", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 pub struct SqliteStore {
@@ -88,7 +89,55 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS attempts_by_instance ON attempts(bridge_instance, status);
          CREATE INDEX IF NOT EXISTS credentials_by_host ON device_credentials(host_id);
          CREATE INDEX IF NOT EXISTS notifications_by_recipient ON notifications(recipient_agent_id);",
-    )
+    )?;
+    rebuild_agents(conn)
+}
+
+/// A file created before `address_kind` accepted 'mailbox' (DESIGN-v2.md §4) gets the agents
+/// table rebuilt with the schema's CHECK: the standard SQLite rebuild, in one transaction with
+/// foreign keys off, verified by `foreign_key_check` before it commits. Runs once per file.
+fn rebuild_agents(conn: &Connection) -> rusqlite::Result<()> {
+    let current: String =
+        conn.query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agents'", [], |r| r.get(0))?;
+    if current.contains("'mailbox'") {
+        return Ok(());
+    }
+    const START: &str = "CREATE TABLE IF NOT EXISTS agents(";
+    let at = SCHEMA.find(START).expect("the schema defines agents");
+    let len = SCHEMA[at..].find(");").expect("the agents definition ends") + 2;
+    let create = SCHEMA[at..at + len].replacen(START, "CREATE TABLE agents_rebuilt(", 1);
+    const COLUMNS: &str =
+        "agent_id, owner_id, name_lower, display, address_kind, address_target, host_id, binding_version, pinned_address";
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let rebuilt = (|| {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let steps = || -> rusqlite::Result<()> {
+            conn.execute_batch(&create)?;
+            conn.execute_batch(&format!(
+                "INSERT INTO agents_rebuilt({COLUMNS}) SELECT {COLUMNS} FROM agents;
+                 DROP TABLE agents;
+                 ALTER TABLE agents_rebuilt RENAME TO agents;
+                 CREATE INDEX IF NOT EXISTS agents_by_address ON agents(address_kind, address_target, host_id);"
+            ))?;
+            let broken = conn.prepare("PRAGMA foreign_key_check")?.exists([])?;
+            if broken {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+                    Some("the agents rebuild left a dangling reference".into()),
+                ));
+            }
+            Ok(())
+        };
+        match steps() {
+            Ok(()) => conn.execute_batch("COMMIT"),
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    })();
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    rebuilt
 }
 
 impl Store for SqliteStore {
@@ -365,6 +414,27 @@ impl Tx for SqliteTx<'_> {
         Ok(n)
     }
 
+    fn host_mailbox_only(&self, host: &str) -> StoreResult<bool> {
+        Ok(self.opt("SELECT mailbox_only FROM hosts WHERE host_id = ?1", [host], one_col::<bool>)?.unwrap_or(false))
+    }
+
+    fn set_host_mailbox_only(&self, host: &str) -> StoreResult<()> {
+        self.exec("UPDATE hosts SET mailbox_only = 1 WHERE host_id = ?1", [host])?;
+        Ok(())
+    }
+
+    fn host_evidence(&self, owner_id: i64, host: &str) -> StoreResult<Vec<EvidenceRow>> {
+        self.rows(super::HOST_EVIDENCE, params![owner_id, host], |r| {
+            Ok(EvidenceRow {
+                agent_id: r.get(0)?,
+                via: r.get(1)?,
+                with: r.get(2)?,
+                created_at: r.get(3)?,
+                imported: r.get::<_, String>(4)? == "imported",
+            })
+        })
+    }
+
     fn host_last_seen(&self, host: &str) -> StoreResult<Option<String>> {
         self.one("SELECT MAX(updated_at) FROM bridge_instances WHERE host_id = ?1", [host], one_col)
     }
@@ -548,12 +618,23 @@ impl Tx for SqliteTx<'_> {
         self.rows(&format!("{AGENT_SELECT} WHERE a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"), [], agent_row)
     }
 
+    fn agents_on_host(&self, host: &str) -> StoreResult<Vec<Agent>> {
+        self.rows(
+            &format!("{AGENT_SELECT} WHERE a.host_id = ?1 AND a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"),
+            [host],
+            agent_row,
+        )
+    }
+
     fn insert_agent(&self, id: &str, owner_id: i64, name: &str) -> StoreResult<()> {
         self.exec("INSERT INTO agents(agent_id, owner_id, name_lower) VALUES (?1, ?2, ?3)", params![id, owner_id, name])?;
         Ok(())
     }
 
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()> {
+        let old: Option<String> =
+            self.opt("SELECT host_id FROM agents WHERE agent_id = ?1", [agent_id], one_col)?.flatten();
+        self.wakes.borrow_mut().hosts.extend(old);
         self.exec(
             "UPDATE agents SET address_kind = ?2, address_target = ?3, host_id = ?4,
              binding_version = binding_version + 1 WHERE agent_id = ?1",
@@ -941,7 +1022,8 @@ impl Tx for SqliteTx<'_> {
         self.rows(
             "SELECT t.attempt_id, t.notification_id,
                     a.address_kind || ':' || a.address_target || '@' || a.host_id, t.text,
-                    u.name || '/' || a.name_lower, n.message_id, t.target_binding_version
+                    u.name || '/' || a.name_lower, n.message_id, t.target_binding_version, n.kind,
+                    n.recipient_agent_id
              FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
              JOIN agents a ON a.agent_id = n.recipient_agent_id JOIN users u ON u.user_id = a.owner_id
              WHERE t.bridge_instance = ?1 AND t.status IN ('dispatching', 'held')
@@ -957,6 +1039,8 @@ impl Tx for SqliteTx<'_> {
                     recipient: r.get(4)?,
                     message_id: r.get(5)?,
                     binding_version: r.get(6)?,
+                    kind: r.get(7)?,
+                    recipient_id: r.get(8)?,
                 })
             },
         )
@@ -977,15 +1061,24 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn gone_claude_holds(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<String>> {
+    fn gone_holds(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<String>> {
         self.rows(
             "SELECT t.attempt_id FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
              JOIN agents a ON a.agent_id = n.recipient_agent_id
-             WHERE t.bridge_instance = ?1 AND t.status = 'held' AND a.address_kind = 'claude' AND a.host_id = ?2
+             WHERE t.bridge_instance = ?1 AND t.status = 'held' AND a.address_kind IN ('claude', 'mailbox')
+               AND a.host_id = ?2
                AND NOT EXISTS (SELECT 1 FROM endpoints e
-                               WHERE e.host_id = a.host_id AND e.kind = 'claude' AND e.target = a.address_target)
+                               WHERE e.host_id = a.host_id AND e.kind = a.address_kind AND e.target = a.address_target)
              ORDER BY t.rowid",
             params![bridge_instance, host],
+            one_col,
+        )
+    }
+
+    fn count_dispatching(&self, bridge_instance: &str) -> StoreResult<i64> {
+        self.one(
+            "SELECT COUNT(*) FROM attempts WHERE bridge_instance = ?1 AND status = 'dispatching'",
+            [bridge_instance],
             one_col,
         )
     }
@@ -1094,6 +1187,20 @@ impl Tx for SqliteTx<'_> {
             "INSERT INTO bridge_instances(instance, host_id, state, updated_at) VALUES (?1, ?2, 'active', ?3)
              ON CONFLICT(instance) DO UPDATE SET state = 'active', updated_at = ?3",
             params![instance, host, at],
+        )?;
+        self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
+        Ok(fenced)
+    }
+
+    fn fence_host(&self, host: &str, at: &str) -> StoreResult<Vec<String>> {
+        let fenced: Vec<String> = self.rows(
+            "SELECT instance FROM bridge_instances WHERE host_id = ?1 AND state = 'active' ORDER BY instance",
+            [host],
+            one_col,
+        )?;
+        self.exec(
+            "UPDATE bridge_instances SET state = 'fenced', updated_at = ?2 WHERE host_id = ?1 AND state = 'active'",
+            params![host, at],
         )?;
         self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
         Ok(fenced)

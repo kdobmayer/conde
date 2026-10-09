@@ -239,6 +239,8 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         .into_iter()
         .map(|e| ((e.host, e.kind, e.target), e.seen_at))
         .collect();
+    // Reached: delivered, or accepted on a codex row; a mailbox row counts delivered only, which
+    // is what a confirmed Codex reach is normalized to (the rule lives in `agent_health`).
     let health: HashMap<String, _> =
         ctx.db.agent_health(ctx.p.user_id, &stuck_before)?.into_iter().map(|h| (h.agent_id.clone(), h)).collect();
     let mut agents = Vec::new();
@@ -255,9 +257,14 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         let own = a.owner_id == ctx.p.user_id;
         let h = health.get(&a.id);
         let reached = h.and_then(|h| h.last_reached.clone());
+        // A shared board lists kind and host, never a target (DESIGN-v2.md §6).
+        let (shown_address, pinned) = match ctx.board {
+            Some(_) => (Value::Null, Value::Null),
+            None => (json!(address.to_string()), json!(a.pinned)),
+        };
         agents.push(json!({
             "name": a.canonical(), "owner": a.owner, "display": a.display, "kind": address.kind.as_str(),
-            "host": address.host, "address": address.to_string(), "pinned": a.pinned,
+            "host": address.host, "address": shown_address, "pinned": pinned,
             "discovered": discovered,
             "held": own.then(|| h.map_or(0, |h| h.held)),
             "stuck": own.then(|| h.map_or(0, |h| h.stuck)),

@@ -349,6 +349,24 @@ pub struct OpenAttempt {
     pub recipient: String,
     pub message_id: String,
     pub binding_version: i64,
+    /// The notification's kind: dm | mention | post.
+    pub kind: String,
+    pub recipient_id: String,
+}
+
+/// One message that relates an agent bound on a host to an agent of another owner (the
+/// migration preview's evidence, DESIGN-v2.md §9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceRow {
+    pub agent_id: String,
+    /// dm | channel
+    pub via: String,
+    /// The other owner's agent (`owner/name`) for a DM, `#channel` for a channel post.
+    pub with: String,
+    pub created_at: String,
+    /// The board created no notification for the message and it is dated before a notified
+    /// message committed earlier: written by `conde import` (kond's dates), not sent here.
+    pub imported: bool,
 }
 
 /// What an owner already has on the board, for `conde import`'s idempotency.
@@ -406,6 +424,13 @@ pub trait Tx {
     fn revoke_host_credentials(&self, host: &str, at: &str) -> StoreResult<u64>;
     /// The host's latest bridge activity.
     fn host_last_seen(&self, host: &str) -> StoreResult<Option<String>>;
+    /// Whether the host migrated to v2 (`hosts.mailbox_only`); false for an unknown host.
+    fn host_mailbox_only(&self, host: &str) -> StoreResult<bool>;
+    fn set_host_mailbox_only(&self, host: &str) -> StoreResult<()>;
+    /// The cross-owner message relationships of `owner_id`'s agents bound on `host`: every DM
+    /// with an agent of another owner, and every channel post by the agent in a channel where
+    /// an agent of another owner posted or is a member. By agent, then message order.
+    fn host_evidence(&self, owner_id: i64, host: &str) -> StoreResult<Vec<EvidenceRow>>;
 
     // users, Entra identities and browser sign-in (times in unix seconds)
     fn user_by_identity(&self, tid: &str, oid: &str) -> StoreResult<Option<UserRow>>;
@@ -451,8 +476,11 @@ pub trait Tx {
     fn agents_at_address(&self, owner_id: i64, address: &Address) -> StoreResult<Vec<Agent>>;
     /// Every bound agent, by owner then name.
     fn bound_agents(&self) -> StoreResult<Vec<Agent>>;
+    /// Every agent bound on `host`, by owner then name.
+    fn agents_on_host(&self, host: &str) -> StoreResult<Vec<Agent>>;
     fn insert_agent(&self, id: &str, owner_id: i64, name: &str) -> StoreResult<()>;
-    /// Rebinds (or unbinds) and bumps binding_version.
+    /// Rebinds (or unbinds) and bumps binding_version; the old and the new host are woken
+    /// on commit (a moved mailbox changes both hosts' routes).
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()>;
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()>;
     fn set_display(&self, agent_id: &str, display: Option<&str>) -> StoreResult<()>;
@@ -549,8 +577,11 @@ pub trait Tx {
     /// still stands at 'notified', for recipients on `host` (or unbound), that
     /// another instance owns or that target an older binding, as (attempt id, reason).
     fn stale_attempts(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<(String, String)>>;
-    /// This instance's holds on Claude recipients of `host` whose session is not a live endpoint.
-    fn gone_claude_holds(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<String>>;
+    /// This instance's holds on Claude or mailbox recipients of `host` whose session or
+    /// mailbox is not a live endpoint.
+    fn gone_holds(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<String>>;
+    /// The instance's attempts still without a first outcome (status 'dispatching').
+    fn count_dispatching(&self, bridge_instance: &str) -> StoreResult<i64>;
     /// (notification id, status) of an attempt.
     fn attempt(&self, id: &str) -> StoreResult<Option<(String, String)>>;
     /// (bridge instance, host, last event seq) of an attempt.
@@ -571,6 +602,8 @@ pub trait Tx {
     fn active_bridges(&self, host: &str) -> StoreResult<Vec<String>>;
     /// Makes `instance` the host's one active bridge; returns the instances it fenced.
     fn fence(&self, host: &str, instance: &str, at: &str) -> StoreResult<Vec<String>>;
+    /// Fences every active bridge instance of `host` (announced on commit); returns them.
+    fn fence_host(&self, host: &str, at: &str) -> StoreResult<Vec<String>>;
     /// Replaces the host's live endpoints with `endpoints` as (kind, target).
     fn replace_endpoints(&self, host: &str, instance: &str, endpoints: &[(&str, &str)], at: &str)
     -> StoreResult<()>;
@@ -621,6 +654,40 @@ pub trait Tx {
     /// Notifications in `statuses` whose recipient agent belongs to the owner.
     fn count_notifications(&self, owner_id: i64, statuses: &[&str]) -> StoreResult<i64>;
 }
+
+/// The migration preview's evidence (DESIGN-v2.md §9), one row per relating message. A message is
+/// imported when the board created no notification for it and it is dated before a notified
+/// message committed earlier: the importer creates none and writes kond's dates, while traffic
+/// sent here is dated at its commit.
+/// Both dialects: SQLite binds `$1`, `$2` by position.
+pub(crate) const HOST_EVIDENCE: &str = "WITH notified AS (SELECT DISTINCT message_id FROM notifications),
+    dated AS (
+        SELECT m.message_id, m.created_at, n.message_id IS NOT NULL AS native,
+               MAX(CASE WHEN n.message_id IS NOT NULL THEN m.created_at END)
+                   OVER (ORDER BY m.commit_seq ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prior
+        FROM messages m LEFT JOIN notified n ON n.message_id = m.message_id),
+    mine AS (SELECT agent_id, owner_id FROM agents WHERE owner_id = $1 AND host_id = $2 AND address_kind IS NOT NULL),
+    ev AS (
+        SELECT r.agent_id, 'dm' AS via, ou.name || '/' || o.name_lower AS partner, m.message_id, m.commit_seq
+        FROM mine r
+        JOIN messages m ON m.channel_id IS NULL AND (m.sender_agent_id = r.agent_id OR m.recipient_agent_id = r.agent_id)
+        JOIN agents o ON o.agent_id = CASE WHEN m.sender_agent_id = r.agent_id THEN m.recipient_agent_id
+                                           ELSE m.sender_agent_id END
+        JOIN users ou ON ou.user_id = o.owner_id
+        WHERE o.owner_id <> r.owner_id
+        UNION ALL
+        SELECT r.agent_id, 'channel', '#' || c.name_lower, m.message_id, m.commit_seq
+        FROM mine r
+        JOIN messages m ON m.sender_agent_id = r.agent_id AND m.channel_id IS NOT NULL
+        JOIN channels c ON c.channel_id = m.channel_id
+        WHERE EXISTS (SELECT 1 FROM memberships x JOIN agents xa ON xa.agent_id = x.agent_id
+                      WHERE x.channel_id = m.channel_id AND xa.owner_id <> r.owner_id)
+           OR EXISTS (SELECT 1 FROM messages p JOIN agents pa ON pa.agent_id = p.sender_agent_id
+                      WHERE p.channel_id = m.channel_id AND pa.owner_id <> r.owner_id))
+    SELECT ev.agent_id, ev.via, ev.partner, d.created_at,
+           CASE WHEN NOT d.native AND d.prior IS NOT NULL AND d.created_at < d.prior THEN 'imported' ELSE 'later' END
+    FROM ev JOIN dated d ON d.message_id = ev.message_id
+    ORDER BY ev.agent_id, ev.commit_seq";
 
 // --- events -------------------------------------------------------------------
 

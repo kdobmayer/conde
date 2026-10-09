@@ -27,8 +27,8 @@ use tokio::time::{MissedTickBehavior, interval_at, timeout};
 
 use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HOST_MISMATCH};
 use crate::{
-    Authentication, Authenticator, Dispatcher, Endpoint, FenceResult, Hello, NotificationSource, Outcome, Polled, Principal,
-    Recorded, SourceEvent,
+    Admission, Authentication, Authenticator, Dispatcher, Endpoint, Hello, NotificationSource, Outcome, PROTO_V2, Polled,
+    Principal, Recorded, Routes, SourceEvent,
 };
 
 /// Frame and request-body limit (DESIGN.md §4).
@@ -50,6 +50,9 @@ pub struct ServerConfig {
     pub dist_base_url: Option<String>,
     /// Entra sign-in, the keys page and the admin API, when configured.
     pub web: Option<crate::web::WebSetup>,
+    /// The lowest bridge protocol accepted (`CONDE_MIN_PROTO`); an older hello is refused with
+    /// `bad_hello`, which a v1 bridge takes as final.
+    pub min_proto: u32,
 }
 
 impl Default for ServerConfig {
@@ -62,6 +65,7 @@ impl Default for ServerConfig {
             max_frame_bytes: MAX_FRAME_BYTES,
             dist_base_url: None,
             web: None,
+            min_proto: crate::PROTO_V1,
         }
     }
 }
@@ -632,12 +636,17 @@ async fn run_bridge(
         )
         .await;
     }
-    let host = hello.host_id;
-    let instance = hello.bridge_instance;
+    if hello.proto < shared.config.min_proto {
+        let why = format!("upgrade conde: this board takes bridge protocol {} or newer", shared.config.min_proto);
+        return close_with_error(&mut tx, CODE_BAD_HELLO, &why).await;
+    }
+    let host = hello.host_id.clone();
+    let instance = hello.bridge_instance.clone();
+    let (proto, window) = (hello.proto, hello.window);
 
     let conn_id = shared.next_conn.fetch_add(1, Ordering::Relaxed);
     let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-    let endpoints: HashSet<Endpoint> = hello.endpoints.into_iter().collect();
+    let endpoints: HashSet<Endpoint> = hello.endpoints.iter().filter(|e| speaks(proto, e)).cloned().collect();
     let fence = {
         let (shared, host, instance) = (shared.clone(), host.clone(), instance.clone());
         let endpoints: Vec<Endpoint> = endpoints.iter().cloned().collect();
@@ -653,8 +662,8 @@ async fn run_bridge(
                 Some(Authentication::Unavailable(why)) => return Err(Some(why)),
                 _ => return Err(None),
             }
-            let result = shared.source.fence(&host, &instance);
-            if result == FenceResult::Active {
+            let result = shared.source.admit(&host, &hello);
+            if result == Admission::Active {
                 let entry = ActiveBridge {
                     conn_id,
                     instance: instance.clone(),
@@ -677,7 +686,10 @@ async fn run_bridge(
         .await
     };
     match fence {
-        Ok(Ok(FenceResult::Active)) => {}
+        Ok(Ok(Admission::Active)) => {}
+        Ok(Ok(Admission::Refused { code, message })) => {
+            return close_with_error(&mut tx, &code, &message).await;
+        }
         Ok(Err(None)) => {
             return close_with_error(&mut tx, "revoked", "this host's key was revoked").await;
         }
@@ -691,7 +703,7 @@ async fn run_bridge(
             )
             .await;
         }
-        Ok(Ok(FenceResult::Fenced)) => {
+        Ok(Ok(Admission::Fenced)) => {
             return close_with_error(
                 &mut tx,
                 CODE_FENCED,
@@ -721,6 +733,9 @@ async fn run_bridge(
         endpoints,
         heartbeat_pending: Arc::default(),
         last_heartbeat: None,
+        proto,
+        window,
+        routes: None,
     };
     let reason = conn.run(&mut tx, &mut rx, &mut control_rx).await;
     tracing::info!(%host, %instance, conn_id, reason, "bridge disconnected");
@@ -729,6 +744,11 @@ async fn run_bridge(
     if bridges.get(&host).is_some_and(|b| b.conn_id == conn_id) {
         bridges.remove(&host);
     }
+}
+
+/// Whether an endpoint belongs to a bridge protocol: harness endpoints to v1, mailboxes to v2.
+fn speaks(proto: u32, e: &Endpoint) -> bool {
+    matches!(e, Endpoint::Mailbox { .. }) == (proto == PROTO_V2)
 }
 
 /// Outcomes queued per connection before reading pauses; a well-behaved bridge keeps at most
@@ -798,6 +818,11 @@ struct Conn {
     heartbeat_pending: Arc<std::sync::atomic::AtomicBool>,
     /// When the last heartbeat write was started.
     last_heartbeat: Option<tokio::time::Instant>,
+    /// The hello's bridge protocol and (v2) admission window.
+    proto: u32,
+    window: Option<u32>,
+    /// v2: the routes last sent on this connection (None until the first is sent).
+    routes: Option<Routes>,
 }
 
 impl Conn {
@@ -954,15 +979,30 @@ impl Conn {
         true
     }
 
-    /// Pending notifications not yet pushed on this connection, as notify frames.
+    /// Pending notifications not yet pushed on this connection, as notify frames. On v2 the
+    /// host's routes go first whenever they differ from the last sent (always on connect), so
+    /// the bridge applies a revocation before any further notify.
     async fn new_notifications(&mut self) -> Vec<String> {
-        let (source, host, instance) = (
+        let (source, host, instance, window) = (
             self.shared.source.clone(),
             self.host.clone(),
             self.instance.clone(),
+            self.window,
         );
-        let pending = match tokio::task::spawn_blocking(move || source.poll(&host, &instance)).await {
-            Ok(Polled::Due(p) | Polled::Routed { notifies: p, .. }) => p,
+        let polled = tokio::task::spawn_blocking(move || match window {
+            Some(w) => source.poll_window(&host, &instance, w),
+            None => source.poll(&host, &instance),
+        });
+        let mut frames = Vec::new();
+        let pending = match polled.await {
+            Ok(Polled::Due(p)) => p,
+            Ok(Polled::Routed { notifies, routes }) => {
+                if self.proto == PROTO_V2 && self.routes.as_ref() != Some(&routes) {
+                    frames.push(protocol::frame("routes", &routes));
+                    self.routes = Some(routes);
+                }
+                notifies
+            }
             Ok(Polled::Fenced) => {
                 // Durably fenced (an event may have been missed): close this connection.
                 let bridges = self.shared.bridges.lock().unwrap_or_else(|p| p.into_inner());
@@ -978,7 +1018,6 @@ impl Conn {
         };
         let current: HashSet<&str> = pending.iter().map(|n| n.attempt_id.as_str()).collect();
         self.sent.retain(|a| current.contains(a.as_str()));
-        let mut frames = Vec::new();
         for n in &pending {
             if self.sent.insert(n.attempt_id.clone()) {
                 frames.push(protocol::frame("notify", n));
@@ -1010,6 +1049,15 @@ impl Conn {
                         ));
                     }
                 };
+                // A v2 bridge reports the closed statuses and reasons only (DESIGN-v2.md §5).
+                if self.proto == PROTO_V2
+                    && let Err(why) = outcome.check_v2()
+                {
+                    tracing::warn!(attempt = %outcome.attempt_id, host = %self.host, %why, "outcome rejected");
+                    let ack = json!({"attempt_id": outcome.attempt_id, "event_seq": outcome.event_seq,
+                                     "rejected": true, "retry": false, "reason": why});
+                    return Some(protocol::frame("outcome_ack", &ack));
+                }
                 // Recorded in order by the connection's outcome worker, so a slow store
                 // never holds up the request frames read after it.
                 let _ = outcome_tx.send(outcome).await;
@@ -1028,7 +1076,8 @@ impl Conn {
                 for e in &diff.removed {
                     self.endpoints.remove(e);
                 }
-                self.endpoints.extend(diff.added);
+                let proto = self.proto;
+                self.endpoints.extend(diff.added.into_iter().filter(|e| speaks(proto, e)));
                 let (source, host, instance) = (
                     self.shared.source.clone(),
                     self.host.clone(),
@@ -1072,6 +1121,7 @@ impl Conn {
 #[cfg(test)]
 mod revalidation_tests {
     use super::*;
+    use crate::FenceResult;
     use std::sync::atomic::AtomicUsize;
 
     /// Host "a" checks valid, then "b"'s check blocks until released; meanwhile "a" is

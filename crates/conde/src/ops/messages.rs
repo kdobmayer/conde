@@ -171,8 +171,12 @@ pub fn send(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let attachments = decode_attachments(body)?;
     let to = body.get("to").ok_or_else(|| bad_request("missing field 'to'"))?;
     let (id, seq, to_name) = if let Some(name) = to.get("agent").and_then(Value::as_str) {
-        let rcpt = agents::find(ctx, name)?
-            .ok_or_else(|| not_found(format!("no agent registered as '{name}'")))?;
+        // A local board queues for a name that is not registered now; a shared board addresses
+        // published names only.
+        let rcpt = match ctx.board {
+            Some(_) => agents::lookup_bound(ctx, name)?,
+            None => agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent registered as '{name}'")))?,
+        };
         let (id, seq) = insert_message(ctx, &me, Target::Agent(&rcpt), text, reply_to, attachments)?;
         (id, seq, rcpt.canonical())
     } else if let Some(raw) = to.get("channel").and_then(Value::as_str) {

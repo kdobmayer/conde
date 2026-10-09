@@ -31,7 +31,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt,
+    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt,
     PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes, WebSessionRow, address_of,
 };
 use crate::address::Address;
@@ -64,6 +64,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (3, "web", include_str!("migrations/0003_web.sql")),
     (4, "notifications_by_recipient", include_str!("migrations/0004_notifications_by_recipient.sql")),
     (5, "attempt_settled_at", include_str!("migrations/0005_attempt_settled_at.sql")),
+    (6, "mailbox", include_str!("migrations/0006_mailbox.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -855,6 +856,31 @@ impl Tx for PgTx {
         Ok(n)
     }
 
+    fn host_mailbox_only(&self, host: &str) -> StoreResult<bool> {
+        Ok(self
+            .query_opt("SELECT mailbox_only FROM hosts WHERE host_id = $1", &[&host])?
+            .is_some_and(|r| r.get::<_, bool>(0)))
+    }
+
+    fn set_host_mailbox_only(&self, host: &str) -> StoreResult<()> {
+        self.execute("UPDATE hosts SET mailbox_only = true WHERE host_id = $1", &[&host])?;
+        Ok(())
+    }
+
+    fn host_evidence(&self, owner_id: i64, host: &str) -> StoreResult<Vec<EvidenceRow>> {
+        Ok(self
+            .query(super::HOST_EVIDENCE, &[&owner_id, &host])?
+            .iter()
+            .map(|r| EvidenceRow {
+                agent_id: r.get(0),
+                via: r.get(1),
+                with: r.get(2),
+                created_at: r.get(3),
+                imported: r.get::<_, String>(4) == "imported",
+            })
+            .collect())
+    }
+
     fn host_last_seen(&self, host: &str) -> StoreResult<Option<String>> {
         Ok(self.query_one("SELECT MAX(updated_at) FROM bridge_instances WHERE host_id = $1", &[&host])?.get(0))
     }
@@ -1052,6 +1078,19 @@ impl Tx for PgTx {
             .collect())
     }
 
+    fn agents_on_host(&self, host: &str) -> StoreResult<Vec<Agent>> {
+        Ok(self
+            .query(
+                &format!(
+                    "{AGENT_SELECT} WHERE a.host_id = $1 AND a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"
+                ),
+                &[&host],
+            )?
+            .iter()
+            .map(agent_row)
+            .collect())
+    }
+
     fn insert_agent(&self, id: &str, owner_id: i64, name: &str) -> StoreResult<()> {
         self.execute(
             "INSERT INTO agents(agent_id, owner_id, name_lower) VALUES ($1, $2, $3)",
@@ -1061,6 +1100,9 @@ impl Tx for PgTx {
     }
 
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()> {
+        let old: Option<String> =
+            self.query_opt("SELECT host_id FROM agents WHERE agent_id = $1", &[&agent_id])?.and_then(|r| r.get(0));
+        self.wakes.borrow_mut().hosts.extend(old);
         self.execute(
             "UPDATE agents SET address_kind = $2, address_target = $3, host_id = $4,
              binding_version = binding_version + 1 WHERE agent_id = $1",
@@ -1556,7 +1598,8 @@ impl Tx for PgTx {
             .query(
                 "SELECT t.attempt_id, t.notification_id,
                         a.address_kind || ':' || a.address_target || '@' || a.host_id, t.text,
-                        u.name || '/' || a.name_lower, n.message_id, t.target_binding_version
+                        u.name || '/' || a.name_lower, n.message_id, t.target_binding_version, n.kind,
+                        n.recipient_agent_id
                  FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
                  JOIN agents a ON a.agent_id = n.recipient_agent_id JOIN users u ON u.user_id = a.owner_id
                  WHERE t.bridge_instance = $1 AND t.status IN ('dispatching', 'held')
@@ -1573,24 +1616,37 @@ impl Tx for PgTx {
                 recipient: r.get(4),
                 message_id: r.get(5),
                 binding_version: r.get(6),
+                kind: r.get(7),
+                recipient_id: r.get(8),
             })
             .collect())
     }
 
-    fn gone_claude_holds(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<String>> {
+    fn gone_holds(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<String>> {
         Ok(self
             .query(
                 "SELECT t.attempt_id FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
                  JOIN agents a ON a.agent_id = n.recipient_agent_id
-                 WHERE t.bridge_instance = $1 AND t.status = 'held' AND a.address_kind = 'claude' AND a.host_id = $2
+                 WHERE t.bridge_instance = $1 AND t.status = 'held' AND a.address_kind IN ('claude', 'mailbox')
+                   AND a.host_id = $2
                    AND NOT EXISTS (SELECT 1 FROM endpoints e
-                                   WHERE e.host_id = a.host_id AND e.kind = 'claude' AND e.target = a.address_target)
+                                   WHERE e.host_id = a.host_id AND e.kind = a.address_kind
+                                     AND e.target = a.address_target)
                  ORDER BY t.attempt_seq",
                 &[&bridge_instance, &host],
             )?
             .iter()
             .map(|r| r.get(0))
             .collect())
+    }
+
+    fn count_dispatching(&self, bridge_instance: &str) -> StoreResult<i64> {
+        Ok(self
+            .query_one(
+                "SELECT COUNT(*) FROM attempts WHERE bridge_instance = $1 AND status = 'dispatching'",
+                &[&bridge_instance],
+            )?
+            .get(0))
     }
 
     fn dm_delivery(&self, message_id: &str, recipient: &str) -> StoreResult<Option<DmDelivery>> {
@@ -1640,6 +1696,21 @@ impl Tx for PgTx {
             &[&instance, &host, &at],
         )?;
         let mut fenced = fenced;
+        fenced.sort();
+        self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
+        Ok(fenced)
+    }
+
+    fn fence_host(&self, host: &str, at: &str) -> StoreResult<Vec<String>> {
+        let mut fenced: Vec<String> = self
+            .query(
+                "UPDATE bridge_instances SET state = 'fenced', updated_at = $2
+                 WHERE host_id = $1 AND state = 'active' RETURNING instance",
+                &[&host, &at],
+            )?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
         fenced.sort();
         self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
         Ok(fenced)

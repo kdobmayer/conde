@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use conde_remote::{
-    Authentication, Authenticator, Endpoint, FenceResult, NotificationSource, Notify, Outcome, Polled, Principal as RemotePrincipal,
-    Recorded, ServerConfig, ServerHandle, SourceEvent, WebPrincipal,
+    Admission, Authentication, Authenticator, Endpoint, FenceResult, Hello, NotificationSource, Notify, NotifyFields, Outcome,
+    Polled, Principal as RemotePrincipal, Recorded, Route, Routes, ServerConfig, ServerHandle, SourceEvent, WebPrincipal,
 };
 use tokio::sync::broadcast;
 use serde_json::{Value, json};
@@ -203,6 +203,52 @@ impl Authenticator for Board {
     }
 }
 
+impl Board {
+    /// One `bridge.claim`: every open attempt of the instance as a notify (with the structured
+    /// fields on v2), plus the host's routes when the claim carries them.
+    fn claim(&self, host_id: &str, bridge_instance: &str, body: Value) -> Polled {
+        let claim = match self.bridge_op(host_id, bridge_instance, "bridge.claim", body) {
+            Ok(c) => c,
+            Err(e) => {
+                if let OpFailure::Refused(_) = e
+                    && let Ok(Some(newer)) = self.d.with_conn(|tx| crate::dispatch::fenced_by(tx, host_id, bridge_instance))
+                {
+                    tracing::info!(host = host_id, instance = bridge_instance, %newer, "poll found the instance fenced");
+                    return Polled::Fenced;
+                }
+                tracing::warn!(host = host_id, instance = bridge_instance, "claim failed: {e:?}");
+                return Polled::Due(Vec::new());
+            }
+        };
+        let s = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+        let notifies = claim["open"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|j| {
+                Some(Notify {
+                    notification_id: s(j, "notification_id"),
+                    attempt_id: s(j, "attempt_id"),
+                    recipient: s(j, "recipient"),
+                    binding_version: j["binding_version"].as_u64().unwrap_or_default(),
+                    endpoint: endpoint_of(j["address"].as_str()?)?,
+                    message_id: s(j, "message_id"),
+                    text: s(j, "text"),
+                    fields: j.get("fields").and_then(|f| serde_json::from_value::<NotifyFields>(f.clone()).ok()),
+                })
+            })
+            .collect();
+        match claim.get("routes").map(|r| serde_json::from_value::<Vec<Route>>(r.clone())) {
+            Some(Ok(mailboxes)) => Polled::Routed { notifies, routes: Routes { mailboxes } },
+            Some(Err(e)) => {
+                tracing::error!(host = host_id, instance = bridge_instance, "unreadable routes in a claim: {e}");
+                Polled::Due(notifies)
+            }
+            None => Polled::Due(notifies),
+        }
+    }
+}
+
 fn endpoint_of(address: &str) -> Option<Endpoint> {
     let a = Address::parse(address, "-").ok()?;
     match a.kind {
@@ -224,37 +270,38 @@ impl NotificationSource for Board {
     /// A refused claim on a durably fenced instance is reported as such, so the
     /// server closes the connection even when the fence event was missed.
     fn poll(&self, host_id: &str, bridge_instance: &str) -> Polled {
-        let claim = match self.bridge_op(host_id, bridge_instance, "bridge.claim", json!({"limit": 100, "open": true})) {
-            Ok(c) => c,
-            Err(e) => {
-                if let OpFailure::Refused(_) = e
-                    && let Ok(Some(newer)) = self.d.with_conn(|tx| crate::dispatch::fenced_by(tx, host_id, bridge_instance))
-                {
-                    tracing::info!(host = host_id, instance = bridge_instance, %newer, "poll found the instance fenced");
-                    return Polled::Fenced;
+        self.claim(host_id, bridge_instance, json!({"limit": 100, "open": true}))
+    }
+
+    /// A v2 instance's claim: within its window, with the structured fields and the host's routes.
+    fn poll_window(&self, host_id: &str, bridge_instance: &str, window: u32) -> Polled {
+        self.claim(host_id, bridge_instance, json!({"window": window, "open": true}))
+    }
+
+    /// The hello's protocol is checked against the host's migration state in the fence's own
+    /// transaction, so a migration cannot slip between the check and the fence.
+    fn admit(&self, host_id: &str, hello: &Hello) -> Admission {
+        let instance = &hello.bridge_instance;
+        match self.bridge_op(host_id, instance, "bridge.fence", json!({"proto": hello.proto})) {
+            Ok(r) if r["active"] == true => {
+                if let Some(old) = r["fenced"].as_array().filter(|a| !a.is_empty()) {
+                    tracing::info!(host = host_id, instance, ?old, "bridge took over the host");
                 }
-                tracing::warn!(host = host_id, instance = bridge_instance, "claim failed: {e:?}");
-                return Polled::Due(Vec::new());
+                Admission::Active
             }
-        };
-        let s = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
-        Polled::Due(claim["open"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|j| {
-                Some(Notify {
-                    notification_id: s(j, "notification_id"),
-                    attempt_id: s(j, "attempt_id"),
-                    recipient: s(j, "recipient"),
-                    binding_version: j["binding_version"].as_u64().unwrap_or_default(),
-                    endpoint: endpoint_of(j["address"].as_str()?)?,
-                    message_id: s(j, "message_id"),
-                    text: s(j, "text"),
-                    fields: None,
-                })
-            })
-            .collect())
+            Ok(r) => match r["refused"].as_str() {
+                Some(why) => {
+                    tracing::warn!(host = host_id, instance, proto = hello.proto, "hello refused: {why}");
+                    Admission::Refused { code: "bad_hello".into(), message: why.to_string() }
+                }
+                None => Admission::Fenced,
+            },
+            Err(OpFailure::Refused(why)) => {
+                tracing::error!(host = host_id, instance, "fence refused: {why}");
+                Admission::Fenced
+            }
+            Err(OpFailure::Transient(why)) => unanswered(format!("fence of {instance} not recorded: {why}")),
+        }
     }
 
     fn record_outcome(&self, host_id: &str, bridge_instance: &str, o: &Outcome) -> Recorded {
@@ -321,11 +368,11 @@ impl NotificationSource for Board {
     fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) {
         let list: Vec<Value> = endpoints
             .iter()
-            .filter_map(|e| match e {
-                Endpoint::Claude { session_id } => Some(json!({"kind": "claude", "target": session_id})),
-                Endpoint::Codex { thread_id } => Some(json!({"kind": "codex", "target": thread_id})),
-                // A v1 board keeps harness endpoints only.
-                Endpoint::Mailbox { .. } => None,
+            .map(|e| match e {
+                Endpoint::Claude { session_id } => json!({"kind": "claude", "target": session_id}),
+                Endpoint::Codex { thread_id } => json!({"kind": "codex", "target": thread_id}),
+                // Taken only from a host migrated to v2 (bridge.endpoints decides).
+                Endpoint::Mailbox { mailbox_id } => json!({"kind": "mailbox", "target": mailbox_id}),
             })
             .collect();
         match self.bridge_op(host_id, bridge_instance, "bridge.endpoints", json!({"endpoints": list})) {
@@ -338,8 +385,30 @@ impl NotificationSource for Board {
     }
 }
 
-/// Start the remote listener over `d` (tests and `conde server`).
+/// The shared board's advertised name (`CONDE_BOARD_NAME`, default `shared`): the alias every
+/// teammate is offered at enrollment.
+pub fn board_name() -> anyhow::Result<String> {
+    let raw = std::env::var("CONDE_BOARD_NAME").ok().filter(|n| !n.is_empty()).unwrap_or_else(|| "shared".into());
+    let name = crate::address::normalize_name(&raw)
+        .filter(|n| !n.contains('.') && n != crate::protocol::v2::LOCAL_BOARD)
+        .ok_or_else(|| anyhow::anyhow!("CONDE_BOARD_NAME '{raw}' is not a board name (one word, not 'local')"))?;
+    Ok(name)
+}
+
+/// The lowest bridge protocol the server takes (`CONDE_MIN_PROTO`, default 1); 2 once every
+/// enrolled host migrated.
+pub fn min_proto() -> anyhow::Result<u32> {
+    match std::env::var("CONDE_MIN_PROTO").ok().filter(|v| !v.is_empty()).as_deref() {
+        None | Some("1") => Ok(conde_remote::PROTO_V1),
+        Some("2") => Ok(conde_remote::PROTO_V2),
+        Some(other) => anyhow::bail!("CONDE_MIN_PROTO '{other}' is not 1 or 2"),
+    }
+}
+
+/// Start the remote listener over `d` (tests and `conde server`); `d` serves as the shared
+/// board named by [`board_name`].
 pub async fn start(d: Arc<Dispatcher>, listen: SocketAddr, config: ServerConfig) -> std::io::Result<ServerHandle> {
+    d.share(&board_name().map_err(std::io::Error::other)?);
     let board = Arc::new(Board::new(d));
     conde_remote::start(listen, config, board.clone(), board.clone(), board).await
 }
@@ -353,7 +422,9 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
         if let Some(w) = &web {
             tracing::info!(entra = w.entra.is_some(), admin = w.admin_key.is_some(), "web surface enabled");
         }
-        let handle = start(d, listen, ServerConfig { dist_base_url, web, ..ServerConfig::default() }).await?;
+        let min_proto = min_proto()?;
+        tracing::info!(board = %board_name()?, min_proto, "shared board");
+        let handle = start(d, listen, ServerConfig { dist_base_url, web, min_proto, ..ServerConfig::default() }).await?;
         tracing::info!(addr = %handle.local_addr(), "conde server ready");
         crate::daemon::termination().await;
         tracing::info!("terminating: closing bridge connections");

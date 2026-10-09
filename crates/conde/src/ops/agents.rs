@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::channels;
 use crate::address::{Address, Kind, split_qualified};
 use crate::dispatch::{
-    Ctx, OpResult, bad_request, conflict, forbidden, not_found, one_line, opt_str, str_param,
+    Ctx, OpError, OpResult, bad_request, conflict, forbidden, not_found, one_line, opt_str, str_param,
 };
 pub use crate::store::Agent;
 use crate::store::Tx;
@@ -41,18 +41,40 @@ pub fn find(ctx: &Ctx, input: &str) -> OpResult<Option<Agent>> {
     by_name(ctx.db, owner_id, &name)
 }
 
-/// Like `find`, but the name must currently be bound to an address.
+/// Like `find`, but the name must currently be bound to an address. On a shared board an
+/// unknown, unbound or unpublished name all read `recipient unavailable` (DESIGN-v2.md §6).
 pub fn lookup_bound(ctx: &Ctx, input: &str) -> OpResult<Agent> {
-    find(ctx, input)?
-        .filter(|a| a.address.is_some())
-        .ok_or_else(|| not_found(format!("no agent registered as '{input}'")))
+    find(ctx, input)?.filter(|a| a.address.is_some()).ok_or_else(|| match ctx.board {
+        Some(_) => unavailable(ctx, input),
+        None => not_found(format!("no agent registered as '{input}'")),
+    })
+}
+
+/// The shared board's one answer for a name that cannot be addressed, whether it never existed
+/// or is not published: `recipient unavailable: <owner/name>`.
+pub fn unavailable(ctx: &Ctx, input: &str) -> OpError {
+    let canonical = match split_qualified(input) {
+        Some((owner, name)) => format!("{}/{name}", owner.unwrap_or_else(|| ctx.p.user.clone())),
+        None => input.to_string(),
+    };
+    not_found(format!("recipient unavailable: {canonical}"))
+}
+
+/// A row as a shared board lists it: kind and host, never a target (session, thread or pin).
+fn target_free(a: &Agent) -> Value {
+    json!({
+        "name": a.canonical(),
+        "kind": a.address.as_ref().map(|x| x.kind.as_str()),
+        "host": a.address.as_ref().map(|x| x.host.as_str()),
+        "display": a.display,
+    })
 }
 
 fn set_binding(db: &dyn Tx, agent_id: &str, address: Option<&Address>) -> OpResult<()> {
     Ok(db.set_binding(agent_id, address)?)
 }
 
-fn ensure_row(ctx: &Ctx, name: &str) -> OpResult<Agent> {
+pub(crate) fn ensure_row(ctx: &Ctx, name: &str) -> OpResult<Agent> {
     if let Some(a) = by_name(ctx.db, ctx.p.user_id, name)? {
         return Ok(a);
     }
@@ -93,7 +115,7 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 
 /// A name's first registration joins `#lobby` when it exists: a plain
 /// membership at the end of the log, no join post, no notification.
-fn join_lobby(ctx: &Ctx, agent: &Agent) -> OpResult<Option<String>> {
+pub(crate) fn join_lobby(ctx: &Ctx, agent: &Agent) -> OpResult<Option<String>> {
     let Some(lobby) = ctx.db.channel_by_name(LOBBY)? else { return Ok(None) };
     if ctx.db.read_seq(&lobby.id, &agent.id)?.is_some() {
         return Ok(None);
@@ -224,6 +246,11 @@ pub fn whoami(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
 
 pub fn resolve(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let agent = lookup_bound(ctx, str_param(body, "name")?)?;
+    if ctx.board.is_some() {
+        let mut row = target_free(&agent);
+        row.as_object_mut().map(|o| o.remove("display"));
+        return Ok(row);
+    }
     Ok(json!({"name": agent.canonical(), "address": agent.address.map(|a| a.to_string())}))
 }
 
@@ -232,13 +259,14 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         .db
         .bound_agents()?
         .into_iter()
-        .map(|a| {
-            json!({
+        .map(|a| match ctx.board {
+            Some(_) => target_free(&a),
+            None => json!({
                 "name": a.canonical(),
                 "address": a.address.as_ref().map(ToString::to_string),
                 "display": a.display,
                 "pinned": a.pinned,
-            })
+            }),
         })
         .collect();
     Ok(json!({"agents": agents}))
@@ -246,7 +274,13 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
 
 pub fn profile_get(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let input = str_param(body, "name")?;
-    let agent = find(ctx, input)?.ok_or_else(|| not_found(format!("no agent named '{input}'")))?;
+    // On a shared board another owner's unpublished name reads as one that never existed.
+    let agent = find(ctx, input)?
+        .filter(|a| ctx.board.is_none() || a.owner_id == ctx.p.user_id || a.address.is_some())
+        .ok_or_else(|| not_found(format!("no agent named '{input}'")))?;
+    if ctx.board.is_some() {
+        return Ok(target_free(&agent));
+    }
     Ok(json!({
         "name": agent.canonical(),
         "address": agent.address.as_ref().map(ToString::to_string),

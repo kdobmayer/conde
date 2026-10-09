@@ -6,7 +6,9 @@ pub mod bridge;
 pub mod channels;
 pub mod history;
 pub mod hosts;
+pub mod mailbox;
 pub mod messages;
+pub mod migrate;
 pub mod misc;
 pub mod web;
 
@@ -57,6 +59,12 @@ pub static OPS: &[OpSpec] = &[
     // Temporary (DESIGN-v2 section 10, H3): removed after H4.
     op!("history.copy", history::copy, query),
     op!("doctor", misc::doctor, query),
+    op!("board.info", mailbox::board_info, query),
+    op!("mailbox.publish", mailbox::publish, mutation),
+    op!("mailbox.unpublish", mailbox::unpublish, mutation),
+    op!("mailbox.mine", mailbox::mine, query),
+    op!("host.migrate_preview", migrate::preview, query),
+    op!("host.migrate_v2", migrate::migrate, mutation),
     op!("bridge.claim", bridge::claim, bridge),
     op!("bridge.report", bridge::report, bridge),
     op!("bridge.fence", bridge::fence, bridge),

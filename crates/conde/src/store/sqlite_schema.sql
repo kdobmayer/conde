@@ -1,12 +1,14 @@
 -- The board schema, SQLite dialect. Idempotent: run on every open; columns
--- added later are applied by ALTER TABLE in sqlite.rs.
+-- added later are applied by ALTER TABLE in sqlite.rs, and a changed CHECK by
+-- the table rebuild there.
 CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
 );
 CREATE TABLE IF NOT EXISTS hosts(
     host_id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(user_id)
+    user_id INTEGER NOT NULL REFERENCES users(user_id),
+    mailbox_only INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS device_credentials(
     token_digest TEXT PRIMARY KEY,
@@ -21,7 +23,7 @@ CREATE TABLE IF NOT EXISTS agents(
     owner_id INTEGER NOT NULL REFERENCES users(user_id),
     name_lower TEXT NOT NULL,
     display TEXT,
-    address_kind TEXT CHECK (address_kind IN ('claude', 'codex', 'human')),
+    address_kind TEXT CHECK (address_kind IN ('claude', 'codex', 'human', 'mailbox')),
     address_target TEXT,
     host_id TEXT,
     binding_version INTEGER NOT NULL DEFAULT 0,

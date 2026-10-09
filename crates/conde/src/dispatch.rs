@@ -3,7 +3,7 @@
 //! with its idempotency record.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde_json::Value;
@@ -81,6 +81,11 @@ pub struct Ctx<'a> {
     pub now_ms: i64,
     /// Backoff before a failed / expired / dropped notification is retried.
     pub retry_ms: i64,
+    /// The shared board's advertised name when this dispatcher serves one (`conde server`),
+    /// None on a local board.
+    pub board: Option<&'a str>,
+    /// The caller's host migrated to v2 (`hosts.mailbox_only`; shared boards only).
+    pub mailbox_only: bool,
 }
 
 impl Ctx<'_> {
@@ -93,7 +98,10 @@ impl Ctx<'_> {
         let raw = self
             .actor
             .ok_or_else(|| unauthenticated("this request needs the caller's identity (actor)"))?;
-        let address = Address::parse_v1(raw, &self.p.host).map_err(|e| bad_request(e.to_string()))?;
+        // A host migrated to v2 acts as its mailboxes; every other host as its sessions.
+        let parsed =
+            if self.mailbox_only { Address::parse(raw, &self.p.host) } else { Address::parse_v1(raw, &self.p.host) };
+        let address = parsed.map_err(|e| bad_request(e.to_string()))?;
         if address.host != self.p.host {
             return Err(forbidden(format!(
                 "actor host '{}' is not this connection's host '{}'",
@@ -101,6 +109,23 @@ impl Ctx<'_> {
             )));
         }
         Ok(address)
+    }
+
+    /// The shared board's name, or the refusal of a shared-board op on a local board.
+    pub fn shared_board(&self) -> OpResult<&str> {
+        self.board.ok_or_else(|| forbidden("this is a local board; publication and migration are ops of a shared board"))
+    }
+
+    /// The refusal of a mailbox op from a host that has not migrated to v2.
+    pub fn migrated(&self) -> OpResult<()> {
+        self.shared_board()?;
+        if !self.mailbox_only {
+            return Err(forbidden(format!(
+                "host '{}' has not migrated to v2 on this board yet; its human runs conde setup first",
+                self.p.host
+            )));
+        }
+        Ok(())
     }
 
     /// Resolve a possibly qualified name inside the caller's own namespace;
@@ -157,6 +182,8 @@ pub struct Dispatcher {
     store: Arc<dyn Store>,
     clock_offset_ms: AtomicI64,
     retry_ms: AtomicI64,
+    /// Set once this dispatcher serves a shared board: its advertised name.
+    shared: OnceLock<String>,
 }
 
 impl Dispatcher {
@@ -175,7 +202,24 @@ impl Dispatcher {
     }
 
     pub fn with(store: Arc<dyn Store>) -> Dispatcher {
-        Dispatcher { store, clock_offset_ms: AtomicI64::new(0), retry_ms: AtomicI64::new(NOTIFY_RETRY_MS) }
+        Dispatcher {
+            store,
+            clock_offset_ms: AtomicI64::new(0),
+            retry_ms: AtomicI64::new(NOTIFY_RETRY_MS),
+            shared: OnceLock::new(),
+        }
+    }
+
+    /// Serve this board as a shared board advertised as `name` (`conde server`, DESIGN-v2.md
+    /// §6): non-disclosing recipient errors, target-free listings, the v2 ops, and the
+    /// refusals for hosts migrated to v2. Set once; a later call keeps the first name.
+    pub fn share(&self, name: &str) {
+        let _ = self.shared.set(name.to_string());
+    }
+
+    /// The shared board's name, None on a local board.
+    pub fn shared_name(&self) -> Option<&str> {
+        self.shared.get().map(String::as_str)
     }
 
     pub fn store(&self) -> &Arc<dyn Store> {
@@ -298,6 +342,11 @@ impl Dispatcher {
                 p.host
             )));
         }
+        let board = self.shared_name();
+        let mailbox_only = board.is_some() && !p.local && !p.browser && tx.host_mailbox_only(&p.host)?;
+        if mailbox_only {
+            refuse_on_migrated_host(p, req)?;
+        }
         if let (Some(key), Some(hash)) = (key, &request_hash)
             && let Some((stored_hash, result)) = tx.idempotency_get(&actor_id, spec.name, key)?
         {
@@ -316,6 +365,8 @@ impl Dispatcher {
             from: req.from.as_deref(),
             now_ms: self.now_ms(),
             retry_ms: self.retry_ms.load(Ordering::Relaxed),
+            board,
+            mailbox_only,
         };
         let result = (spec.run)(&ctx, &req.body)?;
         if spec.mutation && !spec.bridge_only {
@@ -339,10 +390,32 @@ impl Dispatcher {
     }
 }
 
+/// A host migrated to v2 (DESIGN-v2.md §6) never registers, pins or renames a name on the shared
+/// board (its names are published), and never acts as a session.
+fn refuse_on_migrated_host(p: &Principal, req: &Request) -> OpResult<()> {
+    if matches!(req.op.as_str(), "agent.register" | "agent.pin" | "agent.rename") {
+        return Err(forbidden(format!(
+            "'{}' is refused for host '{}': it migrated to v2, and its names on this board are published by \
+             its human (conde publish <agent> --board <alias>)",
+            req.op, p.host
+        )));
+    }
+    if let Some(actor) = &req.actor
+        && Address::parse(actor, &p.host).is_ok_and(|a| matches!(a.kind, Kind::Claude | Kind::Codex))
+    {
+        return Err(forbidden(format!(
+            "host '{}' migrated to v2: it acts on this board as a published mailbox, never as a session",
+            p.host
+        )));
+    }
+    Ok(())
+}
+
 /// What a committed (non-bridge) mutation changed, as the web UI groups it.
 fn board_topics(op: &str) -> u8 {
     use crate::store::topics::{DELIVERY, FLEET, MESSAGES};
-    if op.starts_with("agent.") || op.starts_with("profile.") { FLEET | MESSAGES } else { MESSAGES | DELIVERY }
+    let fleet = ["agent.", "profile.", "mailbox.", "host."];
+    if fleet.iter().any(|f| op.starts_with(f)) { FLEET | MESSAGES } else { MESSAGES | DELIVERY }
 }
 
 /// The instance that superseded `instance` on `host`, when it was fenced (the

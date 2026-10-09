@@ -1009,11 +1009,11 @@ fn fencing_and_endpoints(s: &dyn Store) {
         tx.update_attempt("held1", "held", None, None, "2026-10-09T00:00:00.000Z").unwrap();
         tx.replace_endpoints("box", "b2", &[("claude", "s1"), ("codex", "t1")], "t5").unwrap();
         assert_eq!(tx.count_endpoints().unwrap(), 2);
-        assert!(tx.gone_claude_holds("b2", "box").unwrap().is_empty(), "s1 is live");
+        assert!(tx.gone_holds("b2", "box").unwrap().is_empty(), "s1 is live");
         tx.replace_endpoints("box", "b2", &[("codex", "t1"), ("codex", "t1")], "t6").unwrap();
         assert_eq!(tx.count_endpoints().unwrap(), 1, "replaced, duplicates folded");
-        assert_eq!(tx.gone_claude_holds("b2", "box").unwrap(), vec!["held1".to_string()]);
-        assert!(tx.gone_claude_holds("b1", "box").unwrap().is_empty(), "only the instance's own holds");
+        assert_eq!(tx.gone_holds("b2", "box").unwrap(), vec!["held1".to_string()]);
+        assert!(tx.gone_holds("b1", "box").unwrap().is_empty(), "only the instance's own holds");
     });
 }
 

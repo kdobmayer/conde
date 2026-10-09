@@ -691,18 +691,17 @@ already revoked (admin API, checked 2026-10-09); Astra's Codex thread registers 
   is the new, empty local `conde.db`, with the daemon stopped. Nothing writes to it until both
   steps validate. On any failure the file is discarded and the restore rerun from scratch, so a
   partial local board never starts.
-  - **H2**: `conde import --from ~/.cache/conde-snapshot-final --expect-files 59220`. The source is
-    the frozen copy of the share snapshot, verified file for file against the share (H-pre,
-    2026-10-09), never `~/.local/share/kond`: that directory kept changing after kond stopped (a kond
-    session still writes to it), so its file count is not 59220 and its content is not the snapshot. Validation: the v1 checks (every source row present, cursors at or past kond's), with
+  - **H2**: `conde import --from <fresh snapshot> --expect-files <its count> --skip-agents <prune list>`.
+    The source is a snapshot of `~/.local/share/kond` taken at the switch with kond stopped (kond
+    runs again for private traffic until then, so the frozen 59220-file copy is only the regression
+    reference for the class (a) digest). The owner's prune list (names struck from
+    `conde history prune-candidates`) is applied here; pruned names never enter the local board. Validation: the v1 checks (every source row present, cursors at or past kond's), with
     sha256 of every body and every attachment instead of the 50-body sample and sizes.
-  - **H3**: a one-off copy of class (b), by the frozen ids. It goes through a temporary owner-only
-    read on central, `history.copy {ids}`. That read refuses any id that is not class (b) for the
-    caller, and returns the rows with read state, reactions, attachment bytes and their hashes. The
-    copy writes everything in one SQLite transaction and preserves:
-    - message ids and `reply_to` links;
-    - DM read state, with channel cursors only moved forward;
-    - reactions and attachment bytes.
+  - **H3**: the owner's private conde-native rows were purged from central on 2026-10-09 (safety
+    copy as pg COPY csv on homepc). `conde history copy --manifest <dir> --from-csv <dir> --after-freeze`
+    restores them into the local board: frozen rows checked against the manifest hashes, rows newer
+    than the freeze against the csv; one transaction, re-validated after. The server-side
+    `history.copy` op was removed (lane H-pre). Recipe: docs/SWITCH-v2-history.md.
 
     Parties are mapped to the local agents by owner/name. Copied messages are appended after the
     kond import. This keeps the order because class (b) is newer than kond's traffic in every

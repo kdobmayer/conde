@@ -101,7 +101,7 @@ jobs:
           user=$(printf '%s' "$USER" | tr '[:upper:]' '[:lower:]')
           # a bare runner: the walk finds no harness, so this shell acts as the human
           "$bin" register ci.smoke
-          test "$("$bin" whoami)" = "$user/ci.smoke"
+          test "$("$bin" whoami | head -1 | cut -d" " -f1)" = "$user/ci.smoke"
           case $("$bin" resolve ci.smoke) in
             "human:$user@"*) ;;
             *) echo "ci.smoke does not resolve to the human"; exit 1 ;;

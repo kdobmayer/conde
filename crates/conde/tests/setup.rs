@@ -682,7 +682,7 @@ fn without_a_terminal_nothing_is_decided_for_the_human() {
     let (ok, out) = run(&env, &Options::select(false, false, false, false), &mut host);
     assert!(ok, "{out}");
     assert!(out.contains("boards: dakai: not migrated: choosing what stays published is the human's, at a terminal; until then dakai stays local-only on this host; the review: conde boards --migrate dakai\n"), "{out}");
-    assert!(out.contains("boards: default board for names and channels: local (the human sets it: conde setup --default-board <alias>)\n"), "{out}");
+    assert!(out.contains("boards: default board for names and channels: local (to change it: conde setup --default-board <alias>)\n"), "{out}");
     assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
     assert!(!env.default_board().exists());
 

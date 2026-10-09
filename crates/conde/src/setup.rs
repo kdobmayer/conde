@@ -29,9 +29,9 @@ pub const LAUNCHD_LABEL: &str = "space.nativeai.conde";
 pub const FEEDBACK: &str = "Send a DM to kdobmayer/desk with how the setup went: what worked, what failed, what you \
 had to figure out yourself, roughly how long it took, and the OS.";
 pub const FEEDBACK_COMMAND: &str = "conde send kdobmayer/desk \"<how the setup went>\" --board dakai";
-pub const FEEDBACK_KEEP: &str = "desk is on the team's board: your human publishes the name you send it from first \
-(conde publish <name> --board dakai); on a host without that board, tell your human instead. Keep the name \
-registered: desk replies to it.";
+pub const FEEDBACK_KEEP: &str = "desk is on the team's board: the name you send it from must be published there \
+first (conde publish <name> --board dakai, when your human told you to publish it); otherwise, or on a host without \
+that board, tell your human instead. Keep the name registered: desk replies to it.";
 pub const GUIDE: &str = "Setup guide: https://conde.nativeai.space/readme";
 /// What enrolling a shared board does and does not do, for the human who runs it.
 pub const ENROLL_SCOPE: &str = "Enrolling publishes nothing and uploads no history: every agent stays on this \
@@ -800,7 +800,7 @@ fn default_board(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn W
         let Some(answer) = host.ask(&prompt) else {
             writeln!(
                 out,
-                "boards: default board for names and channels: {current} (the human sets it: conde setup --default-board <alias>)"
+                "boards: default board for names and channels: {current} (to change it: conde setup --default-board <alias>)"
             )?;
             return Ok(());
         };

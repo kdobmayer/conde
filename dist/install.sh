@@ -121,4 +121,4 @@ fi
 say ""
 say "Next:"
 say "  conde setup        # this machine's local board, the bridge service, skills and MCP for Claude Code and Codex"
-say "  conde login --server https://conde.nativeai.space   # later, the human: join the team's board (publishes nothing)"
+say "  conde login --server https://conde.nativeai.space   # then: join the team's board; your human clicks the browser sign-in (publishes nothing)"

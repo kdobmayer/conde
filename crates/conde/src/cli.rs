@@ -754,7 +754,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Boards { forget: Some(alias), .. } => {
             let r = sx.call_on(surface::BOARD_FORGET, Some(&alias), json!({}))?;
             println!(
-                "forgot {alias}: {} publications and {} pending ops removed on this host; nothing changed on the server",
+                "forgot {alias}: {} publications and {} operation records removed on this host; nothing changed on the server",
                 r["publications_removed"].as_u64().unwrap_or(0),
                 r["ops_removed"].as_u64().unwrap_or(0)
             );
@@ -769,9 +769,6 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("ok      daemon: reachable at {}", paths::socket_path().display());
             for c in r["checks"].as_array().into_iter().flatten() {
                 println!("{}{}", if c["ok"] == true { "ok      " } else { "ISSUE   " }, s(&c["text"]));
-            }
-            for (kind, text) in surface::origins(&r) {
-                println!("{kind:<8}{text}");
             }
             let issues = r["issues"].as_i64().unwrap_or(0);
             if issues == 0 {

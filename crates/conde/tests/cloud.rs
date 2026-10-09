@@ -206,7 +206,7 @@ fn two_hosts_exchange_a_dm_through_the_server() {
     assert!(doctor.contains("ok      shared: connected to ws://"), "{doctor}");
     assert!(doctor.contains("credentials: ") && doctor.contains("boards/shared.json mode 600"), "{doctor}");
     assert!(doctor.contains("ok      database: ok"), "{doctor}");
-    assert!(doctor.contains("delivery shared: "), "{doctor}");
+    assert!(doctor.contains("ok      slots: shared "), "{doctor}");
 
     // a revoked key stops the board connection only; the local board keeps working
     let revoked = cloud.d.with_tx(|c| conde::ops::hosts::revoke(c, Some("host-a"), None, "now")).unwrap();

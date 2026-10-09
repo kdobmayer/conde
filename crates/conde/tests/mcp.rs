@@ -295,6 +295,7 @@ fn board_rules_through_mcp_match_the_cli() {
                 {"board": "dakai", "kind": "dm", "message_id": "01MD", "from": "b/r", "date": "d", "preview": "q"}],
                 "boards": [{"board": "dakai", "available": true}, {"board": "two", "available": false}]}),
             "receipt.list" => json!({"receipts": [{"board": "dakai", "message_id": "01SD", "to": "b/r", "status": "unread", "delivery": "held"}]}),
+            "search" => json!({"board": "dakai", "next_cursor": 3, "hits": []}),
             "agent.whoami" => json!({"name": "tester/me", "address": "claude:s-me@testhost",
                 "publications": [{"board": "dakai", "name": "tester/reviewer", "state": "published"}]}),
             "reaction.set" => json!({"place": "dm"}),
@@ -329,6 +330,7 @@ fn board_rules_through_mcp_match_the_cli() {
         "local\tdm\t01ML\ttester/a\td\tp\ndakai\tdm\tdakai:01MD\tb/r\td\tq\n(local: 1 unread; dakai: 1 unread)\n(two: unavailable)"
     );
     assert_eq!(p.ok("sent", json!({"board": "dakai"}), json!({})), "dakai  dakai:01SD  b/r  unread  delivery: held");
+    assert_eq!(p.ok("search", json!({"pattern": "x", "board": "dakai"}), json!({})), "(no matches)\n(more: call search with board=\"dakai\" after=3)");
     assert_eq!(d.take().pop().unwrap()["board"], "dakai");
     assert_eq!(p.ok("whoami", json!({}), json!({})), "tester/me (local, claude:s-me@testhost)\npublished: dakai as tester/reviewer");
     drop(p);

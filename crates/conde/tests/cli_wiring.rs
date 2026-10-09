@@ -441,7 +441,8 @@ fn publish_unpublish_boards_whoami_and_doctor() {
                 "publications": [{"board": "dakai", "name": "tester/kw", "state": "published"}],
                 "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true}]}),
             "agent.register" => json!({"name": "tester/worker", "address": "claude:s1@testhost", "publications": [], "boards": ["dakai"]}),
-            "doctor" => json!({"checks": [{"ok": true, "text": "local board: conde.db (integrity ok)"}], "issues": 0,
+            "doctor" => json!({"checks": [{"ok": true, "text": "local board: conde.db (integrity ok)"},
+                                          {"ok": true, "text": "slots: dakai 256/256 used (queue 32/32, outcomes 0, book 0)"}], "issues": 0,
                 "origins": [{"origin": "local", "slots_used": 0, "slots": 256}, {"origin": "dakai", "slots_used": 256, "slots": 256, "queued": 32}]}),
             _ => json!({}),
         })
@@ -483,7 +484,7 @@ fn publish_unpublish_boards_whoami_and_doctor() {
     );
     let (ok, out, _) = r.conde(&["boards", "--forget", "dakai"]);
     assert!(ok);
-    assert_eq!(out, "forgot dakai: 2 publications and 0 pending ops removed on this host; nothing changed on the server\n");
+    assert_eq!(out, "forgot dakai: 2 publications and 0 operation records removed on this host; nothing changed on the server\n");
     let req = d.take().pop().unwrap();
     assert_eq!((req["op"].as_str(), req["board"].as_str()), (Some("board.forget"), Some("dakai")));
 
@@ -497,8 +498,9 @@ fn publish_unpublish_boards_whoami_and_doctor() {
     );
     let (ok, out, _) = r.conde(&["doctor"]);
     assert!(ok, "{out}");
-    assert!(out.contains("ok      delivery local: 0/256 receipt slots used\n"), "{out}");
-    assert!(out.contains("note    delivery dakai: 256/256 receipt slots used, 32 queued; new pushes from dakai wait until held messages settle\n"), "{out}");
+    // the daemon's own checks carry the slots per origin; `origins` is data, not printed twice
+    assert!(out.contains("ok      slots: dakai 256/256 used (queue 32/32, outcomes 0, book 0)\n"), "{out}");
+    assert!(!out.contains("receipt slots used"), "{out}");
     assert!(out.ends_with("all clear\n"), "{out}");
 }
 
@@ -586,4 +588,32 @@ fn a_daemon_that_predates_boards_is_never_handed_a_board() {
     // without a board the request is the v1 one
     let (ok, out, _) = r.conde(&["send", "x", "hi"]);
     assert!(ok && out == "queued 01M to tester/x\n", "{out}");
+}
+
+#[test]
+fn paging_hints_and_unconfirmed_reads_name_their_board() {
+    let r = Root::new();
+    let _d = r.fake(|req| {
+        Ok(match (req["op"].as_str().unwrap(), req["board"].as_str()) {
+            ("inbox.list", Some("dakai")) => json!({"board": "dakai", "next_cursor": 7, "items": [
+                {"board": "dakai", "kind": "dm", "message_id": "dakai:01MD", "from": "b/r", "date": "d", "preview": "q"}]}),
+            ("inbox.list", _) => json!({"next_cursor": 5, "items": [
+                {"board": "local", "kind": "dm", "message_id": "01ML", "from": "a", "date": "d", "preview": "p"}],
+                "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "next_cursor": 9}]}),
+            ("message.read", _) => json!({"more": false, "messages": [
+                {"board": "dakai", "place": "dm", "message_id": "dakai:01MU", "from": "b/r", "date": "d", "text": "preview only", "unconfirmed": true}],
+                "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "unconfirmed": true}]}),
+            _ => json!({}),
+        })
+    });
+    // aggregate: `after` pages the local part; each board pages on its own
+    let (_, _, err) = r.conde(&["inbox"]);
+    assert!(err.contains("(more on local: conde inbox --board local --after 5)\n"), "{err}");
+    assert!(err.contains("(more on dakai: conde inbox --board dakai --after 9)\n"), "{err}");
+    let (_, _, err) = r.conde(&["inbox", "--board", "dakai"]);
+    assert!(err.contains("(more: conde inbox --board dakai --after 7)\n"), "{err}");
+    // a read the board did not confirm in time is shown as such, never as read
+    let (_, out, err) = r.conde(&["read"]);
+    assert!(out.starts_with("=== dakai:01MU\nFrom: b/r\nTo: \nDate: d\nUnconfirmed: dakai did not confirm the read in time; this is its preview, read it with: conde read dakai:01MU\n"), "{out}");
+    assert!(err.contains("(dakai: listed but not marked read; read each with conde read <its id>)"), "{err}");
 }

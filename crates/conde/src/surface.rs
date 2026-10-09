@@ -14,6 +14,8 @@
 //!   refused before it is sent ([`stale_daemon`]).
 //! - `agent.whoami` and `agent.register` results list `publications: [{board, name, state}]`
 //!   (`name` is the shared `owner/name`) and the shared boards in `boards`.
+//! - Aggregate parts may carry `next_cursor` (that board's page) and `unconfirmed` (a read the
+//!   board did not confirm in time; its rows are previews flagged `unconfirmed`).
 //! - Publication ops on the socket carry the alias in the envelope: `mailbox.publish`
 //!   `{agent, name, take?}` and `mailbox.unpublish` `{agent}`, each answering
 //!   `{state, op_id, name?}`; `board.list`, `board.forget`, `board.info`,
@@ -203,6 +205,32 @@ fn shared_parts(r: &Value) -> bool {
     r["boards"].as_array().is_some_and(|b| b.iter().any(|p| s(&p["board"]) != LOCAL_BOARD))
 }
 
+/// The paging hints: `after` pages one board, so an aggregate view names each part's board.
+fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
+    let hint = |board: Option<&str>, n: i64| match (surface, tool, board) {
+        (Surface::Cli, "search", None) => format!("add --after {n}"),
+        (Surface::Cli, "search", Some(b)) => format!("add --board {b} --after {n}"),
+        (Surface::Cli, _, None) => format!("conde {tool} --after {n}"),
+        (Surface::Cli, _, Some(b)) => format!("conde {tool} --board {b} --after {n}"),
+        (Surface::Mcp, _, None) => format!("call {tool} with after={n}"),
+        (Surface::Mcp, _, Some(b)) => format!("call {tool} with board=\"{b}\" after={n}"),
+    };
+    if shared_parts(r) {
+        if let Some(n) = r["next_cursor"].as_i64() {
+            out.note(format!("(more on local: {})", hint(Some(LOCAL_BOARD), n)));
+        }
+        for part in r["boards"].as_array().into_iter().flatten() {
+            if let Some(n) = part["next_cursor"].as_i64() {
+                let b = s(&part["board"]);
+                out.note(format!("(more on {b}: {})", hint(Some(b), n)));
+            }
+        }
+    } else if let Some(n) = r["next_cursor"].as_i64() {
+        let b = result_board(r);
+        out.note(format!("(more: {})", hint((b != LOCAL_BOARD).then_some(b), n)));
+    }
+}
+
 /// `queued <id> to <recipient>`.
 pub fn sent_line(r: &Value) -> String {
     format!("queued {} to {}", qualify(result_board(r), s(&r["message_id"])), s(&r["to"]))
@@ -236,12 +264,7 @@ pub fn inbox(r: &Value, surface: Surface) -> Out {
         out.note(format!("({})", parts.join("; ")));
     }
     unavailable(&mut out, r);
-    if let Some(n) = r["next_cursor"].as_i64() {
-        out.note(match surface {
-            Surface::Cli => format!("(more: conde inbox --after {n})"),
-            Surface::Mcp => format!("(more: call inbox with after={n})"),
-        });
-    }
+    more(&mut out, r, surface, "inbox");
     out
 }
 
@@ -267,6 +290,11 @@ pub fn read(r: &Value, surface: Surface) -> Out {
         out.note("(no unread messages)");
     }
     unavailable(&mut out, r);
+    for part in r["boards"].as_array().into_iter().flatten() {
+        if part["unconfirmed"] == true {
+            out.note(format!("({}: listed but not marked read; read each with conde read <its id>)", s(&part["board"])));
+        }
+    }
     if r["more"].as_bool() == Some(true) {
         out.note(match surface {
             Surface::Cli => "(more unread: run conde read again)",
@@ -289,6 +317,10 @@ pub fn message(out: &mut String, m: &Value, fallback: &str) {
     );
     if let Some(r) = m["reply_to"].as_str() {
         let _ = writeln!(out, "In-Reply-To: {}", qualify(board, r));
+    }
+    if m["unconfirmed"] == true {
+        let id = qualify(board, s(&m["message_id"]));
+        let _ = writeln!(out, "Unconfirmed: {board} did not confirm the read in time; this is its preview, read it with: conde read {id}");
     }
     for a in m["attachments"].as_array().into_iter().flatten() {
         let _ = writeln!(
@@ -330,12 +362,7 @@ pub fn search(r: &Value, surface: Surface) -> Out {
         out.note("(no matches)");
     }
     unavailable(&mut out, r);
-    if let Some(n) = r["next_cursor"].as_i64() {
-        out.note(match surface {
-            Surface::Cli => format!("(more: add --after {n})"),
-            Surface::Mcp => format!("(more: call search with after={n})"),
-        });
-    }
+    more(&mut out, r, surface, "search");
     out
 }
 
@@ -480,26 +507,6 @@ pub fn renamed(r: &Value) -> String {
         );
     }
     out
-}
-
-/// The `doctor` lines of the delivery origins (local and each board): receipt slots used.
-pub fn origins(r: &Value) -> Vec<(&'static str, String)> {
-    let mut lines = Vec::new();
-    for o in r["origins"].as_array().into_iter().flatten() {
-        let (origin, used, slots) = (s(&o["origin"]), o["slots_used"].as_u64().unwrap_or(0), o["slots"].as_u64());
-        let Some(slots) = slots else { continue };
-        let mut text = format!("delivery {origin}: {used}/{slots} receipt slots used");
-        if let Some(q) = o["queued"].as_u64() {
-            let _ = write!(text, ", {q} queued");
-        }
-        if used >= slots {
-            let _ = write!(text, "; new pushes from {origin} wait until held messages settle");
-            lines.push(("note", text));
-        } else {
-            lines.push(("ok", text));
-        }
-    }
-    lines
 }
 
 #[cfg(test)]

@@ -202,16 +202,18 @@ ok      database: ok
 ok      registry: 0 registered agent(s)
 ok      held: 0 notification(s) await their recipient user's approval
 ok      refused: 0 notification(s) denied or refused by recipients
+ok      local board: /Users/<you>/.local/share/conde/conde.db
+ok      slots: local 0/256 used (queue 0/32, outcomes 0)
 ok      claude: sessions dir /Users/<you>/.claude/sessions readable, 3 live session(s)
 ok      codex: app-server control socket present at <path>
 all clear
 ```
 
 On an enrolled machine, each shared board adds its lines: its connection
-(`dakai: connected as host <host> (owner <you>), mailbox-only`), the
-published names and pending publication ops, its credential file and mode,
-and per delivery origin the receipt slots in use
-(`delivery dakai: 3/256 receipt slots used`).
+(`dakai: connected to https://conde.nativeai.space as host <host> (owner <you>), ...`),
+the published names and pending ops (`dakai publications: ...; pending ops: none`),
+its credential file and mode, and the receipt slots it uses
+(`slots: dakai 0/256 used (queue 0/32, outcomes 0, book 0)`).
 
 `conde doctor` exits 0 when every line starts with `ok` or `note`, and 1 when
 any line starts with `ISSUE`. A `claude: this session ... is discovered` line
@@ -482,7 +484,11 @@ conde inbox --board local                     # the local board only, no wait on
 `conde inbox`, `conde sent` and `conde read` without a target show the local
 board and every shared board this session is published on, merged, with the
 board as the first column; a board that does not answer within 2 seconds is
-listed as `(dakai: unavailable)`. Names and channels are looked up on one
+listed as `(dakai: unavailable)`. Each board pages on its own: a long listing
+ends with `(more on dakai: conde inbox --board dakai --after 9)`. When dakai
+does not confirm an aggregate `read` in time, its messages are shown as
+previews marked `Unconfirmed:` and stay unread there; read each by its id.
+Names and channels are looked up on one
 board only: local `reviewer` and dakai's `kdobmayer/reviewer` are different
 agents, and local `#dev` and dakai's `#dev` are different channels. A send
 refused on one board is never retried on another.

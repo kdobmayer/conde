@@ -614,6 +614,59 @@ fn g4_identical_names_resolve_by_board() {
     assert_eq!(local["message"]["text"], "local hello");
 }
 
+/// G4 through MCP: the same names, ids and refusals as the socket leg, with the `board`
+/// argument where the CLI has `--board` and the actor derived from the session, never an argument.
+#[test]
+fn g4_identical_names_resolve_by_board_through_mcp() {
+    use conde::identity::{Harness, Markers};
+    let board = FakeBoard::start();
+    let (a, _me) = published_host(&board, "kdobmayer", "homepc", "me", "s-me", fast());
+    a.claude("reviewer", "s-local-rev");
+    let (b, shared_reviewer) = published_host(&board, "kdobmayer", "laptop", "reviewer", "s-shared-rev", fast());
+    let markers = Markers { claude_session: Some("s-me".into()), user: Some("kdobmayer".into()), ..Markers::default() };
+    let mut mcp = conde::mcp::Server::new(a.sock(), conde::mcp::Identity::new(markers, Some(Harness::Claude)));
+    let mut tool = |name: &str, args: Value| -> (bool, String) {
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}},
+            "name": name, "arguments": args}});
+        let r = mcp.handle(&msg).unwrap();
+        (r["result"]["isError"] == true, r["result"]["content"][0]["text"].as_str().unwrap().to_string())
+    };
+    let queued = |text: &str| text.strip_prefix("queued ").and_then(|s| s.split(' ').next()).expect(text).to_string();
+
+    // a plain send reaches the local reviewer, board="dakai" the mailbox
+    let (err, out) = tool("send", json!({"to": "reviewer", "text": "local hello"}));
+    assert!(!err && out.ends_with(" to kdobmayer/reviewer"), "{out}");
+    let local_id = queued(&out);
+    assert!(!local_id.contains(':'), "{local_id}");
+    assert_eq!(a.harness.wait_pushes(&local_id, 1)[0].address, "claude:s-local-rev@homepc");
+    let (err, out) = tool("send", json!({"to": "reviewer", "text": "shared hello", "board": "dakai"}));
+    assert!(!err, "{out}");
+    let shared_id = queued(&out);
+    assert!(shared_id.starts_with("dakai:"), "{shared_id}");
+    assert_eq!(b.harness.wait_pushes(bare(&shared_id), 1)[0].address, "claude:s-shared-rev@laptop");
+
+    // the teammate's reply comes back qualified; answering it stays on dakai with no board argument
+    let reply = b.ok(&shared_reviewer, "message.send", json!({"to": {"agent": "kdobmayer/me"}, "text": "re", "reply_to": shared_id}), None);
+    let reply_id = id_of(&reply);
+    let (err, shown) = tool("show", json!({"id": reply_id}));
+    assert!(!err && shown.starts_with(&format!("=== {reply_id}\nFrom: kdobmayer/reviewer\n")), "{shown}");
+    assert!(shown.contains(&format!("In-Reply-To: {shared_id}\n")), "{shown}");
+    let (err, out) = tool("inbox", json!({}));
+    assert!(!err && out.contains(&format!("dakai\tdm\t{reply_id}\tkdobmayer/reviewer\t")), "{out}");
+    let (err, out) = tool("send", json!({"to": "kdobmayer/reviewer", "text": "re re", "reply_to": reply_id}));
+    assert!(!err, "{out}");
+    let rere = queued(&out);
+    assert!(rere.starts_with("dakai:"), "{rere}");
+    assert_eq!(b.harness.wait_pushes(bare(&rere), 1)[0].address, "claude:s-shared-rev@laptop");
+
+    // a bare id is local whatever the board argument says
+    let (err, out) = tool("show", json!({"id": local_id, "board": "dakai"}));
+    assert!(err && out == format!("conde: {local_id} is a local message; drop the board argument, or use the dakai: id"), "{out}");
+    let (err, out) = tool("read", json!({"target": local_id, "board": "dakai"}));
+    assert!(err && out.contains("is a local message"), "{out}");
+}
+
 // --- G5 ---------------------------------------------------------------------------------
 
 /// G5 no injection without a live publication: every notify below is refused with

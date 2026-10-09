@@ -314,6 +314,9 @@ impl Dispatcher {
             retry_ms: self.retry_ms.load(Ordering::Relaxed),
         };
         let result = (spec.run)(&ctx, &req.body)?;
+        if spec.mutation && !spec.bridge_only {
+            tx.announce(board_topics(spec.name));
+        }
         if let (Some(key), Some(hash)) = (key, request_hash) {
             tx.idempotency_put(&actor_id, spec.name, key, &hash, &result.to_string(), &ctx.now_iso())?;
         }
@@ -330,6 +333,12 @@ impl Dispatcher {
             .unwrap_or_default();
         format!("{}|{}|{}", p.user_id, actor, req.from.as_deref().unwrap_or("").to_lowercase())
     }
+}
+
+/// What a committed (non-bridge) mutation changed, as the web UI groups it.
+fn board_topics(op: &str) -> u8 {
+    use crate::store::topics::{DELIVERY, FLEET, MESSAGES};
+    if op.starts_with("agent.") || op.starts_with("profile.") { FLEET | MESSAGES } else { MESSAGES | DELIVERY }
 }
 
 /// The instance that superseded `instance` on `host`, when it was fenced (the

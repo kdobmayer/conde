@@ -6,8 +6,10 @@
 //! Routes: `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /auth/cli`,
 //! `POST /auth/cli/redeem`, `GET /keys`, `POST /keys`, `GET /keys/created`,
 //! `POST /keys/{host}/revoke`; with `CONDE_ADMIN_KEY` also the admin API under `/v1/admin`.
+//! The server adds the web app ([`app`]): `/`, `/app/*` and the browser API under `/v1`.
 
 mod admin;
+pub(crate) mod app;
 mod auth;
 mod keys;
 mod pages;
@@ -23,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use admin::{AdminState, router as admin_router};
+pub use app::embedded as app_embedded;
 pub use auth::{Oidc, RedeemResponse};
 pub use keys::new_host_key;
 
@@ -488,14 +491,19 @@ impl WebSetup {
 
     /// The configured routes over the server's connection registry.
     pub fn router(self, registry: Arc<dyn BridgeRegistry>) -> Router {
+        self.into_parts(registry).0
+    }
+
+    /// The configured routes and, with Entra configured, the sign-in state they share (the
+    /// web app's routes authenticate browsers with it).
+    pub fn into_parts(self, registry: Arc<dyn BridgeRegistry>) -> (Router, Option<WebState>) {
         let mut app = Router::new();
         let tenant = self.entra.as_ref().map(|c| c.tenant_id.clone());
+        let mut state = None;
         if let Some(config) = self.entra {
-            app = app.merge(router(WebState::new(
-                config,
-                self.store.clone(),
-                registry.clone(),
-            )));
+            let web = WebState::new(config, self.store.clone(), registry.clone());
+            app = app.merge(router(web.clone()));
+            state = Some(web);
         }
         if let Some(key) = self.admin_key {
             let core = Core {
@@ -505,24 +513,13 @@ impl WebSetup {
             };
             app = app.merge(admin::router(AdminState::new(core, &key, tenant)));
         }
-        app
+        (app, state)
     }
 }
 
-/// `GET /`: the keys page (which sends a signed-out browser to sign in).
-async fn home() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    (
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        axum::response::Redirect::to("/keys"),
-    )
-        .into_response()
-}
-
-/// The web routes, ready to merge into the server's router.
+/// The sign-in and keys routes, ready to merge into the server's router (which serves `/`).
 pub fn router(state: WebState) -> Router {
     Router::new()
-        .route("/", get(home))
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))

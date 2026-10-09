@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use conde_remote::{
     Authentication, Authenticator, Endpoint, FenceResult, NotificationSource, Notify, Outcome, Polled, Principal as RemotePrincipal,
-    Recorded, ServerConfig, ServerHandle, SourceEvent,
+    Recorded, ServerConfig, ServerHandle, SourceEvent, WebPrincipal,
 };
 use tokio::sync::broadcast;
 use serde_json::{Value, json};
@@ -19,7 +19,11 @@ use crate::dispatch::{Dispatcher, Principal};
 use crate::ops;
 use crate::protocol::{ErrorCode, Request, Response};
 use crate::store::Wake;
-use crate::util::new_ulid;
+use crate::util::{iso_from_ms, new_ulid};
+
+/// The host of a human first named from the browser (`human:<user>@web`): a user whose human
+/// has no name on the board yet gets one there. Not a real host; nothing is delivered to it.
+pub const WEB_HOST: &str = "web";
 
 /// How long SIGTERM may take before the server stops waiting for connections.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(50);
@@ -124,6 +128,19 @@ impl conde_remote::Dispatcher for Board {
         self.dispatch_as(principal, Some(bridge_instance), request)
     }
 
+    fn dispatch_web(&self, user: &WebPrincipal, request: Value) -> Value {
+        let id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_string();
+        let resp = match serde_json::from_value::<Request>(request) {
+            Err(e) => Response::err(&id, ErrorCode::BadRequest, format!("bad request frame: {e}")),
+            Ok(req) => match self.web_human(user) {
+                Ok((p, actor)) => self.d.dispatch(&p, &Request { actor: Some(actor), from: None, ..req }),
+                Err((code, message)) => Response::err(&id, code, message),
+            },
+        };
+        serde_json::to_value(resp).unwrap_or_else(|e| json!({"v": 1, "type": "response", "request_id": id, "ok": false,
+            "error": {"code": "internal", "message": e.to_string()}}))
+    }
+
     fn healthy(&self) -> bool {
         self.d.healthy()
     }
@@ -152,6 +169,79 @@ impl Board {
         };
         serde_json::to_value(resp).unwrap_or_else(|e| json!({"v": 1, "type": "response", "request_id": id, "ok": false,
             "error": {"code": "internal", "message": e.to_string()}}))
+    }
+}
+
+impl Board {
+    /// The principal and actor a browser user acts as: their human, the name bound to a
+    /// `human:` address in their namespace. A name registered from a terminal wins over the
+    /// browser's own; among several, the one named after the user. A user without one gets
+    /// `<user>` bound to `human:<user>@web`, through the same registration rules as the CLI (a
+    /// name held by an agent or pinned elsewhere is refused).
+    fn web_human(&self, user: &WebPrincipal) -> Result<(Principal, String), (ErrorCode, String)> {
+        let internal = |e: crate::store::StoreError| (ErrorCode::Internal, format!("storage error: {e}"));
+        let (row, humans) = self
+            .d
+            .with_conn(|tx| {
+                let row = tx.user_by_id(user.user_id)?;
+                let humans: Vec<_> =
+                    tx.bound_agents()?.into_iter().filter(|a| a.owner_id == user.user_id && a.is_human()).collect();
+                Ok((row, humans))
+            })
+            .map_err(internal)?;
+        let Some(row) = row.filter(|r| !r.disabled) else {
+            return Err((ErrorCode::Unauthenticated, "this account is disabled or gone".into()));
+        };
+        let principal = |host: &str| Principal {
+            user_id: row.user_id,
+            user: row.name.clone(),
+            host: host.to_string(),
+            local: false,
+            bridge_instance: None,
+            bridge_connection: None,
+        };
+        // A human named from a terminal wins over the one the browser named on `web`.
+        let on_web = |a: &&crate::store::Agent| a.address.as_ref().is_some_and(|x| x.host == WEB_HOST);
+        let (web, named): (Vec<_>, Vec<_>) = humans.iter().partition(on_web);
+        let chosen = named
+            .iter()
+            .find(|a| a.name == row.name)
+            .or(if named.len() == 1 { named.first() } else { None })
+            .or(if named.is_empty() { web.first() } else { None });
+        if let Some(address) = chosen.and_then(|a| a.address.as_ref()) {
+            return Ok((principal(&address.host), address.to_string()));
+        }
+        if !humans.is_empty() {
+            let names: Vec<String> = humans.iter().map(|a| a.canonical()).collect();
+            return Err((
+                ErrorCode::Conflict,
+                format!(
+                    "several names are bound to your human ({}); the browser acts as the one named '{}'",
+                    names.join(", "),
+                    row.name
+                ),
+            ));
+        }
+        let p = principal(WEB_HOST);
+        let actor = Address::new(Kind::Human, &row.name, WEB_HOST).to_string();
+        let mut register = Request::new(new_ulid(), "agent.register", json!({"name": row.name}));
+        register.actor = Some(actor.clone());
+        register.idempotency_key = Some(new_ulid());
+        let resp = self.d.dispatch(&p, &register);
+        match resp.error {
+            None => {
+                tracing::info!(user = %row.name, %actor, "named the browser human");
+                Ok((p, actor))
+            }
+            Some(e) => Err((
+                e.code,
+                format!(
+                    "your human has no name on the board yet, and naming it '{}' failed: {}. \
+                     Register your human from a terminal with: conde register <name>",
+                    row.name, e.message
+                ),
+            )),
+        }
     }
 }
 
@@ -268,6 +358,7 @@ impl NotificationSource for Board {
                     Ok(Wake::All) | Err(broadcast::error::RecvError::Lagged(_)) => SourceEvent::Pending(None),
                     Ok(Wake::Fenced(instance)) => SourceEvent::Fenced(instance),
                     Ok(Wake::Revoked(host)) => SourceEvent::Revoked(host),
+                    Ok(Wake::Board(topics)) => SourceEvent::Board(topics),
                     Err(broadcast::error::RecvError::Closed) => return,
                 };
                 if tx.send(event).is_err() {
@@ -276,6 +367,16 @@ impl NotificationSource for Board {
             }
         });
         Some(rx)
+    }
+
+    /// The fleet's online state: the active instance's heartbeat, on every answered ping.
+    fn heartbeat(&self, host_id: &str, bridge_instance: &str) {
+        let at = iso_from_ms(self.d.now_ms());
+        match self.d.with_tx(|tx| Ok(tx.touch_bridge(bridge_instance, &at)?)) {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(host = host_id, instance = bridge_instance, "heartbeat of an inactive instance"),
+            Err(e) => tracing::warn!(host = host_id, instance = bridge_instance, "heartbeat not recorded: {e}"),
+        }
     }
 
     fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) {

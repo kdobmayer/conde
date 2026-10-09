@@ -19,6 +19,7 @@ use super::channels;
 use super::messages::msg_by_id;
 use crate::address::Kind;
 use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, opt_i64, opt_str, str_param};
+use crate::store::topics;
 use crate::util::new_ulid;
 
 const TERMINAL: &[&str] = &["delivered", "denied", "refused", "expired", "dropped", "failed", "abandoned"];
@@ -61,6 +62,9 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     abandon_stale(ctx, me)?;
 
     let due = ctx.db.due_notifications(ctx.now_ms, &ctx.p.host, limit)?;
+    if !due.is_empty() {
+        ctx.db.announce(topics::DELIVERY);
+    }
     let mut jobs = Vec::new();
     for n in due {
         let (notification_id, message_id, rcpt_id, kind) = (n.id, n.message_id, n.recipient_id, n.kind);
@@ -153,6 +157,7 @@ pub fn fence(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         return Ok(json!({"active": false}));
     }
     let fenced = ctx.db.fence(&ctx.p.host, me, &ctx.now_iso())?;
+    ctx.db.announce(topics::FLEET);
     Ok(json!({"active": true, "fenced": fenced}))
 }
 
@@ -175,6 +180,7 @@ pub fn endpoints(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         live.push((kind, target));
     }
     ctx.db.replace_endpoints(&ctx.p.host, me, &live, &ctx.now_iso())?;
+    ctx.db.announce(topics::FLEET);
     let gone = ctx.db.gone_claude_holds(me, &ctx.p.host)?;
     for attempt_id in &gone {
         apply(ctx, attempt_id, "abandoned", Some("recipient session gone"), None)?;
@@ -245,6 +251,7 @@ fn apply(ctx: &Ctx, attempt_id: &str, outcome: &str, reason: Option<&str>, event
         return Ok(json!({"attempt_id": attempt_id, "ignored": "duplicate"}));
     }
     ctx.db.update_attempt(attempt_id, outcome, reason, event_seq)?;
+    ctx.db.announce(topics::DELIVERY | topics::FLEET);
     let current = ctx.db.latest_attempt(&notification_id)?.as_deref() == Some(attempt_id);
     if current {
         let (status, next) = match outcome {

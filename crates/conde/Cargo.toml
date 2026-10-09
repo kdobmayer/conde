@@ -41,11 +41,13 @@ ulid = "3.0.0"
 # hooks: tests inject storage faults with the progress handler and authorizer
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query", "form"] }
+futures-util = "0.3.34"
 rand = "0.10.3"
 rand_core06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "cookies", "form"] }
 rsa = { version = "0.9.10", features = ["sha2"] }
 tempfile = "3.27.0"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake"] }
 
 [[test]]
 name = "store"

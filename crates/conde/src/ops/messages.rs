@@ -137,7 +137,7 @@ fn visible_msg(ctx: &Ctx, me: &Agent, id: &str) -> OpResult<MsgRow> {
     Ok(m)
 }
 
-fn view(db: &dyn Tx, m: &MsgRow) -> OpResult<Value> {
+pub(crate) fn view(db: &dyn Tx, m: &MsgRow) -> OpResult<Value> {
     let attachments: Vec<Value> = db
         .attachment_list(&m.id)?
         .into_iter()

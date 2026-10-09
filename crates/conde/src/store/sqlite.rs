@@ -11,8 +11,8 @@ use rusqlite::types::FromSql;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, params_from_iter};
 
 use super::{
-    Agent, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, CredentialRow, DmDelivery, DueNotification,
-    ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt,
+    Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
+    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, HostBridge, ImportState, ImportedAgent, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt,
     PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes, WebSessionRow, address_of,
 };
 use crate::address::Address;
@@ -273,6 +273,10 @@ impl Tx for SqliteTx<'_> {
         }
         for host in &self.wakes.borrow().revoked {
             self.signal.raise(Wake::Revoked(host.clone()));
+        }
+        let board = self.wakes.borrow().board;
+        if board != 0 {
+            self.signal.raise(Wake::Board(board));
         }
         Ok(())
     }
@@ -1095,6 +1099,158 @@ impl Tx for SqliteTx<'_> {
 
     fn count_endpoints(&self) -> StoreResult<i64> {
         self.one("SELECT COUNT(*) FROM endpoints", [], one_col)
+    }
+
+    // web UI
+
+    fn dm_threads(&self, agent_id: &str) -> StoreResult<Vec<DmThread>> {
+        self.rows(
+            "SELECT p.partner, pu.name || '/' || pa.name_lower, p.last_seq, lm.created_at, p.unread
+             FROM (SELECT CASE WHEN m.sender_agent_id = ?1 THEN m.recipient_agent_id ELSE m.sender_agent_id END
+                          AS partner,
+                          MAX(m.commit_seq) AS last_seq,
+                          SUM(CASE WHEN m.recipient_agent_id = ?1 AND NOT EXISTS (SELECT 1 FROM dm_read d
+                              WHERE d.message_id = m.message_id AND d.agent_id = ?1) THEN 1 ELSE 0 END) AS unread
+                   FROM messages m
+                   WHERE m.channel_id IS NULL AND (m.sender_agent_id = ?1 OR m.recipient_agent_id = ?1)
+                   GROUP BY 1) p
+             JOIN agents pa ON pa.agent_id = p.partner JOIN users pu ON pu.user_id = pa.owner_id
+             JOIN messages lm ON lm.commit_seq = p.last_seq
+             ORDER BY p.last_seq DESC",
+            [agent_id],
+            |r| {
+                Ok(DmThread {
+                    partner_id: r.get(0)?,
+                    partner: r.get(1)?,
+                    last_seq: r.get(2)?,
+                    last_at: r.get(3)?,
+                    unread: r.get(4)?,
+                })
+            },
+        )
+    }
+
+    fn channel_threads(&self, agent_id: &str) -> StoreResult<Vec<ChannelThread>> {
+        self.rows(
+            "SELECT c.name_lower, c.topic,
+                    COALESCE((SELECT MAX(commit_seq) FROM messages WHERE channel_id = c.channel_id), 0),
+                    (SELECT created_at FROM messages WHERE channel_id = c.channel_id
+                     ORDER BY commit_seq DESC LIMIT 1),
+                    (SELECT COUNT(*) FROM messages m WHERE m.channel_id = c.channel_id
+                     AND m.commit_seq > x.read_seq AND m.sender_agent_id <> x.agent_id)
+             FROM memberships x JOIN channels c ON c.channel_id = x.channel_id
+             WHERE x.agent_id = ?1 ORDER BY c.name_lower",
+            [agent_id],
+            |r| {
+                Ok(ChannelThread {
+                    name: r.get(0)?,
+                    topic: r.get(1)?,
+                    last_seq: r.get(2)?,
+                    last_at: r.get(3)?,
+                    unread: r.get(4)?,
+                })
+            },
+        )
+    }
+
+    fn dm_history(&self, a: &str, b: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>> {
+        self.msgs(
+            "m.channel_id IS NULL AND ((m.sender_agent_id = ?1 AND m.recipient_agent_id = ?2)
+                OR (m.sender_agent_id = ?2 AND m.recipient_agent_id = ?1))
+             AND m.commit_seq < ?3 ORDER BY m.commit_seq DESC LIMIT ?4",
+            params![a, b, before, limit],
+        )
+    }
+
+    fn channel_history(&self, channel_id: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>> {
+        self.msgs(
+            "m.channel_id = ?1 AND m.commit_seq < ?2 ORDER BY m.commit_seq DESC LIMIT ?3",
+            params![channel_id, before, limit],
+        )
+    }
+
+    fn unread_dms_from(&self, agent_id: &str, sender: &str, up_to: i64) -> StoreResult<Vec<String>> {
+        self.rows(
+            "SELECT m.message_id FROM messages m
+             WHERE m.recipient_agent_id = ?1 AND m.sender_agent_id = ?2 AND m.commit_seq <= ?3
+             AND NOT EXISTS (SELECT 1 FROM dm_read d WHERE d.message_id = m.message_id AND d.agent_id = ?1)
+             ORDER BY m.commit_seq",
+            params![agent_id, sender, up_to],
+            one_col,
+        )
+    }
+
+    fn deliveries(&self, message_id: &str) -> StoreResult<Vec<Delivery>> {
+        // Notification ids are `<message id>.<recipient id>`: the primary key serves the lookup.
+        self.rows(
+            "SELECT n.recipient_agent_id, ru.name || '/' || r.name_lower, n.kind, n.status, n.next_attempt_at,
+                    (SELECT COUNT(*) FROM attempts WHERE notification_id = n.notification_id), t.status, t.reason
+             FROM notifications n
+             JOIN agents r ON r.agent_id = n.recipient_agent_id JOIN users ru ON ru.user_id = r.owner_id
+             LEFT JOIN attempts t ON t.rowid = (SELECT MAX(rowid) FROM attempts WHERE notification_id = n.notification_id)
+             WHERE n.notification_id > ?1 || '.' AND n.notification_id < ?1 || '/' AND n.message_id = ?1
+             ORDER BY 2",
+            [message_id],
+            |r| {
+                Ok(Delivery {
+                    recipient_id: r.get(0)?,
+                    recipient: r.get(1)?,
+                    kind: r.get(2)?,
+                    status: r.get(3)?,
+                    next_attempt_at: r.get(4)?,
+                    attempts: r.get(5)?,
+                    last_status: r.get(6)?,
+                    last_reason: r.get(7)?,
+                })
+            },
+        )
+    }
+
+    fn host_bridges(&self) -> StoreResult<Vec<HostBridge>> {
+        self.rows(
+            "SELECT h.host_id, u.name,
+                    (SELECT MAX(updated_at) FROM bridge_instances b WHERE b.host_id = h.host_id AND b.state = 'active'),
+                    (SELECT MAX(updated_at) FROM bridge_instances b WHERE b.host_id = h.host_id)
+             FROM hosts h JOIN users u ON u.user_id = h.user_id ORDER BY u.name, h.host_id",
+            [],
+            |r| Ok(HostBridge { host: r.get(0)?, owner: r.get(1)?, heartbeat: r.get(2)?, last_seen: r.get(3)? }),
+        )
+    }
+
+    fn endpoint_rows(&self) -> StoreResult<Vec<EndpointRow>> {
+        self.rows(
+            "SELECT host_id, kind, target, seen_at FROM endpoints ORDER BY host_id, kind, target",
+            [],
+            |r| Ok(EndpointRow { host: r.get(0)?, kind: r.get(1)?, target: r.get(2)?, seen_at: r.get(3)? }),
+        )
+    }
+
+    fn agent_health(&self, owner_id: i64, stuck_before: &str) -> StoreResult<Vec<AgentHealth>> {
+        self.rows(
+            "SELECT n.recipient_agent_id,
+                    COUNT(DISTINCT CASE WHEN n.status = 'held' THEN n.notification_id END),
+                    COUNT(DISTINCT CASE WHEN n.status IN ('pending', 'dispatching') AND m.created_at < ?2
+                          THEN n.notification_id END),
+                    MAX(CASE WHEN t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')
+                        THEN t.attempt_id END)
+             FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
+             JOIN messages m ON m.message_id = n.message_id
+             LEFT JOIN attempts t ON t.notification_id = n.notification_id
+             WHERE a.owner_id = ?1 GROUP BY n.recipient_agent_id ORDER BY n.recipient_agent_id",
+            params![owner_id, stuck_before],
+            |r| Ok(AgentHealth { agent_id: r.get(0)?, held: r.get(1)?, stuck: r.get(2)?, last_reached: r.get(3)? }),
+        )
+    }
+
+    fn touch_bridge(&self, instance: &str, at: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE bridge_instances SET updated_at = ?2 WHERE instance = ?1 AND state = 'active'",
+            params![instance, at],
+        )? > 0)
+    }
+
+    fn announce(&self, topics: u8) {
+        self.wakes.borrow_mut().board |= topics;
     }
 
     // import

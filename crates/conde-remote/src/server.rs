@@ -77,6 +77,10 @@ struct Shared {
     /// Requests for a full credential recheck and whether its worker runs.
     revalidation: Mutex<Revalidation>,
     shutdown: watch::Receiver<bool>,
+    /// Board changes for the browsers' event sockets (topic bits).
+    board: tokio::sync::broadcast::Sender<u8>,
+    /// The web app, when Entra sign-in is configured.
+    app: Mutex<Option<crate::web::app::AppState>>,
 }
 
 struct ActiveBridge {
@@ -127,6 +131,10 @@ async fn route_events(shared: Arc<Shared>, mut events: tokio::sync::broadcast::R
             e = events.recv() => e,
         };
         let (host, fenced) = match event {
+            Ok(SourceEvent::Board(topics)) => {
+                let _ = shared.board.send(topics);
+                continue;
+            }
             Ok(SourceEvent::Pending(host)) => (host, None),
             Ok(SourceEvent::Fenced(instance)) => (None, Some(instance)),
             Ok(SourceEvent::Revoked(host)) => {
@@ -140,6 +148,8 @@ async fn route_events(shared: Arc<Shared>, mut events: tokio::sync::broadcast::R
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         };
         if host.is_none() && fenced.is_none() {
+            // Events may have been missed: the browsers refetch everything.
+            let _ = shared.board.send(crate::web::app::ALL_TOPICS);
             // Events may have been missed (a lagging receiver, a listener gap): a lost
             // revocation must not leave its connection open.
             if !revalidate(&shared).await {
@@ -329,6 +339,8 @@ pub async fn start(
         next_conn: AtomicU64::new(1),
         revalidation: Mutex::new(Revalidation::default()),
         shutdown: shutdown_rx.clone(),
+        board: tokio::sync::broadcast::channel(256).0,
+        app: Mutex::new(None),
     });
     if let Some(events) = shared.source.events() {
         tokio::spawn(route_events(shared.clone(), events));
@@ -344,7 +356,24 @@ pub async fn start(
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(shared.clone());
     let app = match web {
-        Some(setup) => app.merge(setup.router(Arc::new(Registry(Arc::downgrade(&shared))))),
+        Some(setup) => {
+            let (routes, state) = setup.into_parts(Arc::new(Registry(Arc::downgrade(&shared))));
+            let app = app.merge(routes);
+            match state {
+                Some(web) => {
+                    let ui = crate::web::app::AppState {
+                        web,
+                        dispatcher: shared.dispatcher.clone(),
+                        events: shared.board.clone(),
+                        shutdown: shutdown_rx.clone(),
+                    };
+                    *shared.app.lock().unwrap_or_else(|p| p.into_inner()) = Some(ui.clone());
+                    tracing::info!(embedded = crate::web::app::embedded(), "web app enabled");
+                    app.merge(crate::web::app::routes(ui))
+                }
+                None => app,
+            }
+        }
         None => app,
     };
     let mut stop = shutdown_rx;
@@ -501,6 +530,12 @@ async fn dispatch_on(shared: &Shared, principal: Principal, bridge_instance: Opt
 }
 
 async fn rpc(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Response {
+    if bearer(&headers).is_none() {
+        let app = shared.app.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(app) = app {
+            return crate::web::app::rpc(&app, headers, body).await;
+        }
+    }
     let principal = match authenticate(&shared, &headers).await {
         Ok(p) => p,
         Err(refused) => return refused,
@@ -848,7 +883,11 @@ impl Conn {
                     let text = match msg {
                         None | Some(Err(_)) => return "connection lost",
                         Some(Ok(Message::Close(_))) => return "closed by bridge",
-                        Some(Ok(Message::Pong(_))) => { unanswered = 0; continue }
+                        Some(Ok(Message::Pong(_))) => {
+                            unanswered = 0;
+                            self.heartbeat();
+                            continue
+                        }
                         Some(Ok(Message::Ping(_))) => continue,
                         Some(Ok(Message::Binary(_))) => {
                             let _ = tx.send(Message::text(protocol::error_frame("bad_frame", "binary frames are not supported"))).await;
@@ -879,6 +918,12 @@ impl Conn {
                 }
             }
         }
+    }
+
+    /// Records that the bridge answered a ping, off the async workers and without waiting.
+    fn heartbeat(&self) {
+        let (source, host, instance) = (self.shared.source.clone(), self.host.clone(), self.instance.clone());
+        tokio::task::spawn_blocking(move || source.heartbeat(&host, &instance));
     }
 
     /// Sends pending notifications not yet pushed; false when the connection is lost. A fenced
@@ -1107,6 +1152,8 @@ mod revalidation_tests {
             next_conn: AtomicU64::new(3),
             revalidation: Mutex::new(Revalidation::default()),
             shutdown,
+            board: tokio::sync::broadcast::channel(1).0,
+            app: Mutex::new(None),
         });
         retry_revalidation(shared.clone());
         tokio::time::timeout(Duration::from_secs(3), auth.second_entered.notified())

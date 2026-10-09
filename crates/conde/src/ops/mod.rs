@@ -7,6 +7,7 @@ pub mod channels;
 pub mod hosts;
 pub mod messages;
 pub mod misc;
+pub mod web;
 
 use crate::dispatch::OpSpec;
 
@@ -46,6 +47,10 @@ pub static OPS: &[OpSpec] = &[
     op!("channel.invite", channels::invite, mutation),
     op!("channel.list", channels::list, query),
     op!("channel.members", channels::members, query),
+    op!("conversation.list", web::list, query),
+    op!("conversation.history", web::history, query),
+    op!("conversation.read", web::read, mutation),
+    op!("fleet.list", web::fleet, query),
     op!("doctor", misc::doctor, query),
     op!("bridge.claim", bridge::claim, bridge),
     op!("bridge.report", bridge::report, bridge),

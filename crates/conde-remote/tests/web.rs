@@ -1294,13 +1294,10 @@ async fn a_revoked_socket_holding_its_hello_cannot_fence_the_valid_replacement()
 }
 
 #[tokio::test]
-async fn the_root_leads_to_the_keys_page_and_unknown_paths_are_404() {
+async fn the_keys_page_needs_sign_in_and_unknown_paths_are_404() {
+    // `/` belongs to the server's web app (tested with the board in conde's web_ui suite).
     let env = Env::with(Arc::new(MemStore::default())).await;
     let b = Browser::new();
-    let r = b.step.get(env.url("/")).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::SEE_OTHER);
-    assert_eq!(r.headers()[header::LOCATION], "/keys");
-    assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(
         b.peek(&env.url("/keys")).await.1,
         "/auth/login?next=%2Fkeys"

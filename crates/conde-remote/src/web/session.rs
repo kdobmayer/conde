@@ -144,9 +144,20 @@ pub(crate) async fn current(
         return Ok(None);
     }
     let id_digest = digest(&id);
+    let record = lookup(state, &id_digest, true).await?;
+    Ok(record.map(|record| Session { id_digest, record }))
+}
+
+/// The live session stored under `id_digest`; an expired one, or one whose user is disabled,
+/// is deleted. With `touch`, a live one has its activity time refreshed.
+pub(crate) async fn lookup(
+    state: &WebState,
+    id_digest: &str,
+    touch: bool,
+) -> Result<Option<SessionRecord>, WebError> {
     let now = state.now();
     let limits = state.limits();
-    let key = id_digest.clone();
+    let key = id_digest.to_string();
     let record = state
         .store(move |s| {
             let Some(record) = s.session(&key)? else {
@@ -158,13 +169,13 @@ pub(crate) async fn current(
                 s.delete_session(&key)?;
                 return Ok(None);
             }
-            if now - record.last_seen >= TOUCH_EVERY {
+            if touch && now - record.last_seen >= TOUCH_EVERY {
                 s.touch_session(&key, now)?;
             }
             Ok(Some(record))
         })
         .await?;
-    Ok(record.map(|record| Session { id_digest, record }))
+    Ok(record)
 }
 
 /// Starts a session for the user and returns the jar that sets its cookie.

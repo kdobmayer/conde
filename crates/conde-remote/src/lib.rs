@@ -26,6 +26,13 @@ pub struct Principal {
     pub host_id: String,
 }
 
+/// A signed-in browser user: acts as their human, never through a host credential.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebPrincipal {
+    pub user_id: i64,
+    pub user: String,
+}
+
 /// Executes one request object (DESIGN.md §4) for an authenticated principal and returns
 /// one response object. Host and user are stamped from `principal`, never from the body.
 pub trait Dispatcher: Send + Sync {
@@ -34,6 +41,13 @@ pub trait Dispatcher: Send + Sync {
     /// refuses it once that instance is fenced. Default: [`Dispatcher::dispatch`].
     fn dispatch_bridge(&self, principal: &Principal, _bridge_instance: &str, request: serde_json::Value) -> serde_json::Value {
         self.dispatch(principal, request)
+    }
+    /// A request from a signed-in browser, executed as the user's human; the request's
+    /// `actor` and `from` are the server's to set, never the browser's. Default: refused.
+    fn dispatch_web(&self, _user: &WebPrincipal, request: serde_json::Value) -> serde_json::Value {
+        let id = request.get("request_id").cloned().unwrap_or(serde_json::Value::Null);
+        serde_json::json!({"v": 1, "type": "response", "request_id": id, "ok": false,
+            "error": {"code": "forbidden", "message": "this server takes no browser requests"}})
     }
     /// Whether the store is reachable; `GET /healthz` answers 503 otherwise.
     fn healthy(&self) -> bool {
@@ -91,6 +105,9 @@ pub trait NotificationSource: Send + Sync {
     fn events(&self) -> Option<tokio::sync::broadcast::Receiver<SourceEvent>> {
         None
     }
+    /// The bridge answered a ping: its instance is alive (the fleet's online state).
+    /// Called from a blocking thread. Default: ignored.
+    fn heartbeat(&self, _host_id: &str, _bridge_instance: &str) {}
 }
 
 /// Result of [`NotificationSource::poll`].
@@ -110,6 +127,8 @@ pub enum SourceEvent {
     Fenced(String),
     /// A key of this host was revoked or its user disabled: close the host's connection.
     Revoked(String),
+    /// The board changed in ways the web UI shows (topic bits); the browsers refetch.
+    Board(u8),
 }
 
 /// Result of [`NotificationSource::record_outcome`].

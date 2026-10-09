@@ -224,6 +224,78 @@ pub struct DmDelivery {
     pub reason: Option<String>,
 }
 
+/// One conversation partner of an agent's DMs, for the web UI's rail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmThread {
+    pub partner_id: String,
+    /// The partner's canonical name.
+    pub partner: String,
+    pub last_seq: i64,
+    pub last_at: String,
+    /// DMs from the partner the agent has not read.
+    pub unread: i64,
+}
+
+/// A channel the agent belongs to, for the web UI's rail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelThread {
+    pub name: String,
+    pub topic: Option<String>,
+    /// 0 for an empty channel.
+    pub last_seq: i64,
+    pub last_at: Option<String>,
+    /// Posts by others past the agent's read position.
+    pub unread: i64,
+}
+
+/// One notification of a message with its latest attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delivery {
+    pub recipient_id: String,
+    /// The recipient's canonical name.
+    pub recipient: String,
+    /// dm | mention | post
+    pub kind: String,
+    pub status: String,
+    /// Unix milliseconds of the next attempt (meaningful while pending).
+    pub next_attempt_at: i64,
+    pub attempts: i64,
+    pub last_status: Option<String>,
+    pub last_reason: Option<String>,
+}
+
+/// A host's bridge as the fleet view sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostBridge {
+    pub host: String,
+    pub owner: String,
+    /// The latest heartbeat of the host's active bridge instance.
+    pub heartbeat: Option<String>,
+    /// The latest activity of any of the host's bridge instances.
+    pub last_seen: Option<String>,
+}
+
+/// A live harness endpoint as the host's bridge last reported it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointRow {
+    pub host: String,
+    pub kind: String,
+    pub target: String,
+    pub seen_at: String,
+}
+
+/// Delivery health of one recipient agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentHealth {
+    pub agent_id: String,
+    /// Notifications held at the recipient for approval.
+    pub held: i64,
+    /// Notifications still pending or dispatching for a message older than the cutoff.
+    pub stuck: i64,
+    /// The newest attempt that reached the recipient (delivered; accepted for Codex), a ULID.
+    pub last_reached: Option<String>,
+}
+
 /// A host credential as the admin lists it (the digest, never the key).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialRow {
@@ -490,6 +562,31 @@ pub trait Tx {
     -> StoreResult<()>;
     fn count_endpoints(&self) -> StoreResult<i64>;
 
+    // web UI
+    /// The agent's DM partners, most recent conversation first.
+    fn dm_threads(&self, agent_id: &str) -> StoreResult<Vec<DmThread>>;
+    /// The channels the agent belongs to, by name.
+    fn channel_threads(&self, agent_id: &str) -> StoreResult<Vec<ChannelThread>>;
+    /// DMs between `a` and `b` (either way) before `before`, newest first.
+    fn dm_history(&self, a: &str, b: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>>;
+    /// Messages of a channel before `before`, newest first.
+    fn channel_history(&self, channel_id: &str, before: i64, limit: i64) -> StoreResult<Vec<Message>>;
+    /// Ids of DMs from `sender` to `agent_id` up to `up_to` that the agent has not read.
+    fn unread_dms_from(&self, agent_id: &str, sender: &str, up_to: i64) -> StoreResult<Vec<String>>;
+    /// The message's notifications with their latest attempts, by recipient name.
+    fn deliveries(&self, message_id: &str) -> StoreResult<Vec<Delivery>>;
+    /// Every host with its owner and bridge activity, by owner then host.
+    fn host_bridges(&self) -> StoreResult<Vec<HostBridge>>;
+    /// Every endpoint the bridges reported live.
+    fn endpoint_rows(&self) -> StoreResult<Vec<EndpointRow>>;
+    /// Delivery health of the owner's agents that have notifications; `stuck_before` is an ISO
+    /// time: an undelivered notification for an older message counts as stuck.
+    fn agent_health(&self, owner_id: i64, stuck_before: &str) -> StoreResult<Vec<AgentHealth>>;
+    /// Records a heartbeat of an active bridge instance; false when it is not active.
+    fn touch_bridge(&self, instance: &str, at: &str) -> StoreResult<bool>;
+    /// Announces a board change ([`topics`]) to the browsers on commit.
+    fn announce(&self, topics: u8);
+
     // import
     fn import_state(&self, owner: &str) -> StoreResult<ImportState>;
     fn insert_imported_agent(&self, a: &ImportedAgent) -> StoreResult<()>;
@@ -517,6 +614,19 @@ pub enum Wake {
     Fenced(String),
     /// A key of this host was revoked or its user disabled: close the host's connection.
     Revoked(String),
+    /// The board changed in ways the web UI shows ([`topics`] bits); carries no content.
+    Board(u8),
+}
+
+/// What a [`Wake::Board`] says changed.
+pub mod topics {
+    /// Messages, read positions, reactions, memberships.
+    pub const MESSAGES: u8 = 1;
+    /// Notifications and attempts.
+    pub const DELIVERY: u8 = 2;
+    /// Bindings, pins, profiles, bridges, endpoints.
+    pub const FLEET: u8 = 4;
+    pub const ALL: u8 = MESSAGES | DELIVERY | FLEET;
 }
 
 /// Raised after a write transaction commits that made a notification pending
@@ -539,7 +649,7 @@ impl Default for PendingSignal {
 
 impl PendingSignal {
     pub fn raise(&self, wake: Wake) {
-        let pending = !matches!(wake, Wake::Fenced(_) | Wake::Revoked(_));
+        let pending = !matches!(wake, Wake::Fenced(_) | Wake::Revoked(_) | Wake::Board(_));
         let _ = self.tx.send(wake);
         if pending {
             *self.generation.lock().unwrap_or_else(|e| e.into_inner()) += 1;
@@ -587,7 +697,7 @@ impl PendingWatch {
             match tokio::time::timeout_at(deadline, self.rx.recv()).await {
                 Err(_) => return false,
                 Ok(Ok(Wake::Host(h))) if h != host => continue,
-                Ok(Ok(Wake::Fenced(_) | Wake::Revoked(_))) => continue,
+                Ok(Ok(Wake::Fenced(_) | Wake::Revoked(_) | Wake::Board(_))) => continue,
                 Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => return true,
                 Ok(Err(broadcast::error::RecvError::Closed)) => {
                     tokio::time::sleep_until(deadline).await;
@@ -609,10 +719,16 @@ pub(crate) struct Wakes {
     pub fenced: BTreeSet<String>,
     /// Hosts whose keys this transaction revoked (or whose user it disabled).
     pub revoked: BTreeSet<String>,
+    /// Board changes announced to the browsers ([`topics`] bits).
+    pub board: u8,
 }
 
 impl Wakes {
     pub fn is_empty(&self) -> bool {
-        self.notifications.is_empty() && self.hosts.is_empty() && self.fenced.is_empty() && self.revoked.is_empty()
+        self.notifications.is_empty()
+            && self.hosts.is_empty()
+            && self.fenced.is_empty()
+            && self.revoked.is_empty()
+            && self.board == 0
     }
 }

@@ -521,8 +521,8 @@ Rollout order:
    the one review prompt).
 5. After the last host migrates: `CONDE_MIN_PROTO=2`.
 
-The `astra-box` host (the acceptance test's second bridge, which is not running now) is not
-migrated; Astra's Codex thread registers on homepc's local board.
+The `astra-box` host (the acceptance test's second bridge) is not migrated: its credential is
+already revoked (admin API, checked 2026-10-09); Astra's Codex thread registers on homepc's local board.
 
 ## 10. History (separate, staged; nothing is deleted without the owner's go per list)
 
@@ -747,8 +747,6 @@ Order:
    teammate who joins #hive or #vvp reads the owner's kond channels. No other owner is a member today
    (verified as above). Should the six owner-only channels be retired first, ahead of the rest of H4?
    This is destructive and needs a list plus your go.
-3. The `astra-box` host credential (acceptance-test bridge, not running): revoke it after the switch?
-   Revocation cannot be undone.
 
 ## 15. Found while designing (live board, 2026-10-09)
 

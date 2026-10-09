@@ -10,6 +10,7 @@ pub mod credentials;
 pub mod daemon;
 pub mod dispatch;
 pub mod harness;
+pub mod history;
 pub mod identity;
 pub mod import;
 pub mod login;

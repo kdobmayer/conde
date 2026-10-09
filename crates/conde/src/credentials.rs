@@ -87,6 +87,12 @@ pub fn bridge_url(server: &str) -> anyhow::Result<String> {
     Ok(format!("{}://{authority}{path}", if tls { "wss" } else { "ws" }))
 }
 
+/// The RPC URL for a server URL: `https://host/v1/rpc` (`http://` for a plain server).
+pub fn rpc_url(server: &str) -> anyhow::Result<String> {
+    let (tls, authority) = origin(server)?;
+    Ok(format!("{}://{authority}/v1/rpc", if tls { "https" } else { "http" }))
+}
+
 /// Whether two server URLs name the same server (the key never goes elsewhere).
 pub fn same_server(a: &str, b: &str) -> anyhow::Result<bool> {
     Ok(origin(a)? == origin(b)?)

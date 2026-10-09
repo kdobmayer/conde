@@ -208,6 +208,12 @@ enum Cmd {
         #[arg(long, value_name = "N")]
         expect_files: Option<usize>,
     },
+    /// One-off history tools of the v2 switch (DESIGN-v2 section 10); removed after H4.
+    #[command(hide = true)]
+    History {
+        #[command(subcommand)]
+        cmd: HistoryCmd,
+    },
     /// MCP server for this session's agent on stdin/stdout (Claude Code and Codex spawn it).
     Mcp,
     /// Set up this machine: the bridge service, and the conde skill and MCP server for
@@ -234,6 +240,40 @@ enum Cmd {
         /// Report what is set up and what is missing; change nothing.
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum HistoryCmd {
+    /// H1: classify a read-only extraction (history_extract.sql output) against the kond
+    /// snapshot and write the manifest: <out>.md, <out>-messages.tsv, <out>-attachments.tsv,
+    /// <out>-names.tsv.
+    Inventory {
+        #[arg(long, value_name = "FILE")]
+        extract: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        snapshot: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+        /// Where the extraction came from, as the manifest states it.
+        #[arg(long, default_value = "the extraction file")]
+        source: String,
+    },
+    /// H3: copy the manifest's class (b) rows from the board of this machine's credential into
+    /// the local board the H2 import restored, in one transaction, validated by hashes.
+    Copy {
+        /// The manifest path given to inventory --out (without the suffixes).
+        #[arg(long, value_name = "PATH")]
+        manifest: PathBuf,
+        /// The local board (default: the data directory's conde.db).
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// The host credential file (default: the enrolled one).
+        #[arg(long, value_name = "FILE")]
+        credentials: Option<PathBuf>,
+        /// Fetch and check; write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -345,6 +385,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Setup { claude, codex, service, all, keep_receiver_policy, yes: _, check } => {
             return setup(claude, codex, service, all, keep_receiver_policy, check);
         }
+        Cmd::History { cmd: HistoryCmd::Inventory { extract, snapshot, out, source } } => {
+            return crate::history::inventory_main(&extract, &snapshot, &out, &source);
+        }
+        Cmd::History { cmd: HistoryCmd::Copy { manifest, db, credentials, dry_run } } => {
+            return crate::history::copy_main(&manifest, db, credentials, dry_run);
+        }
         Cmd::Admin { cmd: AdminCmd::Key { cmd } } => {
             admin::require_human()?;
             return match cmd {
@@ -367,7 +413,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
     };
     let sx = &mut session;
     match cli.cmd {
-        Cmd::Daemon { .. } | Cmd::Server { .. } | Cmd::Enroll { .. } | Cmd::Login { .. } | Cmd::Admin { .. } => {
+        Cmd::Daemon { .. }
+        | Cmd::Server { .. }
+        | Cmd::Enroll { .. }
+        | Cmd::Login { .. }
+        | Cmd::Admin { .. }
+        | Cmd::History { .. } => {
             unreachable!()
         }
         Cmd::Import { .. } | Cmd::Mcp | Cmd::Setup { .. } => unreachable!(),

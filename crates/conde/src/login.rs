@@ -154,7 +154,7 @@ async fn respond(sock: &mut TcpStream, status: &str, message: &str) {
 }
 
 /// rustls with the ring provider and the system CA bundle (as the store's Postgres client).
-fn tls() -> anyhow::Result<rustls::ClientConfig> {
+pub(crate) fn tls() -> anyhow::Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
     if roots.is_empty() {

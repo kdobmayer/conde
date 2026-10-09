@@ -446,11 +446,24 @@ Each line closes a question the sections above left open; the gate tests in
   publication.
 - **Aggregate paging**: `after` applies to the local part; each board's part carries its own
   `next_cursor` in `boards`; a board is paged with `--board <alias> --after N`.
-- **Aggregate read** (`read` with no target): a board's part is two calls inside the 2 s bound,
-  `inbox.list` and then `message.read`. If the second does not answer in time, the part shows
-  the listed messages with `"unconfirmed": true` (read them with `conde read dakai:<id>`), so a
-  read applied on the board after the cut is never silently lost; a board whose listing does not
-  answer is unavailable and nothing is marked read there.
+- **Aggregate read** (`read` with no target): a board's part lists its unread messages
+  (`inbox.list`), then reads exactly those, each by id (`message.read {id}`), all inside the 2 s
+  bound. A message that arrives in between stays unread; a read whose answer does not come in
+  time leaves its message in the result as `"unconfirmed": true` with `"recover": "conde read
+  <alias>:<id>"` (its text is the listing's preview); a board whose listing does not answer is
+  unavailable and nothing is read there. Every part in `boards` carries its own `next_cursor`
+  and `more`.
+- **Default board**: `board.forget` of the default board resets the default to `local` first
+  and answers `default_reset: true`; a default naming a board this host does not have is
+  refused for names and channels, never replaced by another board.
+- **Board op completion**: the originating request and the reconnect worker may both finish one
+  op; the op is reread in the completing transaction, a finished op returns its stored result
+  and changes nothing, and a completion touches only the row state its own op created.
+- **Routes snapshots against completions**: the client numbers the frames it receives; a
+  publication completed by a response numbered after a routes snapshot (or a `mailbox.mine`
+  answer) is not deleted by that snapshot, whatever order their handlers run in.
+- **Local outcomes**: each is kept, in order, until the local board records it (a storage
+  failure is retried); its slot, token and notifier mapping are released only then.
 - **Admission by generation**: a notify older than the publication's generation is `refused`; a
   newer one (routes not applied yet) is `failed` with `recipient unavailable`, retried after the
   board's backoff.

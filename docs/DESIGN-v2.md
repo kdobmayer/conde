@@ -270,7 +270,8 @@ board's outcome budget is full.
     de-duplication is backed by the token map, so it does not depend on the client's seen-set
     capacity.
   - **Outcomes and receipts.** Outcomes and late receipts never block the notifier thread. They go
-    into a per-board map keyed by token, where the latest status wins, and the board's task drains
+    into a per-board map keyed by token, where the latest status wins (a terminal status is never
+    replaced by a non-terminal one), and the board's task drains
     the map into the client's outcome book (`bridge.report`) whenever the book has room. The map
     holds at most one entry per in-flight or injected attempt, so it is bounded by W plus the
     notifier's own cap on remembered injections (`REMEMBERED` in `harness.rs`). A late `held` or

@@ -207,7 +207,10 @@ fn recipient_state(db: &dyn Tx, m: &MsgRow, d: &Delivery) -> OpResult<Value> {
         other => other,
     };
     let retry_at = (state == "retrying").then(|| iso_from_ms(d.next_attempt_at));
+    // A reached message has no delivery error: a later attempt failing under it (abandoned at
+    // a host takeover) does not undo the read or the delivery.
     let last_error = match (&d.last_status, &d.last_reason) {
+        _ if matches!(state, "read" | "delivered") => Value::Null,
         (Some(s), reason) if FAILED.contains(&s.as_str()) => json!({"status": s, "reason": reason}),
         _ => Value::Null,
     };

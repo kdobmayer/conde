@@ -101,6 +101,7 @@ on_both!(
     the_owner_sees_what_their_agents_can_read_and_nothing_else,
     another_owner_sees_only_their_own_agents,
     delivery_state_shows_the_retry_clock_the_hold_and_the_last_error,
+    a_read_message_never_shows_the_error_of_a_stale_attempt,
     history_pages_back_in_chronological_order,
     attachments_download_only_where_an_own_agent_can_read,
     channel_members_shows_read_positions_to_members_only,
@@ -529,6 +530,40 @@ async fn delivery_state_shows_the_retry_clock_the_hold_and_the_last_error(d: Arc
     let rs = first["delivery"]["recipients"].as_array().unwrap();
     assert_eq!(rs.len(), 1, "{first}");
     assert_eq!(rs[0]["recipient"], format!("{USER}/worker"));
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The state a host takeover left on the live board: the recipient read the message, its
+/// notification is read, and the old instance's attempt under it was abandoned afterwards. The
+/// message shows as read with its time, never with that attempt's error.
+async fn a_read_message_never_shows_the_error_of_a_stale_attempt(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let sent = ui.op(&c.k, &c.worker, "message.send", json!({"to": {"agent": "david/scout"}, "text": "ping"})).await;
+    let bridge = ui.d.bridge_principal(&c.dv);
+    let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
+    let job = claim["jobs"].as_array().unwrap().iter().find(|j| j["message_id"] == sent["message_id"]).unwrap().clone();
+    let (attempt, notification) =
+        (job["attempt_id"].as_str().unwrap().to_string(), job["notification_id"].as_str().unwrap().to_string());
+    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": attempt, "outcome": "accepted"})).await;
+    ui.op(&c.dv, &c.scout, "message.read", json!({"id": sent["message_id"]})).await;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|tx| {
+            tx.update_attempt(&attempt, "abandoned", Some("bridge instance gone"), None, "2026-10-09T13:31:22.000Z")?;
+            tx.set_notification_status(&notification, "read")?;
+            Ok(())
+        })
+        .unwrap()
+    })
+    .await;
+
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "worker", "with": "david/scout"})).await;
+    let r = h["messages"].as_array().unwrap().last().unwrap()["delivery"]["recipients"][0].clone();
+    assert_eq!((r["state"].as_str(), r["status"].as_str()), (Some("read"), Some("read")), "{r}");
+    assert!(r["read_at"].is_string(), "{r}");
+    assert_eq!(r["last_error"], Value::Null, "a read message carries no delivery error: {r}");
     ui.server.shutdown().await.unwrap();
 }
 

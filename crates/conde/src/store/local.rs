@@ -293,10 +293,14 @@ impl LocalTx for SqliteTx<'_> {
     }
 
     fn finish_op(&self, op_id: &str, state: BoardOpState, result: Option<&Value>, at: &str) -> StoreResult<()> {
-        self.guard(self.raw().execute(
+        let n = self.guard(self.raw().execute(
             "UPDATE board_ops SET state = ?2, result_json = ?3, updated_at = ?4 WHERE op_id = ?1",
             params![op_id, state.as_str(), result.map(Value::to_string), at],
         ))?;
+        // An op that is gone (its board forgotten) refuses the whole transaction.
+        if n != 1 {
+            return Err(super::StoreError(format!("board op {op_id} no longer exists")));
+        }
         Ok(())
     }
 

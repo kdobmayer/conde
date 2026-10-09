@@ -459,9 +459,18 @@ Each line closes a question the sections above left open; the gate tests in
 - **Board op completion**: the originating request and the reconnect worker may both finish one
   op; the op is reread in the completing transaction, a finished op returns its stored result
   and changes nothing, and a completion touches only the row state its own op created.
-- **Routes snapshots against completions**: the client numbers the frames it receives; a
-  publication completed by a response numbered after a routes snapshot (or a `mailbox.mine`
-  answer) is not deleted by that snapshot, whatever order their handlers run in.
+- **Routes snapshots against completions**: causality, not arrival order. Each host has a
+  route revision (`hosts.route_revision`), bumped in the same transaction as every binding
+  change that touches the host (the old and the new host of a takeover); `routes`,
+  `mailbox.mine`, `mailbox.publish` and `mailbox.unpublish` carry the revision they were read
+  at (`revision`, absent from an older server). The daemon applies a snapshot only if its
+  revision is not older than the newest it applied from a snapshot or a mutation's answer. As
+  a second guard, the client numbers the frames it receives, and a publication completed by a
+  response numbered after a snapshot is not deleted by that snapshot.
+- **A forgotten board**: `board.forget` marks the board first; afterwards no late answer
+  applies to it (a completion for an op that no longer exists is a no-op answering
+  `forgotten`, and recording an op's end must update exactly its one row) and nothing starts
+  its connection again.
 - **Local outcomes**: each is kept, in order, until the local board records it (a storage
   failure is retried); its slot, token and notifier mapping are released only then.
 - **Admission by generation**: a notify older than the publication's generation is `refused`; a

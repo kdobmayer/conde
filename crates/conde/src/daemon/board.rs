@@ -51,6 +51,11 @@ pub struct BoardConn {
     epoch: AtomicU64,
     /// A connection started and its `mailbox.mine` is not answered yet.
     mine_due: AtomicBool,
+    /// The newest route revision applied (from a snapshot or a mutation's answer); an older
+    /// snapshot is ignored.
+    revision: Mutex<u64>,
+    /// `board.forget` removed this board: nothing applies to it or starts it any more.
+    pub forgotten: AtomicBool,
 }
 
 impl BoardConn {
@@ -69,6 +74,8 @@ impl BoardConn {
             completions: Mutex::default(),
             epoch: AtomicU64::new(0),
             mine_due: AtomicBool::new(false),
+            revision: Mutex::new(0),
+            forgotten: AtomicBool::new(false),
         }
     }
 
@@ -146,6 +153,9 @@ pub fn describe_stop(reason: &StopReason) -> String {
 
 /// Starts the board's v2 connection and its task.
 pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
+    if conn.forgotten.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(cfg) = conn.config.clone() else { return };
     let url = match crate::credentials::bridge_url(&cfg.server) {
         Ok(u) => u,
@@ -193,7 +203,7 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
                 if let Some(d) = core.mux.tuning.routes_delay {
                     std::thread::sleep(d);
                 }
-                reconcile(&core, &alias, &routes.mailboxes, seq);
+                reconcile(&core, &alias, &routes.mailboxes, seq, routes.revision);
                 core.mux.reconciled(&alias);
             }
             Inbound::Notify(n) => core.mux.push(&alias, *n),
@@ -245,7 +255,7 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
                         .into_iter()
                         .map(|m| Route { mailbox_id: m.mailbox_id, route_generation: m.route_generation })
                         .collect();
-                    reconcile(&core, &conn.alias, &routes, seq);
+                    reconcile(&core, &conn.alias, &routes, seq, mine.revision);
                     if current(&conn) {
                         core.mux.reconciled(&conn.alias);
                     }
@@ -302,7 +312,7 @@ fn drain(core: &Core, alias: &str, client: &BridgeClient) {
 /// routes here is deleted (and kept for doctor); a newer generation is adopted. A row whose
 /// publication completed by a response received after the snapshot is left alone: the snapshot
 /// predates it, whatever order the two were handled in.
-pub fn reconcile(core: &Core, alias: &str, routes: &[Route], seq: u64) {
+pub fn reconcile(core: &Core, alias: &str, routes: &[Route], seq: u64, revision: Option<u64>) {
     let now = iso_from_ms(now_ms());
     let conn = core.board(alias);
     let result = core.local_tx(|tx| {
@@ -310,6 +320,16 @@ pub fn reconcile(core: &Core, alias: &str, routes: &[Route], seq: u64) {
         let completions =
             conn.as_ref().map(|c| c.completions.lock().unwrap_or_else(|p| p.into_inner()).clone()).unwrap_or_default();
         let mut removed = Vec::new();
+        // Causality first: a snapshot read at an older route revision than one already
+        // applied (a snapshot, or a publish or unpublish answer) is stale as a whole.
+        if let (Some(conn), Some(r)) = (&conn, revision) {
+            let mut applied = conn.revision.lock().unwrap_or_else(|p| p.into_inner());
+            if r < *applied {
+                tracing::info!(board = alias, revision = r, applied = *applied, "stale routes snapshot ignored");
+                return Ok(removed);
+            }
+            *applied = r;
+        }
         for p in tx.publications(Some(alias))? {
             if p.state != PublicationState::Published || completions.get(&p.agent_id).is_some_and(|done| *done > seq) {
                 continue;
@@ -404,9 +424,23 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
     let agent = op.agent_id.clone().unwrap_or_default();
     let now = iso_from_ms(now_ms());
     let internal = |e: anyhow::Error| (ErrorCode::Internal, format!("{e:#}"));
-    // The stored op when it is no longer pending (a duplicate completion).
-    let stored = |tx: &crate::store::sqlite::SqliteTx| -> anyhow::Result<Option<BoardOp>> {
-        Ok(tx.op(&op.op_id)?.filter(|o| o.state != BoardOpState::Pending))
+    // The answer when this completion must change nothing: the board was forgotten (its op
+    // is gone), or the op already ended (a duplicate completion).
+    let stored = |tx: &crate::store::sqlite::SqliteTx| -> anyhow::Result<Option<Result<String, (ErrorCode, String)>>> {
+        if conn.forgotten.load(Ordering::SeqCst) {
+            return Ok(Some(Ok("forgotten".into())));
+        }
+        Ok(match tx.op(&op.op_id)? {
+            None => Some(Ok("forgotten".into())),
+            Some(o) if o.state != BoardOpState::Pending => Some(settled(&o)),
+            Some(_) => None,
+        })
+    };
+    let advance = |r: Option<u64>| {
+        if let Some(r) = r {
+            let mut applied = conn.revision.lock().unwrap_or_else(|p| p.into_inner());
+            *applied = (*applied).max(r);
+        }
     };
     let owned = |tx: &crate::store::sqlite::SqliteTx, state: PublicationState| -> anyhow::Result<bool> {
         Ok(tx.publication(alias, &agent)?.is_some_and(|p| p.state == state))
@@ -415,7 +449,7 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
         (kind, OpOutcome::Pending(why)) => {
             tracing::info!(board = alias, op = op.op_id, "board op pending: {why}");
             if let Some(done) = core.local_tx(|tx| stored(tx)).map_err(internal)? {
-                return settled(&done);
+                return done;
             }
             Ok(match kind {
                 BoardOpKind::Publish => "publishing",
@@ -426,7 +460,7 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
         }
         (BoardOpKind::Migrate, OpOutcome::Done(result, _)) => {
             if let Some(done) = core.local_tx(|tx| stored(tx)).map_err(internal)? {
-                return settled(&done);
+                return done;
             }
             super::publish::apply_manifest(core, conn, op, &result)
         }
@@ -450,13 +484,14 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
                             let mark = done.entry(agent.clone()).or_default();
                             *mark = (*mark).max(seq);
                         }
+                        advance(p.revision);
                     }
                     tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
                     Ok(None)
                 })
                 .map_err(internal)?;
             if let Some(done) = duplicate {
-                return settled(&done);
+                return done;
             }
             Ok("published".into())
         }
@@ -469,13 +504,14 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
                     }
                     if tx.publication(alias, &agent)?.is_some_and(|p| p.state == PublicationState::Unpublishing && p.mailbox_id.as_deref() == Some(mailbox.as_str())) {
                         tx.delete_publication(alias, &agent)?;
+                        advance(result["revision"].as_u64());
                     }
                     tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
                     Ok(None)
                 })
                 .map_err(internal)?;
             match duplicate {
-                Some(done) => settled(&done),
+                Some(done) => done,
                 None => Ok("unpublished".into()),
             }
         }
@@ -518,7 +554,7 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
                 })
                 .map_err(internal)?;
             match duplicate {
-                Some(done) => settled(&done),
+                Some(done) => done,
                 None if moved => Ok("unpublished".into()),
                 None => Err((code, format!("{alias}: {message}"))),
             }
@@ -530,6 +566,9 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
 pub async fn resume_migration(core: Arc<Core>, conn: Arc<BoardConn>, op: BoardOp) {
     let mut delay = Duration::from_secs(1);
     loop {
+        if conn.forgotten.load(Ordering::SeqCst) {
+            return;
+        }
         let outcome = send_op(&conn, &op, core.mux.tuning.call_timeout).await;
         match outcome {
             OpOutcome::Pending(why) => {
@@ -598,7 +637,7 @@ pub async fn probe_migrated(core: Weak<Core>, conn: Arc<BoardConn>) {
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
         let Some(c) = core.upgrade() else { return };
-        if conn.status() != Status::NotMigrated {
+        if conn.status() != Status::NotMigrated || conn.forgotten.load(Ordering::SeqCst) {
             return;
         }
         let wait = c.mux.tuning.call_timeout;
@@ -729,8 +768,34 @@ mod tests {
         // Its callback is queued while the idempotent response for the old publish (frame 9)
         // reaches the concurrently resumed op worker. The operation is already locally Done.
         finish_op(&core, &conn, &publish, OpOutcome::Done(answer, Some(9))).unwrap();
-        reconcile(&core, "dakai", &[], 8);
+        reconcile(&core, "dakai", &[], 8, None);
         assert_eq!(state(&core, &agent), None,
             "a duplicate completion must not suppress a newer routes withdrawal");
+    }
+
+    // Models an actual host.migrate_v2 response arriving after board.forget completed.
+    #[test]
+    fn late_migration_completion_must_not_recreate_forgotten_publications() {
+        let (_dir, _rt, core, conn, agent) = setup();
+        let mut migration = op("01LATEFORGOTTENMIGRATION", BoardOpKind::Migrate, &agent, json!({"publish": ["01REMOTEAGENT"]}));
+        migration.agent_id = None;
+        begin(&core, &migration, None, None);
+        let answer = json!({"bindings": [{
+            "agent_id": "01REMOTEAGENT", "name": "worker",
+            "address": format!("codex:local-thread@{}", core.principal.host),
+            "pin": null,
+            "published": {"mailbox_id": "01REMOTEMAILBOX", "route_generation": 2}
+        }]});
+        let mut req = crate::protocol::Request::new("forget", crate::surface::BOARD_FORGET, json!({}));
+        req.actor = Some(format!("human:tester@{}", core.principal.host));
+        req.board = Some("dakai".into());
+        let forgotten = super::super::publish::forget(&core, &req).unwrap();
+        assert_eq!(forgotten["ops_removed"], 1);
+        assert!(core.board("dakai").is_none());
+        assert!(core.local_tx(|tx| Ok(tx.op(&migration.op_id)?)).unwrap().is_none());
+        assert_eq!(state(&core, &agent), None);
+        // The real HTTP request or startup resume worker still owns this Arc and op.
+        let _late = finish_op(&core, &conn, &migration, OpOutcome::Done(answer, None));
+        assert_eq!(state(&core, &agent), None, "board.forget must prevent its outstanding migration from recreating exposure");
     }
 }

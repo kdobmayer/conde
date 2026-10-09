@@ -235,6 +235,8 @@ pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     require_human(core, req, "a board's configuration")?;
     let conn = board_of(core, req)?;
     let alias = conn.alias.clone();
+    // From here no late answer applies to this board and nothing starts it again.
+    conn.forgotten.store(true, std::sync::atomic::Ordering::SeqCst);
     // A default that names this board would point bare names nowhere: it goes back to the
     // local board first, and the answer says so.
     let default_reset = core.default_board() == alias;
@@ -353,7 +355,13 @@ pub fn apply_manifest(core: &Core, conn: &BoardConn, op: &BoardOp, result: &Valu
     let owner = core.principal.user_id;
     let now = iso_from_ms(now_ms());
     let live = |a: &Address| core.live(a);
-    core.local_tx(|tx| {
+    let applied = core.local_tx(|tx| {
+        // Only for the board's own pending op: a forgotten board's late answer applies nothing.
+        if conn.forgotten.load(std::sync::atomic::Ordering::SeqCst)
+            || tx.op(&op.op_id)?.is_none_or(|o| o.state != BoardOpState::Pending)
+        {
+            return Ok(false);
+        }
         let mut conflicts = Vec::new();
         for row in &manifest.bindings {
             let Some(name) = normalize_name(&row.name) else { continue };
@@ -396,8 +404,8 @@ pub fn apply_manifest(core: &Core, conn: &BoardConn, op: &BoardOp, result: &Valu
         }
         let stored = json!({"manifest": result, "conflicts": conflicts});
         tx.finish_op(&op.op_id, BoardOpState::Done, Some(&stored), &now)?;
-        Ok(())
+        Ok(true)
     })
     .map_err(internal)?;
-    Ok("migrated".into())
+    Ok(if applied { "migrated" } else { "forgotten" }.into())
 }

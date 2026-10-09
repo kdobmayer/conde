@@ -1830,3 +1830,89 @@ fn integrated_g15_unpublish_and_republish() {
     let rows: i64 = sql(&a).query_row("SELECT count(*) FROM publications WHERE agent_id = ?1", [&agent], |r| r.get(0)).unwrap();
     assert_eq!(rows, 0);
 }
+
+
+// Review-only: keep real storage/server/daemon; delay only the return of one completed
+// mailbox.mine read. This is the scheduling gap at server dispatch_on's spawn_blocking await.
+struct ReviewMineGate {
+    board: Arc<conde::cloud::Board>,
+    claimed: AtomicBool,
+    reached: AtomicBool,
+    empty: AtomicBool,
+    returned: AtomicBool,
+    released: Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+impl ReviewMineGate {
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+}
+struct ReviewMineRelease(Arc<ReviewMineGate>);
+impl Drop for ReviewMineRelease {
+    fn drop(&mut self) { self.0.release(); }
+}
+impl RemoteDispatcher for ReviewMineGate {
+    fn dispatch(&self, p: &conde_remote::Principal, request: Value) -> Value {
+        self.board.dispatch(p, request)
+    }
+    fn dispatch_bridge(&self, p: &conde_remote::Principal, instance: &str, request: Value) -> Value {
+        let hold = request["op"].as_str() == Some(op::MAILBOX_MINE)
+            && !self.claimed.swap(true, Ordering::SeqCst);
+        let response = self.board.dispatch_bridge(p, instance, request);
+        if hold {
+            self.empty.store(response["ok"] == true
+                && response["result"]["mailboxes"].as_array().is_some_and(Vec::is_empty), Ordering::SeqCst);
+            self.reached.store(true, Ordering::SeqCst);
+            let released = self.released.lock().unwrap();
+            let _ = self.changed.wait_timeout_while(released, Duration::from_secs(20), |r| !*r).unwrap();
+            self.returned.store(true, Ordering::SeqCst);
+        }
+        response
+    }
+}
+
+#[test]
+fn review_older_mine_snapshot_arriving_after_publish_must_not_delete_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = Arc::new(conde::dispatch::Dispatcher::open(&dir.path().join("board.db")).unwrap());
+    d.share("dakai");
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let real = Arc::new(conde::cloud::Board::new(d.clone()));
+    let gate = Arc::new(ReviewMineGate {
+        board: real.clone(), claimed: AtomicBool::new(false), reached: AtomicBool::new(false),
+        empty: AtomicBool::new(false), returned: AtomicBool::new(false),
+        released: Mutex::new(false), changed: std::sync::Condvar::new(),
+    });
+    let config = conde_remote::ServerConfig {
+        poll_interval: Duration::from_millis(50), ..conde_remote::ServerConfig::default()
+    };
+    let handle = rt.block_on(conde_remote::start(
+        "127.0.0.1:0".parse().unwrap(), config, real.clone(), gate.clone(), real,
+    )).unwrap();
+    let addr = handle.local_addr();
+    std::mem::forget(handle);
+    let board = RealBoard { rt, d, addr, stalled: Arc::new(AtomicBool::new(false)), _dir: dir };
+    let release = ReviewMineRelease(gate.clone());
+    let mut a = Host::tuned("kdobmayer", "homepc", Tuning {
+        call_timeout: Duration::from_secs(10), ..fast()
+    });
+    a.join_real(&board);
+    wait_for("the real empty mine snapshot captured before its response", ||
+        gate.reached.load(Ordering::SeqCst).then_some(()));
+    assert!(gate.empty.load(Ordering::SeqCst), "mine read must have seen the empty pre-publication state");
+    a.claude("worker", "s-worker");
+    let published = a.publish("worker");
+    assert_eq!(published["state"], "published", "{published}");
+    let local_state = || sql(&a).query_row(
+        "SELECT state FROM publications WHERE shared_name='worker'", [], |r| r.get::<_, String>(0),
+    ).ok();
+    assert_eq!(local_state().as_deref(), Some("published"));
+    release.0.release();
+    wait_for("the old real mine result returned", || gate.returned.load(Ordering::SeqCst).then_some(()));
+    // Allow the actual client to receive the response and its actual run task to reconcile it.
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(local_state().as_deref(), Some("published"),
+        "response arrival order is not snapshot order: the old empty mine must not delete the new publication");
+}

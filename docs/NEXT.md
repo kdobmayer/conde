@@ -146,3 +146,9 @@ table for claude binaries and read each one's CLAUDE_CONFIG_DIR from its
 environment, or watch every sessions dir named in a config list), and
 `conde setup` offers to install the skill/MCP/setting into every config dir it
 finds. Until then: system-default account works; injected dirs do not.
+
+## G. Found at the homepc switch (2026-10-09), small
+
+- `conde search --after` rejects an ISO timestamp ("invalid digit found in string"); accept RFC 3339 as well as the cursor.
+- `host.migrate_v2` local apply registers the published names at their session addresses without checking that the session already holds another local name (desk's kond-era name collided; fixed by hand with `conde unregister --if-address`). The apply should rename or refuse with the exact command.
+- The offline gate (G1 on the real machine, network blocked for 30 s) was not run at the switch: run it once with the owner present.

@@ -119,7 +119,68 @@ pub fn no_agent(name: &str, board: &str) -> String {
 
 /// Rule 4: a local agent without a publication acting on a shared board.
 pub fn not_published(agent: &str, board: &str) -> String {
-    format!("{agent} is not published on {board}. Publication is set by your human: conde publish {agent} --board {board}")
+    format!("{agent} is not published on {board}. Your human decides what is published; when told: conde publish {agent} --board {board}")
+}
+
+/// The shared board a publish or unpublish names: always explicit, never the local board.
+pub fn publication_board<'a>(board: Option<&'a str>, cmd: &str, surface: Surface) -> Result<&'a str, String> {
+    match board {
+        None => Err(format!("{cmd} needs {} (conde boards lists this host's boards)", surface.with_board("<alias>"))),
+        Some(LOCAL_BOARD) => Err(format!(
+            "the local board needs no publication; {cmd} names a shared board ({})",
+            surface.with_board("<alias>")
+        )),
+        Some(b) => Ok(b),
+    }
+}
+
+/// `mailbox.publish`'s answer: the shared owner/name, a pending op, or Err when the board
+/// withdrew it or the board was forgotten before the answer applied.
+pub fn published(r: &Value, agent: &str, board: &str, shared: &str, surface: Surface) -> Result<String, String> {
+    let again = match surface {
+        Surface::Cli => "run conde publish again",
+        Surface::Mcp | Surface::Remote => "call publish again",
+    };
+    match r["state"].as_str().unwrap_or_default() {
+        "withdrawn" => Err(format!(
+            "not published: {agent} was withdrawn on {board} before the publish completed; {again} or check conde boards"
+        )),
+        "forgotten" => Err(format!("not published: board {board} was forgotten before the publish completed")),
+        "published" => {
+            let name = r["name"].as_str().unwrap_or(shared);
+            Ok(format!("published {agent} on {board} as {}", owner_qualified(r, board, name)))
+        }
+        _ => Ok(format!(
+            "publishing {agent} on {board} is pending (op {}): {board} did not answer; the daemon completes it when it \
+             reconnects, and conde doctor shows it until then",
+            r["op_id"].as_str().unwrap_or_default()
+        )),
+    }
+}
+
+/// A shared name with its owner: the daemon's answer, else the board's file on this host.
+fn owner_qualified(r: &Value, board: &str, name: &str) -> String {
+    if name.contains('/') {
+        return name.to_string();
+    }
+    let owner = r["owner"].as_str().map(str::to_string).or_else(|| crate::boards::path(board).and_then(|p| crate::boards::load(&p)).ok().map(|c| c.owner));
+    match owner {
+        Some(o) if !o.is_empty() => format!("{o}/{name}"),
+        _ => name.to_string(),
+    }
+}
+
+/// `mailbox.unpublish`'s answer.
+pub fn unpublished(r: &Value, agent: &str, board: &str) -> String {
+    if r["state"] == "unpublished" {
+        format!("unpublished {agent} from {board}")
+    } else {
+        format!(
+            "unpublishing {agent} from {board} is pending (op {}): it is no longer used in either direction; the daemon \
+             completes it on {board} when it reconnects",
+            r["op_id"].as_str().unwrap_or_default()
+        )
+    }
 }
 
 /// Rule 4: a publication in flight is not usable.

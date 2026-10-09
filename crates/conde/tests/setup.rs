@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use conde::protocol::v2::BoardInfo;
-use conde::setup::{self, CmdOut, Env, Host, Options, Os};
+use conde::setup::{self, CmdOut, Env, Host, Options, Os, Publish};
 use conde::{paths, util};
 
 struct Fake {
@@ -91,6 +91,10 @@ impl Host for Fake {
 
     fn reach(&mut self, _socket: &Path) -> Result<(), String> {
         if self.alive { Ok(()) } else { Err("No such file or directory (os error 2)".into()) }
+    }
+
+    fn terminal(&self) -> bool {
+        !self.answers.is_empty()
     }
 
     fn ask(&mut self, prompt: &str) -> Option<String> {
@@ -670,8 +674,10 @@ fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// An agent runs setup from its shell: no terminal and no flag publishes the candidates (an
+/// enrolled v1 host keeps its cross-owner names) and says how to change it.
 #[test]
-fn without_a_terminal_nothing_is_decided_for_the_human() {
+fn without_a_terminal_or_a_flag_the_candidates_stay_published() {
     let root = temp_root();
     let env = env(&root, Os::Linux);
     enrolled(&env);
@@ -681,20 +687,89 @@ fn without_a_terminal_nothing_is_decided_for_the_human() {
     host.daemon.insert("host.migrate_v2", Ok(manifest(&["desk"])));
     let (ok, out) = run(&env, &Options::select(false, false, false, false), &mut host);
     assert!(ok, "{out}");
-    assert!(out.contains("boards: dakai: not migrated: choosing what stays published is the human's, at a terminal; until then dakai stays local-only on this host; the review: conde boards --migrate dakai\n"), "{out}");
-    assert!(out.contains("boards: default board for names and channels: local (to change it: conde setup --default-board <alias>)\n"), "{out}");
-    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
+    for line in [
+        "boards: dakai: host box (account krisz) still has 2 names bound from v1. A candidate (*) has messages with another owner's agents:\n",
+        "boards: dakai: no terminal and no --publish flag, so the candidates (*) stay published: desk; the other 1 names move to this host's local board only\n",
+        "boards: dakai: switched to v2; published: desk; on this host's local board only: 1 names\n",
+        "boards: dakai: to change it later: conde publish <name> --board dakai, conde unpublish <name> --board dakai\n",
+        "boards: default board for names and channels: local (to change it: conde setup --default-board <alias>)\n",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in\n{out}");
+    }
+    assert!(host.prompts.is_empty(), "{:?}", host.prompts);
+    assert_eq!(ops(&host).last().unwrap(), &("host.migrate_v2".to_string(), Some("dakai".to_string()), json!({"publish": ["01DESK"]})));
     assert!(!env.default_board().exists());
 
-    // the explicit review without a terminal is a failure the human sees
+    // the explicit review without a terminal does the same
     let mut sink = Vec::new();
-    assert!(!setup::migrate_review(&env, &mut host, &mut sink, "dakai", true).unwrap());
+    assert!(setup::migrate_review(&env, &mut host, &mut sink, "dakai", true, None).unwrap());
+    assert_eq!(ops(&host).last().unwrap().2, json!({"publish": ["01DESK"]}));
     // the flag sets the default without asking
     let mut opts = Options::select(false, false, false, false);
     opts.default_board = Some("dakai".into());
     let (_, out) = run(&env, &opts, &mut host);
     assert!(out.contains("boards: default board for names and channels: dakai\n"), "{out}");
     assert_eq!(read(&env.default_board()), "dakai\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `--publish <names>`, `--publish-candidates`, `--publish-all`, `--publish-none`: each
+/// decides without a prompt, even at a terminal; a name the board does not have applies
+/// nothing.
+#[test]
+fn each_publish_flag_decides_the_switch() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    enrolled(&env);
+    let cases = [
+        (Publish::Names(vec!["lane.v0".into(), "krisz/desk".into()]), json!(["01LANE", "01DESK"]), "--publish lane.v0,krisz/desk publishes lane.v0, desk; the other 0 names"),
+        (Publish::Candidates, json!(["01DESK"]), "--publish-candidates publishes desk; the other 1 names"),
+        (Publish::All, json!(["01DESK", "01LANE"]), "--publish-all publishes desk, lane.v0; the other 0 names"),
+        (Publish::Nothing, json!([]), "--publish-none publishes nothing; the other 2 names"),
+    ];
+    for (choice, ids, line) in cases {
+        let mut host = Fake::new(&env, &[]);
+        host.daemon.insert("board.info", Ok(board_info(false)));
+        host.daemon.insert("host.migrate_preview", Ok(preview()));
+        host.daemon.insert("host.migrate_v2", Ok(manifest(&[])));
+        // a terminal is there, and nobody is asked
+        host.answers = ["unused"].map(String::from).into();
+        let mut out = Vec::new();
+        assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, Some(&choice)).unwrap());
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains(&format!("boards: dakai: {line} move to this host's local board only\n")), "{choice:?}: {out}");
+        assert!(out.contains("to change it later: conde publish <name> --board dakai"), "{out}");
+        assert!(host.prompts.is_empty(), "{choice:?}: {:?}", host.prompts);
+        assert_eq!(ops(&host).last().unwrap().2, json!({"publish": ids}), "{choice:?}");
+    }
+
+    // setup takes the flag for every enrolled board's review
+    let mut host = Fake::new(&env, &[]);
+    host.daemon.insert("board.info", Ok(board_info(false)));
+    host.daemon.insert("host.migrate_preview", Ok(preview()));
+    host.daemon.insert("host.migrate_v2", Ok(manifest(&[])));
+    let mut opts = Options::select(false, false, false, false);
+    opts.publish = Some(Publish::Nothing);
+    let (ok, out) = run(&env, &opts, &mut host);
+    assert!(ok && out.contains("boards: dakai: --publish-none publishes nothing"), "{out}");
+    assert_eq!(ops(&host).last().unwrap().2, json!({"publish": []}));
+
+    // an unknown name: nothing applied, and the review failed
+    let mut host = Fake::new(&env, &[]);
+    host.daemon.insert("board.info", Ok(board_info(false)));
+    host.daemon.insert("host.migrate_preview", Ok(preview()));
+    let mut out = Vec::new();
+    let names = Publish::Names(vec!["desk".into(), "nope".into()]);
+    assert!(!setup::migrate_review(&env, &mut host, &mut out, "dakai", false, Some(&names)).unwrap());
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("boards: dakai: not migrated: not names of host box on dakai: nope; until then dakai stays local-only on this host"), "{out}");
+    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
+    // also where the board has no names at all
+    host.daemon.insert("host.migrate_preview", Ok(json!({"rows": []})));
+    let mut out = Vec::new();
+    assert!(!setup::migrate_review(&env, &mut host, &mut out, "dakai", false, Some(&names)).unwrap());
+    assert!(String::from_utf8(out).unwrap().contains("not names of host box on dakai: desk, nope"));
+    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -711,7 +786,7 @@ fn the_review_takes_names_none_or_declines() {
     // an unknown name is asked again; a "no" applies nothing
     host.answers = ["nope", "lane.v0 desk", "n"].map(String::from).into();
     let mut out = Vec::new();
-    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, None).unwrap());
     let out = String::from_utf8(out).unwrap();
     assert!(out.contains("boards: dakai: not names of this host: nope\n"), "{out}");
     assert!(out.contains("boards: dakai: not migrated (declined)"), "{out}");
@@ -721,7 +796,7 @@ fn the_review_takes_names_none_or_declines() {
     // none: the host switches with nothing published
     host.answers = ["none", "yes"].map(String::from).into();
     let mut out = Vec::new();
-    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, None).unwrap());
     assert!(String::from_utf8(out).unwrap().contains("switched to v2; published: nothing; on this host's local board only: 2 names"));
     assert_eq!(ops(&host).last().unwrap().2, json!({"publish": []}));
     let _ = std::fs::remove_dir_all(&root);
@@ -739,7 +814,7 @@ fn a_switch_finished_on_board_info_prints_its_result() {
     info["migration"] = manifest(&["desk"]);
     host.daemon.insert("board.info", Ok(info));
     let mut out = Vec::new();
-    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, None).unwrap());
     let text = String::from_utf8(out).unwrap();
     assert_eq!(
         text,
@@ -759,7 +834,7 @@ fn a_migrated_host_is_not_reviewed_and_an_empty_one_switches_with_nothing_publis
     let mut host = Fake::new(&env, &[]);
     host.daemon.insert("board.info", Ok(board_info(true)));
     let mut out = Vec::new();
-    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, None).unwrap());
     let text = String::from_utf8(out).unwrap();
     assert_eq!(text, "boards: dakai: host box (account krisz) is on v2; publish names with: conde publish <name> --board dakai\n");
     assert_eq!(ops(&host).len(), 1);
@@ -768,7 +843,7 @@ fn a_migrated_host_is_not_reviewed_and_an_empty_one_switches_with_nothing_publis
     host.daemon.insert("host.migrate_preview", Ok(json!({"rows": []})));
     host.daemon.insert("host.migrate_v2", Ok(json!({"bindings": []})));
     let mut out = Vec::new();
-    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", false).unwrap());
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", false, None).unwrap());
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("no names of host box are bound there; switching it to v2 publishes nothing"), "{text}");
     assert!(host.prompts.is_empty(), "nothing to decide, nobody asked");
@@ -777,7 +852,7 @@ fn a_migrated_host_is_not_reviewed_and_an_empty_one_switches_with_nothing_publis
     // a daemon that does not answer leaves the board local-only and says how to resume
     host.daemon.clear();
     let mut out = Vec::new();
-    assert!(!setup::migrate_review(&env, &mut host, &mut out, "dakai", false).unwrap());
+    assert!(!setup::migrate_review(&env, &mut host, &mut out, "dakai", false, None).unwrap());
     assert!(String::from_utf8(out).unwrap().contains("boards: dakai: not reached through the daemon (unknown op board.info); until then dakai stays local-only"));
     let _ = std::fs::remove_dir_all(&root);
 }

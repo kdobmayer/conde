@@ -38,6 +38,29 @@ fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
+/// This test binary's daemon log (every in-process daemon writes to it); the audit lines of
+/// publication and the migration are read from here.
+fn daemon_log() -> String {
+    static LOG: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buf = LOG.get_or_init(|| {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let w = buf.clone();
+        let _ = tracing_subscriber::fmt().with_ansi(false).with_writer(move || Sink(w.clone())).try_init();
+        buf
+    });
+    String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
+}
+
 // --- the scripted harness ---------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -823,7 +846,7 @@ fn g7_an_unpublished_agent_sends_nothing() {
     let from = board.capture("homepc").len();
     let e = a.send(&worker, "balazs/relay", "hi", Some("dakai")).unwrap_err();
     assert_eq!(e.0, ErrorCode::Forbidden);
-    assert_eq!(e.1, "worker is not published on dakai. Publication is set by your human: conde publish worker --board dakai");
+    assert_eq!(e.1, "worker is not published on dakai. Your human decides what is published; when told: conde publish worker --board dakai");
     std::thread::sleep(Duration::from_millis(200));
     let sent = requests_since(&board, "homepc", from);
     assert!(sent.is_empty(), "{sent:?}");
@@ -1291,33 +1314,63 @@ fn forgetting_the_default_board_resets_it_and_says_so() {
 // --- publication rules, the v1 credential, reconciliation on connect ------------------
 
 /// Publishing again under the same name is a no-op; a different `--as` while published is
-/// refused; publication is the human's; an unpublishing publication is not usable outbound;
-/// an explicit shared board on a registry op is refused; whoami shows both names.
+/// refused; an agent publishes and unpublishes like the human (any local agent, logged with
+/// its address), but forgetting a board stays the human's; an unpublishing publication is
+/// not usable outbound; an explicit shared board on a registry op is refused; whoami shows
+/// both names.
 #[test]
 fn publication_rules() {
+    daemon_log();
     let board = FakeBoard::start();
-    let (a, worker) = published_host(&board, "kdobmayer", "homepc", "worker", "s-worker", fast());
+    let (a, worker) = published_host(&board, "kdobmayer", "pubhost", "worker", "s-worker", fast());
     assert_eq!(a.publish("worker")["unchanged"], true);
     let other = a.request(&a.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "other"}), Some("dakai")).unwrap_err();
     assert_eq!(other, (ErrorCode::Conflict, "worker is published on dakai as worker; unpublish first".to_string()));
-    let by_agent = a.request(&worker, op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker"}), Some("dakai")).unwrap_err();
-    assert_eq!(by_agent.0, ErrorCode::Forbidden);
+    let by_agent = a.ok(&worker, op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker"}), Some("dakai"));
+    assert_eq!(by_agent["unchanged"], true, "{by_agent}");
+    let forget = a.request(&worker, conde::surface::BOARD_FORGET, json!({}), Some("dakai")).unwrap_err();
+    assert_eq!(forget, (ErrorCode::Forbidden, "a board's configuration is set by your human".to_string()));
     for (op, verb) in [("agent.register", "register"), ("agent.rename", "rename"), ("agent.pin", "pin"), ("agent.unregister", "unregister")] {
         let e = a.request(&worker, op, json!({"name": "worker"}), Some("dakai")).unwrap_err();
         assert_eq!(e.1, format!("{verb} is local; a shared address is conde publish <name> --board dakai"));
     }
+    // an agent publishes another of this host's names, as its human told it
     let lane = a.claude("lane", "s-lane");
-    let p = a.ok(&a.human(), op::MAILBOX_PUBLISH, json!({"agent": "lane", "name": "lane-homepc"}), Some("dakai"));
-    assert_eq!(p["name"], "lane-homepc");
+    let p = a.ok(&worker, op::MAILBOX_PUBLISH, json!({"agent": "lane", "name": "lane-homepc"}), Some("dakai"));
+    assert_eq!((p["name"].clone(), p["state"].clone()), (json!("lane-homepc"), json!("published")), "{p}");
     let who = a.ok(&lane, "agent.whoami", json!({}), None);
     assert_eq!(who["name"], "kdobmayer/lane");
     assert_eq!(who["publications"], json!([{"board": "dakai", "name": "kdobmayer/lane-homepc", "state": "published"}]));
     assert_eq!(who["boards"], json!(["dakai"]));
-    // the agent may shrink its own exposure
-    assert_eq!(a.ok(&lane, op::MAILBOX_UNPUBLISH, json!({"agent": "lane"}), Some("dakai"))["state"], "unpublished");
+    // and withdraws it again
+    assert_eq!(a.ok(&worker, op::MAILBOX_UNPUBLISH, json!({"agent": "lane"}), Some("dakai"))["state"], "unpublished");
+    let log = daemon_log();
+    for line in ["publish board=\"dakai\" agent=\"lane\" name=\"lane-homepc\"", "unpublish board=\"dakai\" agent=\"lane\""] {
+        let hit = log.lines().find(|l| l.contains(line) && l.contains("by=\"claude:s-worker@pubhost\""));
+        assert!(hit.is_some(), "no audit line {line:?} by the worker in\n{log}");
+    }
+    assert!(log.lines().any(|l| l.contains("publish board=\"dakai\" agent=\"worker\"") && l.contains("by=\"human:kdobmayer@pubhost\"")), "{log}");
     sql(&a).execute("UPDATE publications SET state = 'unpublishing' WHERE shared_name = 'worker'", []).unwrap();
     let e = a.send(&worker, "balazs/relay", "x", Some("dakai")).unwrap_err();
     assert_eq!(e.1, conde::surface::publication_pending("worker", "dakai", "unpublishing"));
+}
+
+/// An agent's shell runs the one-time switch like the human: an unregistered session reads
+/// the preview and applies the migration, and the daemon log names it.
+#[test]
+fn an_agent_runs_the_migration() {
+    daemon_log();
+    let board = FakeBoard::start();
+    let mut a = Host::new("kdobmayer", "mighost");
+    a.enroll(&board);
+    a.start();
+    wait_for("the board listed", || (a.status() == "not migrated").then_some(()));
+    let agent = "codex:t-setup";
+    assert_eq!(a.ok(agent, op::HOST_MIGRATE_PREVIEW, json!({}), Some("dakai")), json!({"rows": []}));
+    a.ok(agent, op::HOST_MIGRATE_V2, json!({"publish": []}), Some("dakai"));
+    wait_for("the board connection", || (board.connected("mighost") && a.status() == "connected").then_some(()));
+    let log = daemon_log();
+    assert!(log.lines().any(|l| l.contains("migrate board=\"dakai\"") && l.contains("by=\"codex:t-setup@mighost\"")), "{log}");
 }
 
 /// The v1 credential file moves to `boards/<board name>.json` with the account the board names;

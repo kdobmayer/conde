@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 
 use crate::client::Client;
@@ -140,8 +140,8 @@ enum Cmd {
     },
     /// Check the health of the local board and of every shared board.
     Doctor,
-    /// Publish a local agent on a shared board, so teammates there can reach it (the human
-    /// only): `conde publish <agent> --board <alias> [--as <name>]`.
+    /// Publish a local agent on a shared board, so teammates there can reach it (run it when
+    /// your human tells you to): `conde publish <agent> --board <alias> [--as <name>]`.
     Publish {
         agent: String,
         /// The name on the shared board (default: the local name).
@@ -151,7 +151,7 @@ enum Cmd {
         #[arg(long)]
         take: bool,
     },
-    /// Withdraw an agent's publication from a shared board (the human, or the agent itself).
+    /// Withdraw an agent's publication from a shared board.
     Unpublish { agent: String },
     /// List this host's boards: the local one and every enrolled shared board.
     Boards {
@@ -163,6 +163,8 @@ enum Cmd {
         /// host to v2 (the one-time switch of an already enrolled host).
         #[arg(long, value_name = "ALIAS")]
         migrate: Option<String>,
+        #[command(flatten)]
+        publish: PublishArgs,
     },
     /// Run the local board, its socket and the notification bridge, plus a connection to
     /// every enrolled shared board.
@@ -289,7 +291,47 @@ enum Cmd {
         /// without the prompt.
         #[arg(long, value_name = "ALIAS")]
         default_board: Option<String>,
+        #[command(flatten)]
+        publish: PublishArgs,
     },
+}
+
+/// What stays published when an enrolled host switches to v2. Without one: asked at a
+/// terminal; without a terminal, the candidates.
+#[derive(Args)]
+#[group(multiple = false)]
+struct PublishArgs {
+    /// At the switch to v2: publish exactly these names (comma-separated).
+    #[arg(long, value_name = "NAME,...", value_delimiter = ',')]
+    publish: Option<Vec<String>>,
+    /// At the switch to v2: publish the candidates, the names with messages with another
+    /// owner's agents.
+    #[arg(long)]
+    publish_candidates: bool,
+    /// At the switch to v2: publish every name bound on the board.
+    #[arg(long)]
+    publish_all: bool,
+    /// At the switch to v2: publish nothing.
+    #[arg(long)]
+    publish_none: bool,
+}
+
+impl PublishArgs {
+    fn choice(&self) -> Option<crate::setup::Publish> {
+        use crate::setup::Publish;
+        if let Some(names) = &self.publish {
+            return Some(Publish::Names(names.iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()));
+        }
+        if self.publish_candidates {
+            Some(Publish::Candidates)
+        } else if self.publish_all {
+            Some(Publish::All)
+        } else if self.publish_none {
+            Some(Publish::Nothing)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -447,15 +489,6 @@ fn print(out: surface::Out) {
     eprint!("{}", out.notes);
 }
 
-/// A shared board named for a publication; the default board never applies.
-fn publication_board<'a>(board: Option<&'a str>, cmd: &str) -> anyhow::Result<&'a str> {
-    match board {
-        None => bail!("{cmd} needs --board <alias> (conde boards lists this host's boards)"),
-        Some(LOCAL_BOARD) => bail!("the local board needs no publication; {cmd} names a shared board (--board <alias>)"),
-        Some(b) => Ok(b),
-    }
-}
-
 fn run(cli: Cli) -> anyhow::Result<i32> {
     let secs = |s: f64| Duration::from_secs_f64(s.max(0.0));
     surface::check_board_flag(cli.board.as_deref()).map_err(|e| anyhow!(e))?;
@@ -496,13 +529,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             crate::mcp::run(paths::socket_path())?;
             return Ok(0);
         }
-        Cmd::Setup { claude, codex, service, all, keep_receiver_policy, yes: _, check, default_board } => {
+        Cmd::Setup { claude, codex, service, all, keep_receiver_policy, yes: _, check, default_board, publish } => {
             no_board("setup", "; the host's default board is conde setup --default-board <alias>")?;
-            return setup(claude, codex, service, all, keep_receiver_policy, check, default_board);
+            let opts = crate::setup::Options {
+                keep_receiver_policy,
+                default_board,
+                publish: publish.choice(),
+                ..crate::setup::Options::select(claude, codex, service, all)
+            };
+            return setup(opts, check);
         }
-        Cmd::Boards { forget: None, migrate: Some(alias) } => {
+        Cmd::Boards { forget: None, migrate: Some(alias), publish } => {
             no_board("boards --migrate", "")?;
-            return boards_migrate(&alias);
+            return boards_migrate(&alias, publish.choice());
+        }
+        Cmd::Boards { migrate: None, publish, .. } if publish.choice().is_some() => {
+            bail!("the --publish flags choose what stays published at a switch: conde boards --migrate <alias> --publish-...")
         }
         Cmd::History { cmd: HistoryCmd::Inventory { extract, snapshot, out, source } } => {
             no_board("history", "")?;
@@ -740,45 +782,19 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             }
         }
         Cmd::Publish { agent, as_name, take } => {
-            let board = publication_board(flag.as_deref(), "publish")?;
+            let board = surface::publication_board(flag.as_deref(), "publish", Surface::Cli).map_err(|e| anyhow!(e))?;
             let shared = as_name.unwrap_or_else(|| agent.rsplit('/').next().unwrap_or(&agent).to_string());
             let mut body = json!({"agent": agent, "name": shared});
             if take {
                 body["take"] = json!(true);
             }
             let r = sx.call(op::MAILBOX_PUBLISH, body)?;
-            match s(&r["state"]) {
-                // taken over or withdrawn on the board before the answer was applied: no publication here
-                "withdrawn" => bail!(
-                    "not published: {agent} was withdrawn on {board} before the publish completed; run conde publish \
-                     again or check conde boards"
-                ),
-                "forgotten" => bail!("not published: board {board} was forgotten before the publish completed"),
-                _ => {}
-            }
-            if s(&r["state"]) == "published" {
-                let name = r["name"].as_str().unwrap_or(&shared);
-                println!("published {agent} on {board} as {}", owner_qualified(board, name));
-            } else {
-                println!(
-                    "publishing {agent} on {board} is pending (op {}): {board} did not answer; the daemon completes it \
-                     when it reconnects, and conde doctor shows it until then",
-                    s(&r["op_id"])
-                );
-            }
+            println!("{}", surface::published(&r, &agent, board, &shared, Surface::Cli).map_err(|e| anyhow!(e))?);
         }
         Cmd::Unpublish { agent } => {
-            let board = publication_board(flag.as_deref(), "unpublish")?;
+            let board = surface::publication_board(flag.as_deref(), "unpublish", Surface::Cli).map_err(|e| anyhow!(e))?;
             let r = sx.call(op::MAILBOX_UNPUBLISH, json!({"agent": agent}))?;
-            if s(&r["state"]) == "unpublished" {
-                println!("unpublished {agent} from {board}");
-            } else {
-                println!(
-                    "unpublishing {agent} from {board} is pending (op {}): it is no longer used in either direction; the \
-                     daemon completes it on {board} when it reconnects",
-                    s(&r["op_id"])
-                );
-            }
+            println!("{}", surface::unpublished(&r, &agent, board));
         }
         Cmd::Boards { forget: Some(alias), .. } => {
             let r = sx.call_on(surface::BOARD_FORGET, Some(&alias), json!({}))?;
@@ -791,8 +807,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 println!("default board reset to {}", r["default"].as_str().unwrap_or(LOCAL_BOARD));
             }
         }
-        Cmd::Boards { forget: None, migrate: Some(_) } => unreachable!(),
-        Cmd::Boards { forget: None, migrate: None } => {
+        Cmd::Boards { forget: None, migrate: Some(_), .. } => unreachable!(),
+        Cmd::Boards { forget: None, migrate: None, .. } => {
             let live = sx.call(surface::BOARD_LIST, json!({}));
             print!("{}", boards_listing(live)?);
         }
@@ -820,17 +836,6 @@ fn name_on(whoami: &Value, board: &str) -> String {
         return s(&p["name"]).to_string();
     }
     s(&whoami["name"]).to_string()
-}
-
-/// `owner/name` with the account the alias is enrolled as, when its file says.
-fn owner_qualified(board: &str, name: &str) -> String {
-    if name.contains('/') {
-        return name.to_string();
-    }
-    match boards::path(board).and_then(|p| boards::load(&p)) {
-        Ok(cfg) => format!("{}/{name}", cfg.owner),
-        Err(_) => name.to_string(),
-    }
 }
 
 /// `conde boards`: the local board, then every enrolled board, each with what the daemon
@@ -880,31 +885,20 @@ fn boards_listing(live: anyhow::Result<Value>) -> anyhow::Result<String> {
 }
 
 /// `conde boards --migrate <alias>`: the review `conde setup` runs, for one board.
-fn boards_migrate(alias: &str) -> anyhow::Result<i32> {
+fn boards_migrate(alias: &str, publish: Option<crate::setup::Publish>) -> anyhow::Result<i32> {
     let env = crate::setup::Env::from_process()?;
-    let ok = crate::setup::migrate_review(&env, &mut crate::setup::System, &mut std::io::stdout(), alias, true)?;
+    let ok = crate::setup::migrate_review(&env, &mut crate::setup::System, &mut std::io::stdout(), alias, true, publish.as_ref())?;
     Ok(i32::from(!ok))
 }
 
 /// `conde setup`: the service runs the single daemon (the local board, plus every enrolled
 /// shared board); the default board and the migration review follow.
-fn setup(
-    claude: bool,
-    codex: bool,
-    service: bool,
-    all: bool,
-    keep_receiver_policy: bool,
-    check: bool,
-    default_board: Option<String>,
-) -> anyhow::Result<i32> {
-    use crate::setup::{Env, Options, System, run, verify};
+fn setup(mut opts: crate::setup::Options, check: bool) -> anyhow::Result<i32> {
+    use crate::setup::{Env, System, run, verify};
     let env = Env::from_process()?;
-    let mut opts = Options::select(claude, codex, service, all);
-    opts.keep_receiver_policy = keep_receiver_policy;
-    if default_board.is_some() {
+    if opts.default_board.is_some() || opts.publish.is_some() {
         opts.boards = true;
     }
-    opts.default_board = default_board;
     let ok = if check {
         verify(&env, &opts, &mut System, &mut std::io::stdout())?
     } else {

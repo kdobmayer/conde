@@ -187,6 +187,55 @@ pub struct Options {
     pub keep_receiver_policy: bool,
     /// Set the default board without asking.
     pub default_board: Option<String>,
+    /// What stays published when an enrolled host switches to v2; None: asked at a terminal,
+    /// the candidates without one.
+    pub publish: Option<Publish>,
+}
+
+/// Which of an enrolled host's v1 names stay published at its switch to v2 (`--publish*`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Publish {
+    /// Exactly these names (`--publish a,b`).
+    Names(Vec<String>),
+    /// The names the preview marks as candidates: messages with another owner's agents.
+    Candidates,
+    /// Every name bound on the board.
+    All,
+    /// None: the host switches publishing nothing.
+    Nothing,
+}
+
+impl Publish {
+    fn flag(&self) -> String {
+        match self {
+            Publish::Names(names) => format!("--publish {}", names.join(",")),
+            Publish::Candidates => "--publish-candidates".into(),
+            Publish::All => "--publish-all".into(),
+            Publish::Nothing => "--publish-none".into(),
+        }
+    }
+
+    /// The preview rows this choice publishes; Err names the ones the board does not have.
+    fn rows<'a>(&self, rows: &'a [PreviewRow]) -> Result<Vec<&'a PreviewRow>, Vec<String>> {
+        match self {
+            Publish::Candidates => Ok(rows.iter().filter(|r| r.candidate).collect()),
+            Publish::All => Ok(rows.iter().collect()),
+            Publish::Nothing => Ok(Vec::new()),
+            Publish::Names(names) => {
+                let mut chosen: Vec<&PreviewRow> = Vec::new();
+                let mut unknown = Vec::new();
+                for typed in names {
+                    let bare = typed.rsplit('/').next().unwrap_or(typed);
+                    match rows.iter().find(|r| r.name.eq_ignore_ascii_case(bare)) {
+                        Some(r) if !chosen.iter().any(|c| c.agent_id == r.agent_id) => chosen.push(r),
+                        Some(_) => {}
+                        None => unknown.push(typed.clone()),
+                    }
+                }
+                if unknown.is_empty() { Ok(chosen) } else { Err(unknown) }
+            }
+        }
+    }
 }
 
 impl Options {
@@ -216,8 +265,9 @@ pub trait Host {
     /// Whether a daemon answers on `socket`: connect and one request frame,
     /// bounded by a short timeout. Err carries why not.
     fn reach(&mut self, socket: &Path) -> Result<(), String>;
-    /// A line the human typed after `prompt`; None without a terminal (an agent's shell,
-    /// a script), where nothing is decided for the human.
+    /// Whether a person is at a terminal (stdin is one); false in an agent's shell or a script.
+    fn terminal(&self) -> bool;
+    /// A line the human typed after `prompt`; None without a terminal or at end of input.
     fn ask(&mut self, prompt: &str) -> Option<String>;
     /// One request to the local daemon on `socket`, waiting briefly for a service that is
     /// starting. Err carries the daemon's refusal or why it was not reached.
@@ -272,10 +322,14 @@ impl Host for System {
         })
     }
 
+    fn terminal(&self) -> bool {
+        // SAFETY: isatty on the process's own stdin descriptor.
+        unsafe { libc::isatty(0) == 1 }
+    }
+
     fn ask(&mut self, prompt: &str) -> Option<String> {
         use std::io::BufRead;
-        // SAFETY: isatty on the process's own stdin descriptor.
-        if unsafe { libc::isatty(0) } != 1 {
+        if !self.terminal() {
             return None;
         }
         print!("{prompt}");
@@ -766,7 +820,7 @@ fn boards_part(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Wri
     }
     let mut ok = true;
     for alias in &enrolled {
-        ok &= migrate_review(env, host, out, alias, false)?;
+        ok &= migrate_review(env, host, out, alias, false, opts.publish.as_ref())?;
     }
     default_board(env, opts, host, out, &enrolled)?;
     if !ok {
@@ -822,11 +876,19 @@ fn short_date(at: &str) -> &str {
 }
 
 /// The one-time switch of an enrolled host to v2 on board `alias` (§9): the daemon fetches
-/// the read-only preview, the human picks the names that stay published, and the daemon
-/// applies it as a resumable operation. Without a terminal nothing is decided and the board
-/// stays local-only on this host. Ok(false) when the review could not run (`explicit`: the
-/// human asked for it with `conde boards --migrate`).
-pub fn migrate_review(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &str, explicit: bool) -> anyhow::Result<bool> {
+/// the read-only preview, `publish` (the `--publish*` flag) or the human at a terminal picks
+/// the names that stay published, and the daemon applies it as a resumable operation.
+/// Without a flag and without a terminal (an agent running setup) the candidates stay
+/// published, and the output says so. Ok(false) when the review could not run (`explicit`:
+/// asked for with `conde boards --migrate`).
+pub fn migrate_review(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    alias: &str,
+    explicit: bool,
+    publish: Option<&Publish>,
+) -> anyhow::Result<bool> {
     let later = format!("until then {alias} stays local-only on this host; the review: conde boards --migrate {alias}");
     let (info, finished) = match host.daemon(&env.socket, op::BOARD_INFO, Some(alias), json!({})) {
         Ok(v) => (serde_json::from_value::<BoardInfo>(v.clone()).context("board.info answer")?, v.get("migration").cloned()),
@@ -850,13 +912,46 @@ pub fn migrate_review(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias
             return Ok(false);
         }
     };
+    let unknown = |out: &mut dyn Write, names: &[String]| {
+        writeln!(out, "boards: {alias}: not migrated: not names of host {} on {alias}: {}; {later}", info.host, names.join(", "))
+    };
     if preview.rows.is_empty() {
+        if let Some(Publish::Names(names)) = publish
+            && !names.is_empty()
+        {
+            unknown(out, names)?;
+            return Ok(false);
+        }
         writeln!(out, "boards: {alias}: no names of host {} are bound there; switching it to v2 publishes nothing", info.host)?;
         return apply_migration(env, host, out, alias, &[]);
     }
-    show_preview(out, alias, &info, &preview)?;
+    let interactive = publish.is_none() && host.terminal();
+    show_preview(out, alias, &info, &preview, interactive)?;
+    if !interactive {
+        let (choice, head) = match publish {
+            Some(p) => (p.clone(), format!("{} publishes", p.flag())),
+            None => (Publish::Candidates, "no terminal and no --publish flag, so the candidates (*) stay published:".to_string()),
+        };
+        let chosen = match choice.rows(&preview.rows) {
+            Ok(c) => c,
+            Err(names) => {
+                unknown(out, &names)?;
+                return Ok(false);
+            }
+        };
+        let names: Vec<&str> = chosen.iter().map(|r| r.name.as_str()).collect();
+        let listed = if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
+        let rest = preview.rows.len() - chosen.len();
+        writeln!(out, "boards: {alias}: {head} {listed}; the other {rest} names move to this host's local board only")?;
+        let ids: Vec<String> = chosen.iter().map(|r| r.agent_id.clone()).collect();
+        let ok = apply_migration(env, host, out, alias, &ids)?;
+        if ok {
+            writeln!(out, "boards: {alias}: to change it later: conde publish <name> --board {alias}, conde unpublish <name> --board {alias}")?;
+        }
+        return Ok(ok);
+    }
     let Some(chosen) = choose(host, out, alias, &preview.rows)? else {
-        writeln!(out, "boards: {alias}: not migrated: choosing what stays published is the human's, at a terminal; {later}")?;
+        writeln!(out, "boards: {alias}: not migrated: no answer; {later}")?;
         return Ok(!explicit);
     };
     let names: Vec<&str> = chosen.iter().map(|r| r.name.as_str()).collect();
@@ -880,11 +975,12 @@ pub fn migrate_review(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias
     apply_migration(env, host, out, alias, &ids)
 }
 
-fn show_preview(out: &mut dyn Write, alias: &str, info: &BoardInfo, preview: &MigratePreview) -> anyhow::Result<()> {
+fn show_preview(out: &mut dyn Write, alias: &str, info: &BoardInfo, preview: &MigratePreview, interactive: bool) -> anyhow::Result<()> {
+    let choose = if interactive { "; history alone is not consent, so you choose" } else { "" };
     writeln!(
         out,
         "boards: {alias}: host {} (account {}) still has {} names bound from v1. A candidate (*) has messages with \
-         another owner's agents; history alone is not consent, so you choose:",
+         another owner's agents{choose}:",
         info.host,
         info.owner,
         preview.rows.len()

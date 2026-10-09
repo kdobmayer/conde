@@ -370,11 +370,11 @@ fn board_flag_travels_in_the_envelope_and_references_verbatim() {
     // a daemon refusal is printed as the daemon words it
     let d2 = {
         drop(d);
-        r.fake(|_| Err(("forbidden", "worker is not published on dakai. Publication is set by your human: conde publish worker --board dakai".into())))
+        r.fake(|_| Err(("forbidden", "worker is not published on dakai. Your human decides what is published; when told: conde publish worker --board dakai".into())))
     };
     let (ok, _, err) = r.conde(&["send", "reviewer", "hi", "--board", "dakai"]);
     assert!(!ok);
-    assert_eq!(err, "conde: worker is not published on dakai. Publication is set by your human: conde publish worker --board dakai\n");
+    assert_eq!(err, "conde: worker is not published on dakai. Your human decides what is published; when told: conde publish worker --board dakai\n");
     drop(d2);
 }
 
@@ -680,6 +680,40 @@ fn aggregate_sent_names_each_boards_continuation() {
     assert!(err.contains("(more on dakai: conde sent --board dakai --after 200)"), "{err}");
     let (_, _, err) = r.conde(&["sent", "--board", "dakai"]);
     assert!(err.contains("(more: conde sent --board dakai --after 7)"), "{err}");
+}
+
+/// `conde boards --migrate <alias> --publish*` reaches the review with its choice and asks
+/// nothing; the flags exclude each other and need --migrate.
+#[test]
+fn boards_migrate_takes_the_publish_flags() {
+    let r = Root::new();
+    r.enroll_file("dakai", "https://conde.test");
+    let d = r.fake(scripted(vec![
+        ("board.info", json!({"name": "dakai", "owner": "tester", "host": "testhost", "mailbox_only": false})),
+        ("host.migrate_preview", json!({"rows": [
+            {"agent_id": "01DESK", "name": "desk", "address": "claude:s1@testhost", "pin": null, "candidate": true, "evidence": []},
+            {"agent_id": "01LANE", "name": "lane", "address": "claude:s2@testhost", "pin": null, "candidate": false, "evidence": []}]})),
+        ("host.migrate_v2", json!({"bindings": [
+            {"agent_id": "01DESK", "name": "desk", "address": "claude:s1@testhost", "pin": null, "published": null},
+            {"agent_id": "01LANE", "name": "lane", "address": "claude:s2@testhost", "pin": null, "published": {"mailbox_id": "01MB", "route_generation": 1}}]})),
+    ]));
+    let (ok, out, err) = r.conde(&["boards", "--migrate", "dakai", "--publish", "lane"]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("boards: dakai: --publish lane publishes lane; the other 1 names move to this host's local board only\n"), "{out}");
+    assert!(out.contains("boards: dakai: switched to v2; published: lane; on this host's local board only: 1 names\n"), "{out}");
+    let migrate = d.take().into_iter().find(|q| q["op"] == "host.migrate_v2").unwrap();
+    assert_eq!((migrate["board"].as_str(), &migrate["body"]), (Some("dakai"), &json!({"publish": ["01LANE"]})));
+
+    for args in [
+        &["boards", "--migrate", "dakai", "--publish-all", "--publish-none"][..],
+        &["setup", "--publish", "desk", "--publish-candidates"],
+        &["boards", "--publish-all"],
+    ] {
+        let (ok, _, err) = r.conde(args);
+        assert!(!ok, "{args:?} ran");
+        assert!(err.contains("cannot be used with") || err.contains("conde boards --migrate <alias>"), "{args:?}: {err}");
+    }
+    assert!(d.take().is_empty(), "refused before the daemon");
 }
 
 /// A publish whose mailbox was taken over or withdrawn on the board before its answer was

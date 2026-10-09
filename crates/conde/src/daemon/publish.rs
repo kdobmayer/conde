@@ -37,7 +37,7 @@ fn board_of(core: &Core, req: &Request) -> Result<Arc<BoardConn>, Refusal> {
     core.board(alias).ok_or_else(|| refuse(ErrorCode::NotFound, crate::surface::unknown_board(alias, &core.enrolled())))
 }
 
-/// Publication and the board's configuration are the human's.
+/// Forgetting a board is the human's.
 fn require_human(core: &Core, req: &Request, what: &str) -> Result<(), Refusal> {
     let human = req
         .actor
@@ -48,6 +48,14 @@ fn require_human(core: &Core, req: &Request, what: &str) -> Result<(), Refusal> 
         Ok(())
     } else {
         Err(refuse(ErrorCode::Forbidden, format!("{what} is set by your human")))
+    }
+}
+
+/// Who ran a host operation, for the audit line: the caller's address as the socket gave it.
+fn caller(core: &Core, req: &Request) -> String {
+    match req.actor.as_deref() {
+        Some(raw) => Address::parse_v1(raw, &core.principal.host).map(|a| a.to_string()).unwrap_or_else(|_| raw.to_string()),
+        None => "an unidentified caller".to_string(),
     }
 }
 
@@ -76,9 +84,9 @@ fn pending_refusal(name: &str, alias: &str, op: &BoardOp) -> Refusal {
     )
 }
 
-/// `daemon.publish {agent, board, as?, take?}`: human only.
+/// `daemon.publish {agent, board, as?, take?}`: any caller on this host's socket (the human, or
+/// an agent the human told to); the daemon log names who ran it.
 pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
-    require_human(core, req, "publication")?;
     let conn = board_of(core, req)?;
     usable(&conn)?;
     let alias = conn.alias.clone();
@@ -135,9 +143,10 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
         })
         .map_err(internal)??;
     if let Some(p) = existing {
-        return Ok(json!({"board": alias, "agent": agent.name, "name": p.shared_name, "state": "published",
+        return Ok(json!({"board": alias, "agent": agent.name, "name": p.shared_name, "state": "published", "owner": conn.owner(),
                          "mailbox_id": p.mailbox_id, "route_generation": p.route_generation, "unchanged": true}));
     }
+    tracing::info!(board = alias, agent = agent.name, name = shared, op = op.op_id, by = caller(core, req), "publish");
     let outcome = board::send_op(&conn, &op, wait(core)).await;
     let state = board::finish_op(core, &conn, &op, outcome)?;
     let p = board::publication_of(core, &alias, &agent.id);
@@ -151,20 +160,13 @@ fn wait(core: &Core) -> std::time::Duration {
     core.mux.tuning.call_timeout.min(std::time::Duration::from_secs(10))
 }
 
-/// `daemon.unpublish {agent, board}`: the human, or the agent itself.
+/// `daemon.unpublish {agent, board}`: any caller on this host's socket; logged like publish.
 pub async fn unpublish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     let conn = board_of(core, req)?;
     usable(&conn)?;
     let alias = conn.alias.clone();
     let name = req.body.get("agent").and_then(Value::as_str).ok_or_else(|| refuse(ErrorCode::BadRequest, "missing string field 'agent'"))?;
     let agent = agent_named(core, name)?;
-    if require_human(core, req, "unpublish").is_err() {
-        // Shrinking exposure is always allowed to the agent itself.
-        let me = core.local_identity(req)?;
-        if me.id != agent.id {
-            return Err(refuse(ErrorCode::Forbidden, format!("{} may be unpublished by your human or by itself", agent.name)));
-        }
-    }
     let now = iso_from_ms(now_ms());
     let op = core
         .local_tx(|tx| {
@@ -194,6 +196,7 @@ pub async fn unpublish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal
             Ok(Ok(op))
         })
         .map_err(internal)??;
+    tracing::info!(board = alias, agent = agent.name, op = op.op_id, by = caller(core, req), "unpublish");
     let outcome = board::send_op(&conn, &op, wait(core)).await;
     let state = board::finish_op(core, &conn, &op, outcome)?;
     Ok(json!({"board": alias, "agent": agent.name, "state": state, "op_id": op.op_id}))
@@ -255,7 +258,6 @@ pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
 
 /// `host.migrate_preview` (alias in the envelope): the board's read-only preview, over HTTPS.
 pub async fn migrate_preview(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
-    require_human(core, req, "the migration")?;
     let conn = board_of(core, req)?;
     let resp = board::rpc(&conn, json!({"op": op::HOST_MIGRATE_PREVIEW, "body": {}}), core.mux.tuning.call_timeout)
         .await
@@ -267,11 +269,11 @@ pub async fn migrate_preview(core: &Arc<Core>, req: &Request) -> Result<Value, R
     }
 }
 
-/// `host.migrate_v2 {publish: [agent_id]}` (alias in the envelope): human only. Writes the op,
+/// `host.migrate_v2 {publish: [agent_id]}` (alias in the envelope): any caller on this host's
+/// socket, logged with the published list. Writes the op,
 /// applies it on the board over HTTPS, applies the manifest locally, then connects. Answers the
 /// manifest with the local conflicts; an op the board did not answer stays pending (an error).
 pub async fn migrate(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
-    require_human(core, req, "the migration")?;
     let conn = board_of(core, req)?;
     let alias = conn.alias.clone();
     let publish: Vec<String> = req
@@ -301,6 +303,7 @@ pub async fn migrate(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
             Ok(op)
         })
         .map_err(internal)?;
+    tracing::info!(board = alias, op = op.op_id, publish = %op.request["publish"], by = caller(core, req), "migrate");
     if op.state == BoardOpState::Done {
         return migrated(core, &conn, &op.op_id);
     }

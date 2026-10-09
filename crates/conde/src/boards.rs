@@ -1,7 +1,8 @@
 //! Shared-board configuration on this host (DESIGN-v2 §4, §7, decision 9): one file per
 //! enrolled board, `$XDG_CONFIG_HOME/conde/boards/<alias>.json` (mode 0600 in a 0700
 //! directory), each alias pinned to one server and one account; and the host's default
-//! board, `$XDG_CONFIG_HOME/conde/default-board`, set by the human at `conde setup`.
+//! board, `$XDG_CONFIG_HOME/conde/default-board`, set by `conde setup` (whoever runs it, the agent
+//! included, on the human's instruction).
 
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};

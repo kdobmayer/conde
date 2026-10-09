@@ -155,7 +155,7 @@ fn discover_and_tools_list() {
     assert_eq!(first["result"], second["result"], "tools/list must be deterministic");
     let tools = first["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["whoami", "register", "rename", "agents", "send", "inbox", "read", "show", "search", "sent", "react"]);
+    assert_eq!(names, ["whoami", "register", "rename", "agents", "send", "inbox", "read", "show", "search", "sent", "react", "publish", "unpublish"]);
     let register = &tools[1];
     assert_eq!(register["inputSchema"]["required"], json!(["name"]));
     assert!(register["inputSchema"]["properties"].get("address").is_none(), "identity never comes from arguments");
@@ -177,7 +177,7 @@ fn legacy_client_handshake_then_tools() {
     assert_eq!(r["result"]["serverInfo"]["name"], "conde");
     p.notify("notifications/initialized");
     let r = p.rpc("tools/list", json!({"_meta": {"progressToken": 0}}));
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 13);
     let r = p.rpc(
         "tools/call",
         json!({"_meta": {"threadId": "t-legacy"}, "name": "register", "arguments": {"name": "legacy"}}),
@@ -269,12 +269,19 @@ fn board_argument_on_the_board_tools_and_never_an_identity() {
     for t in r["result"]["tools"].as_array().unwrap() {
         let name = t["name"].as_str().unwrap();
         let props = t["inputSchema"]["properties"].as_object().unwrap();
-        assert_eq!(props.contains_key("board"), BOARD_TOOLS.contains(&name), "{name}: {props:?}");
+        let publication = ["publish", "unpublish"].contains(&name);
+        assert_eq!(props.contains_key("board"), BOARD_TOOLS.contains(&name) || publication, "{name}: {props:?}");
         for claim in ["address", "from", "actor", "as", "owner", "host", "session"] {
+            // publish's `as` is the shared name it publishes under, not who calls
+            if publication && claim == "as" {
+                continue;
+            }
             assert!(!props.contains_key(claim), "{name} takes an identity claim '{claim}'");
         }
-        assert!(!["publish", "unpublish"].contains(&name), "publication is the human's; no MCP tool");
-        if let Some(b) = props.get("board") {
+        let required: Vec<&str> = t["inputSchema"]["required"].as_array().unwrap().iter().map(|r| r.as_str().unwrap()).collect();
+        if publication {
+            assert_eq!(required, ["name", "board"], "{name}: a publication always names its shared board");
+        } else if let Some(b) = props.get("board") {
             assert!(b["description"].as_str().unwrap().contains("a bare id is local"), "{name}: {b}");
         }
     }
@@ -333,6 +340,47 @@ fn board_rules_through_mcp_match_the_cli() {
     assert_eq!(p.ok("search", json!({"pattern": "x", "board": "dakai"}), json!({})), "(no matches)\n(more: call search with board=\"dakai\" after=3)");
     assert_eq!(d.take().pop().unwrap()["board"], "dakai");
     assert_eq!(p.ok("whoami", json!({}), json!({})), "tester/me (local, claude:s-me@testhost)\npublished: dakai as tester/reviewer");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// publish and unpublish mirror the CLI: the same request (alias in the envelope, the
+/// derived actor) and the same answers; a publication always names a shared board.
+#[test]
+fn publish_and_unpublish_mirror_the_cli() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
+    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+        let body = &req["body"];
+        Ok(match req["op"].as_str().unwrap() {
+            "mailbox.publish" if body["agent"] == "slow" => json!({"state": "publishing", "op_id": "01OP"}),
+            "mailbox.publish" => json!({"state": "published", "op_id": "01OP", "name": body["name"], "owner": "tester"}),
+            "mailbox.unpublish" => json!({"state": "unpublished", "op_id": "01OQ"}),
+            _ => json!({}),
+        })
+    });
+    let mut p = claude_peer_at(d.socket.clone(), "s-me");
+    let publishes = |d: &fake_daemon::FakeDaemon| d.take().into_iter().filter(|q| q["op"] != "board.list").collect::<Vec<_>>();
+
+    assert_eq!(p.ok("publish", json!({"name": "worker", "board": "dakai", "as": "kw", "take": true}), json!({})), "published worker on dakai as tester/kw");
+    let req = publishes(&d).pop().unwrap();
+    assert_eq!((req["op"].as_str(), req["board"].as_str(), req["actor"].as_str()), (Some("mailbox.publish"), Some("dakai"), Some("claude:s-me")));
+    assert_eq!(req["body"], json!({"agent": "worker", "name": "kw", "take": true}));
+    assert_eq!(
+        p.ok("publish", json!({"name": "slow", "board": "dakai"}), json!({})),
+        "publishing slow on dakai is pending (op 01OP): dakai did not answer; the daemon completes it when it reconnects, and conde doctor shows it until then"
+    );
+    assert_eq!(publishes(&d).pop().unwrap()["body"], json!({"agent": "slow", "name": "slow"}));
+    assert_eq!(p.ok("unpublish", json!({"name": "worker", "board": "dakai"}), json!({})), "unpublished worker from dakai");
+    let req = publishes(&d).pop().unwrap();
+    assert_eq!((req["op"].as_str(), req["board"].as_str(), &req["body"]), (Some("mailbox.unpublish"), Some("dakai"), &json!({"agent": "worker"})));
+
+    let (err, text) = p.tool("publish", json!({"name": "worker"}), json!({}));
+    assert!(err && text == "conde: publish needs board=\"<alias>\" (conde boards lists this host's boards)", "{text}");
+    let (err, text) = p.tool("unpublish", json!({"name": "worker", "board": "local"}), json!({}));
+    assert!(err && text.contains("the local board needs no publication"), "{text}");
+    let (err, text) = p.tool("publish", json!({"name": "worker", "board": "dakai", "take": "yes"}), json!({}));
+    assert!(err && text.contains("argument 'take' must be a boolean"), "{text}");
+    assert!(publishes(&d).is_empty(), "refusals never reach the daemon");
     drop(p);
     let _ = std::fs::remove_dir_all(&root);
 }

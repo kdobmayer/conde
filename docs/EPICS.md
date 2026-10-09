@@ -30,6 +30,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-09 09:30: conde rename landed 31900e2 (agent.rename op, CLI, MCP tool, tests on both stores; refuses a merge into an existing unbound row, explains the reclaim path); Sol pass requested from Astra (01M4FRQ5F1); ships with the next binaries after the pass. Astra's registry proposal copied to docs/DESIGN-v2-astra-proposal.md.
 - 2026-10-09 09:20: both teammate installs passed (Balázs, Dávid, macOS, 3-5 min); attachments, channels, mentions across owners verified live; conde rename in progress; web UI read-only owner view + review fixes in progress; DESIGN-v2 lane launched.
 - 2026-10-09 04:00 UTC: READY reported; owner completed the first real Entra browser sign-in at /keys; E9 web UI lane launched.
 - 2026-10-09 10:45: cloud acceptance COMPLETE (both directions, fence once, idle hold); import job hardening a4c13f8 confirmed by Astra; final image from a4c13f8 building; rehearsal snapshot uploading to the share.

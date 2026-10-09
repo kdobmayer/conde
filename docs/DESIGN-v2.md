@@ -391,24 +391,23 @@ and finally H1 to H4.
 6. Migration publishes names with cross-owner traffic (section 9). History restore H2 happens inside
    the homepc switch, before the local board has traffic.
 7. Daemon-only state lives in SQLite only (`LocalTx`), and the shared `Tx` trait gains nothing.
+8. Owner-internal traffic created on central since the acceptance run (desk with the lanes, desk with
+   astra) is copied to the local board by the new `conde export` before H4 (lead's call, 2026-10-09).
+9. Teammate ergonomics: a per-host default board, set once by the human at `conde setup` (default:
+   local), replaces `--board` on every command for a host whose use is all shared. No auto-publish:
+   each agent is still published by the human, once. Astra's proposal allows an explicitly configured
+   default board; auto-publish would be the silent crossing (lead's call, 2026-10-09).
 
-## 14. Open questions for the owner
+## 14. Open questions for the owner (destructive steps; each needs his go on an exact list)
 
-1. Conde-native owner-internal traffic on central (class b: desk with the lanes, desk with astra,
-   from the cloud acceptance run on): copy it to the local board with the new `conde export`
-   (recommended), or leave it on central?
-2. H4 retention: is deleting the rows enough, or must the Postgres backups age out (or be purged,
+1. H4 retention: is deleting the rows enough, or must the Postgres backups age out (or be purged,
    with dakai-helper) before the history counts as retired?
-3. Exposure today, before H4: channel join is open and new members can read the whole history, so a
+2. Exposure today, before H4: channel join is open and new members can read the whole history, so a
    teammate who joins #hive or #vvp reads the owner's kond channels. No other owner is a member today
    (verified as above). Should the six owner-only channels be retired first, ahead of the rest of H4?
    This is destructive and needs a list plus your go.
-4. The `astra-box` host credential (acceptance-test bridge, not running): revoke it after the switch?
+3. The `astra-box` host credential (acceptance-test bridge, not running): revoke it after the switch?
    Revocation cannot be undone.
-5. Teammate ergonomics: a teammate whose use is all shared must publish each new agent and pass
-   `--board dakai` on every command. A per-host default board and auto-publish, each set once by the
-   human, would remove that friction, but it reintroduces a default crossing. Leave it out of v2
-   (current design), or add it?
 
 ## 15. Found while designing (live board, 2026-10-09)
 

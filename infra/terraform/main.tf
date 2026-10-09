@@ -279,6 +279,8 @@ locals {
   }
   plain_env = {
     RUST_LOG            = "info"
+    CONDE_BOARD_NAME    = var.board_name
+    CONDE_MIN_PROTO     = tostring(var.min_proto)
     CONDE_DIST_BASE_URL = "${azurerm_storage_account.dist.primary_blob_endpoint}${azurerm_storage_container.dist.name}"
     ENTRA_TENANT_ID     = data.azurerm_client_config.current.tenant_id
     ENTRA_CLIENT_ID     = azuread_application.sso.client_id

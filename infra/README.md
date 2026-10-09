@@ -19,7 +19,8 @@ secrets are write-only into the vault, the Entra client secret is created by han
 | SSO | Entra app `conde` (client d87a5254-…) | OIDC code+PKCE, redirect https://conde.nativeai.space/auth/callback and http://localhost/auth/cli; assignment required; users in entra.tf |
 
 Env of the server: PORT, RUST_LOG, DATABASE_URL (secret), CONDE_ADMIN_KEY (secret), CONDE_DIST_BASE_URL,
-ENTRA_TENANT_ID, ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET (secret), ENTRA_REDIRECT_URI.
+CONDE_BOARD_NAME, CONDE_MIN_PROTO (1 until every host runs v2, then 2: `min_proto`), ENTRA_TENANT_ID,
+ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET (secret), ENTRA_REDIRECT_URI.
 
 ## Release (by hand, from the repo root)
 

@@ -37,3 +37,15 @@ variable "database_url_revision" {
   type    = number
   default = 1
 }
+
+variable "board_name" {
+  type        = string
+  description = "Name of this board as the v2 protocol announces it to hosts."
+  default     = "dakai"
+}
+
+variable "min_proto" {
+  type        = number
+  description = "Lowest protocol version a host may speak: 1 keeps v1 hosts working until every teammate upgrades; 2 afterwards."
+  default     = 1
+}

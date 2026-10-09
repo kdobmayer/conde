@@ -742,6 +742,13 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 body["take"] = json!(true);
             }
             let r = sx.call(op::MAILBOX_PUBLISH, body)?;
+            if s(&r["state"]) == "withdrawn" {
+                // taken over or withdrawn on the board before the answer was applied: no publication here
+                bail!(
+                    "not published: {agent} was withdrawn on {board} before the publish completed; run conde publish \
+                     again or check conde boards"
+                );
+            }
             if s(&r["state"]) == "published" {
                 let name = r["name"].as_str().unwrap_or(&shared);
                 println!("published {agent} on {board} as {}", owner_qualified(board, name));

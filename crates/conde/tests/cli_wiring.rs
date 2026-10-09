@@ -681,3 +681,15 @@ fn aggregate_sent_names_each_boards_continuation() {
     let (_, _, err) = r.conde(&["sent", "--board", "dakai"]);
     assert!(err.contains("(more: conde sent --board dakai --after 7)"), "{err}");
 }
+
+/// A publish whose mailbox was taken over or withdrawn on the board before its answer was
+/// applied: a clear outcome, never reported as pending.
+#[test]
+fn a_publish_withdrawn_on_the_board_is_not_pending() {
+    let r = Root::new();
+    let _d = r.fake(scripted(vec![("mailbox.publish", json!({"state": "withdrawn", "op_id": "01OP", "name": "worker"}))]));
+    let (ok, out, err) = r.conde(&["publish", "worker", "--board", "dakai"]);
+    assert!(!ok, "{out}");
+    assert_eq!(err, "conde: not published: worker was withdrawn on dakai before the publish completed; run conde publish again or check conde boards\n");
+    assert!(!out.contains("pending"), "{out}");
+}

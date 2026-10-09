@@ -888,8 +888,14 @@ Order:
 
 ## 13. Decisions taken in this design (each can be overruled by the owner)
 
-1. Publication is set by the human only. An agent may unpublish itself. Reason: publication is
-   the privacy boundary, so an agent widening its own reach is the silent crossing the model forbids.
+1. Publication is run by whoever operates the host, agents included; the human decides what to
+   publish by instructing the agent (owner's ruling 2026-10-09, replacing the human-only rule).
+   `conde publish`, `conde unpublish` and the migration (`conde setup`, `conde boards --migrate`)
+   are accepted from any caller on the host's socket, and the daemon log names who ran each one;
+   the stdio MCP has `publish` and `unpublish` tools, the remote MCP endpoint has neither.
+   Forgetting a board stays the human's. The privacy boundary is unchanged: everything is local by
+   default, nothing is published unless a publish or the switch runs, enrolling uploads nothing,
+   and the listings carry no targets.
 2. The mailbox address uses the board's own agent id, which survives renames. The shared name
    defaults to the local name, with `--as` for a second machine of the same owner. A local rename
    does not rename the mailbox; `whoami` shows both names (Astra).
@@ -907,6 +913,9 @@ Order:
 6. Was: "migration publishes names with cross-owner traffic, computed by the server". Now: the
    server computes candidates from message relationships, the human confirms a preflight manifest,
    and the migration runs as a resumable local operation that replays the server's stored manifest.
+   Since the ruling in decision 1 the choice is `--publish <names>`, `--publish-candidates`,
+   `--publish-all` or `--publish-none`; at a terminal without a flag the human is asked; without a
+   terminal and without a flag the candidates stay published and the output says so.
    Astra: historical shared use is a candidate rule, not adequate evidence of consent, and an
    unrecoverable conversion would strand harness bindings that are already removed on the server.
    The H2 and H3 restore happens inside the homepc switch, before the local board has traffic.
@@ -921,9 +930,9 @@ Order:
    copy by frozen ids inside the homepc switch, combined with the kond restore before any local
    write. Astra: a second import after the switch is refused by the importer
    (`channels_with_native_posts`), and a reusable export is not needed for a one-off copy.
-9. Teammate ergonomics: a per-host default board, set once by the human at `conde setup` (default:
-   local), replaces `--board` on every command for a host whose use is all shared. No auto-publish:
-   each agent is still published by the human, once. Astra's proposal allows an explicitly configured
+9. Teammate ergonomics: a per-host default board, set once at `conde setup` by whoever runs it
+   (default: local), replaces `--board` on every command for a host whose use is all shared. No
+   auto-publish: each name is published once, on the human's instruction (decision 1). Astra's proposal allows an explicitly configured
    default board; auto-publish would be the silent crossing (lead's call, 2026-10-09). The default
    applies to names and channels only: never to message references, to `register`/`rename`, or to
    aggregate views (section 3).

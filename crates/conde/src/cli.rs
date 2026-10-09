@@ -125,8 +125,12 @@ enum Cmd {
         pattern: String,
         /// Limit to a '#channel' or a DM partner.
         target: Option<String>,
-        #[arg(long)]
-        after: Option<i64>,
+        /// Continue after a cursor (the number a previous page printed), or show only messages
+        /// dated after a time: RFC 3339 (2026-10-09T14:30:00Z, 2026-10-09T16:30:00+02:00),
+        /// conde's own dates (2026-10-09T14:30:00.000Z) or the minute listings print
+        /// (2026-10-09T14:30); a time without a zone is UTC.
+        #[arg(long, value_name = "CURSOR|TIME", value_parser = crate::util::parse_after)]
+        after: Option<crate::util::After>,
     },
     /// Show an agent's profile, or set a field (human only).
     Profile {
@@ -708,6 +712,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Agents => print(surface::agents(&sx.call("agent.list", json!({}))?)),
         Cmd::Whoami => println!("{}", surface::whoami(&sx.call("agent.whoami", json!({}))?)),
         Cmd::Search { pattern, target, after } => {
+            let after = after.map(crate::util::After::wire);
             let r = sx.call("search", json!({"pattern": pattern, "target": target, "after": after}))?;
             print(surface::search(&r, Surface::Cli));
         }

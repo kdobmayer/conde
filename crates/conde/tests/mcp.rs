@@ -394,3 +394,38 @@ fn mcp_sent_names_each_boards_continuation() {
     drop(p);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The search tool's `after` takes the CLI's forms: a cursor or a time.
+#[test]
+fn search_after_takes_a_cursor_or_a_time() {
+    let d = Daemon::start();
+    let mut alice = claude_peer(&d, "s-alice");
+    let mut bob = claude_peer(&d, "s-bob");
+    alice.ok("register", json!({"name": "alice"}), json!({}));
+    bob.ok("register", json!({"name": "bob"}), json!({}));
+    let out = alice.ok("send", json!({"to": "bob", "text": "needle one"}), json!({}));
+    let id = out.strip_prefix("queued ").and_then(|s| s.split(' ').next()).expect(&out).to_string();
+    let shown = bob.ok("show", json!({"id": id}), json!({}));
+    let date = shown.lines().find_map(|l| l.strip_prefix("Date: ")).expect(&shown).to_string();
+    // the second message is stamped at a later millisecond
+    std::thread::sleep(Duration::from_millis(5));
+    alice.ok("send", json!({"to": "bob", "text": "needle two"}), json!({}));
+
+    let mut hits = |after: Value| -> Vec<String> {
+        let out = bob.ok("search", json!({"pattern": "needle", "after": after}), json!({}));
+        out.lines().filter(|l| l.contains("needle")).map(|l| l.rsplit('\t').next().unwrap().to_string()).collect()
+    };
+    assert_eq!(hits(json!(date)), ["needle two"], "conde's own date ({date})");
+    assert_eq!(hits(json!(date.replace('Z', "+00:00"))), ["needle two"], "an RFC 3339 offset");
+    assert_eq!(hits(json!(0)), ["needle one", "needle two"], "a cursor");
+    assert_eq!(hits(json!("0")), ["needle one", "needle two"], "a cursor as text");
+    assert!(hits(json!(1_000_000)).is_empty(), "a cursor past the end");
+
+    let (err, text) = bob.tool("search", json!({"pattern": "needle", "after": "yesterday"}), json!({}));
+    assert!(err && text.contains("RFC 3339") && text.contains("cursor"), "{text}");
+    let meta = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}});
+    let tools = bob.rpc("tools/list", meta);
+    let search = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "search").unwrap().clone();
+    let after = &search["inputSchema"]["properties"]["after"];
+    assert!(after["description"].as_str().unwrap().contains("RFC 3339"), "{after}");
+}

@@ -17,7 +17,7 @@ use crate::dispatch::{
 };
 use crate::protocol::{MAX_ATTACHMENT, MAX_MESSAGE_ATTACHMENTS, MAX_TEXT, PAGE};
 use crate::store::{NewMessage, NewNotification, SearchScope, Tx};
-use crate::util::{is_ulid, new_ulid};
+use crate::util::{After, is_ulid, ms_from_iso, new_ulid, parse_after};
 
 static MENTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"@([A-Za-z0-9_](?:[A-Za-z0-9_./\-]*[A-Za-z0-9_])?)").expect("mention regex")
@@ -327,7 +327,14 @@ pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         .size_limit(1 << 20)
         .build()
         .map_err(|e| bad_request(format!("bad pattern: {e}")))?;
-    let after = opt_i64(body, "after")?.unwrap_or(0);
+    let (after, since) = match body.get("after") {
+        None | Some(Value::Null) => (0, None),
+        Some(Value::String(s)) => match parse_after(s).map_err(bad_request)? {
+            After::Cursor(n) => (n, None),
+            After::Time(t) => (0, Some(t)),
+        },
+        Some(_) => (opt_i64(body, "after")?.unwrap_or(0), None),
+    };
     let (channel, partner);
     let scope = match opt_str(body, "target")? {
         None => SearchScope::All,
@@ -347,6 +354,10 @@ pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         let batch = ctx.db.search_scan(&me.id, cursor, scope, SEARCH_BATCH)?;
         for m in &batch {
             cursor = m.seq;
+            // a message whose date does not parse is not known to be later
+            if since.is_some_and(|t| ms_from_iso(&m.created_at).is_none_or(|c| c <= t)) {
+                continue;
+            }
             let Some(line) = m.text.lines().find(|l| rx.is_match(l)) else { continue };
             if hits.len() == PAGE {
                 next = hits.last().and_then(|h: &Value| h["seq"].as_i64());

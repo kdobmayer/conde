@@ -43,6 +43,97 @@ pub fn iso_from_ms(ms: i64) -> String {
     )
 }
 
+/// Milliseconds since the epoch of an RFC 3339 date-time (`2026-10-09T14:30:00Z`,
+/// `2026-10-09T16:30:00.5+02:00`), of conde's own `YYYY-MM-DDTHH:MM:SS.mmmZ`, or of the
+/// minute its listings print (`2026-10-09T14:30`); a time without a zone is UTC, as conde
+/// prints every date. Fractions finer than a millisecond are dropped.
+pub fn ms_from_iso(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let num = |from: usize, len: usize| -> Option<i64> {
+        let part = b.get(from..from + len)?;
+        part.iter().all(u8::is_ascii_digit).then(|| part.iter().fold(0, |n, d| n * 10 + i64::from(d - b'0')))
+    };
+    let at = |i: usize, c: u8| b.get(i) == Some(&c);
+    if !(at(4, b'-') && at(7, b'-') && matches!(b.get(10), Some(b'T' | b't' | b' ')) && at(13, b':')) {
+        return None;
+    }
+    let (y, mo, d, h, mi) = (num(0, 4)?, num(5, 2)?, num(8, 2)?, num(11, 2)?, num(14, 2)?);
+    let mut i = 16;
+    let (mut sec, mut milli) = (0, 0);
+    if at(i, b':') {
+        sec = num(i + 1, 2)?;
+        i += 3;
+        if at(i, b'.') {
+            let digits = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+            if digits == 0 {
+                return None;
+            }
+            milli = (0..3).map(|k| if k < digits { i64::from(b[i + 1 + k] - b'0') } else { 0 }).fold(0, |n, d| n * 10 + d);
+            i += 1 + digits;
+        }
+    }
+    let offset_min = match b.get(i..) {
+        Some([] | [b'Z' | b'z']) => 0,
+        Some([sign @ (b'+' | b'-'), _, _, b':', _, _]) => {
+            let (oh, om) = (num(i + 1, 2)?, num(i + 4, 2)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            (oh * 60 + om) * if *sign == b'-' { -1 } else { 1 }
+        }
+        _ => return None,
+    };
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1..=12).contains(&mo) || d < 1 || d > month_days[(mo - 1) as usize] || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    let days = days_from_civil(y, mo, d);
+    Some(((days * 86_400 + h * 3600 + mi * 60 + sec - offset_min * 60) * 1000) + milli)
+}
+
+// Howard Hinnant's civil date -> days algorithm.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Where a listing starts: after a cursor (the number a previous page printed), or after a
+/// time (messages dated later).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum After {
+    Cursor(i64),
+    Time(i64),
+}
+
+impl After {
+    /// The request field: a cursor as a number (as every daemon takes it), a time as conde's date.
+    pub fn wire(self) -> serde_json::Value {
+        match self {
+            After::Cursor(n) => n.into(),
+            After::Time(t) => iso_from_ms(t).into(),
+        }
+    }
+}
+
+/// The accepted `after` forms, for help texts and refusals.
+pub const AFTER_FORMS: &str = "a cursor (the number a previous page printed) or a time: RFC 3339 \
+(2026-10-09T14:30:00Z, 2026-10-09T16:30:00+02:00), conde's own dates (2026-10-09T14:30:00.000Z), \
+or the minute listings print (2026-10-09T14:30); a time without a zone is UTC";
+
+/// The one `after` rule of the CLI, the MCP tool and the daemon.
+pub fn parse_after(s: &str) -> Result<After, String> {
+    let s = s.trim();
+    if let Ok(n) = s.parse::<i64>() {
+        return Ok(After::Cursor(n));
+    }
+    ms_from_iso(s).map(After::Time).ok_or_else(|| format!("'{s}' is not {AFTER_FORMS}"))
+}
+
 // Howard Hinnant's days -> civil date algorithm.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -173,6 +264,37 @@ mod tests {
         assert_eq!(iso_from_ms(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso_from_ms(1_755_228_303_063), "2025-08-15T03:25:03.063Z");
         assert_eq!(iso_from_ms(951_782_400_000), "2000-02-29T00:00:00.000Z");
+    }
+
+    #[test]
+    fn iso_dates_parse_back() {
+        for ms in [0, 1_755_228_303_063, 951_782_400_000, -86_400_000, 4_102_444_799_999] {
+            assert_eq!(ms_from_iso(&iso_from_ms(ms)), Some(ms), "{ms}");
+        }
+        let t = ms_from_iso("2026-10-09T14:30:00Z").unwrap();
+        assert_eq!(ms_from_iso("2026-10-09T16:30:00+02:00"), Some(t));
+        assert_eq!(ms_from_iso("2026-10-09T12:30:00-02:30"), Some(t + 30 * 60_000));
+        assert_eq!(ms_from_iso("2026-10-09t14:30:00z"), Some(t));
+        assert_eq!(ms_from_iso("2026-10-09 14:30:00Z"), Some(t));
+        assert_eq!(ms_from_iso("2026-10-09T14:30"), Some(t), "the minute listings print");
+        assert_eq!(ms_from_iso("2026-10-09T14:30:00"), Some(t));
+        assert_eq!(ms_from_iso("2026-10-09T14:30:00.5Z"), Some(t + 500));
+        assert_eq!(ms_from_iso("2026-10-09T14:30:00.123456789Z"), Some(t + 123));
+        for bad in ["", "yesterday", "2026-10-09", "2026-13-01T00:00Z", "2026-02-29T00:00Z", "2026-10-09T24:00Z",
+                    "2026-10-09T14:30:00.Z", "2026-10-09T14:30:00+0200", "2026-10-09T14:30:00 Z", "2026-1-09T14:30Z",
+                    "2026-10-09T14:30:00Z junk"] {
+            assert_eq!(ms_from_iso(bad), None, "{bad}");
+        }
+        assert_eq!(ms_from_iso("2024-02-29T00:00Z"), Some(1_709_164_800_000));
+    }
+
+    #[test]
+    fn after_is_a_cursor_or_a_time() {
+        assert_eq!(parse_after("42"), Ok(After::Cursor(42)));
+        assert_eq!(parse_after(" 0 "), Ok(After::Cursor(0)));
+        assert_eq!(parse_after("1970-01-01T00:00:01Z"), Ok(After::Time(1000)));
+        let e = parse_after("yesterday").unwrap_err();
+        assert!(e.starts_with("'yesterday' is not a cursor") && e.contains("RFC 3339"), "{e}");
     }
 
     #[test]

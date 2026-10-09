@@ -699,3 +699,46 @@ fn a_publish_withdrawn_on_the_board_is_not_pending() {
     assert!(!ok && !out.contains("pending"), "{out}");
     assert_eq!(err, "conde: not published: board dakai was forgotten before the publish completed\n");
 }
+
+/// `search --after` takes the cursor a page printed or a time, RFC 3339 or conde's own dates.
+#[test]
+fn search_after_takes_a_cursor_or_a_time() {
+    let mut r = Root::new();
+    r.start_daemon();
+    let agent = |thread: &str, args: &[&str]| {
+        let out = r
+            .cmd(&r.root.join("bin/codex"))
+            .env("CODEX_THREAD_ID", thread)
+            .args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", BIN])
+            .args(args)
+            .output()
+            .unwrap();
+        (out.status.success(), String::from_utf8(out.stdout).unwrap() + &String::from_utf8(out.stderr).unwrap())
+    };
+    assert!(agent("t-a", &["register", "alice"]).0);
+    assert!(agent("t-b", &["register", "bob"]).0);
+    let (ok, out) = agent("t-a", &["send", "bob", "needle one"]);
+    assert!(ok, "{out}");
+    let first = out.strip_prefix("queued ").and_then(|s| s.split(' ').next()).expect(&out).to_string();
+    let (_, shown) = agent("t-b", &["show", &first]);
+    let date = shown.lines().find_map(|l| l.strip_prefix("Date: ")).expect(&shown).to_string();
+    // the second message is stamped at a later millisecond
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(agent("t-a", &["send", "bob", "needle two"]).0);
+
+    let hits = |after: &str| {
+        let (ok, out) = agent("t-b", &["search", "needle", "--after", after]);
+        assert!(ok, "--after {after}: {out}");
+        out.lines().filter(|l| l.contains("needle")).map(|l| l.rsplit('\t').next().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    assert_eq!(hits(&date), ["needle two"], "conde's own date ({date})");
+    assert_eq!(hits(&date.replace('Z', "+00:00")), ["needle two"], "an RFC 3339 offset");
+    assert_eq!(hits("2000-01-01T00:00:00Z"), ["needle one", "needle two"]);
+    assert_eq!(hits("0"), ["needle one", "needle two"], "a cursor");
+    assert!(hits("1000000").is_empty(), "a cursor past the end");
+
+    let (ok, out) = agent("t-b", &["search", "needle", "--after", "yesterday"]);
+    assert!(!ok && out.contains("RFC 3339") && out.contains("cursor"), "{out}");
+    let (_, help) = agent("t-b", &["search", "--help"]);
+    assert!(help.contains("RFC 3339") && help.contains("2026-10-09T14:30:00Z"), "{help}");
+}

@@ -715,21 +715,26 @@ already revoked (admin API, checked 2026-10-09); Astra's Codex thread registers 
     `conde history prune-candidates`) is applied here; pruned names never enter the local board. Validation: the v1 checks (every source row present, cursors at or past kond's), with
     sha256 of every body and every attachment instead of the 50-body sample and sizes.
   - **H3**: the owner's private conde-native rows were purged from central on 2026-10-09 (safety
-    copy as pg COPY csv on homepc). `conde history copy --manifest <dir> --from-csv <dir> --after-freeze`
-    restores them into the local board: frozen rows checked against the manifest hashes, rows newer
-    than the freeze against the csv; one transaction, re-validated after. The server-side
-    `history.copy` op was removed (lane H-pre). Recipe: docs/SWITCH-v2-history.md.
+    copy as pg COPY csv on homepc). `conde history copy --manifest <stem> --from-csv <dir>
+    --skip-agents <prune list>` restores them into the local board. Before any write: every CSV
+    record is read strictly (typed fields, a complete last record), every table holds the count
+    the purge's counts.txt states, and agents.csv names exactly the agents preview.txt lists as
+    gone. Every saved row is then accounted for (class (a) on the local board from H2, frozen
+    class (b) restored, newer than the freeze restored, or skipped by the prune list), and every
+    manifest class (b) row is either saved or read back from central (`message.get` as desk, its
+    body hash equal to the manifest's); anything else refuses the copy. Frozen rows are checked
+    against the manifest hashes, newer rows against the csv; one transaction, re-validated after.
+    The server-side `history.copy` op was removed (lane H-pre). Recipe: docs/SWITCH-v2-history.md.
 
     Parties are mapped to the local agents by owner/name. Copied messages are appended after the
-    kond import. This keeps the order because class (b) is newer than kond's traffic in every
-    conversation they share; the copy refuses, and reports for decision, any conversation where a
-    copied message is older than that conversation's newest kond message. Validation: every frozen
-    id present, the body and attachment hashes equal, every `reply_to` resolvable locally, the read
-    state equal.
+    kond import. The copy restores DMs only (the purge saved no channel post); a copied DM older
+    than a kond DM between the same two names is reported and listed after it, since a DM's read
+    state is its own. Validation: every restored id present, the body and attachment hashes equal,
+    every `reply_to` resolvable locally, the read state and reactions equal.
 
     This is not the importer: its native-post refusal (`import.rs` `channels_with_native_posts`)
     rejects any channel that already holds messages from another source, kond's included. It is not
-    a reusable `conde export` either. The copy tool and `history.copy` are removed after H4.
+    a reusable `conde export` either. The copy tool is removed after H4.
 - **H4 retire, destructive.** Remove (a) and the copied (b) from central, by the frozen ids only:
   their messages, attachments, dm_read, reactions, notifications and attempts; the six owner-only
   channels and their memberships; and agent rows left with no messages and no binding. Class (c)

@@ -129,7 +129,12 @@ ProcessTable injection; credentials under %APPDATA%\conde with ACL-restricted
 file; `conde setup` writes the Claude/Codex config at their Windows paths.
 Acceptance: the one Windows user runs the README path with desk watching.
 
-## F. Session discovery beyond ~/.claude (Orca multi-account, verified 2026-10-09)
+## F. Session discovery beyond ~/.claude (Orca multi-account) — DROPPED 2026-10-09
+
+Owner decision after asking Balázs's agent: his Orca sessions run the default
+~/.claude account (CLAUDE_CONFIG_DIR unset), notifications, skill and MCP all
+worked in an Orca-launched session. Not needed; revisit only if someone uses
+Orca's multi-account mode.
 
 Orca (onorca.dev) launches Claude Code with --dangerously-skip-permissions by
 default ("yolo"; manual/mixed selectable), so README step 3 (crossSessionInbound

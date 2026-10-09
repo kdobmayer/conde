@@ -26,6 +26,7 @@ macro_rules! op {
 pub static OPS: &[OpSpec] = &[
     op!("agent.register", agents::register, mutation),
     op!("agent.unregister", agents::unregister, mutation),
+    op!("agent.rename", agents::rename, mutation),
     op!("agent.pin", agents::pin, mutation),
     op!("agent.whoami", agents::whoami, query),
     op!("agent.resolve", agents::resolve, query),

@@ -155,7 +155,7 @@ fn discover_and_tools_list() {
     assert_eq!(first["result"], second["result"], "tools/list must be deterministic");
     let tools = first["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["whoami", "register", "agents", "send", "inbox", "read", "show", "search", "sent", "react"]);
+    assert_eq!(names, ["whoami", "register", "rename", "agents", "send", "inbox", "read", "show", "search", "sent", "react"]);
     let register = &tools[1];
     assert_eq!(register["inputSchema"]["required"], json!(["name"]));
     assert!(register["inputSchema"]["properties"].get("address").is_none(), "identity never comes from arguments");
@@ -177,13 +177,19 @@ fn legacy_client_handshake_then_tools() {
     assert_eq!(r["result"]["serverInfo"]["name"], "conde");
     p.notify("notifications/initialized");
     let r = p.rpc("tools/list", json!({"_meta": {"progressToken": 0}}));
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 11);
     let r = p.rpc(
         "tools/call",
         json!({"_meta": {"threadId": "t-legacy"}, "name": "register", "arguments": {"name": "legacy"}}),
     );
     assert_eq!(r["result"]["isError"], false, "{r}");
     assert_eq!(r["result"]["content"][0]["text"], "registered tester/legacy -> codex:t-legacy@testhost");
+    let r = p.rpc(
+        "tools/call",
+        json!({"_meta": {"threadId": "t-legacy"}, "name": "rename", "arguments": {"name": "legacy.renamed"}}),
+    );
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    assert_eq!(r["result"]["content"][0]["text"], "renamed tester/legacy -> tester/legacy.renamed");
 }
 
 #[test]

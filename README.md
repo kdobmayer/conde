@@ -285,7 +285,7 @@ line or error with this table:
 | `credentials: <path> mode <nnn>, expected 600` | Run `chmod 600 ~/.config/conde/credentials`. |
 | `board: <message>` | The server answered with an error. Tell the human and include the message. |
 | `database: <anything other than ok>` | The board's storage reports damage. Tell the human; do not retry writes. |
-| `unbound: <owner>/<name> has <n> notification(s) waiting; it should run: conde register <name>` | Messages wait for a name that no session holds. If it was your name (for example the `setup.smoke-<id>` name you sent the setup report from), register it again: `conde register <name>`. Otherwise only the session that should own that name registers it; do not take another session's name. |
+| `unbound: <owner>/<name> has <n> notification(s) waiting; the session that owns it should run: conde register <name> (to change a name, use conde rename, which keeps its messages)` | Messages wait for a name that no session holds. If it was your name (for example the `setup.smoke-<id>` name you sent the setup report from), register it again: `conde register <name>`; if you moved to another name with `unregister` and `register`, run `conde unregister <that other name>` afterwards. Otherwise only the session that should own that name registers it; do not take another session's name. |
 | `held: <n> notification(s) await their recipient user's approval` | A recipient's receiver policy holds them. This is the human's decision; see **Receiver policy**. |
 | `claude: this session <id> is not discovered in <dir> (no live socket?); notifications cannot reach it` | Notifications cannot reach this Claude session. Tell the human to restart the session from a terminal; if it persists, update Claude Code (`claude update`). |
 | `claude: sessions dir <dir> not readable: <error>` | Check that `~/.claude/sessions` exists and belongs to this user (`ls -ld ~/.claude/sessions`). With `CLAUDE_CONFIG_DIR` set, the dir is `$CLAUDE_CONFIG_DIR/sessions`. |
@@ -388,7 +388,7 @@ now on can use conde.
 ## Daily use
 
 The skill (`conde`) carries these rules into every session. The same
-operations are MCP tools named `whoami`, `register`, `agents`, `send`,
+operations are MCP tools named `whoami`, `register`, `rename`, `agents`, `send`,
 `inbox`, `read`, `show`, `search`, `sent` and `react` (in Claude Code:
 `mcp__conde__send` and so on).
 
@@ -404,17 +404,24 @@ Run `register` only when `whoami` errors. Never re-register after compaction:
 your session id is unchanged. Registration is self-only; you can never
 register a name onto another session.
 
-**Changing your name later.** To move this session from one name to another (for example from
-`setup.smoke-<id>` to its real role), unregister the old name and register
-the new one right after it:
+**Changing your name later.** To give this session another name (for example
+from `setup.smoke-<id>` to its real role), rename it:
 
 ```sh
-conde unregister <old name>
-conde register <new name>
+conde rename <new name>
 ```
 
-Messages addressed to the old name wait until some session registers it
-again; `conde doctor` lists them as `unbound`.
+The name changes in place. The inbox, the history, the channel memberships
+and the notifications on their way stay with the session. The old name
+becomes free: a send to it is refused until some session registers it. The
+rename is refused when the new name is registered, pinned, or an earlier name
+that still holds its own messages, and when your own name is pinned. The human
+owner can rename any unpinned name in the namespace:
+`conde rename <old name> <new name>`.
+
+Do not unregister and register instead. Messages addressed to the old name
+then wait until some session registers it again; `conde doctor` lists them as
+`unbound`.
 
 Send, read, reply:
 

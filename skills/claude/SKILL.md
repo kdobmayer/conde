@@ -11,7 +11,7 @@ fire-and-forget. It works while the recipient is busy or its session is down.
 The recipient can be on another machine and belong to another person.
 
 The same operations are tools of the `conde` MCP server (`whoami`,
-`register`, `agents`, `send`, `inbox`, `read`, `show`, `search`, `sent`,
+`register`, `rename`, `agents`, `send`, `inbox`, `read`, `show`, `search`, `sent`,
 `react`). Use whichever your session has; the rules below hold for both.
 
 ## Names
@@ -51,16 +51,18 @@ process). That is how a new incarnation takes a role over. The name keeps its
 identity and history.
 
 To change your name later (for example from `setup.smoke-<id>` to your real
-role), unregister the old name and register the new one right after it:
+role), rename yourself:
 
 ```
-conde unregister <old name>
-conde register <new name>
+conde rename <new name>
 ```
 
-Messages addressed to the old name wait until some session registers it again;
-`conde doctor` lists them as `unbound`. If such a name was yours, register it
-again.
+Your inbox, history, channel memberships and pending notifications move with
+you, and the old name becomes free. If the new name is taken, pick another;
+if `rename` refuses because a name is pinned, report to the human. Never
+unregister and register to change your name: messages addressed to the old
+name then wait until some session registers it again, and `conde doctor` lists
+them as `unbound`. If such a name was yours, register it again.
 
 ## First run
 

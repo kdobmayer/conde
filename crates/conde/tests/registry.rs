@@ -211,3 +211,149 @@ fn host_id_keeps_existing_pinned_bindings_resolvable() {
     assert_eq!(b.call_as(&again, ALICE, "agent.whoami", json!({})).unwrap()["name"], "krisz/worker");
     b.call_as(&again, ALICE, "agent.register", json!({"name": "worker"})).unwrap();
 }
+
+fn rows(v: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+    v[key].as_array().cloned().unwrap_or_default()
+}
+
+#[test]
+fn rename_keeps_the_agent_its_inbox_and_its_delivery() {
+    let b = Board::new();
+    b.register(ALICE, "old");
+    b.register(BOB, "bob");
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    b.ok(BOB, "channel.join", json!({"channel": "#dev"}));
+    let read_dm = b.send(BOB, "old", "already read");
+    b.ok(ALICE, "message.read", json!({"id": read_dm}));
+    let sent_dm = b.send(ALICE, "bob", "sent before the rename");
+    let pending = b.send(BOB, "old", "waiting for delivery");
+    let mention = b.send(BOB, "#dev", "@old please look");
+    let id = b.agent_id("old");
+
+    let r = b.ok(ALICE, "agent.rename", json!({"new": "New"}));
+    assert_eq!(r, json!({"name": "krisz/new", "old": "krisz/old", "address": "codex:t-alice@box"}));
+    assert_eq!(b.agent_id("new"), id, "same row, same id");
+    assert_eq!(b.ok(ALICE, "agent.whoami", json!({}))["name"], "krisz/new");
+    assert_eq!(b.ok(BOB, "agent.resolve", json!({"name": "new"}))["address"], "codex:t-alice@box");
+
+    // notifications queued for the old name reach the same session
+    let mut br = b.bridge(FakeNotifier::default());
+    br.pass().unwrap();
+    let texts: Vec<String> = br.notifier().sent_to("codex:t-alice").iter().map(|s| s.1.clone()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains(&pending)), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains(&mention)), "{texts:?}");
+    assert_eq!(b.status_of(&pending, "new"), "notified");
+    assert_eq!(b.status_of(&mention, "new"), "notified");
+
+    // read state, inbox, history and memberships stay
+    let inbox: Vec<_> = rows(&b.ok(ALICE, "inbox.list", json!({})), "items").iter().map(|i| i["message_id"].clone()).collect();
+    assert!(inbox.contains(&json!(pending)) && inbox.contains(&json!(mention)), "{inbox:?}");
+    assert!(!inbox.contains(&json!(read_dm)), "{inbox:?}");
+    assert_eq!(b.ok(ALICE, "message.read", json!({"id": read_dm}))["messages"][0]["text"], "already read");
+    let receipts = rows(&b.ok(ALICE, "receipt.list", json!({})), "receipts");
+    assert_eq!(receipts[0]["message_id"], json!(sent_dm));
+    let members = rows(&b.ok(BOB, "channel.members", json!({"channel": "#dev"})), "members");
+    assert!(members.iter().any(|m| m["name"] == "krisz/new"), "{members:?}");
+    let to = b.ok(BOB, "message.send", json!({"to": {"agent": "new"}, "text": "to the new name"}));
+    assert_eq!(to["to"], "krisz/new");
+    assert!(!b.ok(BOB, "doctor", json!({}))["checks"].to_string().contains("unbound"));
+
+    // the old name is free: unknown to senders, and a fresh row when registered again
+    let err = b.call(BOB, "message.send", json!({"to": {"agent": "old"}, "text": "x"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::NotFound);
+    let r = b.ok(CAROL, "agent.register", json!({"name": "old"}));
+    assert_eq!(r["name"], "krisz/old");
+    assert_ne!(b.agent_id("old"), id);
+    assert!(rows(&b.ok(CAROL, "inbox.list", json!({})), "items").is_empty());
+}
+
+#[test]
+fn rename_refuses_taken_pinned_invalid_and_foreign_names() {
+    let b = Board::new();
+    b.register(HUMAN, "krisz");
+    b.register(ALICE, "a");
+    b.register(BOB, "b");
+    let refused = |actor: &str, body: serde_json::Value, code: ErrorCode, needle: &str| {
+        let err = b.call(actor, "agent.rename", body.clone()).unwrap_err();
+        assert_eq!(err.0, code, "{body}: {}", err.1);
+        assert!(err.1.contains(needle), "{body}: {}", err.1);
+    };
+    // taken: bound to another session, or a human's
+    refused(ALICE, json!({"new": "b"}), ErrorCode::Conflict, "registered to codex:t-bob@box");
+    refused(ALICE, json!({"new": "krisz"}), ErrorCode::Conflict, "registered to human:krisz@box");
+    // taken: pinned
+    b.ok(HUMAN, "agent.pin", json!({"name": "role", "address": "claude:s-carol"}));
+    refused(ALICE, json!({"new": "role"}), ErrorCode::Conflict, "owner-pinned");
+    // taken: an earlier, unbound name keeps its own messages
+    b.send(ALICE, "b", "for the earlier b");
+    b.ok(BOB, "agent.unregister", json!({"name": "b"}));
+    refused(ALICE, json!({"new": "b"}), ErrorCode::Conflict, "conde register b");
+    // invalid or reserved
+    refused(ALICE, json!({"new": "../x"}), ErrorCode::BadRequest, "invalid name");
+    refused(ALICE, json!({"new": "everybody"}), ErrorCode::BadRequest, "reserved");
+    // the caller's own name pinned
+    refused(CAROL, json!({"new": "free"}), ErrorCode::Forbidden, "owner-pinned");
+    refused(HUMAN, json!({"old": "role", "new": "free"}), ErrorCode::Forbidden, "owner-pinned");
+    // another session's name, and another owner's namespace
+    b.register(BOB, "b2");
+    refused(BOB, json!({"old": "a", "new": "free"}), ErrorCode::Forbidden, "self-only");
+    let other = b.other("bob", "otherhost");
+    let err = b.call_as(&other, "human:bob", "agent.rename", json!({"old": "krisz/a", "new": "free"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::Forbidden);
+    let err = b.call_as(&other, "human:bob", "agent.rename", json!({"old": "a", "new": "free"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::NotFound);
+    // nothing moved
+    assert_eq!(b.ok(ALICE, "agent.whoami", json!({}))["name"], "krisz/a");
+    assert_eq!(b.ok(BOB, "agent.whoami", json!({}))["name"], "krisz/b2");
+    assert_eq!(b.ok(CAROL, "agent.whoami", json!({}))["name"], "krisz/role");
+}
+
+#[test]
+fn the_human_renames_any_unpinned_name() {
+    let b = Board::new();
+    b.register(HUMAN, "krisz");
+    b.register(ALICE, "a");
+    let r = b.ok(HUMAN, "agent.rename", json!({"old": "a", "new": "proj.impl"}));
+    assert_eq!(r["name"], "krisz/proj.impl");
+    assert_eq!(b.ok(ALICE, "agent.whoami", json!({}))["name"], "krisz/proj.impl");
+    // an unbound name too, and the human's own name with one argument
+    b.ok(ALICE, "agent.unregister", json!({"name": "proj.impl"}));
+    let r = b.ok(HUMAN, "agent.rename", json!({"old": "proj.impl", "new": "retired"}));
+    assert_eq!(r["address"], json!(null));
+    assert_eq!(b.ok(HUMAN, "agent.rename", json!({"new": "boss"}))["name"], "krisz/boss");
+    assert_eq!(b.ok(HUMAN, "agent.whoami", json!({}))["name"], "krisz/boss");
+    // renaming to the current name changes nothing
+    assert_eq!(b.ok(HUMAN, "agent.rename", json!({"new": "BOSS"}))["name"], "krisz/boss");
+}
+
+#[test]
+fn rename_is_idempotent_by_key() {
+    let b = Board::new();
+    b.register(ALICE, "a");
+    let first = b.request(&b.p, ALICE, None, "agent.rename", json!({"new": "b"}), Some("k1")).unwrap();
+    let again = b.request(&b.p, ALICE, None, "agent.rename", json!({"new": "b"}), Some("k1")).unwrap();
+    assert_eq!(first, again);
+    assert_eq!(first["old"], "krisz/a");
+    let err = b.request(&b.p, ALICE, None, "agent.rename", json!({"new": "c"}), Some("k1")).unwrap_err();
+    assert_eq!(err.0, ErrorCode::Conflict);
+    let err = b.request(&b.p, ALICE, None, "agent.rename", json!({"new": "c"}), None).unwrap_err();
+    assert_eq!(err.0, ErrorCode::BadRequest);
+    assert_eq!(b.ok(ALICE, "agent.whoami", json!({}))["name"], "krisz/b");
+}
+
+#[test]
+fn unregister_then_register_still_leaves_the_old_name_waiting() {
+    let b = Board::new();
+    b.register(ALICE, "old");
+    b.register(BOB, "bob");
+    b.ok(ALICE, "agent.unregister", json!({"name": "old"}));
+    b.register(ALICE, "new");
+    assert_eq!(b.ok(ALICE, "agent.whoami", json!({}))["name"], "krisz/new");
+    // a send to the old name is stored and waits for a session to hold it
+    let mid = b.send(BOB, "old", "stranded");
+    assert_eq!(b.status_of(&mid, "old"), "pending");
+    let checks = b.ok(BOB, "doctor", json!({}))["checks"].to_string();
+    assert!(checks.contains("unbound: krisz/old has 1 notification(s) waiting"), "{checks}");
+    assert!(checks.contains("use conde rename"), "{checks}");
+}

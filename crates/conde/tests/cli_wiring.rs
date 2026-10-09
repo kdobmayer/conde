@@ -239,4 +239,11 @@ fn lobby_auto_join_and_channel_topics() {
     assert_eq!(agent("t-a", &["topic", "#dev", ""]), (true, "cleared the topic of #dev\n".into()));
     let (_, out) = agent("t-a", &["channels"]);
     assert!(out.contains("#dev\t2 members\t"), "{out}");
+
+    // rename keeps the session and its memberships under the new name
+    assert_eq!(agent("t-b", &["rename", "bob.renamed"]), (true, "renamed tester/bob -> tester/bob.renamed\n".into()));
+    let (_, out) = agent("t-a", &["members", "#dev"]);
+    assert!(out.contains("tester/bob.renamed"), "{out}");
+    let (ok, out) = agent("t-a", &["rename", "bob", "x"]);
+    assert!(!ok && out.contains("no agent named 'bob'"), "{out}");
 }

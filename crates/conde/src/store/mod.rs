@@ -445,6 +445,8 @@ pub trait Tx {
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()>;
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()>;
     fn set_display(&self, agent_id: &str, display: Option<&str>) -> StoreResult<()>;
+    /// Gives the agent a new name in place: id, binding and every reference stay.
+    fn rename_agent(&self, agent_id: &str, name: &str) -> StoreResult<()>;
 
     // channels
     fn channel_by_name(&self, name: &str) -> StoreResult<Option<Channel>>;

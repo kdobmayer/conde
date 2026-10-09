@@ -144,6 +144,63 @@ pub fn unregister(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({"name": canonical, "was_registered": true, "address": current.to_string()}))
 }
 
+/// Give a name a new one in place: the row keeps its id, binding, inbox, history and
+/// memberships, and the old name is free. Self-only for agents (`old` omitted means the
+/// caller's own name); the human owner may rename any unpinned name in the namespace.
+pub fn rename(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    let new = ctx.own_name(str_param(body, "new")?)?;
+    if new == "everybody" {
+        return Err(bad_request("'everybody' is reserved (channel-wide mention)"));
+    }
+    let caller = ctx.actor_address()?;
+    let agent = match opt_str(body, "old")? {
+        None => ctx.me()?,
+        Some(old) => {
+            let old = ctx.own_name(old)?;
+            let agent = by_name(ctx.db, ctx.p.user_id, &old)?
+                .ok_or_else(|| not_found(format!("no agent named '{old}'")))?;
+            if caller.kind != Kind::Human && agent.address.as_ref() != Some(&caller) {
+                let bound = agent.address.as_ref().map_or("no session".to_string(), ToString::to_string);
+                return Err(forbidden(format!(
+                    "rename is self-only: {} is bound to {bound}, not to this session ({caller}). \
+                     Only that session or the human owner can rename it.",
+                    agent.canonical()
+                )));
+            }
+            agent
+        }
+    };
+    let old = agent.canonical();
+    if let Some(pin) = &agent.pinned {
+        return Err(forbidden(format!(
+            "{old} is owner-pinned to {pin}; refusing rename. Unpin it first (conde unpin {}).",
+            agent.name
+        )));
+    }
+    if agent.name != new {
+        if let Some(taken) = by_name(ctx.db, ctx.p.user_id, &new)? {
+            let why = match (&taken.pinned, &taken.address) {
+                (Some(pin), _) => format!("is owner-pinned to {pin}"),
+                (None, Some(at)) => format!("is registered to {at}"),
+                // Taking it would merge two inboxes; register takes an old name back whole.
+                (None, None) => format!(
+                    "is an earlier name that keeps its own messages; if it was yours, take it back with \
+                     `conde register {new}` and then `conde unregister {}`",
+                    agent.name
+                ),
+            };
+            return Err(conflict(format!("cannot rename {old} to {}: it {why}", taken.canonical())));
+        }
+        ctx.db.rename_agent(&agent.id, &new)?;
+    }
+    let agent = by_id(ctx.db, &agent.id)?.ok_or_else(|| not_found(old.clone()))?;
+    Ok(json!({
+        "name": agent.canonical(),
+        "old": old,
+        "address": agent.address.as_ref().map(ToString::to_string),
+    }))
+}
+
 /// Owner pin: the sole address a role may be bound to (human only).
 pub fn pin(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if ctx.actor_address()?.kind != Kind::Human {

@@ -1087,6 +1087,11 @@ impl Tx for PgTx {
         Ok(())
     }
 
+    fn rename_agent(&self, agent_id: &str, name: &str) -> StoreResult<()> {
+        self.execute("UPDATE agents SET name_lower = $2 WHERE agent_id = $1", &[&agent_id, &name])?;
+        Ok(())
+    }
+
     // channels
 
     fn channel_by_name(&self, name: &str) -> StoreResult<Option<Channel>> {

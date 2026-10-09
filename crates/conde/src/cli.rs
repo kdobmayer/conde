@@ -95,6 +95,14 @@ enum Cmd {
         #[arg(long)]
         if_address: Option<String>,
     },
+    /// Rename this session's name in place, keeping its messages: `rename <new>`
+    /// (the human owner may also run `rename <old> <new>`).
+    Rename {
+        #[arg(value_name = "OLD_OR_NEW")]
+        first: String,
+        #[arg(value_name = "NEW")]
+        second: Option<String>,
+    },
     /// Pin a role to one exact address (human only).
     Pin { name: String, address: String },
     /// Remove a role's pin (human only).
@@ -517,6 +525,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             } else {
                 println!("{} was not registered", s(&r["name"]));
             }
+        }
+        Cmd::Rename { first, second } => {
+            let (old, new) = match second {
+                Some(new) => (Some(first), new),
+                None => (None, first),
+            };
+            let r = sx.call("agent.rename", json!({"old": old, "new": new}))?;
+            println!("renamed {} -> {}", s(&r["old"]), s(&r["name"]));
         }
         Cmd::Pin { name, address } => {
             let r = sx.call("agent.pin", json!({"name": name, "address": address}))?;

@@ -580,6 +580,11 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
+    fn rename_agent(&self, agent_id: &str, name: &str) -> StoreResult<()> {
+        self.exec("UPDATE agents SET name_lower = ?2 WHERE agent_id = ?1", params![agent_id, name])?;
+        Ok(())
+    }
+
     // channels
 
     fn channel_by_name(&self, name: &str) -> StoreResult<Option<Channel>> {

@@ -19,7 +19,10 @@ pub fn doctor(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         ));
     }
     for (name, n) in ctx.db.unbound_waiting()? {
-        issue(false, format!("unbound: {name} has {n} notification(s) waiting; it should run: conde register <name>"));
+        issue(false, format!(
+            "unbound: {name} has {n} notification(s) waiting; the session that owns it should run: \
+             conde register <name> (to change a name, use conde rename, which keeps its messages)"
+        ));
     }
     let held = ctx.db.count_notifications(&["held"])?;
     issue(held == 0, format!("held: {held} notification(s) await their recipient user's approval"));

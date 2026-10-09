@@ -1,6 +1,6 @@
 # conde remote MCP endpoint (NEXT.md C)
 
-2026-10-09. Design to build; nothing is implemented. Need: a human in Claude desktop, web or mobile,
+2026-10-09. Implemented the same day; the live connect (§6) is the open check. Need: a human in Claude desktop, web or mobile,
 or a Claude Code cloud session, uses the shared board as themselves. Actor = the signed-in user,
 never a session, never an agent. No push (clients poll). Publication stays on the host CLI. The local
 bridge and stdio `conde mcp` are unchanged.
@@ -52,18 +52,33 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
 ## 3. Tokens, revocation, rate limits
 
 - Tables (Postgres `0008_mcp.sql`, same in `sqlite_schema.sql`, behind `WebStore`):
-  `mcp_grants(grant_id, user_id, client_id, client_host, created_at, last_used_at, refresh_digest,
-  refresh_expires_at, expires_at, revoked_at)`, `mcp_tokens(token_digest, grant_id, expires_at)`,
-  `mcp_codes(code_digest, user_id, client_id, redirect_uri, challenge, created_at)`. SHA-256 digests
-  only. Separate from host keys: neither credential is accepted where the other is.
+  `mcp_grants(grant_id, user_id, client_id, client_host, client_name, resource, created_at,
+  last_used_at, expires_at, revoked_at)`, `mcp_tokens(token_digest, grant_id, audience, expires_at)`,
+  `mcp_refresh(digest, grant_id, issued_at, expires_at, consumed_at)` (the grant's refresh-token
+  family: every refresh token ever issued for the grant, kept until it expires),
+  `mcp_codes(code_digest, user_id, client_id, client_name, redirect_uri, challenge, resource,
+  created_at)`. SHA-256 digests only. Separate from host keys: neither credential is accepted where
+  the other is.
+- Rotation is one transaction: the presented refresh token's row gets `consumed_at` (a conditional
+  update, so two concurrent rotations cannot both win) and the new access and refresh rows are
+  inserted. A presented digest whose row is already consumed is reuse: the grant is revoked in the
+  same transaction (`revoked_at` set, its `mcp_tokens` and `mcp_refresh` rows deleted), so the
+  latest access and refresh tokens stop at once. A refresh token presented with another client's
+  `client_id` is refused without being consumed.
+- Each access token carries its audience (the grant's `resource`, the MCP endpoint URL); the
+  endpoint refuses a token whose audience is not its own URL.
 - Access token `conde_at_<64 hex>`, 1 h. Refresh token `conde_rt_<64 hex>`, rotated on every use,
-  30 days. Grant life 90 days, then Claude shows Connect again. `purge_expired` drops dead rows.
-- Each request: one lookup, token -> live grant -> user not disabled, else 401; `last_used_at` at
-  most once a minute. Revocation: the keys page. A disabled user's grants stop at the next request (kept, like host
-  keys). A superseded refresh token presented again revokes its grant. Entra logout is not revocation.
-- Limits: in-process token buckets (`governor`, pinned at lane start), exact on the single replica
-  (DEPLOY.md): `tools/call` 120/min per grant (burst 30), `send` + `react` 30/min per user, OAuth
-  endpoints 60/min per IP. Over limit: tool error `rate limited; retry in N s`; OAuth 429 + `Retry-After`.
+  30 days. Grant life 90 days, then Claude shows Connect again; tokens never outlive their grant.
+  `purge_mcp` (on each consent) drops old codes, expired tokens and ended grants.
+- Each request: one lookup, token -> live grant -> user not disabled -> audience, else 401;
+  `last_used_at` at most once a minute. Revocation: the keys page. A disabled user's grants stop at
+  the next request (kept, like host keys). A superseded refresh token presented again revokes its
+  grant (above). Entra logout is not revocation.
+- Limits: in-process token buckets (`governor` 0.10.4), per replica (with two replicas a client
+  gets at most twice the rate; the per-IP key is the address the ingress appends to
+  `X-Forwarded-For` when the peer is private): `tools/call` 120/min per grant (burst 30), `send` +
+  `react` 30/min per user, OAuth endpoints 60/min per IP. Over limit: tool error `rate limited;
+  retry in N s`; OAuth 429 + `Retry-After`.
 
 ## 4. Tools (human subset; no `board` argument; ids print plain `01M...`)
 

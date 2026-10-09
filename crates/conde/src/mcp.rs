@@ -561,7 +561,7 @@ fn run_tool(
             let id = check_ref(req_str(args, "id")?)?;
             let r = call("message.get", json!({"id": id}))?;
             let mut out = String::new();
-            surface::message(&mut out, &r["message"], surface::result_board(&r));
+            surface::message(&mut out, &r["message"], surface::result_board(&r), Surface::Mcp);
             out
         }
         "search" => {

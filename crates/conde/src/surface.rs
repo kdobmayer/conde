@@ -216,10 +216,14 @@ fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
         (Surface::Mcp, _, Some(b)) => format!("call {tool} with board=\"{b}\" after={n}"),
     };
     if shared_parts(r) {
-        if let Some(n) = r["next_cursor"].as_i64() {
+        let parts = r["boards"].as_array().cloned().unwrap_or_default();
+        // a daemon that lists the local part carries its cursor there
+        if !parts.iter().any(|p| s(&p["board"]) == LOCAL_BOARD && p.get("next_cursor").is_some())
+            && let Some(n) = r["next_cursor"].as_i64()
+        {
             out.note(format!("(more on local: {})", hint(Some(LOCAL_BOARD), n)));
         }
-        for part in r["boards"].as_array().into_iter().flatten() {
+        for part in &parts {
             if let Some(n) = part["next_cursor"].as_i64() {
                 let b = s(&part["board"]);
                 out.note(format!("(more on {b}: {})", hint(Some(b), n)));
@@ -284,7 +288,7 @@ pub fn read(r: &Value, surface: Surface) -> Out {
                 let _ = writeln!(out.text, "--- {label}");
             }
         }
-        message(&mut out.text, m, board);
+        message(&mut out.text, m, board, surface);
     }
     if messages.is_empty() {
         out.note("(no unread messages)");
@@ -292,7 +296,7 @@ pub fn read(r: &Value, surface: Surface) -> Out {
     unavailable(&mut out, r);
     for part in r["boards"].as_array().into_iter().flatten() {
         if part["unconfirmed"] == true {
-            out.note(format!("({}: listed but not marked read; read each with conde read <its id>)", s(&part["board"])));
+            out.note(format!("({}: not confirmed read; each message marked unconfirmed above names how to read it whole)", s(&part["board"])));
         }
     }
     if r["more"].as_bool() == Some(true) {
@@ -305,12 +309,14 @@ pub fn read(r: &Value, surface: Surface) -> Out {
 }
 
 /// One message, headers then the body verbatim; ids qualified with their board.
-pub fn message(out: &mut String, m: &Value, fallback: &str) {
+pub fn message(out: &mut String, m: &Value, fallback: &str, surface: Surface) {
     let board = board_of(m, fallback);
+    let unconfirmed = m["unconfirmed"] == true;
     let _ = write!(
         out,
-        "=== {}\nFrom: {}\nTo: {}\nDate: {}\n",
+        "=== {}{}\nFrom: {}\nTo: {}\nDate: {}\n",
         qualify(board, s(&m["message_id"])),
+        if unconfirmed { " (unconfirmed: preview only)" } else { "" },
         s(&m["from"]),
         s(&m["to"]),
         s(&m["date"])
@@ -318,9 +324,14 @@ pub fn message(out: &mut String, m: &Value, fallback: &str) {
     if let Some(r) = m["reply_to"].as_str() {
         let _ = writeln!(out, "In-Reply-To: {}", qualify(board, r));
     }
-    if m["unconfirmed"] == true {
+    if unconfirmed {
         let id = qualify(board, s(&m["message_id"]));
-        let _ = writeln!(out, "Unconfirmed: {board} did not confirm the read in time; this is its preview, read it with: conde read {id}");
+        let recover = match (surface, m["recover"].as_str()) {
+            (Surface::Cli, Some(cmd)) => cmd.to_string(),
+            (Surface::Cli, None) => format!("conde read {id}"),
+            (Surface::Mcp, _) => format!("call read with target=\"{id}\""),
+        };
+        let _ = writeln!(out, "Unconfirmed: {board} did not confirm this read; below is only a preview. The whole message: {recover}");
     }
     for a in m["attachments"].as_array().into_iter().flatten() {
         let _ = writeln!(

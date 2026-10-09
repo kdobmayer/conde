@@ -614,6 +614,51 @@ fn paging_hints_and_unconfirmed_reads_name_their_board() {
     assert!(err.contains("(more: conde inbox --board dakai --after 7)\n"), "{err}");
     // a read the board did not confirm in time is shown as such, never as read
     let (_, out, err) = r.conde(&["read"]);
-    assert!(out.starts_with("=== dakai:01MU\nFrom: b/r\nTo: \nDate: d\nUnconfirmed: dakai did not confirm the read in time; this is its preview, read it with: conde read dakai:01MU\n"), "{out}");
-    assert!(err.contains("(dakai: listed but not marked read; read each with conde read <its id>)"), "{err}");
+    assert!(out.starts_with("=== dakai:01MU (unconfirmed: preview only)\nFrom: b/r\nTo: \nDate: d\nUnconfirmed: dakai did not confirm this read; below is only a preview. The whole message: conde read dakai:01MU\n"), "{out}");
+    assert!(err.contains("(dakai: not confirmed read; each message marked unconfirmed above names how to read it whole)"), "{err}");
+}
+
+/// Astra's integrated review, findings 4, 8 and 9, and the fields V2 added after it.
+#[test]
+fn review_fields_unconfirmed_recovery_shared_resolve_profile_paging_and_forget() {
+    let r = Root::new();
+    let _d = r.fake(|req| {
+        Ok(match (req["op"].as_str().unwrap(), req["board"].as_str()) {
+            ("message.read", _) => json!({"more": false, "messages": [
+                {"board": "dakai", "place": "dm", "message_id": "dakai:01MU", "from": "b/r", "date": "d",
+                 "text": "the first eighty characters only", "unconfirmed": true, "recover": "conde read dakai:01MU"}],
+                "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "unconfirmed": true}]}),
+            ("inbox.list", _) => json!({"next_cursor": 5, "items": [
+                {"board": "local", "kind": "dm", "message_id": "01ML", "from": "a", "date": "d", "preview": "p"}],
+                "boards": [{"board": "local", "available": true, "next_cursor": 5},
+                           {"board": "dakai", "available": true, "next_cursor": 200, "more": true}]}),
+            ("agent.resolve", Some("dakai")) => json!({"board": "dakai", "name": "balazs/relay", "kind": "mailbox", "host": "bpc"}),
+            ("agent.resolve", _) => json!({"name": "tester/x", "address": "claude:s1@testhost"}),
+            ("profile.get", Some("dakai")) => json!({"board": "dakai", "name": "balazs/relay", "kind": "mailbox", "host": "bpc", "display": "Relay"}),
+            ("board.forget", _) => json!({"board": "dakai", "publications_removed": 0, "ops_removed": 1, "default_reset": true, "default": "local"}),
+            ("message.send", _) => return Err(("not_found", "the default board 'dakai' is not enrolled on this host; ...".into())),
+            _ => json!({}),
+        })
+    });
+    // 4: an unconfirmed row is marked as a preview and names its recovery command
+    let (_, out, _) = r.conde(&["read"]);
+    assert!(out.contains("=== dakai:01MU (unconfirmed: preview only)\n"), "{out}");
+    assert!(out.contains("Unconfirmed: dakai did not confirm this read; below is only a preview. The whole message: conde read dakai:01MU\n"), "{out}");
+    // 9: every part's cursor, the local one printed once
+    let (_, _, err) = r.conde(&["inbox"]);
+    assert_eq!(err.matches("(more on local: conde inbox --board local --after 5)").count(), 1, "{err}");
+    assert!(err.contains("(more on dakai: conde inbox --board dakai --after 200)"), "{err}");
+    // 8: a shared row has no address: kind and host, never a blank line or "(not registered)"
+    let (_, out, _) = r.conde(&["resolve", "balazs/relay", "--board", "dakai"]);
+    assert_eq!(out, "balazs/relay\tmailbox on bpc\n");
+    let (_, out, _) = r.conde(&["resolve", "x"]);
+    assert_eq!(out, "claude:s1@testhost\n", "local rows keep the address");
+    let (_, out, _) = r.conde(&["profile", "balazs/relay", "--board", "dakai"]);
+    assert_eq!(out, "name: balazs/relay\nboard: dakai\nkind: mailbox\nhost: bpc\nDisplay: Relay\n");
+    // forget reports the default board it reset
+    let (_, out, _) = r.conde(&["boards", "--forget", "dakai"]);
+    assert!(out.ends_with("nothing changed on the server\ndefault board reset to local\n"), "{out}");
+    // a default board that is no longer enrolled is the daemon's refusal, passed through
+    let (ok, _, err) = r.conde(&["send", "x", "hi"]);
+    assert!(!ok && err == "conde: the default board 'dakai' is not enrolled on this host; ...\n", "{err}");
 }

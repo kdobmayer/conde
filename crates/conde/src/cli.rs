@@ -588,7 +588,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let id = check_ref(&id)?;
             let r = sx.call("message.get", json!({"id": id}))?;
             let mut out = String::new();
-            surface::message(&mut out, &r["message"], surface::result_board(&r));
+            surface::message(&mut out, &r["message"], surface::result_board(&r), Surface::Cli);
             print!("{out}");
         }
         Cmd::Attachment { id, out } => {
@@ -697,7 +697,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let r = sx.call("agent.pin", json!({"name": name, "address": null}))?;
             println!("unpinned {}", s(&r["name"]));
         }
-        Cmd::Resolve { name } => println!("{}", s(&sx.call("agent.resolve", json!({"name": name}))?["address"])),
+        Cmd::Resolve { name } => {
+            let r = sx.call("agent.resolve", json!({"name": name}))?;
+            match r["address"].as_str() {
+                Some(address) => println!("{address}"),
+                // a shared board shows kind and host, never a target
+                None => println!("{}\t{} on {}", s(&r["name"]), s(&r["kind"]), s(&r["host"])),
+            }
+        }
         Cmd::Agents => print(surface::agents(&sx.call("agent.list", json!({}))?)),
         Cmd::Whoami => println!("{}", surface::whoami(&sx.call("agent.whoami", json!({}))?)),
         Cmd::Search { pattern, target, after } => {
@@ -711,7 +718,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Profile { name, set: None } => {
             let r = sx.call("profile.get", json!({"name": name}))?;
             println!("name: {}", s(&r["name"]));
-            println!("address: {}", r["address"].as_str().unwrap_or("(not registered)"));
+            match (r["address"].as_str(), r["kind"].as_str()) {
+                (Some(address), _) => println!("address: {address}"),
+                (None, Some(kind)) => {
+                    println!("board: {}", surface::result_board(&r));
+                    println!("kind: {kind}");
+                    println!("host: {}", s(&r["host"]));
+                }
+                (None, None) => println!("address: (not registered)"),
+            }
             if let Some(d) = r["display"].as_str() {
                 println!("Display: {d}");
             }
@@ -758,6 +773,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 r["publications_removed"].as_u64().unwrap_or(0),
                 r["ops_removed"].as_u64().unwrap_or(0)
             );
+            if r["default_reset"] == true {
+                println!("default board reset to {}", r["default"].as_str().unwrap_or(LOCAL_BOARD));
+            }
         }
         Cmd::Boards { forget: None, migrate: Some(_) } => unreachable!(),
         Cmd::Boards { forget: None, migrate: None } => {

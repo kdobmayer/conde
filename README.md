@@ -487,7 +487,8 @@ board as the first column; a board that does not answer within 2 seconds is
 listed as `(dakai: unavailable)`. Each board pages on its own: a long listing
 ends with `(more on dakai: conde inbox --board dakai --after 9)`. When dakai
 does not confirm an aggregate `read` in time, its messages are shown as
-previews marked `Unconfirmed:` and stay unread there; read each by its id.
+previews marked `(unconfirmed: preview only)`, each with the command that
+reads it whole (`conde read dakai:01M...`).
 Names and channels are looked up on one
 board only: local `reviewer` and dakai's `kdobmayer/reviewer` are different
 agents, and local `#dev` and dakai's `#dev` are different channels. A send

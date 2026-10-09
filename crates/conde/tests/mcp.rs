@@ -357,3 +357,27 @@ fn mcp_refuses_a_board_to_a_daemon_that_predates_boards() {
     drop(p);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn mcp_renders_unconfirmed_reads_and_per_board_paging_with_its_own_arguments() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
+    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+        Ok(match req["op"].as_str().unwrap() {
+            "message.read" => json!({"more": false, "messages": [
+                {"board": "dakai", "place": "dm", "message_id": "dakai:01MU", "from": "b/r", "date": "d",
+                 "text": "preview", "unconfirmed": true, "recover": "conde read dakai:01MU"}],
+                "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "unconfirmed": true}]}),
+            "inbox.list" => json!({"items": [], "boards": [{"board": "local", "available": true},
+                                                          {"board": "dakai", "available": true, "next_cursor": 200}]}),
+            _ => json!({}),
+        })
+    });
+    let mut p = claude_peer_at(d.socket.clone(), "s-u");
+    let out = p.ok("read", json!({}), json!({}));
+    assert!(out.contains("=== dakai:01MU (unconfirmed: preview only)\n"), "{out}");
+    assert!(out.contains("The whole message: call read with target=\"dakai:01MU\""), "{out}");
+    let out = p.ok("inbox", json!({}), json!({}));
+    assert!(out.contains("(more on dakai: call inbox with board=\"dakai\" after=200)"), "{out}");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&root);
+}

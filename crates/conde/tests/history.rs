@@ -8,6 +8,7 @@ mod pg;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -367,9 +368,11 @@ fn csv_file(dir: &Path, table: &str, header: &[&str], rows: Vec<Vec<Option<Strin
     fs::write(dir.join(format!("{table}.csv")), out).unwrap();
 }
 
-/// What the purge saved: the agents in `gone` and every DM `ids` names, from the central board.
+/// What the purge saved: the agents in `gone` and the DMs `ids`, with counts.txt and
+/// preview.txt in the purge's own format.
 fn save_rows(d: &Dispatcher, dir: &Path, gone: &[&str], ids: &[&String]) {
     fs::create_dir_all(dir).unwrap();
+    let mut counts = String::new();
     d.with_conn(|tx| {
         let uid = tx.user_id("tester")?.unwrap();
         let mut agents = Vec::new();
@@ -377,7 +380,6 @@ fn save_rows(d: &Dispatcher, dir: &Path, gone: &[&str], ids: &[&String]) {
             let a = tx.agent_by_name(uid, n)?.unwrap();
             agents.push(vec![Some(a.id), Some(uid.to_string()), Some(a.name)]);
         }
-        csv_file(dir, "agents", &["agent_id", "owner_id", "name_lower"], agents);
         let (mut msgs, mut atts, mut reads, mut reacts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for id in ids {
             let m = tx.message_by_id(id)?.unwrap();
@@ -408,6 +410,10 @@ fn save_rows(d: &Dispatcher, dir: &Path, gone: &[&str], ids: &[&String]) {
             }
         }
         let mh = ["commit_seq", "message_id", "sender_agent_id", "recipient_agent_id", "channel_id", "text", "reply_to", "created_at"];
+        for (table, n) in [("agents", agents.len()), ("messages", msgs.len()), ("attachments", atts.len()), ("reactions", reacts.len()), ("dm_read", reads.len())] {
+            counts.push_str(&format!("COPY  ( SELECT x.* FROM {table} x WHERE true ) TO STDOUT WITH (FORMAT csv, HEADER)\nCOPY {n}\n"));
+        }
+        csv_file(dir, "agents", &["agent_id", "owner_id", "name_lower"], agents);
         csv_file(dir, "messages", &mh, msgs);
         csv_file(dir, "attachments", &["attachment_id", "message_id", "filename", "bytes", "size"], atts);
         csv_file(dir, "dm_read", &["message_id", "agent_id", "read_at"], reads);
@@ -415,68 +421,108 @@ fn save_rows(d: &Dispatcher, dir: &Path, gone: &[&str], ids: &[&String]) {
         Ok(())
     })
     .unwrap();
+    fs::write(dir.join("counts.txt"), counts).unwrap();
+    let preview: String = gone.iter().map(|n| format!("gone agent | {n}\n")).collect();
+    fs::write(dir.join("preview.txt"), format!("what | name_lower\n{preview}")).unwrap();
 }
 
-/// Central with the kond fixture and native traffic, the manifest frozen, then one DM after the
-/// freeze; the purge saved lead and worker with their DMs (desk stays on central).
+/// Central with the kond fixture and native traffic (desk and helper kept, a DM between them
+/// retained), the manifest frozen, then one DM after the freeze; the purge saved lead and worker
+/// with their DMs. Central is served, so the copy reads the retained DM back as desk.
 struct Switch {
-    _tmp: TempDir,
+    tmp: TempDir,
     stem: PathBuf,
     csv: PathBuf,
     local: PathBuf,
     kond: PathBuf,
     n: Native,
     later: String,
+    retained: String,
+    central: Arc<Dispatcher>,
+    url: String,
+    key: String,
+    _rt: tokio::runtime::Runtime,
 }
 
-fn switch(tag: &str) -> Switch {
+const HELPER: &str = "claude:s-helper";
+
+fn switch_with(tag: &str, prune: &[&str]) -> Switch {
     let tmp = TempDir::new(tag);
     let kond = tmp.0.join("kond");
     kond_fixture(&kond);
-    let central = tmp.0.join("central.db");
-    assert!(import::run(&import_opts(&kond, &central, None)).unwrap().ok());
-    let d = Dispatcher::open(&central).unwrap();
-    let n = native_traffic(&d);
+    let db = tmp.0.join("central.db");
+    assert!(import::run(&import_opts(&kond, &db, None)).unwrap().ok());
+    let d = Arc::new(Dispatcher::open(&db).unwrap());
+    let mut n = native_traffic(&d);
+    // The kond channels were retired before the purge: no class (b) post remains to restore.
+    let post = n.b.pop().unwrap();
+    rusqlite::Connection::open(&db).unwrap().execute("DELETE FROM messages WHERE message_id = ?1", [&post]).unwrap();
+    let p = d.principal("tester", "testhost", false).unwrap();
+    ok(&d, &p, HELPER, "agent.register", json!({"name": "helper"}));
+    let retained = send(&d, &p, DESK, "helper", "kept on the shared board", json!({}));
     let inv = history::classify(extract_via_store(&d, "tester"), &import::snapshot(&kond).unwrap());
     let stem = tmp.0.join("manifest");
     history::write_manifest(&inv, &stem, "test").unwrap();
-    let p = d.principal("tester", "testhost", false).unwrap();
     let later = send(&d, &p, DESK, "worker", "after the freeze, \"quoted\", with a comma\nand a line", json!({}));
     let csv = tmp.0.join("purge");
     save_rows(&d, &csv, &["lead", "worker"], &[&kid(1), &n.b[0], &n.b[1], &later]);
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let handle = rt.block_on(conde::cloud::start(d.clone(), "127.0.0.1:0".parse().unwrap(), conde_remote::ServerConfig::default())).unwrap();
+    let url = format!("http://{}", handle.local_addr());
+    std::mem::forget(handle);
+    let key = format!("conde_test_{}", new_ulid());
+    let digest = conde_remote::token_digest(&key);
+    d.with_tx(|c| conde::ops::hosts::insert_key(c, "tester", "testhost", &digest, "test", "2026-10-09T00:00:00.000Z")).unwrap();
+
     let local = tmp.0.join("local/conde.db");
     fs::create_dir_all(local.parent().unwrap()).unwrap();
-    assert!(import::run(&import_opts(&kond, &local, None)).unwrap().ok());
-    Switch { stem, csv, local, kond, n, later, _tmp: tmp }
+    let skip: std::collections::BTreeSet<String> = prune.iter().map(|s| s.to_string()).collect();
+    assert!(import::run(&Options { skip_agents: skip, ..import_opts(&kond, &local, None) }).unwrap().ok());
+    Switch { stem, csv, local, kond, n, later, retained, central: d, url, key, _rt: rt, tmp }
 }
 
-fn copy_opts(s: &Switch, after_freeze: bool, dry_run: bool) -> CopyOptions {
+fn switch(tag: &str) -> Switch {
+    switch_with(tag, &[])
+}
+
+fn copy_opts(s: &Switch, dry_run: bool) -> CopyOptions {
     CopyOptions {
         manifest: s.stem.clone(),
         from_csv: s.csv.clone(),
         db: s.local.clone(),
-        after_freeze,
         skip_agents: Default::default(),
+        central: Some(history::Central { server: s.url.clone(), key: s.key.clone(), actor: DESK.into() }),
         dry_run,
     }
 }
 
 #[test]
-fn copy_from_the_saved_rows_restores_class_b_validated_by_hashes() {
+fn copy_from_the_saved_rows_accounts_for_every_row_and_validates_by_hashes() {
     let s = switch("csv");
     let before = table_counts(&s.local);
-    let dry = history::copy(&copy_opts(&s, true, true)).unwrap();
+    let dry = history::copy(&copy_opts(&s, true)).unwrap();
     assert!(dry.ok() && !dry.written, "{dry}");
     assert_eq!(table_counts(&s.local), before, "a dry run writes nothing");
 
-    let report = history::copy(&copy_opts(&s, true, false)).unwrap();
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
     assert!(report.ok() && report.written, "{report}");
-    // b1 and b2 from the saved rows; b3 (the #team post) is still on central.
-    assert_eq!((report.frozen, report.on_central), (2, 1), "{report}");
-    assert_eq!(report.after_freeze, vec![s.later.clone()]);
+    assert_eq!((report.saved, report.saved_imported, report.saved_frozen, report.saved_newer), (4, 1, 2, 1), "{report}");
+    assert_eq!((report.restored_frozen, report.restored_newer.clone()), (2, vec![s.later.clone()]));
+    assert_eq!(report.retained_verified, vec![s.retained.clone()]);
+    assert_eq!(report.kept_names, vec!["desk".to_string(), "helper".to_string()]);
     assert_eq!(report.agents_created, vec!["desk".to_string()]);
     let text = report.to_string();
-    for line in ["ids: 3 of 3 on the local board", "bodies: 3 of 3 sha256-equal", "attachments: 1 of 1", "reply-to: 3 of 3", "read state: 3 of 3", "reactions: 3 of 3"] {
+    for line in [
+        "saved messages: 4 = class (a) 1 (restored by the import) + frozen class (b) 2 + newer than the freeze 1",
+        "class (b) in the manifest: 3 = restored 2 + skipped 0 + retained on the shared board 1",
+        "ids: 3 of 3 on the local board",
+        "bodies: 3 of 3 sha256-equal",
+        "attachments: 1 of 1",
+        "reply-to: 3 of 3",
+        "read state: 3 of 3",
+        "reactions: 3 of 3",
+    ] {
         assert!(text.contains(line), "{line}\n{text}");
     }
 
@@ -488,32 +534,81 @@ fn copy_from_the_saved_rows_restores_class_b_validated_by_hashes() {
     assert_eq!(shown["attachments"][0]["filename"], "native.bin");
     let later = ok(&d, &p, WORKER, "message.get", json!({"id": s.later}))["message"].clone();
     assert_eq!(later["text"], "after the freeze, \"quoted\", with a comma\nand a line");
-    let seq = |id: &str| d.with_conn(|tx| tx.message_by_id(id)).unwrap().unwrap().seq;
-    assert!(seq(&s.n.b[0]) > seq(&kid(2)), "appended after the kond import");
+    assert!(d.with_conn(|tx| tx.message_by_id(&s.retained)).unwrap().is_none(), "the retained DM stays on the shared board");
     drop(d);
 
     let after = table_counts(&s.local);
-    let again = history::copy(&copy_opts(&s, true, false)).unwrap();
+    let again = history::copy(&copy_opts(&s, false)).unwrap();
     assert!(!again.ok() && !again.written, "{again}");
     assert_eq!(table_counts(&s.local), after);
     let rerun = import::run(&import_opts(&s.kond, &s.local, None)).unwrap();
     assert!(rerun.ok() && rerun.refused.is_empty(), "{rerun}");
 }
 
+/// Astra's probe: a saved frozen DM missing from messages.csv is never taken for one kept on
+/// the shared board, whether or not counts.txt was cut to match.
 #[test]
-fn copy_without_after_freeze_takes_the_frozen_ids_only_and_skips_pruned_parties() {
-    let s = switch("csv-frozen");
-    let report = history::copy(&copy_opts(&s, false, false)).unwrap();
-    assert!(report.ok(), "{report}");
-    assert!(report.after_freeze.is_empty());
-    let has = |id: &str| rusqlite::Connection::open(&s.local).unwrap().query_row("SELECT COUNT(*) FROM messages WHERE message_id = ?1", [id], |r| r.get::<_, i64>(0)).unwrap();
-    assert_eq!((has(&s.n.b[0]), has(&s.later)), (1, 0));
+fn review_missing_saved_frozen_dm_must_not_be_reported_as_still_on_central() {
+    let s = switch("review-missing-saved");
+    let path = s.csv.join("messages.csv");
+    let mut records = history::read_csv(&fs::read_to_string(&path).unwrap()).unwrap();
+    let header: Vec<String> = records.remove(0).into_iter().map(Option::unwrap).collect();
+    let before = records.len();
+    records.retain(|r| r[1].as_deref() != Some(s.n.b[1].as_str()));
+    assert_eq!(records.len(), before - 1);
+    csv_file(&s.csv, "messages", &header.iter().map(String::as_str).collect::<Vec<_>>(), records);
+    let rows_before = table_counts(&s.local);
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
+    assert!(!report.ok() && !report.written, "copy silently accepted a missing saved frozen DM and called it still on central: {report}");
+    assert!(report.problems.iter().any(|p| p.contains("messages.csv holds 3 rows, counts.txt states 4")), "{report}");
+    assert!(report.problems.iter().any(|p| p.contains(&s.n.b[1]) && p.contains("missing")), "{report}");
 
-    let s = switch("csv-prune");
-    let opts = CopyOptions { skip_agents: ["worker".to_string()].into(), ..copy_opts(&s, true, false) };
+    let counts = s.csv.join("counts.txt");
+    fs::write(&counts, fs::read_to_string(&counts).unwrap().replace("COPY 4\n", "COPY 3\n")).unwrap();
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains(&s.n.b[1]) && p.contains("missing")), "{report}");
+    assert_eq!(table_counts(&s.local), rows_before);
+}
+
+#[test]
+fn copy_refuses_unverified_retained_rows_and_an_incomplete_source() {
+    let s = switch("csv-retained");
+    let before = table_counts(&s.local);
+    let report = history::copy(&CopyOptions { central: None, ..copy_opts(&s, false) }).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains("expected on the shared board") || p.contains("verify them")), "{report}");
+    // The retained DM gone from central: not readable there.
+    let conn = rusqlite::Connection::open(s.tmp.0.join("central.db")).unwrap();
+    for sql in [
+        "DELETE FROM attempts WHERE notification_id IN (SELECT notification_id FROM notifications WHERE message_id = ?1)",
+        "DELETE FROM notifications WHERE message_id = ?1",
+        "DELETE FROM messages WHERE message_id = ?1",
+    ] {
+        conn.execute(sql, [&s.retained]).unwrap();
+    }
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains(&s.retained) && p.contains("not readable there")), "{report}");
+    let _ = &s.central;
+    // preview.txt naming another agent set.
+    let s = switch("csv-preview");
+    fs::write(s.csv.join("preview.txt"), "what | name_lower\ngone agent | lead\n").unwrap();
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains("only in agents.csv: [worker]")), "{report}");
+    assert_eq!(table_counts(&s.local), before);
+}
+
+#[test]
+fn the_prune_list_skips_rows_after_the_completeness_check() {
+    let s = switch_with("csv-prune", &["worker"]);
+    let opts = CopyOptions { skip_agents: ["worker".to_string()].into(), ..copy_opts(&s, false) };
     let report = history::copy(&opts).unwrap();
     assert!(report.ok(), "{report}");
-    assert_eq!(report.skipped, vec![s.later.clone()]);
+    assert_eq!(report.skipped, vec![s.later.clone()], "the class (a) row is the import's to skip");
+    assert_eq!(report.restored_frozen, 2);
+    // Pruned at the copy but not at the import: the kond row of the pruned name is on the board.
+    let s = switch("csv-prune-mismatch");
+    let opts = CopyOptions { skip_agents: ["worker".to_string()].into(), ..copy_opts(&s, false) };
+    let report = history::copy(&opts).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains(&kid(1)) && p.contains("pruned party")), "{report}");
 }
 
 #[test]
@@ -523,21 +618,21 @@ fn copy_refuses_a_hash_mismatch_and_a_channel_post_writing_nothing() {
     let messages = s.csv.join("messages.csv");
     let pristine = fs::read_to_string(&messages).unwrap();
     fs::write(&messages, pristine.replace("native internal", "native internaL")).unwrap();
-    let report = history::copy(&copy_opts(&s, true, false)).unwrap();
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
     assert!(!report.written && report.problems.iter().any(|p| p.contains(&s.n.b[0]) && p.contains("sha256")), "{report}");
     assert_eq!(table_counts(&s.local), before);
 
-    // The frozen #team post among the saved rows: the copy restores DMs only.
-    fs::write(&messages, format!("{pristine}999,{},x,,channel-id,post,,2026-10-09T00:00:00.000Z\n", s.n.b[2])).unwrap();
-    let report = history::copy(&copy_opts(&s, true, false)).unwrap();
-    assert!(!report.written && report.problems.iter().any(|p| p.contains(&s.n.b[2]) && p.contains("DMs only")), "{report}");
+    // A channel post among the saved rows: the copy restores DMs only.
+    fs::write(&messages, format!("{pristine}999,{},x,,channel-id,post,,2026-10-09T00:00:00.000Z\n", new_ulid())).unwrap();
+    let report = history::copy(&copy_opts(&s, false)).unwrap();
+    assert!(!report.written && report.problems.iter().any(|p| p.contains("DMs only")), "{report}");
     assert_eq!(table_counts(&s.local), before);
 
     // A board the import has not restored is refused.
     fs::write(&messages, pristine).unwrap();
     let empty = s.local.with_file_name("empty.db");
     drop(Dispatcher::open(&empty).unwrap());
-    let err = history::copy(&CopyOptions { db: empty, ..copy_opts(&s, true, false) }).unwrap_err().to_string();
+    let err = history::copy(&CopyOptions { db: empty, ..copy_opts(&s, false) }).unwrap_err().to_string();
     assert!(err.contains("run the H2 import"), "{err}");
 }
 

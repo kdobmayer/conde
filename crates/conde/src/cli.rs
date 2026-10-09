@@ -304,8 +304,10 @@ enum HistoryCmd {
         #[arg(long, default_value = "the extraction file")]
         source: String,
     },
-    /// H3: copy the manifest's class (b) rows from the rows the central purge saved (one CSV per
-    /// table) into the local board the H2 import restored, in one transaction, validated by hashes.
+    /// H3: restore the owner's DMs the central purge saved (one CSV per table, counts.txt,
+    /// preview.txt) into the local board the H2 import restored: the source checked complete,
+    /// every saved row and manifest class (b) row accounted for (kept rows read back from the
+    /// shared board), one transaction, validated by hashes.
     Copy {
         /// The manifest path given to inventory --out (without the suffixes).
         #[arg(long, value_name = "PATH")]
@@ -316,12 +318,16 @@ enum HistoryCmd {
         /// The local board (default: the data directory's conde.db).
         #[arg(long, value_name = "FILE")]
         db: Option<PathBuf>,
-        /// Also copy the saved DMs newer than the manifest's freeze (checked against the saved rows).
-        #[arg(long)]
-        after_freeze: bool,
         /// The importer's prune file: rows with a pruned party stay out.
         #[arg(long, value_name = "FILE")]
         skip_agents: Option<PathBuf>,
+        /// Host credential for verifying the class (b) rows kept on the shared board (default:
+        /// boards/dakai.json, else the v1 credentials file).
+        #[arg(long, value_name = "FILE")]
+        credentials: Option<PathBuf>,
+        /// The actor that reads them back, a party to every kept DM (default: this session).
+        #[arg(long, value_name = "ADDRESS")]
+        verify_as: Option<String>,
         /// Read and check; write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -498,9 +504,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             no_board("history", "")?;
             return crate::history::inventory_main(&extract, &snapshot, &out, &source);
         }
-        Cmd::History { cmd: HistoryCmd::Copy { manifest, from_csv, db, after_freeze, skip_agents, dry_run } } => {
+        Cmd::History { cmd: HistoryCmd::Copy { manifest, from_csv, db, skip_agents, credentials, verify_as, dry_run } } => {
             no_board("history", "")?;
-            return crate::history::copy_main(&manifest, &from_csv, db, after_freeze, skip_agents.as_deref(), dry_run);
+            return crate::history::copy_main(&manifest, &from_csv, db, skip_agents.as_deref(), credentials, verify_as, dry_run);
         }
         Cmd::History { cmd: HistoryCmd::PruneCandidates { snapshot, out } } => {
             no_board("history", "")?;

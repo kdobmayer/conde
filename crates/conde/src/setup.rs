@@ -188,7 +188,7 @@ pub struct Options {
     /// Set the default board without asking.
     pub default_board: Option<String>,
     /// What stays published when an enrolled host switches to v2; None: asked at a terminal,
-    /// the candidates without one.
+    /// nothing decided without one.
     pub publish: Option<Publish>,
 }
 
@@ -878,9 +878,9 @@ fn short_date(at: &str) -> &str {
 /// The one-time switch of an enrolled host to v2 on board `alias` (§9): the daemon fetches
 /// the read-only preview, `publish` (the `--publish*` flag) or the human at a terminal picks
 /// the names that stay published, and the daemon applies it as a resumable operation.
-/// Without a flag and without a terminal (an agent running setup) the candidates stay
-/// published, and the output says so. Ok(false) when the review could not run (`explicit`:
-/// asked for with `conde boards --migrate`).
+/// Without a flag and without a terminal (an agent running setup) nothing changes: the board
+/// stays not migrated and the output names the flags. Ok(false) when the review could not run
+/// (`explicit`: asked for with `conde boards --migrate`).
 pub fn migrate_review(
     env: &Env,
     host: &mut dyn Host,
@@ -927,11 +927,8 @@ pub fn migrate_review(
     }
     let interactive = publish.is_none() && host.terminal();
     show_preview(out, alias, &info, &preview, interactive)?;
-    if !interactive {
-        let (choice, head) = match publish {
-            Some(p) => (p.clone(), format!("{} publishes", p.flag())),
-            None => (Publish::Candidates, "no terminal and no --publish flag, so the candidates (*) stay published:".to_string()),
-        };
+    if let Some(choice) = publish {
+        let head = format!("{} publishes", choice.flag());
         let chosen = match choice.rows(&preview.rows) {
             Ok(c) => c,
             Err(names) => {
@@ -949,6 +946,14 @@ pub fn migrate_review(
             writeln!(out, "boards: {alias}: to change it later: conde publish <name> --board {alias}, conde unpublish <name> --board {alias}")?;
         }
         return Ok(ok);
+    }
+    if !interactive {
+        writeln!(
+            out,
+            "boards: {alias}: not a terminal and no --publish flag; nothing changes until you run conde setup (or conde \
+             boards --migrate {alias}) with --publish <name,...>, --publish-candidates, --publish-all or --publish-none"
+        )?;
+        return Ok(!explicit);
     }
     let Some(chosen) = choose(host, out, alias, &preview.rows)? else {
         writeln!(out, "boards: {alias}: not migrated: no answer; {later}")?;

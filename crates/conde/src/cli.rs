@@ -297,7 +297,7 @@ enum Cmd {
 }
 
 /// What stays published when an enrolled host switches to v2. Without one: asked at a
-/// terminal; without a terminal, the candidates.
+/// terminal; without a terminal, nothing changes.
 #[derive(Args)]
 #[group(multiple = false)]
 struct PublishArgs {

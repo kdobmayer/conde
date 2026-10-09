@@ -674,10 +674,10 @@ fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// An agent runs setup from its shell: no terminal and no flag publishes the candidates (an
-/// enrolled v1 host keeps its cross-owner names) and says how to change it.
+/// An agent runs setup from its shell: without a --publish flag nothing is published and the
+/// board stays not migrated; setup finishes its other parts and names the four flags.
 #[test]
-fn without_a_terminal_or_a_flag_the_candidates_stay_published() {
+fn without_an_instruction_nothing_is_published() {
     let root = temp_root();
     let env = env(&root, Os::Linux);
     enrolled(&env);
@@ -689,21 +689,20 @@ fn without_a_terminal_or_a_flag_the_candidates_stay_published() {
     assert!(ok, "{out}");
     for line in [
         "boards: dakai: host box (account krisz) still has 2 names bound from v1. A candidate (*) has messages with another owner's agents:\n",
-        "boards: dakai: no terminal and no --publish flag, so the candidates (*) stay published: desk; the other 1 names move to this host's local board only\n",
-        "boards: dakai: switched to v2; published: desk; on this host's local board only: 1 names\n",
-        "boards: dakai: to change it later: conde publish <name> --board dakai, conde unpublish <name> --board dakai\n",
+        "  * desk  claude:5f2c@box  pinned\n",
+        "boards: dakai: not a terminal and no --publish flag; nothing changes until you run conde setup (or conde boards --migrate dakai) with --publish <name,...>, --publish-candidates, --publish-all or --publish-none\n",
         "boards: default board for names and channels: local (to change it: conde setup --default-board <alias>)\n",
     ] {
         assert!(out.contains(line), "missing {line:?} in\n{out}");
     }
     assert!(host.prompts.is_empty(), "{:?}", host.prompts);
-    assert_eq!(ops(&host).last().unwrap(), &("host.migrate_v2".to_string(), Some("dakai".to_string()), json!({"publish": ["01DESK"]})));
+    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
     assert!(!env.default_board().exists());
 
-    // the explicit review without a terminal does the same
+    // the explicit review without an instruction applies nothing either, and fails
     let mut sink = Vec::new();
-    assert!(setup::migrate_review(&env, &mut host, &mut sink, "dakai", true, None).unwrap());
-    assert_eq!(ops(&host).last().unwrap().2, json!({"publish": ["01DESK"]}));
+    assert!(!setup::migrate_review(&env, &mut host, &mut sink, "dakai", true, None).unwrap());
+    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
     // the flag sets the default without asking
     let mut opts = Options::select(false, false, false, false);
     opts.default_board = Some("dakai".into());

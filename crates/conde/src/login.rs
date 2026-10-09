@@ -1,7 +1,7 @@
 //! `conde login --server <url>`: enrolls this host through a browser sign-in. A loopback
 //! listener on 127.0.0.1 receives a one-time code bound to this run (state + PKCE S256);
 //! the code is redeemed over TLS for the host key, which never appears in a URL. The key is
-//! stored exactly as `conde enroll` stores it (credentials file, mode 0600).
+//! stored exactly as `conde enroll` stores it (`boards/<alias>.json`, mode 0600).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, timeout, timeout_at};
 
-use crate::credentials::{self, Credentials};
+use crate::boards::{self, BoardConfig};
 
 /// How long the browser may take to sign in (MFA included).
 pub const BROWSER_WAIT: Duration = Duration::from_secs(300);
@@ -207,9 +207,13 @@ fn open_browser(url: &str) {
     }
 }
 
-/// `conde login --server <url> [--host <id>] [--no-browser]`.
-pub fn run(server: &str, host: Option<&str>, browser: bool) -> anyhow::Result<i32> {
+/// `conde login --server <url> [--host <id>] [--board <alias>] [--no-browser]`.
+pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool) -> anyhow::Result<i32> {
     origin(server)?;
+    if let Some(alias) = board {
+        boards::check_shared_alias(alias)?;
+        boards::check_pin(&boards::path(alias)?, alias, server, None)?;
+    }
     let host = host.map(str::to_lowercase).unwrap_or_else(crate::util::local_host);
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let enrolled = runtime.block_on(sign_in(
@@ -224,16 +228,30 @@ pub fn run(server: &str, host: Option<&str>, browser: bool) -> anyhow::Result<i3
         },
         BROWSER_WAIT,
     ))?;
-    let path = credentials::path()?;
-    save(&path, server, &enrolled)?;
-    println!("signed in as {}; host {} enrolled with {server}; credential stored at {} (mode 0600)", enrolled.user, enrolled.host_id, path.display());
-    println!("start the bridge with: conde daemon --server {server}");
+    drop(runtime);
+    let alias = match board {
+        Some(a) => a.to_string(),
+        None => boards::board_info(server, &enrolled.key)?.name,
+    };
+    boards::check_shared_alias(&alias)?;
+    let path = boards::path(&alias)?;
+    let cfg = save(&path, &alias, server, &enrolled)?;
+    println!("signed in as {}", enrolled.user);
+    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path));
     Ok(0)
 }
 
-/// Stores the key in the credentials file `conde enroll` writes.
-pub fn save(path: &std::path::Path, server: &str, enrolled: &Enrolled) -> anyhow::Result<()> {
-    credentials::store(path, &Credentials { server: server.to_string(), host_id: enrolled.host_id.clone(), key: enrolled.key.clone() })
+/// Stores the key as the board file `alias` (account: the signed-in user), refusing to
+/// retarget a pinned alias.
+pub fn save(path: &std::path::Path, alias: &str, server: &str, enrolled: &Enrolled) -> anyhow::Result<BoardConfig> {
+    let cfg = BoardConfig {
+        server: server.to_string(),
+        host_id: enrolled.host_id.clone(),
+        owner: enrolled.user.clone(),
+        key: enrolled.key.clone(),
+    };
+    boards::store(path, alias, &cfg)?;
+    Ok(cfg)
 }
 
 #[cfg(test)]

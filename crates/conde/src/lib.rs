@@ -2,6 +2,7 @@
 
 pub mod address;
 pub mod admin;
+pub mod boards;
 pub mod bridge;
 pub mod cli;
 pub mod client;
@@ -23,5 +24,6 @@ pub mod protocol;
 pub mod server;
 pub mod setup;
 pub mod store;
+pub mod surface;
 pub mod util;
 pub mod web_store;

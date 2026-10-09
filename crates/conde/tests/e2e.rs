@@ -109,9 +109,9 @@ const BOB: &[(&str, &str)] = &[("CODEX_THREAD_ID", "t-bob")];
 fn dm_and_channel_mention_end_to_end() {
     let d = Daemon::start();
     let codex = Some("codex");
-    assert_eq!(d.ok(codex, ALICE, &["register", "alice"]), "registered tester/alice -> codex:t-alice@testhost\n");
-    assert_eq!(d.ok(codex, BOB, &["register", "Bob"]), "registered tester/bob -> codex:t-bob@testhost\n");
-    assert_eq!(d.ok(codex, ALICE, &["whoami"]), "tester/alice\n");
+    assert_eq!(d.ok(codex, ALICE, &["register", "alice"]), "registered tester/alice on the local board (codex:t-alice@testhost)\n");
+    assert_eq!(d.ok(codex, BOB, &["register", "Bob"]), "registered tester/bob on the local board (codex:t-bob@testhost)\n");
+    assert_eq!(d.ok(codex, ALICE, &["whoami"]), "tester/alice (local, codex:t-alice@testhost)\n");
 
     // DM: send, push, inbox, read, receipt
     let out = d.ok(codex, ALICE, &["send", "bob", "hello bob\nline two"]);
@@ -119,13 +119,13 @@ fn dm_and_channel_mention_end_to_end() {
     d.wait_log(&format!("conde: new message {id} from tester/alice. Read it with: conde read {id}"));
     assert!(d.log().contains("codex:t-bob@testhost"));
     let inbox = d.ok(codex, BOB, &["inbox"]);
-    assert!(inbox.starts_with(&format!("dm\t{id}\ttester/alice\t20")), "{inbox}");
+    assert!(inbox.starts_with(&format!("local\tdm\t{id}\ttester/alice\t20")), "{inbox}");
     assert!(inbox.ends_with("\thello bob\n"), "{inbox}");
     let read = d.ok(codex, BOB, &["read", &id]);
     assert!(read.starts_with(&format!("=== {id}\nFrom: tester/alice\nTo: tester/bob\n")), "{read}");
     assert!(read.ends_with("\nhello bob\nline two\n"), "{read}");
     let sent = d.ok(codex, ALICE, &["sent"]);
-    assert!(sent.starts_with(&format!("{id}  tester/bob  read 20")), "{sent}");
+    assert!(sent.starts_with(&format!("local  {id}  tester/bob  read 20")), "{sent}");
 
     // channel with a mention
     assert_eq!(d.ok(codex, ALICE, &["create", "#dev"]), "created #dev (you are a member)\n");
@@ -134,7 +134,7 @@ fn dm_and_channel_mention_end_to_end() {
     let post = out.strip_prefix("queued ").and_then(|s| s.strip_suffix(" to #dev\n")).expect(&out).to_string();
     d.wait_log(&format!("conde: you were mentioned in #dev by tester/bob (message {post})"));
     let inbox = d.ok(codex, ALICE, &["inbox"]);
-    assert!(inbox.starts_with(&format!("#dev\t{post}\ttester/bob\t")), "{inbox}");
+    assert!(inbox.starts_with(&format!("local\t#dev\t{post}\ttester/bob\t")), "{inbox}");
     let read = d.ok(codex, ALICE, &["read", "#dev"]);
     assert!(read.starts_with("--- #dev\n"), "{read}");
     assert!(read.contains("@alice please review"), "{read}");
@@ -145,7 +145,7 @@ fn dm_and_channel_mention_end_to_end() {
     assert!(d.ok(codex, ALICE, &["show", &post]).contains("Reaction: 👍 tester/alice\n"));
     assert_eq!(d.ok(codex, ALICE, &["react", &post]), format!("removed 👍 from {post} in #dev\n"));
     let hits = d.ok(codex, BOB, &["search", "REVIEW"]);
-    assert!(hits.starts_with(&format!("#dev\t{post}\ttester/bob\t")), "{hits}");
+    assert!(hits.starts_with(&format!("local\t#dev\t{post}\ttester/bob\t")), "{hits}");
 
     // attachments travel inline and come back byte for byte
     let src = d.root.join("note.txt");
@@ -169,9 +169,9 @@ fn identity_follows_the_nearest_harness() {
     let d = Daemon::start();
     let both = &[("CODEX_THREAD_ID", "t-1"), ("CLAUDE_CODE_SESSION_ID", "s-1")];
     // under codex the codex marker wins; under claude the claude marker does
-    assert!(d.ok(Some("codex"), both, &["register", "vegrehajtas.codex"]).ends_with("-> codex:t-1@testhost\n"));
-    assert!(d.ok(Some("claude"), both, &["register", "kond.dev.claude"]).ends_with("-> claude:s-1@testhost\n"));
-    assert_eq!(d.ok(Some("claude"), both, &["whoami"]), "tester/kond.dev.claude\n");
+    assert!(d.ok(Some("codex"), both, &["register", "vegrehajtas.codex"]).ends_with(" on the local board (codex:t-1@testhost)\n"));
+    assert!(d.ok(Some("claude"), both, &["register", "kond.dev.claude"]).ends_with(" on the local board (claude:s-1@testhost)\n"));
+    assert_eq!(d.ok(Some("claude"), both, &["whoami"]), "tester/kond.dev.claude (local, claude:s-1@testhost)\n");
 
     // a missing codex registration never falls back to the inherited claude one
     d.ok(Some("codex"), both, &["unregister", "vegrehajtas.codex"]);

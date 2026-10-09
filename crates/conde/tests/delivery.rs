@@ -103,5 +103,5 @@ fn a_codex_child_cannot_unregister_another_sessions_name() {
     let out = h.conde(Some("codex"), &[("CODEX_THREAD_ID", "t-other")], &["unregister", "alice"], None);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("self-only"));
-    assert_eq!(h.ok(Some("codex"), ALICE, &["whoami"]), "tester/alice\n");
+    assert_eq!(h.ok(Some("codex"), ALICE, &["whoami"]), "tester/alice (local, codex:t-alice@testhost)\n");
 }

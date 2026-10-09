@@ -1,7 +1,8 @@
 //! `conde login` against a fake board: the browser (reqwest following redirects) lands on the
-//! CLI's loopback listener; the CLI redeems the code and stores the key as `conde enroll` does.
+//! CLI's loopback listener; the CLI redeems the code and stores the key as `conde enroll` does,
+//! as a board file pinned to its server and account; `board.info` names the board.
 
-use conde::{credentials, login, util};
+use conde::{boards, credentials, login, util};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -55,11 +56,25 @@ fn rand_u128() -> u128 {
     u128::from_le_bytes(b)
 }
 
+/// `POST /v1/rpc` as the server answers `board.info` for a host key.
+async fn rpc(headers: axum::http::HeaderMap, Json(req): Json<Value>) -> Response {
+    let authorized = headers.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {KEY}"));
+    if !authorized {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"v": 1, "type": "response", "request_id": req["request_id"], "ok": false,
+            "error": {"code": "unauthenticated", "message": "unknown host key"}}))).into_response();
+    }
+    assert_eq!(req["op"], "board.info");
+    Json(json!({"v": 1, "type": "response", "request_id": req["request_id"], "ok": true,
+        "result": {"name": "dakai", "owner": "krisztian", "host": "box-1", "mailbox_only": false}}))
+    .into_response()
+}
+
 async fn board() -> (String, Arc<Board>) {
     let board = Arc::new(Board::default());
     let app = Router::new()
         .route("/auth/cli", get(cli))
         .route("/auth/cli/redeem", post(redeem))
+        .route("/v1/rpc", post(rpc))
         .with_state(board.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -116,12 +131,21 @@ async fn login_redeems_the_code_and_stores_the_key_like_enroll() {
     assert_eq!(redeemed[0]["host"], "box-1");
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("conde/credentials");
-    login::save(&path, &server, &enrolled).unwrap();
+    let path = dir.path().join("conde/boards/dakai.json");
+    login::save(&path, "dakai", &server, &enrolled).unwrap();
     assert_eq!(credentials::mode(&path), Some(0o600));
-    let stored = credentials::load(&path).unwrap();
-    assert_eq!((stored.server, stored.host_id, stored.key), (server, "box-1".to_string(), KEY.to_string()));
+    let stored = boards::load(&path).unwrap();
+    assert_eq!(
+        (stored.server.as_str(), stored.host_id.as_str(), stored.owner.as_str(), stored.key.as_str()),
+        (server.as_str(), "box-1", "krisztian", KEY)
+    );
     assert!(!util::local_host().is_empty());
+
+    // the alias stays pinned: another account under the same alias is refused, the file kept
+    let other = login::Enrolled { user: "someone".into(), ..enrolled.clone() };
+    let err = login::save(&path, "dakai", &server, &other).unwrap_err().to_string();
+    assert!(err.starts_with(&format!("dakai is pinned to {server} as krisztian")), "{err}");
+    assert_eq!(boards::load(&path).unwrap().owner, "krisztian");
 }
 
 #[tokio::test]
@@ -144,4 +168,16 @@ async fn an_unfinished_browser_sign_in_times_out() {
 async fn plain_http_is_refused_for_remote_servers() {
     let err = login::sign_in("http://conde.example", "h", |_| panic!("no browser"), Duration::from_secs(1)).await.unwrap_err();
     assert!(err.to_string().contains("not TLS"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn board_info_names_the_board_with_the_host_key() {
+    let (server, _) = board().await;
+    let s = server.clone();
+    let info = tokio::task::spawn_blocking(move || boards::board_info(&s, KEY)).await.unwrap().unwrap();
+    assert_eq!((info.name.as_str(), info.owner.as_str(), info.host.as_str(), info.mailbox_only), ("dakai", "krisztian", "box-1", false));
+    let err = tokio::task::spawn_blocking(move || boards::board_info(&server, "conde_wrong")).await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("refused board.info: unknown host key"), "{err}");
+    let err = boards::board_info("http://conde.example", KEY).unwrap_err();
+    assert!(err.to_string().contains("not TLS"), "the key never goes over plain http to a remote host: {err}");
 }

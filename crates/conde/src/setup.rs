@@ -1,7 +1,10 @@
 //! `conde setup`: make this machine's Claude Code and Codex sessions use
 //! conde. Installs the bridge as a user service (systemd on Linux, launchd on
-//! macOS), the skills, and the MCP registration for both harnesses; offers the
-//! Claude receiver setting. Idempotent: a second run reports "unchanged".
+//! macOS) running the single daemon with the local board, the skills, and the MCP
+//! registration for both harnesses; offers the Claude receiver setting; then the
+//! host's boards (DESIGN-v2 §7, §9): the default board, and for an enrolled host
+//! the one review of which earlier names stay published. Enrolling a shared board
+//! is a separate step (`conde login`). Idempotent: a second run reports "unchanged".
 //!
 //! Everything the run reads from the machine (OS, home, config dirs, the
 //! binary's path) arrives in [`Env`], and every external command goes through
@@ -15,6 +18,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow, bail};
 use serde_json::{Map, Value, json};
 
+use crate::boards::{self, BoardConfig};
+use crate::protocol::v2::{BoardInfo, LOCAL_BOARD, Manifest, MigratePreview, PreviewRow, op};
+
 pub const CLAUDE_SKILL: &str = include_str!("../../../skills/claude/SKILL.md");
 pub const CODEX_SKILL: &str = include_str!("../../../skills/codex/SKILL.md");
 
@@ -22,9 +28,14 @@ pub const LAUNCHD_LABEL: &str = "space.nativeai.conde";
 /// The last step of every setup (owner's decision): report how it went.
 pub const FEEDBACK: &str = "Send a DM to kdobmayer/desk with how the setup went: what worked, what failed, what you \
 had to figure out yourself, roughly how long it took, and the OS.";
-pub const FEEDBACK_COMMAND: &str = "conde send kdobmayer/desk \"<how the setup went>\"";
-pub const FEEDBACK_KEEP: &str = "Keep the name you send it from registered: desk replies to that name.";
+pub const FEEDBACK_COMMAND: &str = "conde send kdobmayer/desk \"<how the setup went>\" --board dakai";
+pub const FEEDBACK_KEEP: &str = "desk is on the team's board: your human publishes the name you send it from first \
+(conde publish <name> --board dakai); on a host without that board, tell your human instead. Keep the name \
+registered: desk replies to it.";
 pub const GUIDE: &str = "Setup guide: https://conde.nativeai.space/readme";
+/// What enrolling a shared board does and does not do, for the human who runs it.
+pub const ENROLL_SCOPE: &str = "Enrolling publishes nothing and uploads no history: every agent stays on this \
+machine's local board, and teammates cannot reach one until you publish it";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
@@ -127,6 +138,24 @@ impl Env {
         self.codex_dir().join("skills/conde/SKILL.md")
     }
 
+    /// `$XDG_CONFIG_HOME/conde` (else `~/.config/conde`): board files and the default board.
+    pub fn conde_config(&self) -> PathBuf {
+        self.xdg_config_home.clone().unwrap_or_else(|| self.home.join(".config")).join("conde")
+    }
+
+    pub fn boards_dir(&self) -> PathBuf {
+        self.conde_config().join("boards")
+    }
+
+    pub fn default_board(&self) -> PathBuf {
+        self.conde_config().join("default-board")
+    }
+
+    /// The v1 credential, moved to `boards/<alias>.json` by setup.
+    pub fn v1_credential(&self) -> PathBuf {
+        self.conde_config().join("credentials")
+    }
+
     pub fn systemd_unit(&self) -> PathBuf {
         self.xdg_config_home.clone().unwrap_or_else(|| self.home.join(".config")).join("systemd/user/conde.service")
     }
@@ -152,17 +181,25 @@ pub struct Options {
     pub claude: bool,
     pub codex: bool,
     pub service: bool,
+    /// The host's boards: the v1 credential move, the migration review, the default board.
+    pub boards: bool,
     /// Leave Claude's crossSessionInbound as it is (default: an unset value becomes "accept").
     pub keep_receiver_policy: bool,
-    /// Remote board (`wss://...`) for the bridge; local mode when None.
-    pub server: Option<String>,
+    /// Set the default board without asking.
+    pub default_board: Option<String>,
 }
 
 impl Options {
     /// No part named (or `--all`) means every part.
     pub fn select(claude: bool, codex: bool, service: bool, all: bool) -> Options {
         let every = all || !(claude || codex || service);
-        Options { claude: claude || every, codex: codex || every, service: service || every, ..Options::default() }
+        Options {
+            claude: claude || every,
+            codex: codex || every,
+            service: service || every,
+            boards: every,
+            ..Options::default()
+        }
     }
 }
 
@@ -179,6 +216,14 @@ pub trait Host {
     /// Whether a daemon answers on `socket`: connect and one request frame,
     /// bounded by a short timeout. Err carries why not.
     fn reach(&mut self, socket: &Path) -> Result<(), String>;
+    /// A line the human typed after `prompt`; None without a terminal (an agent's shell,
+    /// a script), where nothing is decided for the human.
+    fn ask(&mut self, prompt: &str) -> Option<String>;
+    /// One request to the local daemon on `socket`, waiting briefly for a service that is
+    /// starting. Err carries the daemon's refusal or why it was not reached.
+    fn daemon(&mut self, socket: &Path, op: &str, board: Option<&str>, body: Value) -> Result<Value, String>;
+    /// `board.info` on a shared board with a host key (over HTTPS, not through the daemon).
+    fn board_info(&mut self, server: &str, key: &str) -> anyhow::Result<BoardInfo>;
 }
 
 /// The real machine.
@@ -227,7 +272,49 @@ impl Host for System {
         })
     }
 
+    fn ask(&mut self, prompt: &str) -> Option<String> {
+        use std::io::BufRead;
+        // SAFETY: isatty on the process's own stdin descriptor.
+        if unsafe { libc::isatty(0) } != 1 {
+            return None;
+        }
+        print!("{prompt}");
+        std::io::stdout().flush().ok()?;
+        let mut line = String::new();
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(line.trim().to_string()),
+        }
+    }
+
+    fn daemon(&mut self, socket: &Path, op: &str, board: Option<&str>, body: Value) -> Result<Value, String> {
+        let deadline = std::time::Instant::now() + DAEMON_WAIT;
+        let mut client = loop {
+            match crate::client::Client::connect(socket) {
+                Ok(c) => break c,
+                Err(e) if std::time::Instant::now() >= deadline => return Err(format!("{e:#}")),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            }
+        };
+        let mut req = crate::protocol::Request::new(crate::util::new_ulid(), op, body);
+        req.idempotency_key = Some(crate::util::new_ulid());
+        req.board = board.map(Into::into);
+        req.actor = crate::identity::derive_address(&crate::identity::Markers::from_env(), crate::identity::harness_ancestor).ok();
+        let resp = client.call(&req).map_err(|e| format!("{e:#}"))?;
+        match (resp.ok, resp.result, resp.error) {
+            (true, Some(r), _) => Ok(r),
+            (_, _, Some(e)) => Err(e.message),
+            _ => Err("the daemon answered without a result".into()),
+        }
+    }
+
+    fn board_info(&mut self, server: &str, key: &str) -> anyhow::Result<BoardInfo> {
+        boards::board_info(server, key)
+    }
 }
+
+/// How long setup waits for the daemon it just (re)started to answer.
+const DAEMON_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
@@ -279,10 +366,15 @@ pub fn run(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
         }
         Ok(())
     };
+    if opts.service || opts.boards {
+        // before the service (re)starts, so the daemon finds the board under its alias
+        let r = adopt_v1_credential(env, host, out);
+        part("boards", r, out)?;
+    }
     if opts.service {
         let r = match env.os {
-            Os::Linux => systemd(env, opts, host, out),
-            Os::MacOs => launchd(env, opts, host, out),
+            Os::Linux => systemd(env, host, out),
+            Os::MacOs => launchd(env, host, out),
         };
         part("service", r, out)?;
     }
@@ -293,6 +385,10 @@ pub fn run(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
     if opts.codex {
         let r = codex(env, out);
         part("codex", r, out)?;
+    }
+    if opts.boards {
+        let r = boards_part(env, opts, host, out);
+        part("boards", r, out)?;
     }
     writeln!(out, "\n{FEEDBACK}\n  {FEEDBACK_COMMAND}\n{FEEDBACK_KEEP}\n\n{GUIDE}")?;
     Ok(ok)
@@ -322,8 +418,8 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
 
     if opts.service {
         let (path, want) = match env.os {
-            Os::Linux => (env.systemd_unit(), systemd_unit(env, opts)),
-            Os::MacOs => (env.launchd_plist(), launchd_plist(env, opts)),
+            Os::Linux => (env.systemd_unit(), systemd_unit(env)),
+            Os::MacOs => (env.launchd_plist(), launchd_plist(env)),
         };
         match file(&path, &want)? {
             None => line("ok", format!("service: {} up to date", env.show(&path)), out)?,
@@ -388,6 +484,27 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
             }
         }
     }
+    if opts.boards {
+        let v1 = env.v1_credential();
+        if v1.exists() {
+            line("ISSUE", format!("boards: the v1 credential {} is not moved to boards/ yet; run: conde setup", env.show(&v1)), out)?;
+        }
+        let enrolled = boards::enrolled_in(&env.boards_dir())?;
+        if enrolled.is_empty() {
+            line("note", "boards: no shared board enrolled; this host works on its local board".into(), out)?;
+        }
+        for alias in &enrolled {
+            let path = env.boards_dir().join(format!("{alias}.json"));
+            match boards::load(&path) {
+                Ok(cfg) => line("ok", format!("boards: {alias}: {} as host {} (account {})", cfg.server, cfg.host_id, cfg.owner), out)?,
+                Err(e) => line("ISSUE", format!("boards: {alias}: {e:#}"), out)?,
+            }
+        }
+        match boards::read_default(&env.default_board()) {
+            Ok(d) => line("ok", format!("boards: default board for names and channels: {d}"), out)?,
+            Err(e) => line("ISSUE", format!("boards: {e:#}"), out)?,
+        }
+    }
     if issues == 0 {
         writeln!(out, "all clear")?;
     }
@@ -420,12 +537,9 @@ fn service_state(env: &Env, host: &mut dyn Host) -> anyhow::Result<String> {
     })
 }
 
-fn daemon_args(opts: &Options) -> Vec<String> {
-    let mut args = vec!["daemon".to_string()];
-    if let Some(server) = &opts.server {
-        args.extend(["--server".to_string(), server.clone()]);
-    }
-    args
+/// One daemon shape on every machine: the local board plus every enrolled shared board.
+fn daemon_args() -> Vec<String> {
+    vec!["daemon".to_string()]
 }
 
 /// One systemd unit-file word: quoted when needed, `%` and `$` escaped.
@@ -445,11 +559,11 @@ fn systemd_env(name: &str, val: &str) -> String {
     format!("\"{name}={escaped}\"")
 }
 
-pub fn systemd_unit(env: &Env, opts: &Options) -> String {
+pub fn systemd_unit(env: &Env) -> String {
     let environment: String =
         env.service_env().iter().map(|(k, v)| format!("Environment={}\n", systemd_env(k, v))).collect();
     let mut exec = systemd_word(&env.exe.to_string_lossy());
-    for a in daemon_args(opts) {
+    for a in daemon_args() {
         exec.push(' ');
         exec.push_str(&systemd_word(&a));
     }
@@ -478,9 +592,9 @@ fn check(host: &mut dyn Host, prog: &str, args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn systemd(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+fn systemd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
     let unit = env.systemd_unit();
-    let change = write_if_changed(&unit, &systemd_unit(env, opts))?;
+    let change = write_if_changed(&unit, &systemd_unit(env))?;
     writeln!(out, "service: {} {}", change.verb(), env.show(&unit))?;
     if host.which("systemctl").is_none() {
         writeln!(out, "service: systemctl not found; start the bridge yourself: conde daemon")?;
@@ -490,7 +604,7 @@ fn systemd(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
         check(host, "systemctl", &["--user", "daemon-reload"])?;
     }
     check(host, "systemctl", &["--user", "enable", "conde.service"])?;
-    if change == Change::Updated {
+    if change == Change::Updated || predates_boards(env, host, out)? {
         check(host, "systemctl", &["--user", "restart", "conde.service"])?;
         writeln!(out, "service: enabled and restarted conde.service")?;
     } else {
@@ -501,13 +615,36 @@ fn systemd(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
     Ok(())
 }
 
+/// Whether the running bridge must restart to serve this machine's boards: it is an older
+/// conde that does not know boards (the binary was replaced under it), or it started before
+/// a board was enrolled.
+fn predates_boards(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<bool> {
+    if host.reach(&env.socket).is_err() {
+        return Ok(false);
+    }
+    let why = match host.daemon(&env.socket, crate::surface::BOARD_LIST, None, json!({})) {
+        Err(e) if crate::surface::predates_boards(&e) => Some("predates boards (an older conde)".to_string()),
+        Err(_) => None,
+        Ok(r) => {
+            let known: Vec<&str> = r["boards"].as_array().into_iter().flatten().filter_map(|b| b["board"].as_str()).collect();
+            let missing: Vec<String> =
+                boards::enrolled_in(&env.boards_dir())?.into_iter().filter(|a| !known.contains(&a.as_str())).collect();
+            (!missing.is_empty()).then(|| format!("started before {} was enrolled", missing.join(", ")))
+        }
+    };
+    if let Some(why) = &why {
+        writeln!(out, "service: the running bridge {why}; restarting it")?;
+    }
+    Ok(why.is_some())
+}
+
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-pub fn launchd_plist(env: &Env, opts: &Options) -> String {
+pub fn launchd_plist(env: &Env) -> String {
     let mut args = format!("    <string>{}</string>\n", xml(&env.exe.to_string_lossy()));
-    for a in daemon_args(opts) {
+    for a in daemon_args() {
         let _ = writeln!(args, "    <string>{}</string>", xml(&a));
     }
     let log = xml(&env.launchd_logs().join("conde.log").to_string_lossy());
@@ -544,17 +681,22 @@ pub fn launchd_plist(env: &Env, opts: &Options) -> String {
     )
 }
 
-fn launchd(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+fn launchd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
     let logs = env.launchd_logs();
     std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
     let plist = env.launchd_plist();
-    let change = write_if_changed(&plist, &launchd_plist(env, opts))?;
+    let change = write_if_changed(&plist, &launchd_plist(env))?;
     writeln!(out, "service: {} {}", change.verb(), env.show(&plist))?;
     let domain = format!("gui/{}", env.uid);
     let target = format!("{domain}/{LAUNCHD_LABEL}");
     let plist_s = plist.to_string_lossy().into_owned();
     let loaded = host.run("launchctl", &["print", &target])?.ok;
+    let stale = loaded && change == Change::Unchanged && predates_boards(env, host, out)?;
     match (loaded, change) {
+        (true, Change::Unchanged) if stale => {
+            check(host, "launchctl", &["kickstart", "-k", &target])?;
+            writeln!(out, "service: restarted {LAUNCHD_LABEL}")?;
+        }
         (true, Change::Unchanged) => {
             check(host, "launchctl", &["kickstart", &target])?;
             writeln!(out, "service: {LAUNCHD_LABEL} already loaded")?;
@@ -571,6 +713,267 @@ fn launchd(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
     }
     writeln!(out, "service: logs in {}", env.show(&logs.join("conde.log")))?;
     Ok(())
+}
+
+/// The switch of a host enrolled under v1: its `conde/credentials` becomes
+/// `boards/<alias>.json`, the alias being the name the board advertises, pinned to the
+/// account `board.info` reports. The file moves only once that board answered.
+fn adopt_v1_credential(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+    let v1 = env.v1_credential();
+    if !v1.exists() {
+        return Ok(());
+    }
+    let creds = crate::credentials::load(&v1)?;
+    let info = match host.board_info(&creds.server, &creds.key) {
+        Ok(info) => info,
+        Err(e) => {
+            writeln!(
+                out,
+                "boards: the v1 credential {} stays where it is: {} did not answer board.info ({e:#}); run conde setup \
+                 again once it is reachable (the local board works meanwhile)",
+                env.show(&v1),
+                creds.server
+            )?;
+            return Ok(());
+        }
+    };
+    boards::check_shared_alias(&info.name)?;
+    let path = env.boards_dir().join(format!("{}.json", info.name));
+    let cfg = BoardConfig { server: creds.server.clone(), host_id: creds.host_id.clone(), owner: info.owner.clone(), key: creds.key };
+    boards::store(&path, &info.name, &cfg)?;
+    std::fs::remove_file(&v1).with_context(|| format!("removing {}", v1.display()))?;
+    writeln!(
+        out,
+        "boards: moved the v1 credential {} to {} (board {}, account {}, host {})",
+        env.show(&v1),
+        env.show(&path),
+        info.name,
+        info.owner,
+        cfg.host_id
+    )?;
+    Ok(())
+}
+
+/// The boards part of `conde setup`: each enrolled board's review, then the default board.
+fn boards_part(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+    let enrolled = boards::enrolled_in(&env.boards_dir())?;
+    if enrolled.is_empty() {
+        writeln!(
+            out,
+            "boards: no shared board enrolled; this host works on its local board. Joining a team's board is a separate \
+             step: conde login --server https://conde.nativeai.space. {ENROLL_SCOPE}."
+        )?;
+    }
+    let mut ok = true;
+    for alias in &enrolled {
+        ok &= migrate_review(env, host, out, alias, false)?;
+    }
+    default_board(env, opts, host, out, &enrolled)?;
+    if !ok {
+        bail!("a board review did not complete (see above)");
+    }
+    Ok(())
+}
+
+/// The host's default board for names and channels (decision 9): from `--default-board`,
+/// else asked once at a terminal, else left as it is.
+fn default_board(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write, enrolled: &[String]) -> anyhow::Result<()> {
+    let path = env.default_board();
+    let current = boards::read_default(&path)?;
+    if let Some(want) = &opts.default_board {
+        boards::write_default(&path, &env.boards_dir(), want)?;
+        writeln!(out, "boards: default board for names and channels: {want}")?;
+        return Ok(());
+    }
+    if enrolled.is_empty() {
+        if current != LOCAL_BOARD {
+            writeln!(out, "boards: the default board {current} is not enrolled; run: conde setup --default-board local")?;
+        }
+        return Ok(());
+    }
+    let choices = std::iter::once(LOCAL_BOARD.to_string()).chain(enrolled.iter().cloned()).collect::<Vec<_>>().join(", ");
+    for _ in 0..3 {
+        let prompt = format!(
+            "boards: names and channels without --board go to the default board; message ids always carry their own. \
+             Default board ({choices}) [{current}]: "
+        );
+        let Some(answer) = host.ask(&prompt) else {
+            writeln!(
+                out,
+                "boards: default board for names and channels: {current} (the human sets it: conde setup --default-board <alias>)"
+            )?;
+            return Ok(());
+        };
+        let want = if answer.is_empty() { current.clone() } else { answer.to_lowercase() };
+        match boards::write_default(&path, &env.boards_dir(), &want) {
+            Ok(()) => {
+                writeln!(out, "boards: default board for names and channels: {want}")?;
+                return Ok(());
+            }
+            Err(e) => writeln!(out, "boards: {e:#}")?,
+        }
+    }
+    writeln!(out, "boards: default board left at {current}")?;
+    Ok(())
+}
+
+fn short_date(at: &str) -> &str {
+    at.get(..10).unwrap_or(at)
+}
+
+/// The one-time switch of an enrolled host to v2 on board `alias` (§9): the daemon fetches
+/// the read-only preview, the human picks the names that stay published, and the daemon
+/// applies it as a resumable operation. Without a terminal nothing is decided and the board
+/// stays local-only on this host. Ok(false) when the review could not run (`explicit`: the
+/// human asked for it with `conde boards --migrate`).
+pub fn migrate_review(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &str, explicit: bool) -> anyhow::Result<bool> {
+    let later = format!("until then {alias} stays local-only on this host; the review: conde boards --migrate {alias}");
+    let info = match host.daemon(&env.socket, op::BOARD_INFO, Some(alias), json!({})) {
+        Ok(v) => serde_json::from_value::<BoardInfo>(v).context("board.info answer")?,
+        Err(why) => {
+            writeln!(out, "boards: {alias}: not reached through the daemon ({why}); {later}")?;
+            return Ok(false);
+        }
+    };
+    if info.mailbox_only {
+        writeln!(out, "boards: {alias}: host {} (account {}) is on v2; publish names with: conde publish <name> --board {alias}", info.host, info.owner)?;
+        return Ok(true);
+    }
+    let preview = match host.daemon(&env.socket, op::HOST_MIGRATE_PREVIEW, Some(alias), json!({})) {
+        Ok(v) => serde_json::from_value::<MigratePreview>(v).context("host.migrate_preview answer")?,
+        Err(why) => {
+            writeln!(out, "boards: {alias}: the preview failed ({why}); {later}")?;
+            return Ok(false);
+        }
+    };
+    if preview.rows.is_empty() {
+        writeln!(out, "boards: {alias}: no names of host {} are bound there; switching it to v2 publishes nothing", info.host)?;
+        return apply_migration(env, host, out, alias, &[]);
+    }
+    show_preview(out, alias, &info, &preview)?;
+    let Some(chosen) = choose(host, out, alias, &preview.rows)? else {
+        writeln!(out, "boards: {alias}: not migrated: choosing what stays published is the human's, at a terminal; {later}")?;
+        return Ok(!explicit);
+    };
+    let names: Vec<&str> = chosen.iter().map(|r| r.name.as_str()).collect();
+    let rest = preview.rows.len() - chosen.len();
+    let listed = if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
+    let confirm = format!(
+        "boards: {alias}: publish {listed}; the other {rest} names move to this host's local board only. Apply? [y/N] "
+    );
+    match host.ask(&confirm).map(|a| a.to_lowercase()) {
+        Some(a) if a == "y" || a == "yes" => {}
+        Some(_) => {
+            writeln!(out, "boards: {alias}: not migrated (declined); {later}")?;
+            return Ok(true);
+        }
+        None => {
+            writeln!(out, "boards: {alias}: not migrated: no answer; {later}")?;
+            return Ok(!explicit);
+        }
+    }
+    let ids: Vec<String> = chosen.iter().map(|r| r.agent_id.clone()).collect();
+    apply_migration(env, host, out, alias, &ids)
+}
+
+fn show_preview(out: &mut dyn Write, alias: &str, info: &BoardInfo, preview: &MigratePreview) -> anyhow::Result<()> {
+    writeln!(
+        out,
+        "boards: {alias}: host {} (account {}) still has {} names bound from v1. A candidate (*) has messages with \
+         another owner's agents; history alone is not consent, so you choose:",
+        info.host,
+        info.owner,
+        preview.rows.len()
+    )?;
+    let mut others = Vec::new();
+    for row in &preview.rows {
+        if !row.candidate {
+            others.push(row.name.as_str());
+            continue;
+        }
+        let pin = if row.pin.is_some() { "  pinned" } else { "" };
+        writeln!(out, "  * {}  {}{pin}", row.name, row.address)?;
+        for e in &row.evidence {
+            let via = match e.via {
+                crate::protocol::v2::Via::Dm => "dm with",
+                crate::protocol::v2::Via::Channel => "posts in",
+            };
+            let source = match e.source {
+                crate::protocol::v2::EvidenceSource::Imported => "imported from kond",
+                crate::protocol::v2::EvidenceSource::Later => "since the import",
+            };
+            writeln!(out, "      {via} {}: {} messages, last {} ({source})", e.with, e.messages, short_date(&e.last_at))?;
+        }
+    }
+    if !others.is_empty() {
+        writeln!(out, "  no messages with another owner's agents ({}): {}", others.len(), others.join(", "))?;
+    }
+    Ok(())
+}
+
+/// The rows the human keeps published; None without a terminal.
+fn choose<'a>(host: &mut dyn Host, out: &mut dyn Write, alias: &str, rows: &'a [PreviewRow]) -> anyhow::Result<Option<Vec<&'a PreviewRow>>> {
+    let prompt = format!(
+        "boards: {alias}: names that stay published (separated by spaces; 'candidates' for the * ones; 'none') [candidates]: "
+    );
+    for _ in 0..3 {
+        let Some(answer) = host.ask(&prompt) else { return Ok(None) };
+        let mut chosen: Vec<&PreviewRow> = Vec::new();
+        let mut unknown = Vec::new();
+        let words: Vec<String> = answer.split([' ', ',']).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+        let words = if words.is_empty() { vec!["candidates".to_string()] } else { words };
+        for w in &words {
+            let picked: Vec<&PreviewRow> = match w.as_str() {
+                "none" => Vec::new(),
+                "candidates" => rows.iter().filter(|r| r.candidate).collect(),
+                name => match rows.iter().find(|r| r.name.eq_ignore_ascii_case(name)) {
+                    Some(r) => vec![r],
+                    None => {
+                        unknown.push(w.clone());
+                        Vec::new()
+                    }
+                },
+            };
+            for r in picked {
+                if !chosen.iter().any(|c| c.agent_id == r.agent_id) {
+                    chosen.push(r);
+                }
+            }
+        }
+        if unknown.is_empty() {
+            return Ok(Some(chosen));
+        }
+        writeln!(out, "boards: {alias}: not names of this host: {}", unknown.join(", "))?;
+    }
+    Ok(None)
+}
+
+fn apply_migration(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &str, ids: &[String]) -> anyhow::Result<bool> {
+    let r = match host.daemon(&env.socket, op::HOST_MIGRATE_V2, Some(alias), json!({"publish": ids})) {
+        Ok(r) => r,
+        Err(why) => {
+            writeln!(
+                out,
+                "boards: {alias}: the switch did not complete ({why}); the daemon resumes the recorded operation when \
+                 {alias} answers, and conde doctor shows it"
+            )?;
+            return Ok(false);
+        }
+    };
+    let manifest: Manifest = serde_json::from_value(r.clone()).context("host.migrate_v2 answer")?;
+    let published: Vec<&str> = manifest.bindings.iter().filter(|b| b.published.is_some()).map(|b| b.name.as_str()).collect();
+    let local = manifest.bindings.len() - published.len();
+    let listed = if published.is_empty() { "nothing".to_string() } else { published.join(", ") };
+    writeln!(out, "boards: {alias}: switched to v2; published: {listed}; on this host's local board only: {local} names")?;
+    for c in r["conflicts"].as_array().into_iter().flatten() {
+        writeln!(
+            out,
+            "boards: {alias}: {} kept its local binding (a live session holds it); its former address {} is in conde doctor",
+            c["name"].as_str().unwrap_or_default(),
+            c["address"].as_str().unwrap_or_default()
+        )?;
+    }
+    Ok(true)
 }
 
 fn read_text(path: &Path) -> anyhow::Result<String> {

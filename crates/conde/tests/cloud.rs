@@ -77,13 +77,14 @@ impl Cloud {
         h.daemon(log, sock, &args)
     }
 
+    /// The v1 credential the v1 cloud daemon (`daemon --server`) reads; `conde enroll` writes
+    /// v2 board files (`boards/<alias>.json`, tests/cli_wiring.rs).
     fn enroll(&self, h: &Host) {
         let key = self.key(&h.user, &h.host);
-        let out = h.conde(None, &[], &["enroll", "--server", &self.url(), "--host", &h.host, "--key-stdin"], Some(&key));
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let path = h.root.join("config/conde/credentials");
+        let creds = conde::credentials::Credentials { server: self.url(), host_id: h.host.clone(), key };
+        conde::credentials::store(&path, &creds).unwrap();
         assert_eq!(conde::credentials::mode(&path), Some(0o600));
-        assert!(!String::from_utf8_lossy(&out.stdout).contains(&key), "the key is never echoed");
     }
 
     /// (bridge instance, status, reason) of the message's attempts, oldest first.
@@ -120,8 +121,8 @@ fn two_hosts_exchange_a_dm_through_the_server() {
     cloud.bridge(&mut b, "bridge.log", &sb, &[]);
 
     // registration, identity and names are the server's, host stamped from the key
-    assert_eq!(a.ok(Some("codex"), ALICE, &["register", "alice"]), "registered ann/alice -> codex:t-alice@host-a\n");
-    assert_eq!(b.ok(Some("claude"), CAROL, &["register", "carol"]), "registered ben/carol -> claude:s-carol@host-b\n");
+    assert_eq!(a.ok(Some("codex"), ALICE, &["register", "alice"]), "registered ann/alice on the local board (codex:t-alice@host-a)\n");
+    assert_eq!(b.ok(Some("claude"), CAROL, &["register", "carol"]), "registered ben/carol on the local board (claude:s-carol@host-b)\n");
     let out = b.conde(Some("claude"), CAROL, &["register", "ann/alice"], None);
     assert!(String::from_utf8_lossy(&out.stderr).contains("not in your namespace"), "{out:?}");
 

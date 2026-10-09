@@ -12,9 +12,11 @@ use serde_json::{Value, json};
 
 use crate::client::Client;
 use crate::identity::{IdentityError, Markers, derive_address, harness_ancestor};
+use crate::protocol::v2::{LOCAL_BOARD, op};
 use crate::protocol::{ErrorCode, MAX_ATTACHMENT, Request};
+use crate::surface::{self, Surface};
 use crate::util::new_ulid;
-use crate::{admin, daemon, paths};
+use crate::{admin, boards, daemon, paths};
 
 #[derive(Parser)]
 #[command(name = "conde", version, about = "Message board for AI agents (Claude Code sessions, Codex threads) and their humans")]
@@ -22,6 +24,11 @@ struct Cli {
     /// Act as this registered name (the human only, local socket only).
     #[arg(long = "from", global = true, hide = true)]
     from: Option<String>,
+    /// The board: `local`, or a shared board's alias (e.g. dakai). Names and channels default
+    /// to this host's default board; a message id carries its own board (dakai:01M...), and a
+    /// bare id is local.
+    #[arg(long = "board", global = true, value_name = "ALIAS")]
+    board: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -127,10 +134,34 @@ enum Cmd {
         #[arg(long, num_args = 2, value_names = ["KEY", "VALUE"])]
         set: Option<Vec<String>>,
     },
-    /// Check the board's health.
+    /// Check the health of the local board and of every shared board.
     Doctor,
-    /// Run the local socket and the notification bridge: with the board in
-    /// this process (local mode), or against a conde server (--server).
+    /// Publish a local agent on a shared board, so teammates there can reach it (the human
+    /// only): `conde publish <agent> --board <alias> [--as <name>]`.
+    Publish {
+        agent: String,
+        /// The name on the shared board (default: the local name).
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
+        /// Take the name over from another host of the same owner.
+        #[arg(long)]
+        take: bool,
+    },
+    /// Withdraw an agent's publication from a shared board (the human, or the agent itself).
+    Unpublish { agent: String },
+    /// List this host's boards: the local one and every enrolled shared board.
+    Boards {
+        /// Forget an enrolled board on this host: its credential, publications and pending
+        /// ops. The server is not touched.
+        #[arg(long, value_name = "ALIAS", conflicts_with = "migrate")]
+        forget: Option<String>,
+        /// Review which of this host's v1 names stay published on a board, then convert the
+        /// host to v2 (the one-time switch of an already enrolled host).
+        #[arg(long, value_name = "ALIAS")]
+        migrate: Option<String>,
+    },
+    /// Run the local board, its socket and the notification bridge, plus a connection to
+    /// every enrolled shared board.
     Daemon {
         #[arg(long, default_value_t = 1.0)]
         interval: f64,
@@ -156,7 +187,8 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         data: Option<PathBuf>,
     },
-    /// Enroll this host with a conde server: reads the host key at a masked prompt.
+    /// Enroll this host with a shared board: reads the host key at a masked prompt and stores
+    /// it under --board <alias> (default: the name the board advertises). Publishes nothing.
     Enroll {
         /// The server URL (https://host).
         #[arg(long, value_name = "URL")]
@@ -168,8 +200,9 @@ enum Cmd {
         #[arg(long)]
         key_stdin: bool,
     },
-    /// Enroll this host by signing in in the browser: the server mints the host key and the
-    /// CLI stores it as `conde enroll` does. The key never appears in a URL.
+    /// Enroll this host with a shared board by signing in in the browser: the server mints the
+    /// host key and the CLI stores it as `conde enroll` does (under --board <alias>). The key
+    /// never appears in a URL. Publishes nothing.
     Login {
         /// The server URL (https://host).
         #[arg(long, value_name = "URL")]
@@ -216,8 +249,9 @@ enum Cmd {
     },
     /// MCP server for this session's agent on stdin/stdout (Claude Code and Codex spawn it).
     Mcp,
-    /// Set up this machine: the bridge service, and the conde skill and MCP server for
-    /// Claude Code and Codex. No part named means all. Safe to run again.
+    /// Set up this machine: the bridge service with the local board, the conde skill and MCP
+    /// server for Claude Code and Codex, and the host's boards (the default board, the review
+    /// of an enrolled host's names). No part named means all. Safe to run again.
     Setup {
         /// Only the Claude Code part.
         #[arg(long)]
@@ -240,6 +274,10 @@ enum Cmd {
         /// Report what is set up and what is missing; change nothing.
         #[arg(long)]
         check: bool,
+        /// Set the host's default board for names and channels (local, or an enrolled alias)
+        /// without the prompt.
+        #[arg(long, value_name = "ALIAS")]
+        default_board: Option<String>,
     },
 }
 
@@ -320,14 +358,32 @@ struct Session {
     client: Client,
     actor: Result<String, IdentityError>,
     from: Option<String>,
+    /// `--board`, sent in every request's envelope.
+    board: Option<String>,
+    /// Whether the daemon was asked once that it knows boards.
+    probed: bool,
 }
 
 impl Session {
     fn call(&mut self, op: &str, body: Value) -> anyhow::Result<Value> {
+        let board = self.board.clone();
+        self.call_on(op, board.as_deref(), body)
+    }
+
+    fn call_on(&mut self, op: &str, board: Option<&str>, body: Value) -> anyhow::Result<Value> {
+        if board.is_some() && !self.probed {
+            self.probed = true;
+            if let Err(e) = self.call_on(surface::BOARD_LIST, None, json!({}))
+                && surface::predates_boards(&format!("{e:#}"))
+            {
+                bail!(surface::stale_daemon(Surface::Cli));
+            }
+        }
         let mut req = Request::new(new_ulid(), op, body);
         req.idempotency_key = Some(new_ulid());
         req.actor = self.actor.as_ref().ok().cloned();
         req.from = self.from.clone();
+        req.board = board.map(Into::into);
         let resp = self.client.call(&req)?;
         if resp.ok {
             return resp.result.ok_or_else(|| anyhow!("empty result"));
@@ -355,10 +411,32 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
 
+fn print(out: surface::Out) {
+    print!("{}", out.text);
+    eprint!("{}", out.notes);
+}
+
+/// A shared board named for a publication; the default board never applies.
+fn publication_board<'a>(board: Option<&'a str>, cmd: &str) -> anyhow::Result<&'a str> {
+    match board {
+        None => bail!("{cmd} needs --board <alias> (conde boards lists this host's boards)"),
+        Some(LOCAL_BOARD) => bail!("the local board needs no publication; {cmd} names a shared board (--board <alias>)"),
+        Some(b) => Ok(b),
+    }
+}
+
 fn run(cli: Cli) -> anyhow::Result<i32> {
     let secs = |s: f64| Duration::from_secs_f64(s.max(0.0));
+    surface::check_board_flag(cli.board.as_deref()).map_err(|e| anyhow!(e))?;
+    let no_board = |cmd: &str, instead: &str| -> anyhow::Result<()> {
+        match &cli.board {
+            Some(_) => bail!("--board does not apply to conde {cmd}{instead}"),
+            None => Ok(()),
+        }
+    };
     match cli.cmd {
         Cmd::Daemon { interval, once, server, retry_backoff, idle_timeout } => {
+            no_board("daemon", "")?;
             tracing_subscriber::fmt().with_writer(std::io::stderr).with_target(false).init();
             daemon::run(daemon::Options {
                 data_dir: paths::data_dir(),
@@ -372,26 +450,40 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             return Ok(0);
         }
         Cmd::Server { listen, data } => {
+            no_board("server", "")?;
             tracing_subscriber::fmt().with_writer(std::io::stdout).with_target(false).init();
             admin::server(listen.as_deref(), data)?;
             return Ok(0);
         }
-        Cmd::Enroll { server, host, key_stdin } => return admin::enroll(&server, host.as_deref(), key_stdin),
-        Cmd::Login { server, host, no_browser } => return crate::login::run(&server, host.as_deref(), !no_browser),
+        Cmd::Enroll { server, host, key_stdin } => {
+            return admin::enroll(&server, host.as_deref(), cli.board.as_deref(), key_stdin);
+        }
+        Cmd::Login { server, host, no_browser } => {
+            return crate::login::run(&server, host.as_deref(), cli.board.as_deref(), !no_browser);
+        }
         Cmd::Mcp => {
+            no_board("mcp", "")?;
             crate::mcp::run(paths::socket_path())?;
             return Ok(0);
         }
-        Cmd::Setup { claude, codex, service, all, keep_receiver_policy, yes: _, check } => {
-            return setup(claude, codex, service, all, keep_receiver_policy, check);
+        Cmd::Setup { claude, codex, service, all, keep_receiver_policy, yes: _, check, default_board } => {
+            no_board("setup", "; the host's default board is conde setup --default-board <alias>")?;
+            return setup(claude, codex, service, all, keep_receiver_policy, check, default_board);
+        }
+        Cmd::Boards { forget: None, migrate: Some(alias) } => {
+            no_board("boards --migrate", "")?;
+            return boards_migrate(&alias);
         }
         Cmd::History { cmd: HistoryCmd::Inventory { extract, snapshot, out, source } } => {
+            no_board("history", "")?;
             return crate::history::inventory_main(&extract, &snapshot, &out, &source);
         }
         Cmd::History { cmd: HistoryCmd::Copy { manifest, db, credentials, dry_run } } => {
+            no_board("history", "")?;
             return crate::history::copy_main(&manifest, db, credentials, dry_run);
         }
         Cmd::Admin { cmd: AdminCmd::Key { cmd } } => {
+            no_board("admin", "")?;
             admin::require_human()?;
             return match cmd {
                 KeyCmd::Create { user, host, label, data } => admin::key_create(data, &user, &host, &label),
@@ -402,16 +494,37 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         _ => {}
     }
     if let Cmd::Import { dry_run, owner, host, expect_files } = &cli.cmd {
+        no_board("import", "")?;
         // `--from` is the global flag here: the kond data directory to import.
         let dir = cli.from.as_deref().ok_or_else(|| anyhow!("conde import needs --from <kond data dir>"))?;
         return crate::import::main(Path::new(dir), *dry_run, owner.as_deref(), host.as_deref(), *expect_files);
     }
+    // register, unregister, rename, pin and unpin act on the local registry only (§3 rule 3)
+    let local_only = match (&cli.cmd, cli.board.as_deref()) {
+        (_, None | Some(LOCAL_BOARD)) => None,
+        (Cmd::Register { name, .. }, Some(b)) => Some(surface::local_only("register", name, b)),
+        (Cmd::Unregister { name, .. }, Some(b)) => Some(surface::local_only("unregister", name, b)),
+        (Cmd::Rename { first, second }, Some(b)) => {
+            Some(surface::local_only("rename", second.as_deref().unwrap_or(first), b))
+        }
+        (Cmd::Pin { name, .. }, Some(b)) => Some(surface::local_only("pin", name, b)),
+        (Cmd::Unpin { name }, Some(b)) => Some(surface::local_only("unpin", name, b)),
+        _ => None,
+    };
+    if let Some(refusal) = local_only {
+        bail!(refusal);
+    }
+    let flag = cli.board.clone();
+    let check_ref = |r: &str| surface::check_ref(Surface::Cli, flag.as_deref(), r).map_err(|e| anyhow!(e));
     let mut session = Session {
         client: Client::connect(&paths::socket_path())?,
         actor: derive_address(&Markers::from_env(), harness_ancestor),
         from: cli.from,
+        board: cli.board.clone(),
+        probed: false,
     };
     let sx = &mut session;
+
     match cli.cmd {
         Cmd::Daemon { .. }
         | Cmd::Server { .. }
@@ -423,54 +536,33 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Import { .. } | Cmd::Mcp | Cmd::Setup { .. } => unreachable!(),
         Cmd::Send { to, text, attach, reply_to } => {
+            let reply_to = reply_to.as_deref().map(check_ref).transpose()?;
             let attachments = attach.iter().map(|p| encode_attachment(p)).collect::<anyhow::Result<Vec<_>>>()?;
             let target = if to.starts_with('#') { json!({"channel": to}) } else { json!({"agent": to}) };
             let r = sx.call(
                 "message.send",
                 json!({"to": target, "text": text, "reply_to": reply_to, "attachments": attachments}),
             )?;
-            println!("queued {} to {}", s(&r["message_id"]), s(&r["to"]));
+            println!("{}", surface::sent_line(&r));
         }
-        Cmd::Inbox { after } => {
-            let r = sx.call("inbox.list", json!({"after": after}))?;
-            let items = r["items"].as_array().cloned().unwrap_or_default();
-            for i in &items {
-                println!("{}\t{}\t{}\t{}\t{}", s(&i["kind"]), s(&i["message_id"]), s(&i["from"]), s(&i["date"]), s(&i["preview"]));
-            }
-            if items.is_empty() {
-                eprintln!("(no unread messages)");
-            }
-            if let Some(n) = r["next_cursor"].as_i64() {
-                eprintln!("(more: conde inbox --after {n})");
-            }
-        }
+        Cmd::Inbox { after } => print(surface::inbox(&sx.call("inbox.list", json!({"after": after}))?, Surface::Cli)),
         Cmd::Read { target } => {
             let body = match &target {
                 Some(t) if t.starts_with('#') => json!({"channel": t}),
-                Some(id) => json!({"id": id}),
+                Some(id) => json!({"id": check_ref(id)?}),
                 None => json!({}),
             };
-            let r = sx.call("message.read", body)?;
-            let messages = r["messages"].as_array().cloned().unwrap_or_default();
-            let mut place = String::new();
-            for m in &messages {
-                if s(&m["place"]) != place {
-                    place = s(&m["place"]).to_string();
-                    if place.starts_with('#') {
-                        println!("--- {place}");
-                    }
-                }
-                print_message(m);
-            }
-            if messages.is_empty() {
-                eprintln!("(no unread messages)");
-            }
-            if r["more"].as_bool() == Some(true) {
-                eprintln!("(more unread: run conde read again)");
-            }
+            print(surface::read(&sx.call("message.read", body)?, Surface::Cli));
         }
-        Cmd::Show { id } => print_message(&sx.call("message.get", json!({"id": id}))?["message"]),
+        Cmd::Show { id } => {
+            let id = check_ref(&id)?;
+            let r = sx.call("message.get", json!({"id": id}))?;
+            let mut out = String::new();
+            surface::message(&mut out, &r["message"], surface::result_board(&r));
+            print!("{out}");
+        }
         Cmd::Attachment { id, out } => {
+            let id = check_ref(&id)?;
             let r = sx.call("attachment.get", json!({"attachment_id": id}))?;
             let bytes = B64.decode(s(&r["data"])).context("attachment data")?;
             let name = Path::new(s(&r["filename"])).file_name().ok_or_else(|| anyhow!("attachment has no usable filename"))?;
@@ -482,10 +574,13 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("{}", path.display());
         }
         Cmd::React { id, emoji, remove } => {
+            let id = check_ref(&id)?;
+            let board = flag.clone().unwrap_or_else(|| surface::ref_board(&id).to_string());
             let present = if remove {
                 false
             } else {
-                let me = sx.call("agent.whoami", json!({}))?["name"].as_str().unwrap_or_default().to_string();
+                let who = sx.call("agent.whoami", json!({}))?;
+                let me = name_on(&who, &board);
                 let m = sx.call("message.get", json!({"id": id}))?;
                 let mine = m["message"]["reactions"]
                     .as_array()
@@ -501,17 +596,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 println!("removed {emoji} from {id} in {}", s(&r["place"]));
             }
         }
-        Cmd::Sent { after } => {
-            let r = sx.call("receipt.list", json!({"after": after}))?;
-            let rows = r["receipts"].as_array().cloned().unwrap_or_default();
-            for x in &rows {
-                let delivery = x["delivery"].as_str().map(|d| format!("  delivery: {d}")).unwrap_or_default();
-                println!("{}  {}  {}{delivery}", s(&x["message_id"]), s(&x["to"]), s(&x["status"]));
-            }
-            if rows.is_empty() {
-                eprintln!("(nothing sent)");
-            }
-        }
+        Cmd::Sent { after } => print(surface::sent(&sx.call("receipt.list", json!({"after": after}))?)),
         Cmd::Create { channel } => {
             let r = sx.call("channel.create", json!({"channel": channel}))?;
             println!("created {} (you are a member)", s(&r["channel"]));
@@ -521,7 +606,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             if r["already_member"].as_bool() == Some(true) {
                 println!("already a member of {}", s(&r["channel"]));
             } else {
-                println!("joined {} (join post {})", s(&r["channel"]), s(&r["message_id"]));
+                let post = surface::qualify(surface::result_board(&r), s(&r["message_id"]));
+                println!("joined {} (join post {post})", s(&r["channel"]));
                 if let Some(topic) = r["topic"].as_str() {
                     println!("topic: {topic}");
                 }
@@ -529,7 +615,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Invite { name, channel } => {
             let r = sx.call("channel.invite", json!({"name": name, "channel": channel}))?;
-            println!("invited {} to {} (join post {})", s(&r["name"]), s(&r["channel"]), s(&r["message_id"]));
+            let post = surface::qualify(surface::result_board(&r), s(&r["message_id"]));
+            println!("invited {} to {} (join post {post})", s(&r["name"]), s(&r["channel"]));
         }
         Cmd::Topic { channel, text } => {
             let r = sx.call("channel.topic", json!({"channel": channel, "topic": text}))?;
@@ -542,20 +629,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let r = sx.call("channel.leave", json!({"channel": channel}))?;
             println!("left {}", s(&r["channel"]));
         }
-        Cmd::Channels => {
-            let r = sx.call("channel.list", json!({}))?;
-            let rows = r["channels"].as_array().cloned().unwrap_or_default();
-            for c in &rows {
-                let name = match c["topic"].as_str() {
-                    Some(topic) => format!("{}: {topic}", s(&c["channel"])),
-                    None => s(&c["channel"]).to_string(),
-                };
-                println!("{name}\t{} members\t{} messages", c["members"], c["messages"]);
-            }
-            if rows.is_empty() {
-                eprintln!("(no channels)");
-            }
-        }
+        Cmd::Channels => print(surface::channels(&sx.call("channel.list", json!({}))?)),
         Cmd::Members { channel } => {
             let r = sx.call("channel.members", json!({"channel": channel}))?;
             for m in r["members"].as_array().into_iter().flatten() {
@@ -568,10 +642,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Register { name, address } => {
             let r = sx.call("agent.register", json!({"name": name, "address": address}))?;
-            println!("registered {} -> {}", s(&r["name"]), s(&r["address"]));
-            if let Some(lobby) = r["joined"].as_str() {
-                println!("joined {lobby}");
-            }
+            println!("{}", surface::registered(&r, &name));
         }
         Cmd::Unregister { name, if_address } => {
             let r = sx.call("agent.unregister", json!({"name": name, "if_address": if_address}))?;
@@ -586,8 +657,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 Some(new) => (Some(first), new),
                 None => (None, first),
             };
-            let r = sx.call("agent.rename", json!({"old": old, "new": new}))?;
-            println!("renamed {} -> {}", s(&r["old"]), s(&r["name"]));
+            println!("{}", surface::renamed(&sx.call("agent.rename", json!({"old": old, "new": new}))?));
         }
         Cmd::Pin { name, address } => {
             let r = sx.call("agent.pin", json!({"name": name, "address": address}))?;
@@ -598,31 +668,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("unpinned {}", s(&r["name"]));
         }
         Cmd::Resolve { name } => println!("{}", s(&sx.call("agent.resolve", json!({"name": name}))?["address"])),
-        Cmd::Agents => {
-            let r = sx.call("agent.list", json!({}))?;
-            let rows = r["agents"].as_array().cloned().unwrap_or_default();
-            for a in &rows {
-                let display = a["display"].as_str().map(|d| format!("\t({d})")).unwrap_or_default();
-                println!("{}\t{}{display}", s(&a["name"]), s(&a["address"]));
-            }
-            if rows.is_empty() {
-                eprintln!("(registry empty)");
-            }
-        }
-        Cmd::Whoami => println!("{}", s(&sx.call("agent.whoami", json!({}))?["name"])),
+        Cmd::Agents => print(surface::agents(&sx.call("agent.list", json!({}))?)),
+        Cmd::Whoami => println!("{}", surface::whoami(&sx.call("agent.whoami", json!({}))?)),
         Cmd::Search { pattern, target, after } => {
             let r = sx.call("search", json!({"pattern": pattern, "target": target, "after": after}))?;
-            let hits = r["hits"].as_array().cloned().unwrap_or_default();
-            for h in &hits {
-                let date: String = s(&h["date"]).chars().take(16).collect();
-                println!("{}\t{}\t{}\t{date}\t{}", s(&h["place"]), s(&h["message_id"]), s(&h["from"]), s(&h["line"]));
-            }
-            if hits.is_empty() {
-                eprintln!("(no matches)");
-            }
-            if let Some(n) = r["next_cursor"].as_i64() {
-                eprintln!("(more: add --after {n})");
-            }
+            print(surface::search(&r, Surface::Cli));
         }
         Cmd::Profile { name, set: Some(kv) } => {
             let r = sx.call("profile.set", json!({"name": name, "key": kv[0], "value": kv[1]}))?;
@@ -639,11 +689,59 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 println!("pinned: {p}");
             }
         }
+        Cmd::Publish { agent, as_name, take } => {
+            let board = publication_board(flag.as_deref(), "publish")?;
+            let shared = as_name.unwrap_or_else(|| agent.rsplit('/').next().unwrap_or(&agent).to_string());
+            let mut body = json!({"agent": agent, "name": shared});
+            if take {
+                body["take"] = json!(true);
+            }
+            let r = sx.call(op::MAILBOX_PUBLISH, body)?;
+            if s(&r["state"]) == "published" {
+                let name = r["name"].as_str().unwrap_or(&shared);
+                println!("published {agent} on {board} as {}", owner_qualified(board, name));
+            } else {
+                println!(
+                    "publishing {agent} on {board} is pending (op {}): {board} did not answer; the daemon completes it \
+                     when it reconnects, and conde doctor shows it until then",
+                    s(&r["op_id"])
+                );
+            }
+        }
+        Cmd::Unpublish { agent } => {
+            let board = publication_board(flag.as_deref(), "unpublish")?;
+            let r = sx.call(op::MAILBOX_UNPUBLISH, json!({"agent": agent}))?;
+            if s(&r["state"]) == "unpublished" {
+                println!("unpublished {agent} from {board}");
+            } else {
+                println!(
+                    "unpublishing {agent} from {board} is pending (op {}): it is no longer used in either direction; the \
+                     daemon completes it on {board} when it reconnects",
+                    s(&r["op_id"])
+                );
+            }
+        }
+        Cmd::Boards { forget: Some(alias), .. } => {
+            let r = sx.call_on(surface::BOARD_FORGET, Some(&alias), json!({}))?;
+            println!(
+                "forgot {alias}: {} publications and {} pending ops removed on this host; nothing changed on the server",
+                r["publications_removed"].as_u64().unwrap_or(0),
+                r["ops_removed"].as_u64().unwrap_or(0)
+            );
+        }
+        Cmd::Boards { forget: None, migrate: Some(_) } => unreachable!(),
+        Cmd::Boards { forget: None, migrate: None } => {
+            let live = sx.call(surface::BOARD_LIST, json!({}));
+            print!("{}", boards_listing(live)?);
+        }
         Cmd::Doctor => {
             let r = sx.call("doctor", json!({}))?;
             println!("ok      daemon: reachable at {}", paths::socket_path().display());
             for c in r["checks"].as_array().into_iter().flatten() {
                 println!("{}{}", if c["ok"] == true { "ok      " } else { "ISSUE   " }, s(&c["text"]));
+            }
+            for (kind, text) in surface::origins(&r) {
+                println!("{kind:<8}{text}");
             }
             let issues = r["issues"].as_i64().unwrap_or(0);
             if issues == 0 {
@@ -655,27 +753,99 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-/// `conde setup`: the service bridges to the server this host enrolled with,
-/// else it runs a local board.
-fn setup(claude: bool, codex: bool, service: bool, all: bool, keep_receiver_policy: bool, check: bool) -> anyhow::Result<i32> {
+/// This caller's name on `board`: the local name, or its publication's shared name.
+fn name_on(whoami: &Value, board: &str) -> String {
+    if board != LOCAL_BOARD
+        && let Some(p) = whoami["publications"].as_array().into_iter().flatten().find(|p| s(&p["board"]) == board)
+    {
+        return s(&p["name"]).to_string();
+    }
+    s(&whoami["name"]).to_string()
+}
+
+/// `owner/name` with the account the alias is enrolled as, when its file says.
+fn owner_qualified(board: &str, name: &str) -> String {
+    if name.contains('/') {
+        return name.to_string();
+    }
+    match boards::path(board).and_then(|p| boards::load(&p)) {
+        Ok(cfg) => format!("{}/{name}", cfg.owner),
+        Err(_) => name.to_string(),
+    }
+}
+
+/// `conde boards`: the local board, then every enrolled board, each with what the daemon
+/// knows of it.
+fn boards_listing(live: anyhow::Result<Value>) -> anyhow::Result<String> {
+    let default = boards::read_default(&boards::default_path()?)?;
+    let (rows, why) = match live {
+        Ok(r) => (r["boards"].as_array().cloned().unwrap_or_default(), None),
+        Err(e) => (Vec::new(), Some(format!("state unknown ({e:#})"))),
+    };
+    let row = |alias: &str| rows.iter().find(|r| s(&r["board"]) == alias).cloned().unwrap_or(Value::Null);
+    let mark = |alias: &str| if alias == default { "\tdefault" } else { "" };
+    let mut out = String::new();
+    let local = row(LOCAL_BOARD);
+    let agents = local["agents"].as_u64().map(|n| format!("\t{n} agents")).unwrap_or_default();
+    out.push_str(&format!("local\t{}{agents}{}\n", paths::data_dir().join("conde.db").display(), mark(LOCAL_BOARD)));
+    for alias in boards::enrolled()? {
+        let cfg = match boards::load(&boards::path(&alias)?) {
+            Ok(c) => c,
+            Err(e) => {
+                out.push_str(&format!("{alias}\t{e:#}{}\n", mark(&alias)));
+                continue;
+            }
+        };
+        let r = row(&alias);
+        let state = r["state"].as_str().map(str::to_string).or_else(|| why.clone()).unwrap_or_else(|| "state unknown".into());
+        let published: Vec<String> = r["published"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let (agent, name, st) = (s(&p["agent"]), s(&p["name"]), s(&p["state"]));
+                let mut item = agent.to_string();
+                if !name.is_empty() && name.rsplit('/').next() != Some(agent) {
+                    item.push_str(&format!(" as {name}"));
+                }
+                if !st.is_empty() && st != "published" {
+                    item.push_str(&format!(" ({st})"));
+                }
+                item
+            })
+            .collect();
+        let published = if published.is_empty() { String::new() } else { format!("\tpublished: {}", published.join(", ")) };
+        out.push_str(&format!("{alias}\t{}\thost {}\t{state}{published}{}\n", cfg.server, cfg.host_id, mark(&alias)));
+    }
+    Ok(out)
+}
+
+/// `conde boards --migrate <alias>`: the review `conde setup` runs, for one board.
+fn boards_migrate(alias: &str) -> anyhow::Result<i32> {
+    let env = crate::setup::Env::from_process()?;
+    let ok = crate::setup::migrate_review(&env, &mut crate::setup::System, &mut std::io::stdout(), alias, true)?;
+    Ok(i32::from(!ok))
+}
+
+/// `conde setup`: the service runs the single daemon (the local board, plus every enrolled
+/// shared board); the default board and the migration review follow.
+fn setup(
+    claude: bool,
+    codex: bool,
+    service: bool,
+    all: bool,
+    keep_receiver_policy: bool,
+    check: bool,
+    default_board: Option<String>,
+) -> anyhow::Result<i32> {
     use crate::setup::{Env, Options, System, run, verify};
     let env = Env::from_process()?;
     let mut opts = Options::select(claude, codex, service, all);
     opts.keep_receiver_policy = keep_receiver_policy;
-    if opts.service {
-        let cred = crate::credentials::path()?;
-        if cred.exists() {
-            opts.server = Some(crate::credentials::load(&cred)?.server);
-        } else if check {
-            println!("note    service: this host is not enrolled ({} missing); the bridge runs a local board", cred.display());
-        } else {
-            println!(
-                "service: this host is not enrolled ({} missing), so the bridge runs a local board; \
-                 after conde login or conde enroll, run conde setup again",
-                cred.display()
-            );
-        }
+    if default_board.is_some() {
+        opts.boards = true;
     }
+    opts.default_board = default_board;
     let ok = if check {
         verify(&env, &opts, &mut System, &mut std::io::stdout())?
     } else {
@@ -695,28 +865,4 @@ fn encode_attachment(path: &Path) -> anyhow::Result<Value> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(json!({"filename": name, "data": B64.encode(bytes)}))
-}
-
-fn print_message(m: &Value) {
-    println!("=== {}", s(&m["message_id"]));
-    println!("From: {}", s(&m["from"]));
-    println!("To: {}", s(&m["to"]));
-    println!("Date: {}", s(&m["date"]));
-    if let Some(r) = m["reply_to"].as_str() {
-        println!("In-Reply-To: {r}");
-    }
-    for a in m["attachments"].as_array().into_iter().flatten() {
-        println!("Attachment: {} ({} bytes; conde attachment {})", s(&a["filename"]), a["size"], s(&a["attachment_id"]));
-    }
-    for r in m["reactions"].as_array().into_iter().flatten() {
-        let by: Vec<&str> = r["by"].as_array().into_iter().flatten().map(s).collect();
-        println!("Reaction: {} {}", s(&r["emoji"]), by.join(", "));
-    }
-    println!();
-    let text = s(&m["text"]);
-    if text.ends_with('\n') {
-        print!("{text}");
-    } else {
-        println!("{text}");
-    }
 }

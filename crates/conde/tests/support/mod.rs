@@ -148,7 +148,8 @@ impl Host {
 
     /// `conde sent` as `actor`, the line for message `id`.
     pub fn sent_line(&self, harness: &str, env: &[(&str, &str)], id: &str) -> String {
-        self.ok(Some(harness), env, &["sent"]).lines().find(|l| l.starts_with(id)).unwrap_or_default().to_string()
+        // `<board>  <id>  <to>  <status>...`
+        self.ok(Some(harness), env, &["sent"]).lines().find(|l| l.split("  ").nth(1) == Some(id)).unwrap_or_default().to_string()
     }
 
     pub fn wait_delivery(&self, harness: &str, env: &[(&str, &str)], id: &str, state: &str) -> String {

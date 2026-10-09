@@ -183,7 +183,7 @@ fn legacy_client_handshake_then_tools() {
         json!({"_meta": {"threadId": "t-legacy"}, "name": "register", "arguments": {"name": "legacy"}}),
     );
     assert_eq!(r["result"]["isError"], false, "{r}");
-    assert_eq!(r["result"]["content"][0]["text"], "registered tester/legacy -> codex:t-legacy@testhost");
+    assert_eq!(r["result"]["content"][0]["text"], "registered tester/legacy on the local board (codex:t-legacy@testhost)");
     let r = p.rpc(
         "tools/call",
         json!({"_meta": {"threadId": "t-legacy"}, "name": "rename", "arguments": {"name": "legacy.renamed"}}),
@@ -201,16 +201,16 @@ fn send_and_inbox_round_trip() {
 
     let (err, text) = alice.tool("whoami", json!({}), json!({}));
     assert!(err && text.contains("conde register"), "{text}");
-    assert_eq!(alice.ok("register", json!({"name": "alice"}), json!({})), "registered tester/alice -> claude:s-alice@testhost");
-    assert_eq!(bob.ok("register", json!({"name": "bob"}), bob_meta.clone()), "registered tester/bob -> codex:t-bob@testhost");
-    assert_eq!(alice.ok("whoami", json!({}), json!({})), "tester/alice");
-    assert_eq!(bob.ok("whoami", json!({}), bob_meta.clone()), "tester/bob");
+    assert_eq!(alice.ok("register", json!({"name": "alice"}), json!({})), "registered tester/alice on the local board (claude:s-alice@testhost)");
+    assert_eq!(bob.ok("register", json!({"name": "bob"}), bob_meta.clone()), "registered tester/bob on the local board (codex:t-bob@testhost)");
+    assert_eq!(alice.ok("whoami", json!({}), json!({})), "tester/alice (local, claude:s-alice@testhost)");
+    assert_eq!(bob.ok("whoami", json!({}), bob_meta.clone()), "tester/bob (local, codex:t-bob@testhost)");
 
     // a Codex call without the harness thread id never falls back to the human
     let (err, text) = bob.tool("whoami", json!({}), json!({}));
     assert!(err && text.contains("refusing to act as the human"), "{text}");
     // a Claude-spawned server ignores a Codex thread id in _meta
-    assert_eq!(alice.ok("whoami", json!({}), bob_meta.clone()), "tester/alice");
+    assert_eq!(alice.ok("whoami", json!({}), bob_meta.clone()), "tester/alice (local, claude:s-alice@testhost)");
 
     let agents = alice.ok("agents", json!({}), json!({}));
     assert!(agents.contains("tester/bob\tcodex:t-bob@testhost"), "{agents}");
@@ -225,7 +225,7 @@ fn send_and_inbox_round_trip() {
     let id = out.strip_prefix("queued ").and_then(|s| s.strip_suffix(" to tester/bob")).expect(&out).to_string();
 
     let inbox = bob.ok("inbox", json!({}), bob_meta.clone());
-    assert!(inbox.starts_with(&format!("dm\t{id}\ttester/alice\t20")), "{inbox}");
+    assert!(inbox.starts_with(&format!("local\tdm\t{id}\ttester/alice\t20")), "{inbox}");
     let shown = bob.ok("show", json!({"id": id}), bob_meta.clone());
     assert!(shown.contains("Attachment: note.txt (14 bytes;"), "{shown}");
     let read = bob.ok("read", json!({"target": id}), bob_meta.clone());
@@ -241,7 +241,7 @@ fn send_and_inbox_round_trip() {
     let hits = bob.ok("search", json!({"pattern": "LINE TWO"}), bob_meta.clone());
     assert!(hits.contains(&id), "{hits}");
     let sent = alice.ok("sent", json!({}), json!({}));
-    assert!(sent.starts_with(&format!("{id}  tester/bob  read")), "{sent}");
+    assert!(sent.starts_with(&format!("local  {id}  tester/bob  read")), "{sent}");
     assert_eq!(alice.ok("react", json!({"id": id, "remove": true}), json!({})), format!("removed 👍 from {id} in dm"));
 
     // bad arguments come back as tool errors the model can read
@@ -249,4 +249,109 @@ fn send_and_inbox_round_trip() {
     assert!(err && text.contains("missing required argument 'text'"), "{text}");
     let (err, text) = alice.tool("send", json!({"to": "nobody", "text": "x"}), json!({}));
     assert!(err && text.contains("nobody"), "{text}");
+}
+
+// --- v2 surface: MCP against a fake daemon (DESIGN-v2 §3, §7) --------------------------------
+
+#[path = "fake_daemon/mod.rs"]
+mod fake_daemon;
+
+/// The tools that take a board, as the CLI commands that take --board.
+const BOARD_TOOLS: [&str; 8] = ["send", "inbox", "read", "show", "search", "sent", "react", "agents"];
+
+#[test]
+fn board_argument_on_the_board_tools_and_never_an_identity() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
+    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |_| Ok(json!({})));
+    let mut p = claude_peer_at(d.socket.clone(), "s-tools");
+    let meta = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}});
+    let r = p.rpc("tools/list", meta);
+    for t in r["result"]["tools"].as_array().unwrap() {
+        let name = t["name"].as_str().unwrap();
+        let props = t["inputSchema"]["properties"].as_object().unwrap();
+        assert_eq!(props.contains_key("board"), BOARD_TOOLS.contains(&name), "{name}: {props:?}");
+        for claim in ["address", "from", "actor", "as", "owner", "host", "session"] {
+            assert!(!props.contains_key(claim), "{name} takes an identity claim '{claim}'");
+        }
+        assert!(!["publish", "unpublish"].contains(&name), "publication is the human's; no MCP tool");
+        if let Some(b) = props.get("board") {
+            assert!(b["description"].as_str().unwrap().contains("a bare id is local"), "{name}: {b}");
+        }
+    }
+    drop(p);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn board_rules_through_mcp_match_the_cli() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
+    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+        Ok(match req["op"].as_str().unwrap() {
+            "message.send" => json!({"message_id": "01MS", "to": "tester/reviewer", "board": req["board"].as_str().unwrap_or("dakai")}),
+            "message.get" => json!({"message": {"board": "dakai", "message_id": "01MG", "from": "b/r", "to": "tester/me",
+                                                "date": "d", "reply_to": "01MP", "text": "body"}}),
+            "inbox.list" => json!({"items": [
+                {"board": "local", "kind": "dm", "message_id": "01ML", "from": "tester/a", "date": "d", "preview": "p"},
+                {"board": "dakai", "kind": "dm", "message_id": "01MD", "from": "b/r", "date": "d", "preview": "q"}],
+                "boards": [{"board": "dakai", "available": true}, {"board": "two", "available": false}]}),
+            "receipt.list" => json!({"receipts": [{"board": "dakai", "message_id": "01SD", "to": "b/r", "status": "unread", "delivery": "held"}]}),
+            "agent.whoami" => json!({"name": "tester/me", "address": "claude:s-me@testhost",
+                "publications": [{"board": "dakai", "name": "tester/reviewer", "state": "published"}]}),
+            "reaction.set" => json!({"place": "dm"}),
+            _ => json!({}),
+        })
+    });
+    let mut p = claude_peer_at(d.socket.clone(), "s-me");
+
+    assert_eq!(p.ok("send", json!({"to": "reviewer", "text": "hi", "board": "dakai"}), json!({})), "queued dakai:01MS to tester/reviewer");
+    let req = d.take().pop().unwrap();
+    assert_eq!((req["op"].as_str(), req["board"].as_str()), (Some("message.send"), Some("dakai")));
+    assert_eq!(req["actor"], "claude:s-me", "the actor is derived, never an argument");
+    // a reply inherits the board through its qualified id
+    p.ok("send", json!({"to": "reviewer", "text": "re", "reply_to": "dakai:01MP"}), json!({}));
+    let req = d.take().pop().unwrap();
+    assert!(req.get("board").is_none() && req["body"]["reply_to"] == "dakai:01MP", "{req}");
+
+    // a bare id is local in MCP as in the CLI
+    let (err, text) = p.tool("show", json!({"id": "01MG", "board": "dakai"}), json!({}));
+    assert!(err && text == "conde: 01MG is a local message; drop the board argument, or use the dakai: id", "{text}");
+    let (err, text) = p.tool("react", json!({"id": "dakai:01MG", "board": "local"}), json!({}));
+    assert!(err && text.contains("dakai:01MG is a dakai message"), "{text}");
+    let (err, text) = p.tool("inbox", json!({"board": 7}), json!({}));
+    assert!(err && text.contains("argument 'board' must be a string"), "{text}");
+    assert!(d.take().is_empty(), "refusals never reach the daemon");
+
+    assert!(p.ok("show", json!({"id": "dakai:01MG"}), json!({})).starts_with("=== dakai:01MG\nFrom: b/r\nTo: tester/me\nDate: d\nIn-Reply-To: dakai:01MP\n"));
+    assert_eq!(d.take().pop().unwrap()["body"], json!({"id": "dakai:01MG"}));
+    assert_eq!(p.ok("react", json!({"id": "dakai:01MG"}), json!({})), "reacted 👍 to dakai:01MG in dm");
+    assert_eq!(
+        p.ok("inbox", json!({}), json!({})),
+        "local\tdm\t01ML\ttester/a\td\tp\ndakai\tdm\tdakai:01MD\tb/r\td\tq\n(local: 1 unread; dakai: 1 unread)\n(two: unavailable)"
+    );
+    assert_eq!(p.ok("sent", json!({"board": "dakai"}), json!({})), "dakai  dakai:01SD  b/r  unread  delivery: held");
+    assert_eq!(d.take().pop().unwrap()["board"], "dakai");
+    assert_eq!(p.ok("whoami", json!({}), json!({})), "tester/me (local, claude:s-me@testhost)\npublished: dakai as tester/reviewer");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn claude_peer_at(sock: PathBuf, session: &str) -> Peer {
+    let markers = Markers { claude_session: Some(session.into()), user: Some("tester".into()), ..Markers::default() };
+    Peer::spawn(sock, markers, Some(Harness::Claude))
+}
+
+#[test]
+fn mcp_refuses_a_board_to_a_daemon_that_predates_boards() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
+    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| match req["op"].as_str().unwrap() {
+        "board.list" => Err(("bad_request", "unknown op 'board.list'".into())),
+        _ => Ok(json!({"items": []})),
+    });
+    let mut p = claude_peer_at(d.socket.clone(), "s-old");
+    let (err, text) = p.tool("inbox", json!({"board": "local"}), json!({}));
+    assert!(err && text.contains("predates boards and would ignore the board argument"), "{text}");
+    assert!(d.take().iter().all(|q| q["op"] == "board.list"));
+    assert_eq!(p.ok("inbox", json!({}), json!({})), "(no unread messages)");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&root);
 }

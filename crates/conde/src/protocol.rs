@@ -29,6 +29,10 @@ pub struct Request {
     /// Human-only, local-only override: act as this registered name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// The board the caller named (`--board <alias>`, MCP `board`), verbatim; the daemon's
+    /// resolver decides the board when absent (DESIGN-v2 §3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
     #[serde(default)]
     pub body: Value,
 }
@@ -43,6 +47,7 @@ impl Request {
             idempotency_key: None,
             actor: None,
             from: None,
+            board: None,
             body,
         }
     }

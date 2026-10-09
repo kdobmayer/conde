@@ -2,11 +2,12 @@
 //! standing in for systemctl, launchctl, the claude CLI and the terminal.
 //! Never touches the real ~/.claude, ~/.codex or ~/.config.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use conde::protocol::v2::BoardInfo;
 use conde::setup::{self, CmdOut, Env, Host, Options, Os};
 use conde::{paths, util};
 
@@ -19,6 +20,14 @@ struct Fake {
     alive: bool,
     print_out: String,
     show_out: String,
+    /// What the human types at each prompt; empty: there is no terminal.
+    answers: VecDeque<String>,
+    prompts: Vec<String>,
+    /// The daemon's answer per op; an op without one is refused.
+    daemon: HashMap<&'static str, Result<Value, String>>,
+    daemon_calls: Vec<(String, Option<String>, Value)>,
+    /// board.info over HTTPS (the v1 credential move).
+    info: Option<Result<BoardInfo, String>>,
 }
 
 impl Fake {
@@ -32,6 +41,11 @@ impl Fake {
             alive: false,
             print_out: String::new(),
             show_out: String::new(),
+            answers: VecDeque::new(),
+            prompts: Vec::new(),
+            daemon: HashMap::new(),
+            daemon_calls: Vec::new(),
+            info: None,
         }
     }
 
@@ -77,6 +91,25 @@ impl Host for Fake {
 
     fn reach(&mut self, _socket: &Path) -> Result<(), String> {
         if self.alive { Ok(()) } else { Err("No such file or directory (os error 2)".into()) }
+    }
+
+    fn ask(&mut self, prompt: &str) -> Option<String> {
+        let answer = self.answers.pop_front()?;
+        self.prompts.push(prompt.to_string());
+        Some(answer)
+    }
+
+    fn daemon(&mut self, _socket: &Path, op: &str, board: Option<&str>, body: Value) -> Result<Value, String> {
+        self.daemon_calls.push((op.to_string(), board.map(Into::into), body));
+        self.daemon.get(op).cloned().unwrap_or_else(|| Err(format!("unknown op {op}")))
+    }
+
+    fn board_info(&mut self, _server: &str, _key: &str) -> anyhow::Result<BoardInfo> {
+        match self.info.clone() {
+            Some(Ok(i)) => Ok(i),
+            Some(Err(e)) => Err(anyhow::anyhow!(e)),
+            None => Err(anyhow::anyhow!("no board here")),
+        }
     }
 }
 
@@ -220,11 +253,10 @@ fn linux_full_setup_then_idempotent_rerun() {
 }
 
 #[test]
-fn macos_launch_agent_with_server() {
+fn macos_launch_agent_runs_the_single_daemon() {
     let root = temp_root();
     let env = env(&root, Os::MacOs);
-    let mut opts = Options::select(false, false, true, false);
-    opts.server = Some("wss://conde.nativeai.space".into());
+    let opts = Options::select(false, false, true, false);
     let mut host = Fake::new(&env, &[]);
     let plist_path = env.launchd_plist();
     assert!(plist_path.ends_with("home/Library/LaunchAgents/space.nativeai.conde.plist"));
@@ -237,7 +269,7 @@ fn macos_launch_agent_with_server() {
     let plist = read(&plist_path);
     for needle in [
         "<key>Label</key>\n  <string>space.nativeai.conde</string>",
-        &format!("<string>{}</string>\n    <string>daemon</string>\n    <string>--server</string>\n    <string>wss://conde.nativeai.space</string>", env.exe.display()),
+        &format!("<string>{}</string>\n    <string>daemon</string>\n  </array>", env.exe.display()),
         "<key>RunAtLoad</key>\n  <true/>",
         "<key>KeepAlive</key>\n  <true/>",
         &format!("<key>CONDE_SOCK</key>\n    <string>{}</string>", env.socket.display()),
@@ -253,7 +285,8 @@ fn macos_launch_agent_with_server() {
     assert!(ok);
     assert_eq!(host.take_calls(), [format!("launchctl print {target}"), format!("launchctl kickstart {target}")]);
 
-    opts.server = None;
+    // a v1 agent that named a server is rewritten to the single daemon and reloaded
+    std::fs::write(&plist_path, plist.replace("<string>daemon</string>", "<string>daemon</string>\n    <string>--server</string>\n    <string>wss://conde.nativeai.space</string>")).unwrap();
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
     assert_eq!(
@@ -406,9 +439,7 @@ fn services_carry_every_relocated_directory() {
         e.conde_data = Some(root.join("board"));
         e.claude_config_dir = Some(root.join("relocated-claude"));
         e.codex_home = Some(root.join("relocated-codex"));
-        let mut opts = Options::select(false, false, true, false);
-        opts.server = Some("https://conde.test".into());
-        let (unit, plist) = (setup::systemd_unit(&e, &opts), setup::launchd_plist(&e, &opts));
+        let (unit, plist) = (setup::systemd_unit(&e), setup::launchd_plist(&e));
         for (name, dir) in [
             ("XDG_CONFIG_HOME", "relocated-config"),
             ("XDG_DATA_HOME", "relocated-data"),
@@ -422,7 +453,7 @@ fn services_carry_every_relocated_directory() {
         }
     }
     // unset overrides are not invented
-    let unit = setup::systemd_unit(&env(&root, Os::Linux), &Options::default());
+    let unit = setup::systemd_unit(&env(&root, Os::Linux));
     assert!(!unit.contains("XDG_CONFIG_HOME") && !unit.contains("CODEX_HOME"), "{unit}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -554,4 +585,228 @@ fn the_real_probe_needs_an_answer_within_the_timeout() {
     hold.join().unwrap();
     assert!(err.contains("closed") || err.contains("Broken pipe") || err.contains("reset"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// --- the host's boards (DESIGN-v2 §7, §9) -----------------------------------------------------
+
+fn board_info(mailbox_only: bool) -> Value {
+    json!({"name": "dakai", "owner": "krisz", "host": "box", "mailbox_only": mailbox_only})
+}
+
+fn preview() -> Value {
+    json!({"rows": [
+        {"agent_id": "01DESK", "name": "desk", "address": "claude:5f2c@box", "pin": "claude:5f2c@box", "candidate": true,
+         "evidence": [{"via": "dm", "with": "balazs/relay", "source": "later", "messages": 4, "last_at": "2026-10-09T10:00:00Z"},
+                      {"via": "channel", "with": "#lobby", "source": "imported", "messages": 1, "last_at": "2026-10-01T08:00:00Z"}]},
+        {"agent_id": "01LANE", "name": "lane.v0", "address": "codex:th-7@box", "pin": null, "candidate": false, "evidence": []}]})
+}
+
+fn manifest(published: &[&str]) -> Value {
+    let row = |id: &str, name: &str, addr: &str| {
+        let p = if published.contains(&name) { json!({"mailbox_id": id, "route_generation": 2}) } else { Value::Null };
+        json!({"agent_id": id, "name": name, "address": addr, "pin": null, "published": p})
+    };
+    json!({"bindings": [row("01DESK", "desk", "claude:5f2c@box"), row("01LANE", "lane.v0", "codex:th-7@box")],
+           "conflicts": [{"name": "lane.v0", "address": "codex:th-7@box"}]})
+}
+
+fn enrolled(env: &Env) {
+    let path = env.boards_dir().join("dakai.json");
+    let cfg = conde::boards::BoardConfig { server: "https://conde.test".into(), host_id: "box".into(), owner: "krisz".into(), key: "k".into() };
+    conde::boards::store(&path, "dakai", &cfg).unwrap();
+}
+
+fn ops(host: &Fake) -> Vec<(String, Option<String>, Value)> {
+    host.daemon_calls.clone()
+}
+
+#[test]
+fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    let cred = env.v1_credential();
+    std::fs::create_dir_all(cred.parent().unwrap()).unwrap();
+    conde::credentials::store(&cred, &conde::credentials::Credentials { server: "https://conde.test".into(), host_id: "box".into(), key: "k1".into() }).unwrap();
+    let mut host = Fake::new(&env, &["systemctl"]);
+    host.info = Some(Ok(serde_json::from_value(board_info(false)).unwrap()));
+    host.daemon.insert("board.info", Ok(board_info(false)));
+    host.daemon.insert("host.migrate_preview", Ok(preview()));
+    host.daemon.insert("host.migrate_v2", Ok(manifest(&["desk"])));
+    host.answers = ["", "y", "dakai"].map(String::from).into();
+
+    let (ok, out) = run(&env, &Options::select(false, false, false, false), &mut host);
+    assert!(ok, "{out}");
+    // the move: under the advertised alias, pinned to the reported account, before the service restarts
+    assert!(!cred.exists());
+    let stored = conde::boards::load(&env.boards_dir().join("dakai.json")).unwrap();
+    assert_eq!((stored.server.as_str(), stored.owner.as_str(), stored.host_id.as_str(), stored.key.as_str()), ("https://conde.test", "krisz", "box", "k1"));
+    let moved = out.find("boards: moved the v1 credential ~/.config/conde/credentials to ~/.config/conde/boards/dakai.json (board dakai, account krisz, host box)").expect(&out);
+    assert!(moved < out.find("service: ").unwrap(), "{out}");
+    // the preview: candidates with their evidence, the rest in one line
+    for line in [
+        "boards: dakai: host box (account krisz) still has 2 names bound from v1. A candidate (*) has messages with another owner's agents; history alone is not consent, so you choose:\n",
+        "  * desk  claude:5f2c@box  pinned\n      dm with balazs/relay: 4 messages, last 2026-10-09 (since the import)\n      posts in #lobby: 1 messages, last 2026-10-01 (imported from kond)\n",
+        "  no messages with another owner's agents (1): lane.v0\n",
+        "boards: dakai: switched to v2; published: desk; on this host's local board only: 1 names\n",
+        "boards: dakai: lane.v0 kept its local binding (a live session holds it); its former address codex:th-7@box is in conde doctor\n",
+        "boards: default board for names and channels: dakai\n",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in\n{out}");
+    }
+    assert_eq!(host.prompts[1], "boards: dakai: publish desk; the other 1 names move to this host's local board only. Apply? [y/N] ");
+    assert!(host.prompts[2].contains("Default board (local, dakai) [local]: "), "{:?}", host.prompts);
+    let dakai = Some("dakai".to_string());
+    assert_eq!(
+        ops(&host),
+        [
+            ("board.info".to_string(), dakai.clone(), json!({})),
+            ("host.migrate_preview".into(), dakai.clone(), json!({})),
+            ("host.migrate_v2".into(), dakai, json!({"publish": ["01DESK"]})),
+        ]
+    );
+    assert_eq!(read(&env.default_board()), "dakai\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn without_a_terminal_nothing_is_decided_for_the_human() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    enrolled(&env);
+    let mut host = Fake::new(&env, &[]);
+    host.daemon.insert("board.info", Ok(board_info(false)));
+    host.daemon.insert("host.migrate_preview", Ok(preview()));
+    host.daemon.insert("host.migrate_v2", Ok(manifest(&["desk"])));
+    let (ok, out) = run(&env, &Options::select(false, false, false, false), &mut host);
+    assert!(ok, "{out}");
+    assert!(out.contains("boards: dakai: not migrated: choosing what stays published is the human's, at a terminal; until then dakai stays local-only on this host; the review: conde boards --migrate dakai\n"), "{out}");
+    assert!(out.contains("boards: default board for names and channels: local (the human sets it: conde setup --default-board <alias>)\n"), "{out}");
+    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
+    assert!(!env.default_board().exists());
+
+    // the explicit review without a terminal is a failure the human sees
+    let mut sink = Vec::new();
+    assert!(!setup::migrate_review(&env, &mut host, &mut sink, "dakai", true).unwrap());
+    // the flag sets the default without asking
+    let mut opts = Options::select(false, false, false, false);
+    opts.default_board = Some("dakai".into());
+    let (_, out) = run(&env, &opts, &mut host);
+    assert!(out.contains("boards: default board for names and channels: dakai\n"), "{out}");
+    assert_eq!(read(&env.default_board()), "dakai\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_review_takes_names_none_or_declines() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    enrolled(&env);
+    let mut host = Fake::new(&env, &[]);
+    host.daemon.insert("board.info", Ok(board_info(false)));
+    host.daemon.insert("host.migrate_preview", Ok(preview()));
+    host.daemon.insert("host.migrate_v2", Ok(manifest(&[])));
+
+    // an unknown name is asked again; a "no" applies nothing
+    host.answers = ["nope", "lane.v0 desk", "n"].map(String::from).into();
+    let mut out = Vec::new();
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("boards: dakai: not names of this host: nope\n"), "{out}");
+    assert!(out.contains("boards: dakai: not migrated (declined)"), "{out}");
+    assert_eq!(host.prompts[2], "boards: dakai: publish lane.v0, desk; the other 0 names move to this host's local board only. Apply? [y/N] ");
+    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"));
+
+    // none: the host switches with nothing published
+    host.answers = ["none", "yes"].map(String::from).into();
+    let mut out = Vec::new();
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    assert!(String::from_utf8(out).unwrap().contains("switched to v2; published: nothing; on this host's local board only: 2 names"));
+    assert_eq!(ops(&host).last().unwrap().2, json!({"publish": []}));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_migrated_host_is_not_reviewed_and_an_empty_one_switches_with_nothing_published() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    enrolled(&env);
+    let mut host = Fake::new(&env, &[]);
+    host.daemon.insert("board.info", Ok(board_info(true)));
+    let mut out = Vec::new();
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text, "boards: dakai: host box (account krisz) is on v2; publish names with: conde publish <name> --board dakai\n");
+    assert_eq!(ops(&host).len(), 1);
+
+    host.daemon.insert("board.info", Ok(board_info(false)));
+    host.daemon.insert("host.migrate_preview", Ok(json!({"rows": []})));
+    host.daemon.insert("host.migrate_v2", Ok(json!({"bindings": []})));
+    let mut out = Vec::new();
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", false).unwrap());
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("no names of host box are bound there; switching it to v2 publishes nothing"), "{text}");
+    assert!(host.prompts.is_empty(), "nothing to decide, nobody asked");
+    assert_eq!(ops(&host).last().unwrap().0, "host.migrate_v2");
+
+    // a daemon that does not answer leaves the board local-only and says how to resume
+    host.daemon.clear();
+    let mut out = Vec::new();
+    assert!(!setup::migrate_review(&env, &mut host, &mut out, "dakai", false).unwrap());
+    assert!(String::from_utf8(out).unwrap().contains("boards: dakai: not reached through the daemon (unknown op board.info); until then dakai stays local-only"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn check_reports_the_boards() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    let cred = env.v1_credential();
+    std::fs::create_dir_all(cred.parent().unwrap()).unwrap();
+    std::fs::write(&cred, "{}").unwrap();
+    enrolled(&env);
+    let mut host = Fake::new(&env, &[]);
+    let opts = Options { boards: true, ..Options::default() };
+    let (ok, out) = verify(&env, &opts, &mut host);
+    assert!(!ok, "{out}");
+    assert!(out.contains("ISSUE   boards: the v1 credential ~/.config/conde/credentials is not moved to boards/ yet; run: conde setup\n"), "{out}");
+    assert!(out.contains("ok      boards: dakai: https://conde.test as host box (account krisz)\n"), "{out}");
+    assert!(out.contains("ok      boards: default board for names and channels: local\n"), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_running_bridge_that_predates_boards_is_restarted() {
+    for os in [Os::Linux, Os::MacOs] {
+        let root = temp_root();
+        let env = env(&root, os);
+        let opts = Options::select(false, false, true, false);
+        let mut host = Fake::new(&env, &["systemctl"]);
+        run(&env, &opts, &mut host);
+        host.take_calls();
+        // the unit is unchanged, the old binary still answers: no board.list
+        host.alive = true;
+        host.launchd_loaded = true;
+        let (ok, out) = run(&env, &opts, &mut host);
+        assert!(ok, "{out}");
+        assert!(out.contains("service: the running bridge predates boards (an older conde); restarting it"), "{out}");
+        let calls = host.take_calls();
+        let restarted = match os {
+            Os::Linux => calls.contains(&"systemctl --user restart conde.service".to_string()),
+            Os::MacOs => calls.contains(&"launchctl kickstart -k gui/501/space.nativeai.conde".to_string()),
+        };
+        assert!(restarted, "{calls:?}");
+        // a bridge that knows boards is left running
+        host.daemon.insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
+        let (_, out) = run(&env, &opts, &mut host);
+        assert!(!out.contains("restarting"), "{out}");
+        assert!(!host.take_calls().iter().any(|c| c.contains("restart") || c.contains("-k")));
+        // until a board is enrolled that it has not loaded
+        if os == Os::Linux {
+            enrolled(&env);
+            let (_, out) = run(&env, &opts, &mut host);
+            assert!(out.contains("service: the running bridge started before dakai was enrolled; restarting it"), "{out}");
+            assert!(host.take_calls().contains(&"systemctl --user restart conde.service".to_string()));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

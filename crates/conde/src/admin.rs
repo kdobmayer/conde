@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 
-use crate::credentials::{self, Credentials};
+use crate::boards::{self, BoardConfig};
+use crate::credentials;
 use crate::dispatch::Dispatcher;
 use crate::identity::{Markers, derive_address, harness_ancestor};
 use crate::ops::hosts;
@@ -110,9 +111,14 @@ pub fn key_list(data: Option<PathBuf>) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-/// `conde enroll`: store the server URL, host id and key (0600).
-pub fn enroll(server: &str, host: Option<&str>, key_stdin: bool) -> anyhow::Result<i32> {
+/// `conde enroll`: store the server URL, host id, account and key (0600) as the board
+/// `alias` (default: the name the board advertises), refusing to retarget a pinned alias.
+pub fn enroll(server: &str, host: Option<&str>, board: Option<&str>, key_stdin: bool) -> anyhow::Result<i32> {
     credentials::bridge_url(server)?;
+    if let Some(alias) = board {
+        boards::check_shared_alias(alias)?;
+        boards::check_pin(&boards::path(alias)?, alias, server, None)?;
+    }
     let host = host.map(str::to_lowercase).unwrap_or_else(local_host);
     let key = if key_stdin {
         credentials::read_stdin_secret()?
@@ -122,9 +128,26 @@ pub fn enroll(server: &str, host: Option<&str>, key_stdin: bool) -> anyhow::Resu
     if key.is_empty() || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
         bail!("that is not a host key (empty or contains whitespace)");
     }
-    let path = credentials::path()?;
-    credentials::store(&path, &Credentials { server: server.to_string(), host_id: host.clone(), key })?;
-    println!("enrolled host {host} with {server}; credential stored at {} (mode 0600)", path.display());
-    println!("start the bridge with: conde daemon --server {server}");
+    let info = boards::board_info(server, &key)?;
+    let alias = board.map(str::to_string).unwrap_or_else(|| info.name.clone());
+    boards::check_shared_alias(&alias)?;
+    let path = boards::path(&alias)?;
+    let cfg = BoardConfig { server: server.to_string(), host_id: info.host.clone(), owner: info.owner.clone(), key };
+    boards::store(&path, &alias, &cfg)?;
+    print!("{}", enrolled_text(&alias, &cfg, &path));
     Ok(0)
+}
+
+/// What `conde enroll` and `conde login` print once the board file is stored.
+pub fn enrolled_text(alias: &str, cfg: &BoardConfig, path: &std::path::Path) -> String {
+    format!(
+        "enrolled host {} with {} as board {alias} (account {}); credential stored at {} (mode 0600)\n\
+         {}: conde publish <name> --board {alias}\n\
+         next: conde setup (the default board, and the review of this host's earlier names on {alias})\n",
+        cfg.host_id,
+        cfg.server,
+        cfg.owner,
+        path.display(),
+        crate::setup::ENROLL_SCOPE
+    )
 }

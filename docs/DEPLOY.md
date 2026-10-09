@@ -26,6 +26,10 @@
 
     az acr build --subscription 60df47fc-ce8f-4f52-a970-43a412d78007 -r crnative --platform linux/amd64 -t conde:<short-sha> -f Dockerfile .
 
+The image carries the web app: the Dockerfile's `web` stage (node 22) runs `npm ci` and
+`npm run build` in web/, and the Rust stage embeds the result. Signed-in browsers get it at
+https://conde.nativeai.space/ (the keys page stays at /keys).
+
 Then tell dakai-helper the tag; it runs
 `terraform apply -var image=crnative.azurecr.io/conde:<tag> -var target_port=8080`
 (one revision switch, about a minute). Logs:

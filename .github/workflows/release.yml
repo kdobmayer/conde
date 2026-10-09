@@ -15,6 +15,32 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
+  # The web app the server image embeds (the Dockerfile builds it the same way): type check,
+  # build, and the static files as an artifact.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Check
+        run: npm run check
+      - name: Build
+        run: npm run build
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: conde-web
+          path: crates/conde-remote/web-dist/
+          if-no-files-found: error
+
   macos:
     runs-on: macos-15
     strategy:

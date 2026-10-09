@@ -4,3 +4,6 @@ infra/terraform/*.bin
 target/
 dist/out/
 core.*
+web/node_modules/
+web/.svelte-kit/
+crates/conde-remote/web-dist/

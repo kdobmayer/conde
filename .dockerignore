@@ -1,9 +1,13 @@
-# The build needs the cargo workspace and the skills setup.rs embeds; everything else (target/, infra/,
-# .git/, docs, core dumps, local state) stays out of the context.
+# The build needs the cargo workspace, the skills setup.rs embeds, the README and the web app's sources; everything
+# else (target/, infra/, .git/, docs, core dumps, local state, local web builds) stays out of the context.
 *
 !Cargo.toml
 !Cargo.lock
 !crates/
 !skills/
 !README.md
+!web/
 crates/**/target/
+crates/conde-remote/web-dist/
+web/node_modules/
+web/.svelte-kit/

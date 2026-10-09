@@ -358,3 +358,23 @@ fn server_on_postgres_stops_cleanly_on_sigterm() {
     assert!(out.status.success(), "exit {:?}\n{log}", out.status);
     assert!(!log.contains("panicked"), "{log}");
 }
+
+/// `conde enroll` against the real server: `board.info` over `/v1/rpc` with the host key
+/// names the alias (the server's advertised name) and the pinned account; nothing is bound.
+#[test]
+fn enroll_takes_the_alias_and_account_from_board_info() {
+    let cloud = Cloud::start(test_config());
+    let h = Host::new("ann", "host-a");
+    let key = cloud.key("ann", "host-a");
+    let out = h.conde(None, &[], &["enroll", "--server", &cloud.url(), "--key-stdin"], Some(&key));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.starts_with(&format!("enrolled host host-a with {} as board shared (account ann)", cloud.url())), "{stdout}");
+    assert!(!stdout.contains(&key), "the key is never echoed");
+    let path = h.root.join("config/conde/boards/shared.json");
+    assert_eq!(conde::credentials::mode(&path), Some(0o600));
+    let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!((stored["owner"].as_str(), stored["host_id"].as_str()), (Some("ann"), Some("host-a")));
+    let bound = cloud.d.with_conn(|tx| tx.agents_on_host("host-a")).unwrap();
+    assert!(bound.is_empty(), "enrollment binds nothing on the server: {bound:?}");
+}

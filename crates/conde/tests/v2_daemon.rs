@@ -24,7 +24,8 @@ use conde_remote::{Endpoint, Notify, NotifyFields, NotifyKind};
 use fake_board::{Acks, FakeBoard};
 use serde_json::{Value, json};
 
-const WAIT: Duration = Duration::from_secs(20);
+// Generous: a wait ends on the observed event; the bound only catches a missing one.
+const WAIT: Duration = Duration::from_secs(60);
 
 fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + WAIT;
@@ -1271,6 +1272,11 @@ fn forgetting_the_default_board_resets_it_and_says_so() {
 
     let forgot = a.ok(&a.human(), conde::surface::BOARD_FORGET, json!({}), Some("dakai"));
     assert_eq!((forgot["default_reset"].clone(), forgot["default"].clone()), (json!(true), json!("local")), "{forgot}");
+    // the forgotten board is gone from doctor, its delivery origin included
+    let doctor = a.doctor();
+    assert!(!doctor.contains("slots: dakai") && !doctor.contains("dakai:"), "{doctor}");
+    let origins = a.ok(&a.human(), "doctor", json!({}), None)["origins"].clone();
+    assert!(origins.as_array().unwrap().iter().all(|o| o["origin"] != "dakai"), "{origins}");
     assert_eq!(std::fs::read_to_string(a.config().join("default-board")).unwrap().trim(), "local");
 
     // a default that names a board this host does not have

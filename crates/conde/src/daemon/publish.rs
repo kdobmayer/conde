@@ -243,7 +243,7 @@ pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
         boards::write_default(&config.join("default-board"), &config.join("boards"), LOCAL_BOARD).map_err(internal)?;
     }
     conn.shutdown();
-    core.mux.stop_board(&alias, "forgotten");
+    core.mux.remove_board(&alias);
     core.remove_board(&alias);
     let (publications, ops) = core.local_tx(|tx| Ok(tx.forget_board(&alias)?)).map_err(internal)?;
     let file = boards::forget_in(&core.config_dir, &alias).map_err(internal)?;

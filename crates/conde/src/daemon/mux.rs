@@ -322,6 +322,13 @@ impl Mux {
         self.notify_all();
     }
 
+    /// A forgotten board: its origin goes, with its jobs, outcomes and slots.
+    pub fn remove_board(&self, alias: &str) {
+        self.stop_board(alias, "forgotten");
+        self.lock().origins.remove(alias);
+        self.notify_all();
+    }
+
     pub fn stats(&self) -> Vec<OriginStats> {
         let st = self.lock();
         st.origins
@@ -831,12 +838,14 @@ impl Delivery {
             }
             // The route went away (unpublished, taken, unbound): the board re-attempts it.
             let routed = match &agent {
-                AgentRef::Id(id) => sqlite
-                    .begin_local()
-                    .and_then(|tx| tx.publication(&origin, id))
-                    .ok()
-                    .flatten()
-                    .is_some_and(|p| p.state == PublicationState::Published),
+                AgentRef::Id(id) => match sqlite.begin_local().and_then(|tx| tx.publication(&origin, id)) {
+                    Ok(p) => p.is_some_and(|p| p.state == PublicationState::Published),
+                    // A lookup that failed says nothing about the route: ask again next rescan.
+                    Err(e) => {
+                        tracing::warn!("route lookup failed: {e}");
+                        continue;
+                    }
+                },
                 AgentRef::Name(_) => true,
             };
             let reason = match bound {

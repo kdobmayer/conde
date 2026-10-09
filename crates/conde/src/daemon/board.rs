@@ -3,6 +3,7 @@
 //! A board that is fenced, revoked or refused stops alone; the daemon keeps running.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -45,6 +46,11 @@ pub struct BoardConn {
     /// Per local agent: the frame order (see `BridgeClient::call_ordered`) of the response
     /// that last completed its publication; a routes snapshot received earlier never undoes it.
     completions: Mutex<HashMap<String, u64>>,
+    /// Connections seen by the callback; a `mailbox.mine` answer reconciles only the
+    /// connection it was asked on.
+    epoch: AtomicU64,
+    /// A connection started and its `mailbox.mine` is not answered yet.
+    mine_due: AtomicBool,
 }
 
 impl BoardConn {
@@ -61,6 +67,8 @@ impl BoardConn {
             removed: Mutex::default(),
             note: Mutex::default(),
             completions: Mutex::default(),
+            epoch: AtomicU64::new(0),
+            mine_due: AtomicBool::new(false),
         }
     }
 
@@ -173,7 +181,14 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
     let client = BridgeClient::start_events(config, move |event| {
         let Some(core) = weak.upgrade() else { return };
         match event {
-            Inbound::Connected => core.mux.connected(&alias),
+            Inbound::Connected => {
+                // In callback order: the reset, then the request that reconciles this connection.
+                core.mux.connected(&alias);
+                if let Some(conn) = core.board(&alias) {
+                    conn.epoch.fetch_add(1, Ordering::SeqCst);
+                    conn.mine_due.store(true, Ordering::SeqCst);
+                }
+            }
             Inbound::Routes { routes, seq } => {
                 if let Some(d) = core.mux.tuning.routes_delay {
                     std::thread::sleep(d);
@@ -195,7 +210,6 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
 /// outcomes to the book whenever it has room; stop the origin when the client stops.
 async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
     let mut seen_connects = 0;
-    let mut mine_due = false;
     let mut mine_retry = tokio::time::Instant::now();
     loop {
         let Some(core) = core.upgrade() else { return };
@@ -208,7 +222,6 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
         }
         if client.state() == BridgeState::Connected && client.connects() != seen_connects {
             seen_connects = client.connects();
-            mine_due = true;
             let pending = core.local_tx(|tx| Ok(tx.pending_ops(Some(&conn.alias))?)).unwrap_or_default();
             for op in pending.into_iter().filter(|o| o.kind != BoardOpKind::Migrate) {
                 let core = core.clone();
@@ -221,7 +234,9 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
                 });
             }
         }
-        if mine_due && tokio::time::Instant::now() >= mine_retry {
+        if tokio::time::Instant::now() >= mine_retry && conn.mine_due.swap(false, Ordering::SeqCst) {
+            let epoch = conn.epoch.load(Ordering::SeqCst);
+            let current = |conn: &BoardConn| conn.epoch.load(Ordering::SeqCst) == epoch;
             match conn.call_ordered(json!({"op": op::MAILBOX_MINE, "body": {}}), core.mux.tuning.call_timeout).await {
                 Ok((resp, seq)) if resp.ok => {
                     let mine: Mine = resp.result.and_then(|r| serde_json::from_value(r).ok()).unwrap_or_default();
@@ -231,19 +246,24 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
                         .map(|m| Route { mailbox_id: m.mailbox_id, route_generation: m.route_generation })
                         .collect();
                     reconcile(&core, &conn.alias, &routes, seq);
-                    core.mux.reconciled(&conn.alias);
-                    mine_due = false;
+                    if current(&conn) {
+                        core.mux.reconciled(&conn.alias);
+                    }
                 }
                 Ok((resp, _)) => {
                     let why = resp.error.map(|e| e.message).unwrap_or_default();
                     *conn.note.lock().unwrap_or_else(|p| p.into_inner()) = Some(format!("mailbox.mine refused: {why}"));
                     // Routes frames still reconcile; nothing better is known.
-                    core.mux.reconciled(&conn.alias);
-                    mine_due = false;
+                    if current(&conn) {
+                        core.mux.reconciled(&conn.alias);
+                    }
                 }
                 Err(why) => {
                     tracing::debug!(board = conn.alias, "mailbox.mine: {why}");
-                    mine_retry = tokio::time::Instant::now() + Duration::from_secs(1);
+                    if current(&conn) {
+                        conn.mine_due.store(true, Ordering::SeqCst);
+                    }
+                    mine_retry = tokio::time::Instant::now() + Duration::from_millis(200);
                 }
             }
         }
@@ -284,8 +304,11 @@ fn drain(core: &Core, alias: &str, client: &BridgeClient) {
 /// predates it, whatever order the two were handled in.
 pub fn reconcile(core: &Core, alias: &str, routes: &[Route], seq: u64) {
     let now = iso_from_ms(now_ms());
-    let completions = core.board(alias).map(|c| c.completions.lock().unwrap_or_else(|p| p.into_inner()).clone()).unwrap_or_default();
+    let conn = core.board(alias);
     let result = core.local_tx(|tx| {
+        // Read under the store's lock: a completion is recorded before its transaction commits.
+        let completions =
+            conn.as_ref().map(|c| c.completions.lock().unwrap_or_else(|p| p.into_inner()).clone()).unwrap_or_default();
         let mut removed = Vec::new();
         for p in tx.publications(Some(alias))? {
             if p.state != PublicationState::Published || completions.get(&p.agent_id).is_some_and(|done| *done > seq) {
@@ -409,6 +432,13 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
         }
         (BoardOpKind::Publish, OpOutcome::Done(result, seq)) => {
             let published: Option<Published> = serde_json::from_value(result.clone()).ok();
+            // Before the commit: a snapshot older than this answer must never see the row
+            // published without seeing this mark.
+            if let Some(seq) = seq {
+                let mut done = conn.completions.lock().unwrap_or_else(|p| p.into_inner());
+                let mark = done.entry(agent.clone()).or_default();
+                *mark = (*mark).max(seq);
+            }
             let duplicate = core
                 .local_tx(|tx| {
                     if let Some(done) = stored(tx)? {
@@ -425,9 +455,6 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
                 .map_err(internal)?;
             if let Some(done) = duplicate {
                 return settled(&done);
-            }
-            if let Some(seq) = seq {
-                conn.completions.lock().unwrap_or_else(|p| p.into_inner()).insert(agent, seq);
             }
             Ok("published".into())
         }

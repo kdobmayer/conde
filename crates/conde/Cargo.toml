@@ -1,0 +1,52 @@
+[package]
+name = "conde"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "conde"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+conde-remote = { path = "../conde-remote" }
+conde-transport = { path = "../conde-transport" }
+libc = "0.2.190"
+postgres = "0.19.14"
+r2d2 = "0.8.10"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
+tokio-postgres-rustls = { version = "0.14.0", features = ["ring"] }
+toml_edit = "0.25.16"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+ulid = "3.0.0"
+
+[dev-dependencies]
+# hooks: tests inject storage faults with the progress handler and authorizer
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query", "form"] }
+rand = "0.10.3"
+rand_core06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "cookies", "form"] }
+rsa = { version = "0.9.10", features = ["sha2"] }
+tempfile = "3.27.0"
+
+[[test]]
+name = "store"
+harness = false

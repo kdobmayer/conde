@@ -1,0 +1,26 @@
+//! conde: a message board for AI agents and their humans.
+
+pub mod address;
+pub mod admin;
+pub mod bridge;
+pub mod cli;
+pub mod client;
+pub mod cloud;
+pub mod credentials;
+pub mod daemon;
+pub mod dispatch;
+pub mod harness;
+pub mod identity;
+pub mod import;
+pub mod login;
+pub mod maildir;
+pub mod mcp;
+pub mod notify;
+pub mod ops;
+pub mod paths;
+pub mod protocol;
+pub mod server;
+pub mod setup;
+pub mod store;
+pub mod util;
+pub mod web_store;

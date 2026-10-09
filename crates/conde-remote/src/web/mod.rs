@@ -1,0 +1,535 @@
+//! Browser surface of the cloud server: Entra ID sign-in (OIDC authorization code + PKCE),
+//! the keys page (list, create shown once, revoke) and the `conde login` browser leg.
+//!
+//! The server stays stateless: login transactions, browser sessions and one-time CLI codes
+//! live in the board's store behind [`WebStore`]; secrets are kept only as SHA-256 digests.
+//! Routes: `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /auth/cli`,
+//! `POST /auth/cli/redeem`, `GET /keys`, `POST /keys`, `GET /keys/created`,
+//! `POST /keys/{host}/revoke`; with `CONDE_ADMIN_KEY` also the admin API under `/v1/admin`.
+
+mod admin;
+mod auth;
+mod keys;
+mod pages;
+pub(crate) use pages::document;
+mod session;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::routing::{get, post};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub use admin::{AdminState, router as admin_router};
+pub use auth::{Oidc, RedeemResponse};
+pub use keys::new_host_key;
+
+/// Everything the web surface needs to know about the deployment.
+#[derive(Clone)]
+pub struct WebConfig {
+    /// `https://login.microsoftonline.com/<tenant>/v2.0`; discovery is read from here.
+    pub issuer: String,
+    /// The only tenant whose users may sign in (the `tid` claim must equal it).
+    pub tenant_id: String,
+    pub client_id: String,
+    pub client_secret: String,
+    /// The registered redirect URI, `https://<host>/auth/callback`.
+    pub redirect_uri: String,
+    /// The server's public origin (`https://<host>`), derived from the redirect URI.
+    pub public_url: String,
+    /// Where Entra sends the browser after sign-out.
+    pub post_logout_redirect_uri: String,
+    /// A browser session ends after this long without a request.
+    pub session_idle: Duration,
+    /// A browser session ends this long after sign-in, whatever its activity.
+    pub session_max: Duration,
+    /// How long a started sign-in may take before its callback is refused.
+    pub login_ttl: Duration,
+    /// Lifetime of a one-time `conde login` code.
+    pub cli_code_ttl: Duration,
+}
+
+impl std::fmt::Debug for WebConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("redirect_uri", &self.redirect_uri)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("{0} is not set")]
+    Missing(&'static str),
+    #[error("CONDE_ADMIN_KEY must be at least {0} characters")]
+    AdminKey(usize),
+    #[error("ENTRA_REDIRECT_URI '{0}' must be an https URL ending in /auth/callback")]
+    RedirectUri(String),
+}
+
+impl WebConfig {
+    /// Builds the Entra configuration for `tenant_id` with the default lifetimes.
+    pub fn entra(
+        tenant_id: &str,
+        client_id: &str,
+        client_secret: &str,
+        redirect_uri: &str,
+    ) -> Result<WebConfig, ConfigError> {
+        let public_url = redirect_uri
+            .strip_suffix("/auth/callback")
+            .filter(|origin| origin.starts_with("https://") || origin.starts_with("http://"))
+            .ok_or_else(|| ConfigError::RedirectUri(redirect_uri.to_string()))?
+            .to_string();
+        Ok(WebConfig {
+            issuer: format!("https://login.microsoftonline.com/{tenant_id}/v2.0"),
+            tenant_id: tenant_id.to_string(),
+            client_id: client_id.to_string(),
+            client_secret: client_secret.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            post_logout_redirect_uri: format!("{public_url}/"),
+            public_url,
+            session_idle: Duration::from_secs(8 * 3600),
+            session_max: Duration::from_secs(24 * 3600),
+            login_ttl: Duration::from_secs(600),
+            cli_code_ttl: Duration::from_secs(300),
+        })
+    }
+
+    /// From `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI`.
+    /// `Ok(None)` when none is set (web sign-in disabled); an error when only some are.
+    pub fn from_env() -> Result<Option<WebConfig>, ConfigError> {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let names = [
+            "ENTRA_TENANT_ID",
+            "ENTRA_CLIENT_ID",
+            "ENTRA_CLIENT_SECRET",
+            "ENTRA_REDIRECT_URI",
+        ];
+        let values: Vec<Option<String>> = names.iter().copied().map(var).collect();
+        if values.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        let get = |i: usize| values[i].as_deref().ok_or(ConfigError::Missing(names[i]));
+        let config = WebConfig::entra(get(0)?, get(1)?, get(2)?, get(3)?)?;
+        if !config.public_url.starts_with("https://") {
+            return Err(ConfigError::RedirectUri(config.redirect_uri));
+        }
+        Ok(Some(config))
+    }
+
+    /// Cookies carry `Secure` and the `__Host-` prefix when the server is served over https.
+    pub(crate) fn secure_cookies(&self) -> bool {
+        self.public_url.starts_with("https://")
+    }
+}
+
+/// A store failure; the request fails with 500 and the message is logged, never shown.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct WebStoreError(pub String);
+
+pub type WebResult<T> = Result<T, WebStoreError>;
+
+/// A board user as the web surface sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebUser {
+    pub user_id: i64,
+    /// The owner namespace (`name/agent`).
+    pub name: String,
+    /// A disabled user signs in to nothing and none of their keys authenticate.
+    pub disabled: bool,
+}
+
+/// A validated Entra identity. `(tid, oid)` is the key; the rest is shown, never matched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub tid: String,
+    pub oid: String,
+    pub display_name: Option<String>,
+    pub preferred_username: Option<String>,
+}
+
+/// Result of [`WebStore::create_user`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreateUser {
+    Created(WebUser),
+    /// The name exists; `bound` says whether it already belongs to an Entra identity.
+    NameTaken {
+        bound: bool,
+    },
+}
+
+/// Result of [`WebStore::bind_identity`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindUser {
+    /// No user had the name; it was created bound to the identity.
+    Created(WebUser),
+    /// An existing user without an identity was bound to it.
+    Bound(WebUser),
+    /// The name belongs to another identity already.
+    NameBound,
+}
+
+/// A credential as the admin API lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminKey {
+    pub user: String,
+    #[serde(flatten)]
+    pub key: HostKey,
+}
+
+/// A browser session row, keyed by the digest of the cookie value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub user_id: i64,
+    pub user_name: String,
+    /// What the page header shows (display name, else preferred_username, else the user name).
+    pub display: String,
+    /// The per-session CSRF token every POST form carries.
+    pub csrf: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    pub last_seen: i64,
+}
+
+/// A started sign-in, keyed by the digest of its `state`; taken once by the callback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginTxn {
+    pub pkce_verifier: String,
+    pub nonce: String,
+    /// A local path to return to after sign-in.
+    pub return_to: String,
+    pub created_at: i64,
+}
+
+/// A one-time `conde login` code, keyed by the digest of the code; taken once by redeem.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliCode {
+    pub user_id: i64,
+    pub user_name: String,
+    /// The CLI run's state; redeem must present the same value.
+    pub state: String,
+    /// The CLI run's PKCE S256 challenge; redeem must present its verifier.
+    pub challenge: String,
+    pub created_at: i64,
+}
+
+/// A just-created key awaiting its one display after the redirect, keyed by the digest of a
+/// one-time display token; taken once. The key itself is not stored, only its digest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyDisplay {
+    pub user_id: i64,
+    pub host_id: String,
+    /// Whether the key replaced live keys of its host.
+    pub replaced: bool,
+    pub key_digest: String,
+    pub created_at: i64,
+}
+
+/// One host credential of a user, as the keys page lists it (never the key itself).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostKey {
+    /// The digest's first 12 hex characters (the admin CLI's key id).
+    pub key_id: String,
+    pub host_id: String,
+    pub label: Option<String>,
+    pub created_at: Option<String>,
+    /// Last bridge activity of the host, when the store knows it.
+    pub last_seen: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+/// Result of [`WebStore::mint_host_key`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Minted {
+    /// Stored; `replaced` live keys of the same host were revoked in the same transaction.
+    Stored { replaced: u64 },
+    /// The host id belongs to another user.
+    HostTaken,
+    /// The user is disabled (checked in the same transaction as the mint).
+    Disabled,
+}
+
+/// The board's storage as the web surface needs it. Implemented over the board's store
+/// (SQLite locally, Postgres in the cloud); every method is one transaction and is called
+/// from a blocking thread. Times are unix seconds.
+pub trait WebStore: Send + Sync {
+    fn user_by_identity(&self, tid: &str, oid: &str) -> WebResult<Option<WebUser>>;
+    /// Creates user `name` bound to the identity, or reports the name as taken.
+    fn create_user(&self, identity: &Identity, name: &str) -> WebResult<CreateUser>;
+    /// Records the display-only profile fields seen at sign-in.
+    fn set_profile(&self, user_id: i64, identity: &Identity) -> WebResult<()>;
+    /// Whether the user is disabled (an unknown user counts as disabled).
+    fn user_disabled(&self, user_id: i64) -> WebResult<bool>;
+
+    /// Stores the session unless its user is disabled (or gone), checked in the same
+    /// transaction; false when refused.
+    fn insert_session(&self, id_digest: &str, session: &SessionRecord) -> WebResult<bool>;
+    fn session(&self, id_digest: &str) -> WebResult<Option<SessionRecord>>;
+    fn touch_session(&self, id_digest: &str, last_seen: i64) -> WebResult<()>;
+    fn delete_session(&self, id_digest: &str) -> WebResult<()>;
+
+    fn insert_login(&self, state_digest: &str, txn: &LoginTxn) -> WebResult<()>;
+    /// Returns and deletes the transaction.
+    fn take_login(&self, state_digest: &str) -> WebResult<Option<LoginTxn>>;
+
+    fn insert_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()>;
+    /// Returns and deletes the code.
+    fn take_cli_code(&self, code_digest: &str) -> WebResult<Option<CliCode>>;
+
+    fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()>;
+    /// Returns and deletes the display.
+    fn take_key_display(&self, token_digest: &str) -> WebResult<Option<KeyDisplay>>;
+
+    /// Deletes sessions, login transactions, CLI codes and key displays older than their limits.
+    fn purge_expired(&self, now: i64, limits: &Limits) -> WebResult<()>;
+
+    /// The user's credentials, newest first.
+    fn host_keys(&self, user_id: i64) -> WebResult<Vec<HostKey>>;
+    /// The user owning `host_id`, if the host exists.
+    fn host_owner(&self, host_id: &str) -> WebResult<Option<i64>>;
+    /// Creates the host for the user on first sight, revokes its live keys and stores the new
+    /// key's digest (device_credentials row with label and creation time); refuses a disabled
+    /// user in the same transaction.
+    fn mint_host_key(
+        &self,
+        user_id: i64,
+        host_id: &str,
+        label: &str,
+        token_digest: &str,
+        now: i64,
+    ) -> WebResult<Minted>;
+    /// Revokes the live keys of `host_id` when the user owns it; returns how many.
+    fn revoke_host(&self, user_id: i64, host_id: &str, now: i64) -> WebResult<u64>;
+
+    // admin API
+    /// The user named `name`, created without an identity on first sight.
+    fn ensure_user(&self, name: &str) -> WebResult<WebUser>;
+    /// Creates `name` bound to the identity, or binds an existing unbound `name` to it.
+    fn bind_identity(&self, name: &str, identity: &Identity) -> WebResult<BindUser>;
+    /// Every credential, newest first.
+    fn all_keys(&self) -> WebResult<Vec<AdminKey>>;
+    /// Revokes the live key whose id is `key_id`; returns its host.
+    fn revoke_key(&self, key_id: &str, now: i64) -> WebResult<Option<String>>;
+    /// Sets the user's disabled flag (disabling also deletes the user's browser sessions);
+    /// returns the user's hosts, or None for an unknown user.
+    fn set_disabled(&self, name: &str, disabled: bool) -> WebResult<Option<Vec<String>>>;
+}
+
+/// Lifetimes for [`WebStore::purge_expired`], in seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub session_idle: i64,
+    pub session_max: i64,
+    pub login_ttl: i64,
+    pub cli_code_ttl: i64,
+    pub key_display_ttl: i64,
+}
+
+/// The live bridge connections, as revocation needs them (the server implements it over its
+/// connection registry; this replica's connections only).
+pub trait BridgeRegistry: Send + Sync {
+    /// Closes the host's live bridge connection, if any.
+    fn disconnect_host(&self, host_id: &str);
+}
+
+/// Unix seconds.
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+pub fn system_clock() -> Clock {
+    Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default()
+    })
+}
+
+/// What every web and admin route shares: the store, the live connections, the clock.
+#[derive(Clone)]
+pub(crate) struct Core {
+    store: Arc<dyn WebStore>,
+    registry: Arc<dyn BridgeRegistry>,
+    clock: Clock,
+}
+
+impl Core {
+    fn now(&self) -> i64 {
+        (self.clock)()
+    }
+
+    /// Runs a store call on a blocking thread.
+    async fn store<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&dyn WebStore) -> WebResult<T> + Send + 'static,
+    ) -> WebResult<T> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || f(store.as_ref()))
+            .await
+            .map_err(|e| WebStoreError(format!("store task failed: {e}")))?
+    }
+}
+
+struct Inner {
+    core: Core,
+    config: WebConfig,
+    oidc: Oidc,
+}
+
+/// Shared state of the sign-in and keys routes.
+#[derive(Clone)]
+pub struct WebState(Arc<Inner>);
+
+impl WebState {
+    pub fn new(
+        config: WebConfig,
+        store: Arc<dyn WebStore>,
+        registry: Arc<dyn BridgeRegistry>,
+    ) -> WebState {
+        WebState::with_clock(config, store, registry, system_clock())
+    }
+
+    pub fn with_clock(
+        config: WebConfig,
+        store: Arc<dyn WebStore>,
+        registry: Arc<dyn BridgeRegistry>,
+        clock: Clock,
+    ) -> WebState {
+        let oidc = Oidc::new(&config);
+        WebState(Arc::new(Inner {
+            core: Core {
+                store,
+                registry,
+                clock,
+            },
+            config,
+            oidc,
+        }))
+    }
+
+    fn core(&self) -> &Core {
+        &self.0.core
+    }
+
+    fn now(&self) -> i64 {
+        self.core().now()
+    }
+
+    fn config(&self) -> &WebConfig {
+        &self.0.config
+    }
+
+    fn limits(&self) -> Limits {
+        let c = self.config();
+        let s = |d: Duration| d.as_secs() as i64;
+        Limits {
+            session_idle: s(c.session_idle),
+            session_max: s(c.session_max),
+            login_ttl: s(c.login_ttl),
+            cli_code_ttl: s(c.cli_code_ttl),
+            key_display_ttl: keys::SHOW_WITHIN,
+        }
+    }
+
+    async fn store<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&dyn WebStore) -> WebResult<T> + Send + 'static,
+    ) -> WebResult<T> {
+        self.core().store(f).await
+    }
+}
+
+/// The browser surface and the admin API as the server mounts them: each part is present
+/// only when configured.
+#[derive(Clone)]
+pub struct WebSetup {
+    pub entra: Option<WebConfig>,
+    /// The admin API's bearer key; the admin API is off without it.
+    pub admin_key: Option<String>,
+    pub store: Arc<dyn WebStore>,
+}
+
+impl std::fmt::Debug for WebSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSetup")
+            .field("entra", &self.entra)
+            .field("admin", &self.admin_key.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl WebSetup {
+    /// Entra sign-in from `ENTRA_*`, the admin API from `CONDE_ADMIN_KEY`; `Ok(None)` when
+    /// neither is configured.
+    pub fn from_env(store: Arc<dyn WebStore>) -> Result<Option<WebSetup>, ConfigError> {
+        let entra = WebConfig::from_env()?;
+        let admin_key = std::env::var("CONDE_ADMIN_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
+        if admin_key
+            .as_ref()
+            .is_some_and(|k| k.len() < admin::MIN_KEY_LEN)
+        {
+            return Err(ConfigError::AdminKey(admin::MIN_KEY_LEN));
+        }
+        if entra.is_none() && admin_key.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(WebSetup {
+            entra,
+            admin_key,
+            store,
+        }))
+    }
+
+    /// The configured routes over the server's connection registry.
+    pub fn router(self, registry: Arc<dyn BridgeRegistry>) -> Router {
+        let mut app = Router::new();
+        let tenant = self.entra.as_ref().map(|c| c.tenant_id.clone());
+        if let Some(config) = self.entra {
+            app = app.merge(router(WebState::new(
+                config,
+                self.store.clone(),
+                registry.clone(),
+            )));
+        }
+        if let Some(key) = self.admin_key {
+            let core = Core {
+                store: self.store,
+                registry,
+                clock: system_clock(),
+            };
+            app = app.merge(admin::router(AdminState::new(core, &key, tenant)));
+        }
+        app
+    }
+}
+
+/// `GET /`: the keys page (which sends a signed-out browser to sign in).
+async fn home() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::response::Redirect::to("/keys"),
+    )
+        .into_response()
+}
+
+/// The web routes, ready to merge into the server's router.
+pub fn router(state: WebState) -> Router {
+    Router::new()
+        .route("/", get(home))
+        .route("/auth/login", get(auth::login))
+        .route("/auth/callback", get(auth::callback))
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/cli", get(auth::cli_start))
+        .route("/auth/cli/redeem", post(auth::cli_redeem))
+        .route("/keys", get(keys::page).post(keys::create))
+        .route("/keys/created", get(keys::created))
+        .route("/keys/{host}/revoke", post(keys::revoke))
+        .with_state(state)
+}

@@ -1,0 +1,9 @@
+# The build needs the cargo workspace and the skills setup.rs embeds; everything else (target/, infra/,
+# .git/, docs, core dumps, local state) stays out of the context.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!skills/
+!README.md
+crates/**/target/

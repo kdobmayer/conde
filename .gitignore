@@ -1,0 +1,6 @@
+infra/terraform/*.tfstate*
+infra/terraform/.terraform/
+infra/terraform/*.bin
+target/
+dist/out/
+core.*

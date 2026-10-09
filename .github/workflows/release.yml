@@ -1,0 +1,172 @@
+name: release
+
+# Static Linux and macOS binaries with a SHA256SUMS file, published to the public
+# `dist` blob container that https://conde.nativeai.space/dist/* redirects to.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.98.0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  macos:
+    runs-on: macos-15
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            name: conde-darwin-arm64
+          - target: x86_64-apple-darwin
+            name: conde-darwin-x86_64
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build
+        run: cargo build --release --locked -p conde --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir out
+          cp target/${{ matrix.target }}/release/conde out/${{ matrix.name }}
+          file out/${{ matrix.name }}
+          (cd out && shasum -a 256 ${{ matrix.name }} > ${{ matrix.name }}.sha256)
+      - name: Smoke test (native target only)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: out/${{ matrix.name }} --version
+      - name: Identity probe (libproc ancestry walk, native target only)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          set -eu
+          bin="$PWD/out/${{ matrix.name }}"
+          tmp=$(mktemp -d)
+          export CONDE_SOCK="$tmp/run/conde.sock" CONDE_DATA="$tmp/data"
+          "$bin" daemon >"$tmp/daemon.log" 2>&1 &
+          daemon=$!
+          dump() {
+            rc=$?
+            set +e
+            if [ "$rc" != 0 ]; then
+              echo "--- daemon log ($tmp/daemon.log)"
+              cat "$tmp/daemon.log"
+              if kill -0 "$daemon" 2>/dev/null; then
+                echo "--- daemon still running"
+              else
+                wait "$daemon"
+                echo "--- daemon exit status: $?"
+              fi
+            fi
+            kill "$daemon" 2>/dev/null
+            exit "$rc"
+          }
+          trap dump EXIT
+          for _ in $(seq 1 100); do [ -S "$CONDE_SOCK" ] && break; sleep 0.1; done
+          echo "--- conde doctor"
+          "$bin" doctor || echo "--- doctor exit status: $?"
+          user=$(printf '%s' "$USER" | tr '[:upper:]' '[:lower:]')
+          # a bare runner: the walk finds no harness, so this shell acts as the human
+          "$bin" register ci.smoke
+          test "$("$bin" whoami)" = "$user/ci.smoke"
+          case $("$bin" resolve ci.smoke) in
+            "human:$user@"*) ;;
+            *) echo "ci.smoke does not resolve to the human"; exit 1 ;;
+          esac
+          # without session markers under a process named claude it must refuse;
+          # /bin/sh on macOS execs another shell and would lose the name, so copy bash
+          cp /bin/bash "$tmp/claude"
+          # shellcheck disable=SC2016 # the inner shell expands $0 and $?
+          if out=$("$tmp/claude" -c '"$0" whoami; rc=$?; exit $rc' "$bin" 2>&1); then
+            echo "whoami succeeded under claude: $out"
+            exit 1
+          fi
+          case $out in
+            *"no session markers, but this process runs under a claude agent"*) echo "refused as expected: $out" ;;
+            *) echo "unexpected output: $out"; exit 1 ;;
+          esac
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            name: conde-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            name: conde-linux-aarch64
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+      - name: cargo-zigbuild
+        # zig cross-compiles the bundled SQLite C code for both musl targets
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install cargo-zigbuild==0.23.4 ziglang==0.17.0
+          echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: cargo zigbuild --release --locked -p conde --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir out
+          cp target/${{ matrix.target }}/release/conde out/${{ matrix.name }}
+          file out/${{ matrix.name }}
+          (cd out && sha256sum ${{ matrix.name }} > ${{ matrix.name }}.sha256)
+      - name: Smoke test (native target only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: out/${{ matrix.name }} --version
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: conde-*
+          merge-multiple: true
+          path: out
+      - name: Assemble
+        run: |
+          version="v$(sed -n 's/^version = "\(.*\)"/\1/p' crates/conde/Cargo.toml | head -n 1)"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match crates/conde version $version" >&2
+            exit 1
+          fi
+          cp dist/install.sh out/install.sh
+          echo "$version" > out/latest
+          (cd out && sha256sum -c ./*.sha256)
+          # the integrity contract install.sh checks: one line per published file
+          sums=$(cd out && find . -maxdepth 1 -type f ! -name '*.sha256' ! -name SHA256SUMS -exec basename {} \; | sort | xargs sha256sum)
+          printf '%s\n' "$sums" > out/SHA256SUMS
+          cat out/SHA256SUMS
+          ls -l out
+      - uses: azure/login@v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Upload to the dist container
+        run: az storage blob upload-batch --auth-mode login --account-name stconde -d dist -s out --overwrite

@@ -1,2 +1,2 @@
-image       = "crnative.azurecr.io/conde:f182865"
+image       = "crnative.azurecr.io/conde:1be9973"
 target_port = 8080

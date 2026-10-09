@@ -597,9 +597,10 @@ already revoked (admin API, checked 2026-10-09); Astra's Codex thread registers 
   is the new, empty local `conde.db`, with the daemon stopped. Nothing writes to it until both
   steps validate. On any failure the file is discarded and the restore rerun from scratch, so a
   partial local board never starts.
-  - **H2**: `conde import --from ~/.local/share/kond`. First check that the directory's file count
-    matches the 59220-file snapshot on the share (it has been unchanged since kond stopped at 02:45
-    UTC). Validation: the v1 checks (every source row present, cursors at or past kond's), with
+  - **H2**: `conde import --from ~/.cache/conde-snapshot-final --expect-files 59220`. The source is
+    the frozen copy of the share snapshot, verified file for file against the share (H-pre,
+    2026-10-09), never `~/.local/share/kond`: that directory kept changing after kond stopped (a kond
+    session still writes to it), so its file count is not 59220 and its content is not the snapshot. Validation: the v1 checks (every source row present, cursors at or past kond's), with
     sha256 of every body and every attachment instead of the 50-body sample and sizes.
   - **H3**: a one-off copy of class (b), by the frozen ids. It goes through a temporary owner-only
     read on central, `history.copy {ids}`. That read refuses any id that is not class (b) for the

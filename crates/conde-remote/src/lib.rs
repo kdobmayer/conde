@@ -7,6 +7,7 @@
 //! text message, every frame carries `"v":1` and a `"type"`.
 
 mod client;
+pub mod mcp_protocol;
 mod protocol;
 mod server;
 pub mod web;
@@ -34,6 +35,23 @@ pub struct WebPrincipal {
     pub user: String,
 }
 
+/// The caller of one remote MCP request (docs/REMOTE-MCP.md): the signed-in user through one
+/// grant, never a session and never an agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpCaller {
+    pub user_id: i64,
+    pub user: String,
+    pub grant_id: String,
+    pub client_host: String,
+    /// The legacy revision of a request without per-request metadata, from its
+    /// `MCP-Protocol-Version` header (already checked to be a legacy one); None for a modern
+    /// request and for `initialize`.
+    pub legacy: Option<String>,
+    /// Set when one of the caller's buckets ran out: a `tools/call` then answers the tool error
+    /// `rate limited; retry in N s`.
+    pub retry_after: Option<u64>,
+}
+
 /// Executes one request object (DESIGN.md §4) for an authenticated principal and returns
 /// one response object. Host and user are stamped from `principal`, never from the body.
 pub trait Dispatcher: Send + Sync {
@@ -49,6 +67,12 @@ pub trait Dispatcher: Send + Sync {
         let id = request.get("request_id").cloned().unwrap_or(serde_json::Value::Null);
         serde_json::json!({"v": 1, "type": "response", "request_id": id, "ok": false,
             "error": {"code": "forbidden", "message": "this server takes no browser requests"}})
+    }
+    /// One JSON-RPC request (never a notification) of the remote MCP endpoint, authenticated
+    /// and with its headers checked; returns the JSON-RPC response. Default: refused.
+    fn mcp(&self, _caller: &McpCaller, request: serde_json::Value) -> serde_json::Value {
+        let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        mcp_protocol::error_response(&id, mcp_protocol::METHOD_NOT_FOUND, "this server serves no MCP tools", None)
     }
     /// Whether the store is reachable; `GET /healthz` answers 503 otherwise.
     fn healthy(&self) -> bool {

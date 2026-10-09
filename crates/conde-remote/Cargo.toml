@@ -12,6 +12,7 @@ axum-extra = { version = "0.12.6", default-features = false, features = ["cookie
 askama = { version = "0.16.1", default-features = false, features = ["derive", "std", "urlencode"] }
 base64 = "0.23.1"
 futures-util = "0.3.34"
+governor = { version = "=0.10.4", default-features = false, features = ["std", "dashmap"] }
 openidconnect = { version = "=4.0.1", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 rand = "0.10.3"

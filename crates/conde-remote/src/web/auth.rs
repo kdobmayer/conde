@@ -101,24 +101,29 @@ struct Http(reqwest::Client);
 
 impl Http {
     fn new() -> Http {
-        let roots = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default TLS versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let client = reqwest::Client::builder()
-            .tls_backend_preconfigured(tls)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .expect("the HTTP client configuration is static");
-        Http(client)
+        Http(http_client(HTTP_TIMEOUT))
     }
+}
+
+/// The server's outbound HTTP client: rustls with ring and the Mozilla roots, no redirects,
+/// `timeout` for the whole exchange.
+pub(crate) fn http_client(timeout: Duration) -> reqwest::Client {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    reqwest::Client::builder()
+        .tls_backend_preconfigured(tls)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+        .expect("the HTTP client configuration is static")
 }
 
 impl<'c> AsyncHttpClient<'c> for Http {

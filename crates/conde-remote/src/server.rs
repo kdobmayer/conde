@@ -367,6 +367,7 @@ pub async fn start(
             let app = app.merge(routes);
             match state {
                 Some(web) => {
+                    let mcp = crate::web::mcp::McpState { web: web.clone(), dispatcher: shared.dispatcher.clone() };
                     let ui = crate::web::app::AppState {
                         web,
                         dispatcher: shared.dispatcher.clone(),
@@ -375,7 +376,7 @@ pub async fn start(
                     };
                     *shared.app.lock().unwrap_or_else(|p| p.into_inner()) = Some(ui.clone());
                     tracing::info!(embedded = crate::web::app::embedded(), "web app enabled");
-                    app.merge(crate::web::app::routes(ui))
+                    app.merge(crate::web::app::routes(ui)).merge(crate::web::mcp::routes(mcp))
                 }
                 None => app,
             }
@@ -384,7 +385,7 @@ pub async fn start(
     };
     let mut stop = shutdown_rx;
     let task = tokio::spawn(async move {
-        axum::serve(listener, app)
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(async move { protocol::shutdown_signal(&mut stop).await })
             .await
     });

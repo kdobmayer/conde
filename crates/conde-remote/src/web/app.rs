@@ -547,9 +547,10 @@ mod tests {
         ] {
             assert!(app_file(path).is_none(), "{path:?}");
         }
-        if embedded() {
-            assert!(app_file("version.json").is_some());
-            assert!(app_file("favicon.svg").is_some());
+        // Whatever the build holds (none, or one older than a given file) is served by name.
+        match app_files().iter().next() {
+            Some(name) => assert!(app_file(&name["app/".len()..]).is_some(), "{name}"),
+            None => eprintln!("no web build embedded: the lookup of a real file is not checked"),
         }
     }
 

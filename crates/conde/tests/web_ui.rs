@@ -235,7 +235,7 @@ async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>)
     assert_eq!(status, StatusCode::OK);
     assert!(keys.contains(r#"<link rel="icon" href="/app/favicon.svg" type="image/svg+xml">"#), "{keys}");
     let icon = b.step.get(ui.env.url("/favicon.ico")).send().await.unwrap();
-    if conde_remote::web::app_embedded() {
+    if icons_built() {
         assert!(keys.contains(r#"<a class="brand" href="/keys"><svg "#), "{keys}");
         assert_eq!(icon.status(), StatusCode::OK);
         assert_eq!(icon.headers()[header::CONTENT_TYPE], "image/png");
@@ -911,6 +911,17 @@ impl Browser {
 
 // --- static files without sign-in ----------------------------------------------------------------
 
+/// Whether the web build the tests run with carries the icons (none, or one made before the
+/// mark, does not); the icon checks are skipped otherwise.
+fn icons_built() -> bool {
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../conde-remote/web-dist/app");
+    let built = ["favicon.svg", "mark.svg", "favicon-light-32.png", "favicon-dark-32.png"].iter().all(|f| dist.join(f).is_file());
+    if !built {
+        eprintln!("the web build carries no icons (run npm run build in web/): icon checks skipped");
+    }
+    built
+}
+
 /// A server without sign-in serves the app's static files and the icons, and nothing else.
 #[tokio::test(flavor = "multi_thread")]
 async fn without_sign_in_only_the_static_files_are_served() {
@@ -919,7 +930,7 @@ async fn without_sign_in_only_the_static_files_are_served() {
     let server = conde::cloud::start(d, "127.0.0.1:0".parse().unwrap(), ServerConfig::default()).await.unwrap();
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
-    if web::app_embedded() {
+    if icons_built() {
         for path in ["/app/favicon.svg", "/app/mark.svg", "/app/favicon-light-32.png", "/app/favicon-dark-32.png", "/favicon.ico"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{path}");
@@ -946,7 +957,7 @@ async fn without_sign_in_only_the_static_files_are_served() {
     assert_eq!(readme.status(), StatusCode::OK);
     let html = readme.text().await.unwrap();
     assert!(html.contains("/app/favicon.svg"), "{html}");
-    if web::app_embedded() {
+    if icons_built() {
         assert!(html.contains("<svg "), "{html}");
     }
     server.shutdown().await.unwrap();

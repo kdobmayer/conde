@@ -216,7 +216,7 @@ fn endpoint_of(address: &str) -> Option<Endpoint> {
 impl NotificationSource for Board {
     fn pending_for_host(&self, host_id: &str, bridge_instance: &str) -> Vec<Notify> {
         match self.poll(host_id, bridge_instance) {
-            Polled::Due(due) => due,
+            Polled::Due(due) | Polled::Routed { notifies: due, .. } => due,
             Polled::Fenced => Vec::new(),
         }
     }

@@ -962,7 +962,7 @@ impl Conn {
             self.instance.clone(),
         );
         let pending = match tokio::task::spawn_blocking(move || source.poll(&host, &instance)).await {
-            Ok(Polled::Due(p)) => p,
+            Ok(Polled::Due(p) | Polled::Routed { notifies: p, .. }) => p,
             Ok(Polled::Fenced) => {
                 // Durably fenced (an event may have been missed): close this connection.
                 let bridges = self.shared.bridges.lock().unwrap_or_else(|p| p.into_inner());

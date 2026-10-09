@@ -97,6 +97,22 @@ pub trait NotificationSource: Send + Sync {
     /// Makes `bridge_instance` the host's single active bridge, or refuses an instance that a
     /// newer one already superseded.
     fn fence(&self, host_id: &str, bridge_instance: &str) -> FenceResult;
+    /// Admits a well-formed hello: fences its instance in, or refuses its protocol for this
+    /// host (a v1 hello from a host migrated to v2, a v2 hello from one that is not), in the
+    /// same store transaction as the fence. Default: [`NotificationSource::fence`] for every
+    /// protocol.
+    fn admit(&self, host_id: &str, hello: &Hello) -> Admission {
+        match self.fence(host_id, &hello.bridge_instance) {
+            FenceResult::Active => Admission::Active,
+            FenceResult::Fenced => Admission::Fenced,
+        }
+    }
+    /// A v2 instance's poll: new attempts are claimed only up to `window` minus the instance's
+    /// attempts without a first outcome, every open attempt is offered again, and the host's
+    /// routes come from the same snapshot ([`Polled::Routed`]). Default: [`NotificationSource::poll`].
+    fn poll_window(&self, host_id: &str, bridge_instance: &str, _window: u32) -> Polled {
+        self.poll(host_id, bridge_instance)
+    }
     /// The bridge's full set of live harness endpoints: from its hello (after a successful
     /// fence) and again after every `endpoints` diff frame. Default: ignored.
     fn endpoints(&self, _host_id: &str, _bridge_instance: &str, _endpoints: &[Endpoint]) {}
@@ -115,8 +131,21 @@ pub trait NotificationSource: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Polled {
     Due(Vec<Notify>),
+    /// v2: the due notifications and the host's current routes, read in one snapshot.
+    Routed { notifies: Vec<Notify>, routes: Routes },
     /// A newer instance fenced this one.
     Fenced,
+}
+
+/// Result of [`NotificationSource::admit`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// The instance is now the host's active bridge.
+    Active,
+    /// A newer instance superseded this one.
+    Fenced,
+    /// The hello's protocol is refused for this host; the connection is closed with `code`.
+    Refused { code: String, message: String },
 }
 
 /// What the store announced after a commit (see [`NotificationSource::events`]).

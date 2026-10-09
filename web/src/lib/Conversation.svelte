@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { RpcError, rpc } from './api';
-	import { onBoard, short } from './board.svelte';
+	import { onBoard, sameOwner, short } from './board.svelte';
 	import { acceptEarlier, acceptNewest, emptyThread } from './thread';
 	import { bytes, clock, day } from './time';
 	import type { History, Message } from './types';
@@ -47,7 +47,7 @@
 		const mine = ++generation;
 		try {
 			const h = await rpc<History>('owner.history', query({ limit: PAGE }));
-			if (mine !== generation) return;
+			if (mine !== generation || !sameOwner()) return;
 			const stick = first || !thread.paged || nearBottom();
 			thread = acceptNewest(thread, h);
 			messages = thread.messages;
@@ -72,6 +72,7 @@
 		const height = scroller.scrollHeight;
 		try {
 			const h = await rpc<History>('owner.history', query({ before: first.seq, limit: PAGE }));
+			if (!sameOwner()) return;
 			thread = acceptEarlier(thread, h);
 			messages = thread.messages;
 			more = thread.more;
@@ -97,6 +98,7 @@
 		}
 		try {
 			const r = await rpc<{ message: Message }>('owner.message', { id });
+			if (!sameOwner()) return;
 			quoted = { ...quoted, [id]: r.message };
 		} catch {
 			quoted = { ...quoted, [id]: 'missing' };

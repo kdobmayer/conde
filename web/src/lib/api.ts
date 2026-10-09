@@ -1,4 +1,4 @@
-/** The board over `/v1/rpc` as the signed-in human: session cookie plus the CSRF header. */
+/** The board over `/v1/rpc` as the signed-in owner: session cookie plus the CSRF header. */
 
 import type { Session } from './types';
 
@@ -11,6 +11,13 @@ export class RpcError extends Error {
 }
 
 let session: Session | null = null;
+const sessionListeners = new Set<(s: Session) => void>();
+
+/** Calls `fn` with every session loaded, the reload after a stale token included. */
+export function onSession(fn: (s: Session) => void): () => void {
+	sessionListeners.add(fn);
+	return () => sessionListeners.delete(fn);
+}
 
 /** Sends the browser to sign in, then back to the current view. */
 export function signIn(): void {
@@ -24,8 +31,10 @@ export async function loadSession(): Promise<Session> {
 		throw new RpcError('unauthenticated', 'Signed out');
 	}
 	if (!r.ok) throw new RpcError('internal', `The server answered ${r.status}`);
-	session = (await r.json()) as Session;
-	return session;
+	const loaded = (await r.json()) as Session;
+	session = loaded;
+	for (const fn of sessionListeners) fn(loaded);
+	return loaded;
 }
 
 export function currentSession(): Session | null {

@@ -4,7 +4,7 @@
  * refetch what they show. Without the socket the app polls every 15 s.
  */
 
-import { loadSession, rpc, signIn } from './api';
+import { currentSession, loadSession, onSession, rpc, signIn } from './api';
 import type { Fleet, Rail, Session } from './types';
 
 export type Topic = 'messages' | 'delivery' | 'fleet';
@@ -22,6 +22,24 @@ export const board = $state({
 	/** Ticks once a second: relative times and retry clocks read it. */
 	now: Date.now()
 });
+
+/**
+ * Every session load lands here. A new token for the same owner just replaces the session; a
+ * different owner (signed in from another tab) makes everything on screen the old owner's
+ * (rail, routes, open conversation), so the app starts over at home.
+ */
+onSession((s) => {
+	if (board.session && board.session.user !== s.user) {
+		location.replace('/');
+		return;
+	}
+	board.session = s;
+});
+
+/** Whether answers now come for the owner on screen (false while switching to another one). */
+export function sameOwner(): boolean {
+	return board.session !== null && currentSession()?.user === board.session.user;
+}
 
 type Listener = (topics: Topic[]) => void;
 const listeners = new Set<Listener>();
@@ -51,7 +69,9 @@ export function changed(topics: Topic[]): void {
 
 export async function refreshRail(): Promise<void> {
 	try {
-		board.rail = await rpc<Rail>('owner.list');
+		const rail = await rpc<Rail>('owner.list');
+		if (!sameOwner()) return;
+		board.rail = rail;
 		board.error = '';
 	} catch (e) {
 		board.error = (e as Error).message;
@@ -62,6 +82,7 @@ export async function refreshFleet(): Promise<void> {
 	try {
 		const asked = Date.now();
 		const fleet = await rpc<Fleet>('fleet.list');
+		if (!sameOwner()) return;
 		board.skewMs = Date.parse(fleet.now) - (asked + Date.now()) / 2;
 		board.fleet = fleet;
 	} catch (e) {
@@ -114,7 +135,7 @@ let started = false;
 export async function start(): Promise<void> {
 	if (started) return;
 	started = true;
-	board.session = await loadSession();
+	await loadSession();
 	await Promise.all([refreshRail(), refreshFleet()]);
 	connect();
 	setInterval(() => (board.now = Date.now()), 1000);

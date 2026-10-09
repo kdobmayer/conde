@@ -110,6 +110,8 @@ export interface FleetAgent {
 	held: number | null;
 	stuck: number | null;
 	last_reached: string | null;
+	/** Reached at some point; with no `last_reached`, at a time not recorded. */
+	ever_reached: boolean | null;
 	own: boolean;
 }
 

@@ -27,7 +27,7 @@ test('Conversation keeps "Load earlier" when its initial request is superseded',
 	const pending = [];
 	const rpc = () => new Promise((resolve) => pending.push(resolve));
 	const body = stripTypeScriptTypes(script) + '\nreturn {refresh, snapshot: () => ({more, loading, messages})};';
-	const names = ['$props', '$state', '$derived', '$effect', 'rpc', 'document', 'tick', 'short', 'onBoard', 'RpcError'];
+	const names = ['$props', '$state', '$derived', '$effect', 'rpc', 'document', 'tick', 'short', 'onBoard', 'RpcError', 'sameOwner'];
 	const c = new Function(...names, 'acceptNewest', 'acceptEarlier', 'emptyThread', body)(
 		() => ({ agent: 'k/worker', target: 'david/scout' }),
 		(x) => x,
@@ -39,6 +39,7 @@ test('Conversation keeps "Load earlier" when its initial request is superseded',
 		(x) => x,
 		() => () => {},
 		class extends Error {},
+		() => true,
 		acceptNewest,
 		acceptEarlier,
 		emptyThread

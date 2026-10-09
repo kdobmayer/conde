@@ -89,7 +89,11 @@
 									{/if}
 									{#if a.own && a.kind !== 'human'}
 										<span class="muted reach">
-											{a.last_reached ? `reached ${ago(a.last_reached, board.now + board.skewMs)}` : 'never reached'}
+											{a.last_reached
+												? `reached ${ago(a.last_reached, board.now + board.skewMs)}`
+												: a.ever_reached
+													? 'reached (time not recorded)'
+													: 'never reached'}
 										</span>
 									{/if}
 									{#if a.held}<span class="tag warn">{a.held} held</span>{/if}

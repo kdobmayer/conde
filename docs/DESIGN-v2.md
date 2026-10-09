@@ -6,7 +6,8 @@ design to build; v1 (docs/DESIGN.md) stays the description of what is live. Noth
 implemented yet. Revised the same day with Astra's design review (docs/DESIGN-v2-astra-review-1.md);
 this revision is the V0 contract the implementation lanes build on. The delivery contract (bounded
 lossless admission, the restart contract) was completed after Astra's second pass
-(docs/DESIGN-v2-astra-review-2.md).
+(docs/DESIGN-v2-astra-review-2.md), and the per-origin receipt budget after the third
+(docs/DESIGN-v2-astra-review-3.md).
 
 ## 1. Goal and non-goals
 
@@ -272,11 +273,34 @@ board's outcome budget is full.
   - **Outcomes and receipts.** Outcomes and late receipts never block the notifier thread. They go
     into a per-board map keyed by token, where the latest status wins (a terminal status is never
     replaced by a non-terminal one), and the board's task drains
-    the map into the client's outcome book (`bridge.report`) whenever the book has room. The map
-    holds at most one entry per in-flight or injected attempt, so it is bounded by W plus the
-    notifier's own cap on remembered injections (`REMEMBERED` in `harness.rs`). A late `held` or
-    `delivered` receipt of an already injected attempt therefore always has a slot: a full board
-    can delay a terminal receipt but cannot drop it.
+    the map into the client's outcome book (`bridge.report`) whenever the book has room. A
+    terminal outcome stays in the map until the client has accepted it into its book (from then
+    on the client owns it, under the restart contract below).
+  - **Receipt budget: one reservation per unresolved attempt.** The window frees on the first
+    outcome, so `accepted` and `held` attempts are not bounded by it. v1's notifier cannot be the
+    bound either: `harness.rs` keeps one global, evicting `msg_id -> attempt` cache (`REMEMBERED`,
+    the oldest entry is popped whatever its state, and a receipt for a popped entry is dropped).
+    So:
+    - each origin (local, and each board) has its own receipt budget R (default 256; local
+      independent of every board);
+    - the notifier thread reserves one slot of the job's origin before injecting it;
+    - the slot, the daemon's token-map entry and the notifier's mapping are held together, and
+      nothing evicts them: the notifier's eviction is removed, and its mappings are released only
+      by an explicit `forget(token)` on the `Notifier` trait;
+    - all three are released when the attempt resolves: its terminal outcome (including a failed
+      injection and a Codex `delivered`) has been accepted by the origin's client book, or the
+      daemon has handed the client an `abandoned` for it.
+
+    The daemon reports `abandoned` when the session is replaced (below), or when the session is no
+    longer live (the v1 per-pass liveness check, applied to every unresolved attempt, reason
+    `recipient offline`). After a process death the restart contract applies. An origin with no
+    free slot pauses new injections only: its queued jobs stay retained (the server window simply
+    fills), the notifier keeps polling receipts, and the board's task keeps handling `outcome_ack`
+    and `routes`. Other origins and local delivery continue. A live session that keeps up to R
+    attempts held pauses its origin, which is the honest bound; `doctor` shows slots used per
+    origin. Memory is bounded by the sum of W and R over the origins, and a late `held` or
+    `delivered` receipt of an injected attempt always finds its mapping: a full board can delay a
+    terminal receipt but cannot drop it.
   - **Pause and recovery without a restart.** When the book stops draining (the server stops
     acking, or its budget is full), first outcomes stop reaching the server. The window then stays
     full and the server stops pushing, and the board pauses with bounded memory. The board's
@@ -618,6 +642,13 @@ server is involved), then run once live on homepc with a teammate:
   - every job the daemon accepted is injected and settled exactly as in the contract, the late
     receipt is settled, and the notifications beyond the window are pushed afterwards;
   - `routes` frames and `outcome_ack` frames are processed throughout.
+- **G11b retention under healthy acks** (small injectable R): an attempt is held, then first-outcome
+  traffic that is acknowledged normally continues from its own origin and from another origin
+  beyond R. Checks:
+  - no unresolved mapping is evicted;
+  - the held attempt's origin pauses at R while the other origin and local delivery continue;
+  - the original attempt's terminal receipt arrives late and is settled without a restart, and
+    the paused origin then resumes.
 - **G12 a lost board**: the board revokes the host's credential, and separately another instance
   fences it. The connection stops, the daemon and local delivery keep running, and `doctor` names
   the state.
@@ -648,7 +679,7 @@ First increment = local + one shared board + publish (V0 to V3). Fewest lanes th
 |---|---|---|
 | V0 contract (standalone, before V1 to V3 start; Astra's second pass) | This document as amended, plus one commit of the shared types: `Kind::Mailbox`, `Endpoint::Mailbox`, hello `proto` and `window`, required `Notify` fields, the `routes` frame, the outcome status and reason enums, op names and bodies of sections 6 and 9 (including idempotency and generation fields), the `publications`/`board_ops` schema, response `board` labels | compiles; protocol round-trip tests; Astra's second pass clean |
 | V1 shared board | Section 6 on both backends: migration 0006 + SQLite rebuild, `mailbox.*` with generations, the `routes` push, `board.info`, `host.migrate_preview`/`host.migrate_v2` with v1 fencing, mailbox-only refusals, closed reasons, non-disclosure, target-free listings, fleet rule for mailbox rows, mixed v1/v2 hosts, the admission window in `bridge.claim` and `conde-remote` `server.rs` | G5 (server half), G11 (server half), G8, G15 (server half); the v1 cloud suite still green on SQLite and on a real PG 18 |
-| V2 daemon | Section 5, and the `conde-remote` client (`client.rs`): single daemon shape, connection-local failure, resolver, `publications` + `board_ops` with resume, credential move and alias pinning, the multiplexer (window, retention invariant, per-board outcome map, tokens, incarnations), admission, outcome normalization and sanitizing, actor translation, endpoint reporting, reconciliation, aggregate views | G1 to G7 and G11 to G17 in an in-process two-host test |
+| V2 daemon | Section 5, and the `conde-remote` client (`client.rs`): single daemon shape, connection-local failure, resolver, `publications` + `board_ops` with resume, credential move and alias pinning, the multiplexer (window, retention invariant, per-board outcome map, per-origin receipt budget, tokens, incarnations), the non-evicting notifier mapping with `forget` (`harness.rs`, `notify.rs`), admission, outcome normalization and sanitizing, actor translation, endpoint reporting, reconciliation, aggregate views | G1 to G7 and G11 to G17 in an in-process two-host test |
 | V3 surface | Section 7: CLI commands and printing, MCP `board` with the same rules, the `setup` unit rewrite plus the default-board and migration-review prompts, skills, README | cli_wiring + mcp tests; README path in a fresh HOME ends with `doctor` all clear |
 | L9 (running) | section 8 owner view | G9 |
 | H-pre (before the switch) | H1 inventory and the frozen manifest; the H2 hash validation in the importer; the H3 one-off copy and `history.copy` | G10, first two parts, run on a rehearsal copy |

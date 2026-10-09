@@ -11,6 +11,11 @@ build is embedded into the `conde` binary (crates/conde-remote, rust-embed) and 
     npm run check    # svelte-kit sync + svelte-check, warnings fail
     npm test         # node --test: API client and pagination logic
     npm run build    # writes ../crates/conde-remote/web-dist (git-ignored)
+    npm run icons    # after changing src/lib/mark.ts: rewrites static/app (needs rsvg-convert)
+
+The mark in `src/lib/mark.ts` is the one source of the header mark, the favicons and the
+`mark.svg` the server inlines in its own pages; the generated files are committed, and a test
+fails when they no longer match the mark.
 
 Build the web app before `cargo build` when the binary should carry it; without it the server
 answers `/` with a short page that links to the keys page. The server image (Dockerfile) and the

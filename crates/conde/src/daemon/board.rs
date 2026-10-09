@@ -908,6 +908,18 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_finished_on_board_info_answers_its_result() {
+        let (_dir, _rt, core, conn, _) = setup();
+        let (migration, answer, at, _) = desk_collision(&core);
+        let mut info = json!({"name": "dakai", "owner": "krisz", "host": "homepc", "mailbox_only": true});
+        super::super::publish::finish_pending(&core, &conn, &migration, OpOutcome::Done(answer, None), &mut info).unwrap();
+        assert_eq!(info["mailbox_only"], true);
+        assert_eq!(info["migration"]["bindings"][0]["name"], "desk");
+        assert_eq!(info["migration"]["moved"], json!([{"name": "desk.kond", "to": "desk", "address": at.to_string()}]));
+        assert_eq!(names_at(&core, &at), ["desk"]);
+    }
+
+    #[test]
     fn a_board_that_reports_the_switch_does_not_connect_past_a_pending_local_apply() {
         let (_dir, _rt, core, conn, _) = setup();
         let (migration, _, _, _) = desk_collision(&core);

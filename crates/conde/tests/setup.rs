@@ -727,6 +727,30 @@ fn the_review_takes_names_none_or_declines() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A switch the board applied and the daemon finished on board.info (after the human freed a
+/// session): its result, the moved binding included, is printed like a fresh switch.
+#[test]
+fn a_switch_finished_on_board_info_prints_its_result() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    enrolled(&env);
+    let mut host = Fake::new(&env, &[]);
+    let mut info = board_info(true);
+    info["migration"] = manifest(&["desk"]);
+    host.daemon.insert("board.info", Ok(info));
+    let mut out = Vec::new();
+    assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true).unwrap());
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(
+        text,
+        "boards: dakai: switched to v2; published: desk; on this host's local board only: 1 names\n\
+         boards: dakai: lane.v0 kept its local binding (a live session holds it); its former address codex:th-7@box is in conde doctor\n\
+         boards: dakai: session claude:5f2c@box moved from the local name desk.kond to desk; desk.kond keeps its messages, unbound\n\
+         boards: dakai: host box (account krisz) is on v2; publish names with: conde publish <name> --board dakai\n"
+    );
+    assert_eq!(ops(&host).len(), 1, "no second migrate call");
+}
+
 #[test]
 fn a_migrated_host_is_not_reviewed_and_an_empty_one_switches_with_nothing_published() {
     let root = temp_root();

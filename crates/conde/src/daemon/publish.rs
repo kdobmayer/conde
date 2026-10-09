@@ -345,16 +345,32 @@ pub async fn board_info(core: &Arc<Core>, req: &Request) -> Result<Value, Refusa
             .local_tx(|tx| Ok(tx.migrate_op(&conn.alias)?))
             .map_err(internal)?
             .filter(|o| o.state == BoardOpState::Pending);
+        let mut answer = serde_json::to_value(&info).map_err(|e| refuse(ErrorCode::Internal, e.to_string()))?;
         if let Some(op) = pending {
             let outcome = board::send_op(&conn, &op, core.mux.tuning.call_timeout).await;
-            if let OpOutcome::Pending(why) = &outcome {
-                return Err(refuse(ErrorCode::Internal, format!("{}: the switch is pending (op {}): {why}", conn.alias, op.op_id)));
-            }
-            board::finish_op(core, &conn, &op, outcome)?;
+            finish_pending(core, &conn, &op, outcome, &mut answer)?;
         }
         board::adopt_migrated(core, &conn).map_err(internal)?;
+        return Ok(answer);
     }
     serde_json::to_value(&info).map_err(|e| refuse(ErrorCode::Internal, e.to_string()))
+}
+
+/// Finishes a pending migrate op on the board's answer; `info` then carries the switch's result
+/// (manifest, conflicts, moved) under `migration`, for setup to print.
+pub(crate) fn finish_pending(
+    core: &Arc<Core>,
+    conn: &Arc<BoardConn>,
+    op: &BoardOp,
+    outcome: OpOutcome,
+    info: &mut Value,
+) -> Result<(), Refusal> {
+    if let OpOutcome::Pending(why) = &outcome {
+        return Err(refuse(ErrorCode::Internal, format!("{}: the switch is pending (op {}): {why}", conn.alias, op.op_id)));
+    }
+    board::finish_op(core, conn, op, outcome)?;
+    info["migration"] = migrated(core, conn, &op.op_id)?;
+    Ok(())
 }
 
 /// The local apply of a migration manifest, in one transaction (idempotent): every former

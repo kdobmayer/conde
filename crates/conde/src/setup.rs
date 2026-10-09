@@ -828,14 +828,18 @@ fn short_date(at: &str) -> &str {
 /// human asked for it with `conde boards --migrate`).
 pub fn migrate_review(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &str, explicit: bool) -> anyhow::Result<bool> {
     let later = format!("until then {alias} stays local-only on this host; the review: conde boards --migrate {alias}");
-    let info = match host.daemon(&env.socket, op::BOARD_INFO, Some(alias), json!({})) {
-        Ok(v) => serde_json::from_value::<BoardInfo>(v).context("board.info answer")?,
+    let (info, finished) = match host.daemon(&env.socket, op::BOARD_INFO, Some(alias), json!({})) {
+        Ok(v) => (serde_json::from_value::<BoardInfo>(v.clone()).context("board.info answer")?, v.get("migration").cloned()),
         Err(why) => {
             writeln!(out, "boards: {alias}: not reached through the daemon ({why}); {later}")?;
             return Ok(false);
         }
     };
     if info.mailbox_only {
+        // a switch the daemon finished just now (its local apply had been pending)
+        if let Some(r) = finished {
+            print_switch(out, alias, &r)?;
+        }
         writeln!(out, "boards: {alias}: host {} (account {}) is on v2; publish names with: conde publish <name> --board {alias}", info.host, info.owner)?;
         return Ok(true);
     }
@@ -960,6 +964,12 @@ fn apply_migration(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &
             return Ok(false);
         }
     };
+    print_switch(out, alias, &r)?;
+    Ok(true)
+}
+
+/// A switch's result: what is published, the kept conflicts, the moved sessions.
+fn print_switch(out: &mut dyn Write, alias: &str, r: &Value) -> anyhow::Result<()> {
     let manifest: Manifest = serde_json::from_value(r.clone()).context("host.migrate_v2 answer")?;
     let published: Vec<&str> = manifest.bindings.iter().filter(|b| b.published.is_some()).map(|b| b.name.as_str()).collect();
     let local = manifest.bindings.len() - published.len();
@@ -983,7 +993,7 @@ fn apply_migration(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &
             m["name"].as_str().unwrap_or_default()
         )?;
     }
-    Ok(true)
+    Ok(())
 }
 
 fn read_text(path: &Path) -> anyhow::Result<String> {

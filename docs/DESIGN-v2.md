@@ -528,6 +528,10 @@ Settled while building this section (lane V1):
 - On a v2 connection an outcome outside the closed statuses and reasons is acked `rejected` and not
   recorded; `bridge.report` from a migrated host refuses it too. A held attempt whose mailbox leaves
   the endpoint set is abandoned with reason `recipient offline`.
+- An outcome for an attempt whose target binding is no longer the recipient's current one (a
+  takeover, an unpublish, a re-register) is recorded `abandoned` (`recipient rebound`) inside the
+  report transaction, whatever its status, `delivered` included; the notification is re-attempted
+  at the current route instead of ending at the old one.
 - Preview source: a message counts as imported when the board created no notification for it and it
   is dated before a notified message committed earlier (the importer creates none and writes kond's
   dates; traffic sent here is dated at its commit). Evidence is ordered by via, counterpart, source.

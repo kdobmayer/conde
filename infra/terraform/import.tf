@@ -4,7 +4,7 @@
 # to mount SMB, so this account is separate from everything else, holds only the snapshot, and dies with the import.
 variable "import_enabled" {
   type    = bool
-  default = true
+  default = false
 }
 
 resource "azurerm_storage_account" "import" {

@@ -498,16 +498,20 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         if host.which("claude").is_none() && !env.claude_dir().exists() {
             line("skip", "claude: Claude Code not found on this machine".into(), out)?;
         } else {
+            let (name, displaced) = claude_name(env)?;
+            if let Some(what) = displaced {
+                line("note", format!("claude: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"), out)?;
+            }
             let skill = env.claude_skill();
-            match file(&skill, CLAUDE_SKILL)? {
+            match file(&skill, &skill_text(CLAUDE_SKILL, &name))? {
                 None => line("ok", format!("claude: skill {} up to date", env.show(&skill)), out)?,
                 Some(why) => line("ISSUE", format!("claude: skill {} {why}{fix}", env.show(&skill)), out)?,
             }
-            let entry = read_json(&env.claude_json())?["mcpServers"]["conde"].clone();
+            let entry = read_json(&env.claude_json())?["mcpServers"][name.as_str()].clone();
             if entry["command"] == exe.as_str() && entry["args"] == json!(["mcp"]) {
-                line("ok", format!("claude: MCP server conde registered at user scope ({exe} mcp)"), out)?;
+                line("ok", format!("claude: MCP server {name} registered at user scope ({exe} mcp)"), out)?;
             } else {
-                line("ISSUE", format!("claude: MCP server conde not registered for {exe}{fix}"), out)?;
+                line("ISSUE", format!("claude: MCP server {name} not registered for {exe}{fix}"), out)?;
             }
             let inbound = read_json(&env.claude_settings())?["crossSessionInbound"].clone();
             let now = if inbound.is_null() { "unset".to_string() } else { inbound.to_string() };
@@ -525,15 +529,20 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         if host.which("codex").is_none() && !env.codex_dir().exists() {
             line("skip", "codex: Codex not found on this machine".into(), out)?;
         } else {
+            let config = env.codex_config();
+            let text = read_text(&config)?;
+            let (name, displaced) = codex_name(env, &text).unwrap_or_else(|_| (MCP_NAME.to_string(), None));
+            if let Some(what) = displaced {
+                line("note", format!("codex: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"), out)?;
+            }
             let skill = env.codex_skill();
-            match file(&skill, CODEX_SKILL)? {
+            match file(&skill, &skill_text(CODEX_SKILL, &name))? {
                 None => line("ok", format!("codex: skill {} up to date", env.show(&skill)), out)?,
                 Some(why) => line("ISSUE", format!("codex: skill {} {why}{fix}", env.show(&skill)), out)?,
             }
-            let config = env.codex_config();
-            match codex_config_edit(&read_text(&config)?, &exe) {
-                Ok(None) => line("ok", format!("codex: MCP server conde registered in {} ({exe} mcp)", env.show(&config)), out)?,
-                Ok(Some(_)) => line("ISSUE", format!("codex: MCP server conde not registered for {exe} in {}{fix}", env.show(&config)), out)?,
+            match codex_config_edit(&text, &name, &exe) {
+                Ok(None) => line("ok", format!("codex: MCP server {name} registered in {} ({exe} mcp)", env.show(&config)), out)?,
+                Ok(Some(_)) => line("ISSUE", format!("codex: MCP server {name} not registered for {exe} in {}{fix}", env.show(&config)), out)?,
                 Err(e) => line("ISSUE", format!("codex: {}: {e:#}", env.show(&config)), out)?,
             }
         }
@@ -1113,10 +1122,108 @@ fn read_json(path: &Path) -> anyhow::Result<Value> {
     serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))
 }
 
+/// The MCP server name conde registers under when nothing else holds it.
+pub const MCP_NAME: &str = "conde";
+
+/// Who holds an MCP server name in a harness's config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Holder {
+    /// No entry, or one whose binary is gone (a stale registration, reused).
+    Free,
+    /// This instance: our binary, on our socket.
+    Ours,
+    /// Another conde instance (another binary or socket) or another server; what it runs.
+    Other(String),
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
+/// An entry's holder from its command and its `CONDE_SOCK`; `command` None for an entry that
+/// runs no local command (a remote server).
+fn holder(env: &Env, present: bool, command: Option<&str>, sock: Option<&str>) -> Holder {
+    if !present {
+        return Holder::Free;
+    }
+    let Some(cmd) = command.filter(|c| !c.is_empty()) else {
+        return Holder::Other("a server that runs no local command".into());
+    };
+    let other = || Holder::Other(match sock {
+        Some(s) => format!("{cmd}, CONDE_SOCK={s}"),
+        None => cmd.to_string(),
+    });
+    let same_socket = sock.is_none_or(|s| Path::new(s) == env.socket);
+    if same_file(Path::new(cmd), &env.exe) {
+        return if same_socket { Holder::Ours } else { other() };
+    }
+    let found = if cmd.contains('/') {
+        Path::new(cmd).exists()
+    } else {
+        env.path.split(':').filter(|d| !d.is_empty()).any(|d| Path::new(d).join(cmd).is_file())
+    };
+    if found { other() } else { Holder::Free }
+}
+
+/// The alias a second registration is named after: the default shared board, else the first
+/// enrolled one.
+fn board_alias(env: &Env) -> Option<String> {
+    let enrolled = boards::enrolled_in(&env.boards_dir()).ok()?;
+    match boards::read_default(&env.default_board()) {
+        Ok(d) if d != LOCAL_BOARD && enrolled.contains(&d) => Some(d),
+        _ => enrolled.into_iter().next(),
+    }
+}
+
+/// The name this instance's MCP server is registered under in one harness: a name it already
+/// holds (`conde` first, then any `conde-*` among `existing`), else the first free of `conde`,
+/// `conde-<board alias>`, `conde-2`..; and, when `conde` belongs to another instance, what
+/// that one runs.
+fn mcp_name(env: &Env, existing: &[String], held: impl Fn(&str) -> Holder) -> anyhow::Result<(String, Option<String>)> {
+    let mut fresh = vec![MCP_NAME.to_string()];
+    fresh.extend(board_alias(env).map(|a| format!("{MCP_NAME}-{a}")));
+    fresh.extend((2..=9).map(|n| format!("{MCP_NAME}-{n}")));
+    let mut held_before: Vec<&String> = existing.iter().filter(|n| n.starts_with(&format!("{MCP_NAME}-"))).collect();
+    held_before.sort();
+    let first = held(MCP_NAME);
+    let pick = std::iter::once(&fresh[0])
+        .chain(held_before)
+        .find(|n| held(n) == Holder::Ours)
+        .or_else(|| fresh.iter().find(|n| held(n) == Holder::Free))
+        .ok_or_else(|| anyhow!("every MCP server name from {} to {} belongs to another server", fresh[0], fresh[fresh.len() - 1]))?
+        .clone();
+    let displaced = match first {
+        Holder::Other(what) if pick != MCP_NAME => Some(what),
+        _ => None,
+    };
+    Ok((pick, displaced))
+}
+
+/// The skill as written for an MCP server registered as `mcp`.
+pub fn skill_text(skill: &str, mcp: &str) -> String {
+    skill.replacen(&format!("tools of the `{MCP_NAME}` MCP server"), &format!("tools of the `{mcp}` MCP server"), 1)
+}
+
+fn claude_holder(env: &Env, entry: &Value) -> Holder {
+    let command = if entry["url"].is_null() { entry["command"].as_str() } else { None };
+    holder(env, !entry.is_null(), command, entry["env"]["CONDE_SOCK"].as_str())
+}
+
+fn claude_name(env: &Env) -> anyhow::Result<(String, Option<String>)> {
+    let servers = read_json(&env.claude_json())?["mcpServers"].clone();
+    let existing: Vec<String> = servers.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    mcp_name(env, &existing, |n| claude_holder(env, &servers[n]))
+}
+
 fn claude(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+    let (name, displaced) = claude_name(env)?;
+    if let Some(what) = displaced {
+        writeln!(out, "claude: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one registers as {name}")?;
+    }
     let skill = env.claude_skill();
-    writeln!(out, "claude: skill {} {}", write_if_changed(&skill, CLAUDE_SKILL)?.verb(), env.show(&skill))?;
-    claude_mcp(env, host, out)?;
+    let text = skill_text(CLAUDE_SKILL, &name);
+    writeln!(out, "claude: skill {} {}", write_if_changed(&skill, &text)?.verb(), env.show(&skill))?;
+    claude_mcp(env, &name, host, out)?;
     claude_inbound(env, opts, out)
 }
 
@@ -1124,31 +1231,31 @@ fn mcp_entry(env: &Env) -> Value {
     json!({"type": "stdio", "command": env.exe.to_string_lossy(), "args": ["mcp"], "env": {}})
 }
 
-fn claude_mcp(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+fn claude_mcp(env: &Env, name: &str, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
     let path = env.claude_json();
     let want = mcp_entry(env);
-    let current = read_json(&path)?["mcpServers"]["conde"].clone();
+    let current = read_json(&path)?["mcpServers"][name].clone();
     if current["command"] == want["command"] && current["args"] == want["args"] {
-        writeln!(out, "claude: MCP server conde unchanged (user scope)")?;
+        writeln!(out, "claude: MCP server {name} unchanged (user scope)")?;
         return Ok(());
     }
     let exe = env.exe.to_string_lossy().into_owned();
     if let Some(claude) = host.which("claude") {
         let claude = claude.to_string_lossy().into_owned();
         if !current.is_null() {
-            check(host, &claude, &["mcp", "remove", "--scope", "user", "conde"])?;
+            check(host, &claude, &["mcp", "remove", "--scope", "user", name])?;
         }
-        check(host, &claude, &["mcp", "add", "--scope", "user", "conde", "--", &exe, "mcp"])?;
-        writeln!(out, "claude: registered MCP server conde at user scope (claude mcp add --scope user conde -- {exe} mcp)")?;
-        if read_json(&path)?["mcpServers"]["conde"]["command"] != want["command"] {
-            writeln!(out, "claude: note: the entry did not appear in {}; check with: claude mcp get conde", env.show(&path))?;
+        check(host, &claude, &["mcp", "add", "--scope", "user", name, "--", &exe, "mcp"])?;
+        writeln!(out, "claude: registered MCP server {name} at user scope (claude mcp add --scope user {name} -- {exe} mcp)")?;
+        if read_json(&path)?["mcpServers"][name]["command"] != want["command"] {
+            writeln!(out, "claude: note: the entry did not appear in {}; check with: claude mcp get {name}", env.show(&path))?;
         }
     } else {
         let text = read_text(&path)?;
-        write_if_changed(&path, &json_set(&text, &["mcpServers", "conde"], &want)?)?;
+        write_if_changed(&path, &json_set(&text, &["mcpServers", name], &want)?)?;
         writeln!(
             out,
-            "claude: claude CLI not found; wrote the user-scope MCP entry conde into {} directly",
+            "claude: claude CLI not found; wrote the user-scope MCP entry {name} into {} directly",
             env.show(&path)
         )?;
     }
@@ -1185,32 +1292,53 @@ bypass-mode sessions do not receive conde notifications without approval"
     Ok(())
 }
 
+/// The name this instance's MCP server has (or gets) in Codex's config, as [`mcp_name`].
+pub fn codex_name(env: &Env, text: &str) -> anyhow::Result<(String, Option<String>)> {
+    let doc: toml_edit::DocumentMut = text.parse().context("not valid TOML")?;
+    let servers = doc.get("mcp_servers");
+    let existing: Vec<String> =
+        servers.and_then(|s| s.as_table_like()).map(|t| t.iter().map(|(k, _)| k.to_string()).collect()).unwrap_or_default();
+    mcp_name(env, &existing, |n| {
+        let entry = servers.and_then(|s| s.get(n));
+        let field = |k: &str| entry.and_then(|e| e.get(k));
+        let command = if field("url").is_none() { field("command").and_then(|c| c.as_str()) } else { None };
+        let sock = field("env").and_then(|e| e.get("CONDE_SOCK")).and_then(|v| v.as_str());
+        holder(env, entry.is_some(), command, sock)
+    })
+}
+
 fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {
-    let skill = env.codex_skill();
-    writeln!(out, "codex: skill {} {}", write_if_changed(&skill, CODEX_SKILL)?.verb(), env.show(&skill))?;
     let path = env.codex_config();
     let text = read_text(&path)?;
-    let edited = codex_config_edit(&text, &env.exe.to_string_lossy())
+    // unreadable TOML: the skill still lands, the edit below reports the file
+    let (name, displaced) = codex_name(env, &text).unwrap_or_else(|_| (MCP_NAME.to_string(), None));
+    if let Some(what) = displaced {
+        writeln!(out, "codex: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one registers as {name}")?;
+    }
+    let skill = env.codex_skill();
+    let skill_body = skill_text(CODEX_SKILL, &name);
+    writeln!(out, "codex: skill {} {}", write_if_changed(&skill, &skill_body)?.verb(), env.show(&skill))?;
+    let edited = codex_config_edit(&text, &name, &env.exe.to_string_lossy())
         .with_context(|| format!("{} left as is", env.show(&path)))?;
     let line = match edited {
         Some(new) => match write_if_changed(&path, &new)? {
-            Change::Created => "added MCP server conde to",
-            _ => "updated MCP server conde in",
+            Change::Created => format!("added MCP server {name} to"),
+            _ => format!("updated MCP server {name} in"),
         },
-        None => "MCP server conde unchanged in",
+        None => format!("MCP server {name} unchanged in"),
     };
     writeln!(out, "codex: {line} {}", env.show(&path))?;
     Ok(())
 }
 
-/// Point `mcp_servers.conde` at `exe mcp` with a TOML-aware edit that keeps
+/// Point `mcp_servers.<name>` at `exe mcp` with a TOML-aware edit that keeps
 /// comments, formatting and every other entry (other keys of an existing
-/// conde entry too). None when it already does.
-pub fn codex_config_edit(text: &str, exe: &str) -> anyhow::Result<Option<String>> {
+/// entry too). None when it already does.
+pub fn codex_config_edit(text: &str, name: &str, exe: &str) -> anyhow::Result<Option<String>> {
     use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value as TomlValue, value};
     let mut doc: DocumentMut = text.parse().context("not valid TOML")?;
     let wanted_args = || Array::from_iter(["mcp"]);
-    let current = doc.get("mcp_servers").and_then(|s| s.get("conde"));
+    let current = doc.get("mcp_servers").and_then(|s| s.get(name));
     let field = |k: &str| current.and_then(|c| c.get(k));
     let args_ok = field("args").and_then(Item::as_array).is_some_and(|a| {
         a.iter().map(|v| v.as_str()).collect::<Vec<_>>() == [Some("mcp")]
@@ -1222,20 +1350,20 @@ pub fn codex_config_edit(text: &str, exe: &str) -> anyhow::Result<Option<String>
     if servers.is_some_and(|s| s.as_table_like().is_none()) {
         bail!("mcp_servers is not a table");
     }
-    let has_conde = servers.and_then(|s| s.get("conde")).is_some();
+    let has_entry = servers.and_then(|s| s.get(name)).is_some();
     let inline_parent =
         servers.is_some_and(|s| s.is_inline_table() || s.as_table_like().is_some_and(|t| t.is_dotted()));
-    if has_conde {
-        let entry = doc["mcp_servers"]["conde"]
+    if has_entry {
+        let entry = doc["mcp_servers"][name]
             .as_table_like_mut()
-            .ok_or_else(|| anyhow!("mcp_servers.conde is not a table"))?;
+            .ok_or_else(|| anyhow!("mcp_servers.{name} is not a table"))?;
         entry.insert("command", value(exe));
         entry.insert("args", value(wanted_args()));
     } else if inline_parent {
         let mut t = InlineTable::new();
         t.insert("command", exe.into());
         t.insert("args", TomlValue::Array(wanted_args()));
-        doc["mcp_servers"]["conde"] = Item::Value(TomlValue::InlineTable(t));
+        doc["mcp_servers"][name] = Item::Value(TomlValue::InlineTable(t));
     } else {
         let servers = doc.entry("mcp_servers").or_insert_with(|| {
             let mut t = Table::new();
@@ -1248,14 +1376,14 @@ pub fn codex_config_edit(text: &str, exe: &str) -> anyhow::Result<Option<String>
         servers
             .as_table_like_mut()
             .ok_or_else(|| anyhow!("mcp_servers is not a table"))?
-            .insert("conde", Item::Table(t));
+            .insert(name, Item::Table(t));
     }
     let new = doc.to_string();
     let back: DocumentMut = new.parse().context("edited config.toml does not parse")?;
-    if back.get("mcp_servers").and_then(|s| s.get("conde")).and_then(|c| c.get("command")).and_then(Item::as_str)
+    if back.get("mcp_servers").and_then(|s| s.get(name)).and_then(|c| c.get("command")).and_then(Item::as_str)
         != Some(exe)
     {
-        bail!("edited config.toml does not hold the conde entry");
+        bail!("edited config.toml does not hold the {name} entry");
     }
     Ok(Some(new))
 }
@@ -1419,35 +1547,35 @@ mod tests {
     #[test]
     fn codex_config_is_edited_in_place() {
         let user = "# my config\nmodel = \"x\" # trailing note\n\n[mcp_servers.docs]\nurl = \"https://example\"\n";
-        let first = codex_config_edit(user, "/bin/conde").unwrap().unwrap();
+        let first = codex_config_edit(user, "conde", "/bin/conde").unwrap().unwrap();
         assert!(first.starts_with(user), "{first}");
         assert!(first.ends_with("[mcp_servers.conde]\ncommand = \"/bin/conde\"\nargs = [\"mcp\"]\n"), "{first}");
-        assert_eq!(codex_config_edit(&first, "/bin/conde").unwrap(), None, "second run is a no-op");
-        let moved = codex_config_edit(&first, "/opt/my conde").unwrap().unwrap();
+        assert_eq!(codex_config_edit(&first, "conde", "/bin/conde").unwrap(), None, "second run is a no-op");
+        let moved = codex_config_edit(&first, "conde", "/opt/my conde").unwrap().unwrap();
         assert_eq!(moved, first.replace("\"/bin/conde\"", "\"/opt/my conde\""));
-        assert_eq!(codex_config_edit("", "/c").unwrap().unwrap(), "[mcp_servers.conde]\ncommand = \"/c\"\nargs = [\"mcp\"]\n");
+        assert_eq!(codex_config_edit("", "conde", "/c").unwrap().unwrap(), "[mcp_servers.conde]\ncommand = \"/c\"\nargs = [\"mcp\"]\n");
 
         // an existing entry keeps its other keys and its place
         let own = "[mcp_servers.conde]\ncommand = \"/old\"\nargs = [\"x\"]\nenv = { A = \"1\" }\n\n[other]\nk = 1\n";
-        let out = codex_config_edit(own, "/c").unwrap().unwrap();
+        let out = codex_config_edit(own, "conde", "/c").unwrap().unwrap();
         assert_eq!(out, "[mcp_servers.conde]\ncommand = \"/c\"\nargs = [\"mcp\"]\nenv = { A = \"1\" }\n\n[other]\nk = 1\n");
 
         // review repro: a comment with triple quotes must not hide the table (no duplicate)
         let tricky = "# example uses '''\n[mcp_servers.conde]\ncommand = \"/old\"\n";
-        let out = codex_config_edit(tricky, "/new").unwrap().unwrap();
+        let out = codex_config_edit(tricky, "conde", "/new").unwrap().unwrap();
         assert_eq!(out, "# example uses '''\n[mcp_servers.conde]\ncommand = \"/new\"\nargs = [\"mcp\"]\n");
         assert_eq!(conde_entry(&out), ("/new".into(), vec!["mcp".into()], 1));
 
         // dotted keys and inline tables are extended, not shadowed
         let dotted = "[mcp_servers]\nconde.command = \"c\"\n";
-        assert_eq!(conde_entry(&codex_config_edit(dotted, "/c").unwrap().unwrap()).0, "/c");
+        assert_eq!(conde_entry(&codex_config_edit(dotted, "conde", "/c").unwrap().unwrap()).0, "/c");
         let inline = "mcp_servers = { x = { command = \"x\" } }\n";
-        let out = codex_config_edit(inline, "/c").unwrap().unwrap();
+        let out = codex_config_edit(inline, "conde", "/c").unwrap().unwrap();
         assert_eq!(conde_entry(&out).0, "/c");
         assert!(out.contains("x = { command = \"x\" }"), "{out}");
 
-        assert!(codex_config_edit("mcp_servers = 3\n", "/c").is_err());
-        assert!(codex_config_edit("[broken\n", "/c").is_err(), "invalid TOML is never rewritten");
+        assert!(codex_config_edit("mcp_servers = 3\n", "conde", "/c").is_err());
+        assert!(codex_config_edit("[broken\n", "conde", "/c").is_err(), "invalid TOML is never rewritten");
     }
 
     #[test]

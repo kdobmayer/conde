@@ -107,7 +107,12 @@ It does five things and prints one line per action:
 - Registers `conde mcp` as an MCP server: for Claude Code at user scope, as
   `claude mcp add --scope user conde -- <conde path> mcp` does; for Codex as
   `[mcp_servers.conde]` in `~/.codex/config.toml`. Comments and other entries
-  in that file stay as they were.
+  in that file stay as they were. When the name `conde` already runs another
+  conde instance (another conde binary that exists, another `CONDE_SOCK`, or
+  a remote server), that entry is left alone and this one registers as
+  `conde-<board alias>` (e.g. `conde-dakai`; `conde-2` before any board is
+  enrolled); the skill then names that server. An entry whose binary is gone
+  is reused.
 - Sets Claude Code's receiver policy so conde notifications arrive without
   per-message approval: an unset `crossSessionInbound` in
   `~/.claude/settings.json` becomes `"accept"` (see **Receiver policy**). An

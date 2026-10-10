@@ -184,7 +184,8 @@ fn bounce(state: &WebState, b: Bounce) -> Response {
     }
 }
 
-fn too_many_page(wait: u64) -> Response {
+fn too_many_page(ip: std::net::IpAddr, wait: u64) -> Response {
+    tracing::info!(client_ip = %ip, wait, endpoint = "authorize", "oauth rate limited");
     let mut r = pages::error(
         StatusCode::TOO_MANY_REQUESTS,
         "Too many requests",
@@ -216,7 +217,7 @@ pub(crate) async fn authorize(
     uri: Uri,
 ) -> Response {
     if let Err(wait) = state.0.limits.oauth(ip) {
-        return too_many_page(wait);
+        return too_many_page(ip, wait);
     }
     let Some(p) = params(uri.query().unwrap_or("").as_bytes()) else {
         return bounce(&state, Bounce::Page(Refusal::DuplicateParameter));
@@ -264,7 +265,7 @@ pub(crate) async fn consent(
     body: Bytes,
 ) -> Response {
     if let Err(wait) = state.0.limits.oauth(ip) {
-        return too_many_page(wait);
+        return too_many_page(ip, wait);
     }
     let Some(p) = params(&body) else {
         return bounce(&state, Bounce::Page(Refusal::DuplicateParameter));
@@ -367,6 +368,7 @@ fn issued(access: &str, refresh: &str, expires_in: i64) -> Response {
 /// `POST /oauth/token` (form): `authorization_code` creates the grant, `refresh_token` rotates.
 pub(crate) async fn token(State(state): State<WebState>, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     if let Err(wait) = state.0.limits.oauth(ip) {
+        tracing::info!(client_ip = %ip, wait, endpoint = "token", "oauth rate limited");
         let mut r = token_response(
             StatusCode::TOO_MANY_REQUESTS,
             json!({"error": "rate_limited", "error_description": format!("retry in {wait} s")}),

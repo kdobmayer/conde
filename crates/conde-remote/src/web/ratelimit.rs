@@ -105,15 +105,19 @@ mod tests {
     }
 }
 
-/// The client's address for the per-IP bucket: the peer, or, when the peer is a private or
-/// loopback address (the ingress in front), the last `X-Forwarded-For` entry, which that proxy
-/// appended (earlier entries are the client's to forge).
+/// The client's address for the per-IP bucket: the peer, or, when the peer is a private,
+/// carrier-grade NAT or loopback address (the ingress in front), the last `X-Forwarded-For`
+/// entry, which that proxy appended (earlier entries are the client's to forge).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ClientIp(pub IpAddr);
 
 fn internal(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified(),
+        IpAddr::V4(v4) => {
+            // 100.64.0.0/10 (RFC 6598): Container Apps' ingress may connect from it.
+            let shared = v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64;
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || shared
+        }
         IpAddr::V6(v6) => {
             v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
         }
@@ -168,6 +172,12 @@ mod ip_tests {
         assert_eq!(client_ip(&parts("10.0.0.5:1", &["6.6.6.6, 203.0.113.9"])), ip("203.0.113.9"));
         assert_eq!(client_ip(&parts("10.0.0.5:1", &["6.6.6.6", "203.0.113.9"])), ip("203.0.113.9"));
         assert_eq!(client_ip(&parts("10.0.0.5:1", &[])), ip("10.0.0.5"));
+        for ingress in ["100.64.0.1:1", "100.100.12.7:1", "100.127.255.254:1"] {
+            assert_eq!(client_ip(&parts(ingress, &["203.0.113.9"])), ip("203.0.113.9"), "{ingress}: shared address space");
+        }
+        for public in ["100.63.255.255:1", "100.128.0.1:1"] {
+            assert_eq!(client_ip(&parts(public, &["203.0.113.9"])), ip(&public[..public.len() - 2]), "{public}");
+        }
         assert_eq!(client_ip(&parts("198.51.100.1:1", &["203.0.113.9"])), ip("198.51.100.1"), "a public peer is the client");
     }
 }

@@ -157,3 +157,15 @@ finds. Until then: system-default account works; injected dirs do not.
 
 - Headless hosts: `conde login --no-browser` makes the human finish the loopback callback by hand from another device. Add a pasted-code path (the keys page shows a one-time code; `conde login --code` redeems it) so a headless host needs no callback.
 - `conde setup` skips the skill/MCP step when an MCP server named `conde` is already registered for another instance; it should detect that and register under a second name (`conde-dakai`), pointing the skill at it.
+
+## I. Remote MCP, from the security review 2026-10-10 (docs/remote-mcp-security-review.md)
+
+- Refresh reuse revokes strictly: if the live check shows Claude refreshing in parallel, a token consumed less than 10 s ago answers `invalid_grant` without revoking.
+- Client metadata trust is per host: pin the exact client_id URLs once the hosted one is seen in the log.
+- Expired tokens are purged only on consent: purge on refresh or on a timer.
+- Live grants per user are unbounded: cap them per user and client.
+- The root `/.well-known/oauth-protected-resource` names `<origin>/mcp` (RFC 9728 §3.3 expects the origin): serve it for the origin only, or drop it.
+- No RFC 7009 revocation endpoint: a connector removed in Claude stays on the keys page until it expires.
+- A second use of an authorization code does not revoke the tokens issued from it.
+- `search` with a never-matching pattern scans all visible history, bounded only by the 120/min bucket.
+- A sign-in `next` path over 2048 characters is dropped silently: a very long authorize request lands on /keys.

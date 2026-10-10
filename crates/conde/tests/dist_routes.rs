@@ -1,5 +1,5 @@
-//! `/install.sh` and `/dist/<file>` on the cloud listener: a no-store 302 into
-//! the release container for one plain file name, 404 for anything else.
+//! `/install.sh`, `/install.ps1` and `/dist/<file>` on the cloud listener: a no-store
+//! 302 into the release container for one plain file name, 404 for anything else.
 
 use std::sync::Arc;
 
@@ -28,7 +28,9 @@ async fn release_files_redirect_to_the_container() {
     let addr = h.local_addr();
     for (path, file) in [
         ("/install.sh", "install.sh"),
+        ("/install.ps1", "install.ps1"),
         ("/dist/conde-darwin-arm64", "conde-darwin-arm64"),
+        ("/dist/conde-windows-x86_64.exe", "conde-windows-x86_64.exe"),
         ("/dist/conde-linux-x86_64.sha256", "conde-linux-x86_64.sha256"),
         ("/dist/latest", "latest"),
     ] {
@@ -50,7 +52,7 @@ async fn release_files_redirect_to_the_container() {
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_dist_base_url_there_is_nothing_to_serve() {
     let h = server(None).await;
-    for path in ["/install.sh", "/dist/latest"] {
+    for path in ["/install.sh", "/install.ps1", "/dist/latest"] {
         let r = get(h.local_addr(), "GET", path).await;
         assert!(r.starts_with("http/1.1 404"), "{path}: {r}");
     }

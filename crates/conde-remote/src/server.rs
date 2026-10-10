@@ -45,8 +45,8 @@ pub struct ServerConfig {
     /// How long a new bridge connection may take to send its hello.
     pub hello_timeout: Duration,
     pub max_frame_bytes: usize,
-    /// Public release files (`https://.../dist`, no trailing slash): `/install.sh`
-    /// and `/dist/<file>` redirect there; None answers 404.
+    /// Public release files (`https://.../dist`, no trailing slash): `/install.sh`,
+    /// `/install.ps1` and `/dist/<file>` redirect there; None answers 404.
     pub dist_base_url: Option<String>,
     /// Entra sign-in, the keys page and the admin API, when configured.
     pub web: Option<crate::web::WebSetup>,
@@ -352,6 +352,7 @@ pub async fn start(
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/install.sh", get(install_sh))
+        .route("/install.ps1", get(install_ps1))
         .route("/dist/{file}", get(dist_file))
         .route("/readme", get(readme_html))
         .route("/readme.md", get(readme_md))
@@ -408,6 +409,10 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
 
 async fn install_sh(State(shared): State<Arc<Shared>>) -> Response {
     dist_redirect(&shared, "install.sh")
+}
+
+async fn install_ps1(State(shared): State<Arc<Shared>>) -> Response {
+    dist_redirect(&shared, "install.ps1")
 }
 
 async fn dist_file(

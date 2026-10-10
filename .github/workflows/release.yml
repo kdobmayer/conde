@@ -1,6 +1,6 @@
 name: release
 
-# Static Linux and macOS binaries with a SHA256SUMS file, published to the public
+# Static Linux, macOS and Windows binaries with a SHA256SUMS file, published to the public
 # `dist` blob container that https://conde.nativeai.space/dist/* redirects to.
 on:
   push:
@@ -162,8 +162,87 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  windows:
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      NAME: conde-windows-x86_64.exe
+      # the VC++ runtime DLL is not on every Windows machine: link the C runtime statically
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p conde --target "$TARGET"
+      - name: Package
+        shell: bash
+        run: |
+          mkdir out
+          cp "target/$TARGET/release/conde.exe" "out/$NAME"
+          (cd out && sha256sum "$NAME" > "$NAME.sha256")
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          & "out/$env:NAME" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Identity probe (named pipe, Toolhelp ancestry walk)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = (Resolve-Path "out/$env:NAME").Path
+          $tmp = Join-Path $env:RUNNER_TEMP 'conde-probe'
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $env:CONDE_DATA = "$tmp\data"
+          $env:CONDE_SOCK = '\\.\pipe\conde-ci-probe'
+          $daemon = Start-Process -FilePath $bin -ArgumentList 'daemon' -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$tmp\daemon.out" -RedirectStandardError "$tmp\daemon.log"
+          $ok = $false
+          try {
+            for ($i = 0; $i -lt 100; $i++) {
+              if ([IO.Directory]::GetFiles('\\.\pipe\') -contains $env:CONDE_SOCK) { break }
+              Start-Sleep -Milliseconds 100
+            }
+            Write-Host '--- conde doctor'
+            & $bin doctor
+            Write-Host "--- doctor exit status: $LASTEXITCODE"
+            $user = $env:USERNAME.ToLowerInvariant()
+            # a bare runner: the walk finds no harness, so this shell acts as the human
+            & $bin register ci.smoke
+            if ($LASTEXITCODE -ne 0) { throw 'register failed' }
+            $who = ((& $bin whoami) | Select-Object -First 1).Split(' ')[0]
+            if ($who -ne "$user/ci.smoke") { throw "whoami: $who" }
+            $resolved = "$(& $bin resolve ci.smoke)"
+            if (-not $resolved.StartsWith("human:$user@")) { throw "ci.smoke does not resolve to the human: $resolved" }
+            # without session markers under a process named claude it must refuse
+            Copy-Item "$env:SystemRoot\System32\cmd.exe" "$tmp\claude.exe"
+            # separate arguments: cmd /c takes the rest of its command line as is
+            $out = "$(& "$tmp\claude.exe" /d /c $bin whoami 2>&1)"
+            if ($LASTEXITCODE -eq 0) { throw "whoami succeeded under claude: $out" }
+            if (-not $out.Contains('no session markers, but this process runs under a claude agent')) { throw "unexpected output: $out" }
+            Write-Host "refused as expected: $out"
+            $ok = $true
+            # the expected refusal's exit status must not become the step's
+            $global:LASTEXITCODE = 0
+          } finally {
+            if (-not $ok) {
+              Write-Host "--- daemon log ($tmp\daemon.log)"
+              Get-Content "$tmp\daemon.log" -ErrorAction SilentlyContinue
+            }
+            Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: conde-windows-x86_64
+          path: out/
+          if-no-files-found: error
+
   publish:
-    needs: [web, macos, linux]
+    needs: [web, macos, linux, windows]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -184,6 +263,7 @@ jobs:
             exit 1
           fi
           cp dist/install.sh out/install.sh
+          cp dist/install.ps1 out/install.ps1
           echo "$version" > out/latest
           (cd out && sha256sum -c ./*.sha256)
           # the integrity contract install.sh checks: one line per published file
@@ -197,4 +277,8 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Upload to the dist container
-        run: az storage blob upload-batch --auth-mode login --account-name stconde -d dist -s out --overwrite
+        run: |
+          az storage blob upload-batch --auth-mode login --account-name stconde -d dist -s out --overwrite
+          # `irm | iex` reads it as text; a guessed binary type is not relied on
+          az storage blob upload --auth-mode login --account-name stconde -c dist -n install.ps1 -f out/install.ps1 \
+            --content-type "text/plain; charset=utf-8" --overwrite

@@ -297,6 +297,9 @@ pub struct CliCode {
     pub tries: u32,
 }
 
+/// The pasted code's alphabet: no 0/O, 1/I/L or U, so it reads aloud and types back cleanly.
+pub const CODE_ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
+
 /// Failed redeems a pasted-code login survives; the last one ends it.
 pub const PASTE_TRIES: u32 = 5;
 

@@ -29,6 +29,8 @@ struct Board {
     pasted: Mutex<HashMap<String, (String, String, u32)>>,
     redeemed: Mutex<Vec<Value>>,
     refuse: Mutex<Option<String>>,
+    /// Answer every redeem with this `invalid_request` message.
+    bad_request: Mutex<Option<String>>,
 }
 
 async fn cli(State(b): State<Arc<Board>>, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -46,6 +48,9 @@ async fn cli(State(b): State<Arc<Board>>, Query(q): Query<HashMap<String, String
 
 async fn redeem(State(b): State<Arc<Board>>, Json(req): Json<Value>) -> Response {
     b.redeemed.lock().unwrap().push(req.clone());
+    if let Some(m) = b.bad_request.lock().unwrap().clone() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_request", "message": m}))).into_response();
+    }
     if let Some(m) = b.refuse.lock().unwrap().clone() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant", "message": m}))).into_response();
     }
@@ -238,11 +243,24 @@ async fn a_pasted_code_finishes_the_login_started_on_this_host() {
         other => panic!("{other:?}"),
     }
     assert!(path.exists(), "a wrong code keeps the login waiting");
-    match login::finish_code(&server, &path, "abc 12", "box-1").await.unwrap() {
-        login::CodeOutcome::Retry(why) => assert!(why.contains("8 letters and digits"), "{why}"),
-        other => panic!("{other:?}"),
+    // a mistyped character outside the alphabet is caught here: not sent, the login still waits
+    for (typo, says) in [("K7QM-3XR0", "'0' is not in a sign-in code"), ("k7qm-3xri", "'I' is not in"), ("K7QM-3XR", "that is 7 characters")] {
+        match login::finish_code(&server, &path, typo, "box-1").await.unwrap() {
+            login::CodeOutcome::Retry(why) => {
+                assert!(why.contains(says) && why.contains("23456789ABCDEFGHJKMNPQRSTVWXYZ (there is no 0/O, 1/I/L or U)"), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
     }
-    assert_eq!(board.redeemed.lock().unwrap().len(), 2, "a malformed code is not sent");
+    assert_eq!(board.redeemed.lock().unwrap().len(), 2, "a mistyped code is not sent");
+    assert!(path.exists());
+
+    // a request the server cannot take (here: a host name) is not final: the login still waits
+    *board.bad_request.lock().unwrap() = Some("bad host name".into());
+    let err = login::finish_code(&server, &path, &shown, "box-1").await.unwrap_err().to_string();
+    assert!(err.contains("bad host name"), "{err}");
+    assert!(path.exists(), "invalid_request keeps the waiting login");
+    *board.bad_request.lock().unwrap() = None;
 
     // typed as read aloud
     let typed = shown.to_lowercase().replace('-', " ");
@@ -314,8 +332,12 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
         })
     };
     let start = vec!["login".into(), "--server".into(), server.clone(), "--host".into(), "box-9".into(), "--no-browser".into()];
-    let (ok, _, err) = conde(start).await.unwrap();
+    let (ok, _, err) = conde(start.clone()).await.unwrap();
     assert!(ok, "{err}");
+    assert!(!err.contains("still waiting"), "{err}");
+    // starting again replaces the waiting run, and says so
+    let (ok, _, err) = conde(start).await.unwrap();
+    assert!(ok && err.contains("was still waiting for its code; this one replaces it"), "{err}");
     let finish = format!("conde login --server {server} --host box-9 --code <CODE>");
     assert!(err.contains(&finish), "{err}");
     let url = err.lines().map(str::trim).find(|l| l.starts_with(&format!("{server}/auth/cli?mode=code"))).unwrap().to_string();

@@ -22,6 +22,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, timeout, timeout_at};
 
+use conde_remote::web::CODE_ALPHABET;
+
 use crate::boards::{self, BoardConfig};
 
 /// How long the browser may take to sign in (MFA included).
@@ -289,13 +291,14 @@ pub enum CodeOutcome {
 }
 
 /// Redeems `typed` for the login waiting at `path`. The waiting login is removed once the
-/// server is done with it (enrolled, expired, out of tries); a wrong code keeps it.
+/// server is done with it (enrolled, expired, out of tries); a wrong or mistyped code, or any
+/// other refusal, keeps it.
 pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host: &str) -> anyhow::Result<CodeOutcome> {
     let pending = load_pending(server, path)?;
-    let code: String = typed.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_uppercase()).collect();
-    if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Ok(CodeOutcome::Retry("that is not a sign-in code: 8 letters and digits, as the page shows it".into()));
-    }
+    let code = match code_typed(typed) {
+        Ok(code) => code,
+        Err(why) => return Ok(CodeOutcome::Retry(why)),
+    };
     let body = json!({"code": code, "state": pending.state, "code_verifier": pending.verifier, "host": host});
     match post_redeem(&pending.server, body).await? {
         Ok(enrolled) => {
@@ -304,12 +307,29 @@ pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host
         }
         Err(r) if r.error == "invalid_code" || r.error == "authorization_pending" => Ok(CodeOutcome::Retry(r.message)),
         Err(r) => {
-            if r.error != "internal" {
+            // only an answer that ended the login on the server ends it here
+            if FINAL.contains(&r.error.as_str()) {
                 let _ = std::fs::remove_file(path);
             }
             bail!("the server refused the sign-in: {}", r.message)
         }
     }
+}
+
+/// Redeem errors after which the server holds no login for the run (it was taken).
+const FINAL: &[&str] = &["invalid_grant", "host_taken", "disabled"];
+
+/// A typed code in canonical form, or why it cannot be one (case, spaces and dashes are free).
+fn code_typed(typed: &str) -> Result<String, String> {
+    let code: String = typed.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_uppercase()).collect();
+    let alphabet = format!("a sign-in code has 8 characters from {CODE_ALPHABET} (there is no 0/O, 1/I/L or U)");
+    if let Some(bad) = code.chars().find(|c| !CODE_ALPHABET.contains(*c)) {
+        return Err(format!("'{bad}' is not in a sign-in code: {alphabet}"));
+    }
+    if code.chars().count() != 8 {
+        return Err(format!("that is {} characters: {alphabet}", code.chars().count()));
+    }
+    Ok(code)
 }
 
 /// Whether this machine has no desktop to open a browser on.
@@ -326,6 +346,12 @@ fn code_login(server: &str, host: &str, finish_hint: &str, code: &str, runtime: 
             CodeOutcome::Enrolled(e) => Ok(Some(e)),
             CodeOutcome::Retry(why) => bail!("{why}; run again with the code the page shows: {finish_hint}"),
         };
+    }
+    if let Ok(earlier) = load_pending(server, &path) {
+        let minutes = unix_now().saturating_sub(earlier.started_at).div_ceil(60);
+        eprintln!(
+            "A conde login started {minutes} min ago was still waiting for its code; this one replaces it, so a code from that run's page no longer works here."
+        );
     }
     let url = start_code(server, &path)?;
     eprintln!("Open this URL in a browser on any device and sign in:\n\n  {url}\n\nThe page then shows a one-time sign-in code.");

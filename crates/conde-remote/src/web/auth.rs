@@ -533,8 +533,7 @@ fn url_safe(s: &str, min: usize, max: usize) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// The pasted code's alphabet: no 0/O, 1/I/L or U, so it reads aloud and types back cleanly.
-const PASTE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTVWXYZ";
+const PASTE_ALPHABET: &[u8] = super::CODE_ALPHABET.as_bytes();
 /// Characters in a pasted code (about 39 bits).
 const PASTE_LEN: usize = 8;
 

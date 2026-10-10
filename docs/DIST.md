@@ -8,6 +8,10 @@ conde login          # or: conde enroll --server https://conde.nativeai.space
 conde setup
 ```
 
+On Windows the first one is `irm https://conde.nativeai.space/install.ps1 | iex`
+(PowerShell), which installs `%LOCALAPPDATA%\conde\bin\conde.exe` and adds that
+directory to the user PATH.
+
 `install.sh` puts the binary in `~/.local/bin` (`sh -s -- --system` installs to
 `/usr/local/bin` with sudo). `conde setup` installs the bridge as a user
 service, the conde skill for Claude Code and Codex, registers `conde mcp` as an
@@ -25,9 +29,11 @@ names:
 |------|---------|
 | `conde-darwin-arm64`, `conde-darwin-x86_64` | macOS binaries (Apple silicon, Intel) |
 | `conde-linux-x86_64`, `conde-linux-aarch64` | static Linux binaries (musl) |
+| `conde-windows-x86_64.exe` | Windows x64 binary (MSVC, C runtime linked statically, so no Visual C++ redistributable is needed) |
 | `SHA256SUMS` | the integrity contract: one `sha256sum` line per published file (binaries, `install.sh`, `latest`); `install.sh` checks its binary's line with `shasum -a 256 -c` (macOS) or `sha256sum -c` (Linux) and refuses a mismatch, a missing line or a missing file |
 | `<binary>.sha256` | per-binary `sha256sum` line, kept for manual checks |
 | `install.sh` | the installer, same as `dist/install.sh` in this repo |
+| `install.ps1` | the Windows installer, same as `dist/install.ps1`; uploaded as `text/plain; charset=utf-8` for `irm \| iex` |
 | `latest` | one line, the released version (`v0.1.0`) |
 
 ## Server routes (for the server owner)
@@ -39,6 +45,7 @@ unauthenticated routes with a redirect into the container. Both sit outside
 | Request | Response |
 |---------|----------|
 | `GET` or `HEAD /install.sh` | `302 Location: $CONDE_DIST_BASE_URL/install.sh` |
+| `GET` or `HEAD /install.ps1` | `302 Location: $CONDE_DIST_BASE_URL/install.ps1` |
 | `GET` or `HEAD /dist/<file>` | `302 Location: $CONDE_DIST_BASE_URL/<file>` |
 
 - `CONDE_DIST_BASE_URL` is set on the Container App
@@ -57,10 +64,14 @@ unauthenticated routes with a redirect into the container. Both sit outside
 
 `.github/workflows/release.yml` runs on a `v*` tag and on manual dispatch. It
 builds the two macOS targets on a `macos-15` (arm64) runner, `x86_64` through
-`rustup target add`, and the two musl Linux targets on `ubuntu-latest` with
-`cargo zigbuild`. It writes per-binary sha256 files and smoke-runs each native binary.
+`rustup target add`, the two musl Linux targets on `ubuntu-latest` with
+`cargo zigbuild`, and `x86_64-pc-windows-msvc` on `windows-latest`. It writes
+per-binary sha256 files and smoke-runs each native binary; on macOS and Windows
+it also runs the identity probe (a daemon on a temporary socket or pipe,
+`whoami` as the human on the bare runner, a refusal under a process named
+`claude`).
 The `publish` job runs in the `release` environment and checks the files
-against their sha256, adds `install.sh` and `latest`, and writes
+against their sha256, adds `install.sh`, `install.ps1` and `latest`, and writes
 `SHA256SUMS` over every published file. It logs in to Azure
 through OIDC, and runs `az storage blob upload-batch --overwrite` into
 `stconde/dist`. A tag must equal `v` plus the version in

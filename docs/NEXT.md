@@ -129,6 +129,74 @@ ProcessTable injection; credentials under %APPDATA%\conde with ACL-restricted
 file; `conde setup` writes the Claude/Codex config at their Windows paths.
 Acceptance: the one Windows user runs the README path with desk watching.
 
+Status 2026-10-10: implemented, not yet run on Windows. The acceptance run is
+the first execution of every Windows code path.
+
+Verified here, without a Windows machine:
+- `cargo check --workspace --target x86_64-pc-windows-msvc` passes (official
+  rust 1.95.0 with its Windows std; the C parts of ring and SQLite are not
+  compiled by a check, the release runner compiles them).
+- Unit tests on Linux behind the injection points: the pipe-name parser and
+  the key-file hash (ported from Claude Code's), the FILETIME/.NET-ticks start
+  rule, receipts gated on the auth line, the owner-only SDDL, the SID peer
+  check, the Windows paths, the Windows `ProcessTable` (exited and reused
+  parent pids, npm-launched harnesses), `conde setup` on Windows (task XML in
+  UTF-16 with CRLF, the schtasks sequence on first run, rerun, binary move and
+  stale bridge, the Claude/Codex config at `%USERPROFILE%`, `--check`), the
+  `/install.ps1` redirect, and install.ps1's text against the workflow.
+- install.ps1 parses in PowerShell 7.6.6 and, on Linux against a local file
+  server, runs `irm | iex` through download, version, checksum match, mismatch,
+  missing line and missing SHA256SUMS (it cannot run the exe or edit the
+  registry there).
+- Unix behaviour unchanged: the full workspace test run.
+
+Read from the shipped bundles, unverified on a Windows install (Claude Code
+2.1.296 and Codex 0.162.1 win32-x64 packages, read statically):
+- Claude Code's Windows inbox is the pipe `\\.\pipe\LOCAL\cc-msg-<32 hex>` in
+  `messagingSocketPath`, the record carries `procStartFt` (creation FILETIME;
+  `procStart` .NET ticks only without its native helper), the key file is
+  `<pid>.<sha256 of \\.\pipe\ + lowercased name>.key`, and the auth line is
+  required there. It answers receipts only to a `from` pipe named
+  `cc-msg-<32 hex>` that a key file vouches for, opening each with the auth
+  line; conde's bridge binds such a pipe and publishes that key. Unverified:
+  that Claude Code's address syntax accepts conde's `uds:\\.\pipe\...` form.
+- `\\.\pipe\LOCAL\` is session-scoped: the bridge must run in the human's
+  desktop session, so the task uses an interactive logon token.
+- Codex's app-server control endpoint is the same
+  `.codex\app-server-control\app-server-control.sock`, an AF_UNIX socket
+  (Codex links `uds_windows`); conde connects through socket2 and tests the
+  file without following its reparse point. `codex app-server daemon start` on
+  Windows is assumed from the bundled daemon crate.
+
+Waits for the first Windows run:
+- `conde setup`: `schtasks /Create /XML` with a UTF-16 file, registration
+  without elevation, the task starting at logon, no 72 h limit, the console
+  detaching to `%LOCALAPPDATA%\conde\data\conde.log` (a flash at logon);
+  `/End` is a hard stop; the state line reads English `schtasks` labels only.
+- The CLI pipe `\\.\pipe\conde-<user>`: owner-only DACL, remote clients
+  rejected, the daemon's check of each client's token user and the client's
+  check of the server's (a squatted name is refused, not used). Not
+  verifiable by design: any process of the same user is trusted, as with the
+  uid check on Unix.
+- Secret files under `%APPDATA%\conde` created with a protected owner-only DACL;
+  load and doctor accept the owner, SYSTEM and Administrators only.
+- The Toolhelp ancestry walk, command lines via NtQueryInformationProcess, the
+  echo-off console prompt, the host name from GetComputerNameExW.
+- install.ps1 in Windows PowerShell 5.1: the user PATH registry edit and its
+  broadcast, renaming a running `conde.exe` aside; the blob's text content type.
+- The release workflow's `windows` job (static CRT build, smoke test, identity
+  probe), first exercised by the next release; it gates `publish` like macOS.
+
+Decisions the section left open: a named pipe, not AF_UNIX, for the CLI
+(std's Windows `UnixStream` is unstable in 1.95 and tokio has no AF_UNIX on
+Windows; tokio's named pipes carry the same NDJSON); the pipe in the global
+namespace, protected by its DACL and both SID checks; a scheduled task, not a
+service (no admin, runs in the desktop session); the task inherits the logon
+environment, so setup names relocated directories to `setx` instead of pinning
+them; data in `%LOCALAPPDATA%\conde\data`, config in `%APPDATA%\conde`
+(`XDG_CONFIG_HOME` still wins when set); a Windows send without a peer token
+fails at once instead of being dropped by Claude Code.
+
 ## F. Session discovery beyond ~/.claude (Orca multi-account) — DROPPED 2026-10-09
 
 Owner decision after asking Balázs's agent: his Orca sessions run the default

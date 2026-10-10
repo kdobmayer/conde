@@ -133,9 +133,10 @@ Status 2026-10-10: implemented, not yet run on Windows. The acceptance run is
 the first execution of every Windows code path.
 
 Verified here, without a Windows machine:
-- `cargo check --workspace --target x86_64-pc-windows-msvc` passes (official
-  rust 1.95.0 with its Windows std; the C parts of ring and SQLite are not
-  compiled by a check, the release runner compiles them).
+- `cargo check --workspace --tests --target x86_64-pc-windows-msvc` passes
+  (official rust 1.95.0 with its Windows std; the C parts of ring and SQLite
+  are not compiled by a check, the release runner compiles them). Tests that
+  drive the daemon over a unix socket or check unix modes are `cfg(unix)`.
 - Unit tests on Linux behind the injection points: the pipe-name parser and
   the key-file hash (ported from Claude Code's), the FILETIME/.NET-ticks start
   rule, receipts gated on the auth line, the owner-only SDDL, the SID peer
@@ -158,8 +159,10 @@ Read from the shipped bundles, unverified on a Windows install (Claude Code
   `<pid>.<sha256 of \\.\pipe\ + lowercased name>.key`, and the auth line is
   required there. It answers receipts only to a `from` pipe named
   `cc-msg-<32 hex>` that a key file vouches for, opening each with the auth
-  line; conde's bridge binds such a pipe and publishes that key. Unverified:
-  that Claude Code's address syntax accepts conde's `uds:\\.\pipe\...` form.
+  line; conde's bridge binds such a pipe and publishes that key, and sends
+  only to a pipe whose server pid is the session's. The `uds:\\.\pipe\...`
+  address form is accepted: the address character class in the 2.1.296
+  strings includes the backslash.
 - `\\.\pipe\LOCAL\` is session-scoped: the bridge must run in the human's
   desktop session, so the task uses an interactive logon token.
 - Codex's app-server control endpoint is the same
@@ -178,14 +181,17 @@ Waits for the first Windows run:
   check of the server's (a squatted name is refused, not used). Not
   verifiable by design: any process of the same user is trusted, as with the
   uid check on Unix.
-- Secret files under `%APPDATA%\conde` created with a protected owner-only DACL;
-  load and doctor accept the owner, SYSTEM and Administrators only.
+- Secret files under `%APPDATA%\conde`, and the data directory, created with a
+  protected DACL for the current user only; load and doctor accept a DACL whose
+  allow entries name only the current user's SID, SYSTEM and Administrators.
+  The file's owner is not read, as on Unix, where only the mode bits are.
 - The Toolhelp ancestry walk, command lines via NtQueryInformationProcess, the
   echo-off console prompt, the host name from GetComputerNameExW.
 - install.ps1 in Windows PowerShell 5.1: the user PATH registry edit and its
   broadcast, renaming a running `conde.exe` aside; the blob's text content type.
 - The release workflow's `windows` job (static CRT build, smoke test, identity
-  probe), first exercised by the next release; it gates `publish` like macOS.
+  probe over the pipe) ran green on its first run; it gates `publish` like
+  macOS.
 
 Decisions the section left open: a named pipe, not AF_UNIX, for the CLI
 (std's Windows `UnixStream` is unstable in 1.95 and tokio has no AF_UNIX on
@@ -195,7 +201,20 @@ service (no admin, runs in the desktop session); the task inherits the logon
 environment, so setup names relocated directories to `setx` instead of pinning
 them; data in `%LOCALAPPDATA%\conde\data`, config in `%APPDATA%\conde`
 (`XDG_CONFIG_HOME` still wins when set); a Windows send without a peer token
-fails at once instead of being dropped by Claude Code.
+fails at once instead of being dropped by Claude Code; the task names the user
+by SID (`<UserId>`), since Entra-joined machines name users `AzureAD\...`; a
+restart is reported only after `/End`, `/Run` and an answer on the pipe.
+
+Follow-ups for the first Windows run (review 2026-10-10, open):
+- Another local user can create `\\.\pipe\conde-<user>` first: the bridge then
+  fails to bind, and the task's restart-on-failure retries up to 999 times
+  without a message anyone sees.
+- An elevated client against a non-elevated bridge: reading the elevated
+  process's token for the SID check may be denied, which refuses it.
+- FreeConsole when Windows Terminal is the default console host.
+- The task's default priority (7, below normal) for the bridge.
+- A `/End` hard stop leaves the reply pipe's `.key` file in the sessions
+  directory until Claude Code sweeps keys of dead pids.
 
 ## F. Session discovery beyond ~/.claude (Orca multi-account) — DROPPED 2026-10-09
 

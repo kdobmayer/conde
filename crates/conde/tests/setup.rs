@@ -66,10 +66,19 @@ impl Host for Fake {
         let mut ok = self.fail.is_none_or(|f| !line.starts_with(f));
         let mut stdout = String::new();
         match (name.as_str(), args) {
-            ("claude", ["mcp", "add", "--scope", "user", server, "--", cmd, "mcp"]) => {
-                // what the real CLI does: a user-scope stdio entry in ~/.claude.json
+            ("claude", ["mcp", "add", "--scope", "user", server, rest @ ..]) => {
+                // what the real CLI (2.1.296) does: a user-scope stdio entry in ~/.claude.json,
+                // its -e KEY=VALUE pairs as env
+                let dash = rest.iter().position(|a| *a == "--").expect("-- before the command");
+                let mut env = serde_json::Map::new();
+                for pair in rest[..dash].chunks(2) {
+                    assert_eq!(pair[0], "-e", "{line}");
+                    let (k, v) = pair[1].split_once('=').unwrap();
+                    env.insert(k.into(), v.into());
+                }
+                let (cmd, args) = (rest[dash + 1], &rest[dash + 2..]);
                 let text = std::fs::read_to_string(&self.claude_json).unwrap_or_default();
-                let entry = json!({"type": "stdio", "command": cmd, "args": ["mcp"], "env": {}});
+                let entry = json!({"type": "stdio", "command": cmd, "args": args, "env": env});
                 std::fs::write(&self.claude_json, setup::json_set(&text, &["mcpServers", server], &entry)?)?;
             }
             ("claude", ["mcp", "remove", "--scope", "user", server]) => {
@@ -136,7 +145,22 @@ fn env(root: &Path, os: Os) -> Env {
         exe: root.join("bin/conde"),
         path: "/usr/local/bin:/usr/bin:/bin".into(),
         socket: root.join("run/conde.sock"),
+        default_socket: root.join("run/conde.sock"),
     }
+}
+
+/// The `claude mcp add` setup runs for MCP server `name`.
+fn add_call(env: &Env, name: &str) -> String {
+    format!("claude mcp add --scope user {name} -e CONDE_SOCK={} -- {} mcp", env.socket.display(), env.exe.display())
+}
+
+/// The Codex entry setup writes for MCP server `name`.
+fn codex_entry(env: &Env, name: &str) -> String {
+    format!(
+        "[mcp_servers.{name}]\ncommand = \"{}\"\nargs = [\"mcp\"]\nenv = {{ CONDE_SOCK = \"{}\" }}\n",
+        env.exe.display(),
+        env.socket.display()
+    )
 }
 
 fn run(env: &Env, opts: &Options, host: &mut Fake) -> (bool, String) {
@@ -183,7 +207,7 @@ fn linux_full_setup_then_idempotent_rerun() {
             "systemctl --user daemon-reload".to_string(),
             "systemctl --user enable conde.service".into(),
             "systemctl --user start conde.service".into(),
-            format!("claude mcp add --scope user conde -- {exe} mcp"),
+            add_call(&env, "conde"),
         ]
     );
     assert!(out.contains("service: wrote ~/.config/systemd/user/conde.service"), "{out}");
@@ -214,7 +238,7 @@ fn linux_full_setup_then_idempotent_rerun() {
     assert_eq!(claude_json["mcpServers"]["conde"]["command"], exe);
     let settings: Value = serde_json::from_str(&read(&env.claude_settings())).unwrap();
     assert_eq!(settings["crossSessionInbound"], "accept");
-    assert!(read(&env.codex_config()).contains(&format!("[mcp_servers.conde]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n")));
+    assert!(read(&env.codex_config()).contains(&codex_entry(&env, "conde")));
     let written = files(&root);
     assert_eq!(
         written,
@@ -369,10 +393,11 @@ fn without_claude_cli_and_with_relocated_config_dirs() {
     let cj: Value = serde_json::from_str(&read(&root.join("claude-cfg/.claude.json"))).unwrap();
     assert_eq!(cj["numStartups"], 3);
     assert_eq!(cj["mcpServers"]["x"]["command"], "y");
-    assert_eq!(cj["mcpServers"]["conde"], json!({"type": "stdio", "command": env.exe.display().to_string(), "args": ["mcp"], "env": {}}));
+    let sock = env.socket.display().to_string();
+    assert_eq!(cj["mcpServers"]["conde"], json!({"type": "stdio", "command": env.exe.display().to_string(), "args": ["mcp"], "env": {"CONDE_SOCK": sock}}));
     let toml = read(&root.join("codex-home/config.toml"));
     assert!(toml.starts_with(codex_cfg), "{toml}");
-    assert!(toml.ends_with(&format!("[mcp_servers.conde]\ncommand = \"{}\"\nargs = [\"mcp\"]\n", env.exe.display())), "{toml}");
+    assert!(toml.ends_with(&codex_entry(&env, "conde")), "{toml}");
     let written = files(&root);
     for f in [
         "claude-cfg/settings.json",
@@ -421,7 +446,8 @@ fn existing_codex_entry_is_updated_in_place() {
     let (ok, out) = run(&env, &Options::select(false, true, false, false), &mut host);
     assert!(ok, "{out}");
     assert!(out.contains("codex: updated MCP server conde in ~/.codex/config.toml"), "{out}");
-    assert_eq!(read(&env.codex_config()), mine.replace("/elsewhere/conde", &env.exe.display().to_string()));
+    let want = format!("{}env = {{ CONDE_SOCK = \"{}\" }}\n", mine.replace("/elsewhere/conde", &env.exe.display().to_string()), env.socket.display());
+    assert_eq!(read(&env.codex_config()), want);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -449,12 +475,17 @@ fn another_instances_conde_entry_stays_and_this_one_registers_as_conde_board() {
     let codex_theirs = format!("[mcp_servers.conde]\ncommand = \"{other}\"\nargs = [\"mcp\"]\n");
     std::fs::write(env.codex_config(), &codex_theirs).unwrap();
     enrolled(&env);
+    // the other instance's skills
+    for skill in [env.claude_skill(), env.codex_skill()] {
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, "---\nname: conde\n---\ntheirs\n").unwrap();
+    }
     let mut host = Fake::new(&env, &["claude"]);
     let exe = env.exe.display().to_string();
 
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
-    assert_eq!(host.take_calls(), [format!("claude mcp add --scope user conde-dakai -- {exe} mcp")], "theirs is never removed");
+    assert_eq!(host.take_calls(), [add_call(&env, "conde-dakai")], "theirs is never removed");
     for want in [
         format!("claude: MCP server conde belongs to another conde instance ({other}); this one registers as conde-dakai"),
         format!("codex: MCP server conde belongs to another conde instance ({other}); this one registers as conde-dakai"),
@@ -467,21 +498,27 @@ fn another_instances_conde_entry_stays_and_this_one_registers_as_conde_board() {
     assert_eq!(cj["mcpServers"]["conde-dakai"]["command"], exe);
     let toml = read(&env.codex_config());
     assert!(toml.starts_with(&codex_theirs), "{toml}");
-    assert!(toml.contains(&format!("[mcp_servers.conde-dakai]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n")), "{toml}");
     for skill in [env.claude_skill(), env.codex_skill()] {
+        assert_eq!(read(&skill), "---\nname: conde\n---\ntheirs\n", "the other instance's skill stays");
+    }
+    for skill in [env.claude_skill_for("conde-dakai"), env.codex_skill_for("conde-dakai")] {
         let text = read(&skill);
+        assert!(text.starts_with("---\nname: conde-dakai\n"), "{}", skill.display());
         assert!(text.contains("tools of the `conde-dakai` MCP server"), "{}", skill.display());
         assert!(!text.contains("tools of the `conde` MCP server"));
     }
+    assert!(out.contains("claude: skill wrote ~/.claude/skills/conde-dakai/SKILL.md"), "{out}");
+    assert_eq!(cj["mcpServers"]["conde-dakai"]["env"]["CONDE_SOCK"], env.socket.display().to_string());
+    assert!(toml.contains(&codex_entry(&env, "conde-dakai")), "{toml}");
 
     // a rerun finds its own entry under the second name and changes nothing
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
     assert!(host.take_calls().is_empty());
     for want in [
-        "claude: skill unchanged ~/.claude/skills/conde/SKILL.md",
+        "claude: skill unchanged ~/.claude/skills/conde-dakai/SKILL.md",
         "claude: MCP server conde-dakai unchanged (user scope)",
-        "codex: skill unchanged ~/.codex/skills/conde/SKILL.md",
+        "codex: skill unchanged ~/.codex/skills/conde-dakai/SKILL.md",
         "codex: MCP server conde-dakai unchanged in ~/.codex/config.toml",
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
@@ -490,7 +527,8 @@ fn another_instances_conde_entry_stays_and_this_one_registers_as_conde_board() {
     let (ok, out) = verify(&env, &opts, &mut host);
     assert!(ok, "{out}");
     assert!(out.contains(&format!("ok      claude: MCP server conde-dakai registered at user scope ({exe} mcp)")), "{out}");
-    assert!(out.contains("ok      codex: skill ~/.codex/skills/conde/SKILL.md up to date"), "{out}");
+    assert!(out.contains("ok      codex: skill ~/.codex/skills/conde-dakai/SKILL.md up to date"), "{out}");
+    assert!(out.contains("ok      claude: skill ~/.claude/skills/conde-dakai/SKILL.md up to date"), "{out}");
     assert!(out.contains(&format!("ok      codex: MCP server conde-dakai registered in ~/.codex/config.toml ({exe} mcp)")), "{out}");
 
     // enrolling another board later does not move the registration
@@ -519,13 +557,14 @@ fn another_socket_or_a_remote_server_is_another_instance_and_without_a_board_the
 
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
-    assert_eq!(host.take_calls(), [format!("claude mcp add --scope user conde-2 -- {exe} mcp")]);
+    assert_eq!(host.take_calls(), [add_call(&env, "conde-2")]);
     assert!(out.contains(&format!("({exe}, CONDE_SOCK=/elsewhere/conde.sock); this one registers as conde-2")), "{out}");
     assert!(out.contains("codex: MCP server conde belongs to another conde instance (a server that runs no local command); this one registers as conde-2"), "{out}");
     let cj: Value = serde_json::from_str(&read(&env.claude_json())).unwrap();
     assert_eq!(cj["mcpServers"]["conde"], theirs);
     assert!(read(&env.codex_config()).starts_with("[mcp_servers.conde]\nurl = \"https://conde.example/mcp\"\n"));
-    assert!(read(&env.codex_skill()).contains("tools of the `conde-2` MCP server"));
+    assert!(read(&env.codex_skill_for("conde-2")).contains("tools of the `conde-2` MCP server"));
+    assert!(!env.codex_skill().exists() && !env.claude_skill().exists(), "skills/conde is the other instance's");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -544,7 +583,7 @@ fn our_own_or_a_dead_conde_entry_is_updated_in_place() {
     assert!(ok, "{out}");
     assert_eq!(
         host.take_calls(),
-        ["claude mcp remove --scope user conde".to_string(), format!("claude mcp add --scope user conde -- {exe} mcp")]
+        ["claude mcp remove --scope user conde".to_string(), add_call(&env, "conde")]
     );
     assert!(!out.contains("another conde instance"), "{out}");
     assert_eq!(read(&env.claude_skill()), setup::CLAUDE_SKILL);
@@ -553,7 +592,48 @@ fn our_own_or_a_dead_conde_entry_is_updated_in_place() {
     claude_servers(&env, json!({"conde": {"type": "stdio", "command": "conde-gone", "args": ["mcp"]}}));
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
-    assert_eq!(host.take_calls()[1], format!("claude mcp add --scope user conde -- {exe} mcp"));
+    assert_eq!(host.take_calls()[1], add_call(&env, "conde"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_entry_without_conde_sock_means_the_default_socket_and_a_bare_name_is_found_on_path() {
+    let root = temp_root();
+    let exe = root.join("bin/conde");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+    let base = Env { path: format!("/nonexistent:{}", root.join("bin").display()), ..env(&root, Os::Linux) };
+    let opts = Options::select(true, false, false, false);
+    let old_style = json!({"type": "stdio", "command": "conde", "args": ["mcp"], "env": {"TOKEN": "t"}});
+
+    // our binary by its bare name, no CONDE_SOCK, and this instance on the default socket: ours,
+    // updated in place to carry the socket, its other env vars kept
+    claude_servers(&base, json!({"conde": old_style}));
+    let mut host = Fake::new(&base, &["claude"]);
+    let (ok, out) = run(&base, &opts, &mut host);
+    assert!(ok, "{out}");
+    assert!(!out.contains("another conde instance"), "{out}");
+    let sock = base.socket.display().to_string();
+    assert_eq!(
+        host.take_calls(),
+        [
+            "claude mcp remove --scope user conde".to_string(),
+            format!("claude mcp add --scope user conde -e CONDE_SOCK={sock} -e TOKEN=t -- {} mcp", exe.display())
+        ]
+    );
+    let cj: Value = serde_json::from_str(&read(&base.claude_json())).unwrap();
+    assert_eq!(cj["mcpServers"]["conde"]["env"], json!({"CONDE_SOCK": sock, "TOKEN": "t"}));
+    let (ok, out) = verify(&base, &opts, &mut host);
+    assert!(out.contains("ok      claude: MCP server conde registered at user scope"), "{ok} {out}");
+
+    // the same entry while this instance runs on another socket: it is the default socket's
+    // instance, not ours
+    let elsewhere = Env { socket: root.join("run/second.sock"), ..base.clone() };
+    claude_servers(&elsewhere, json!({"conde": old_style}));
+    let (ok, out) = run(&elsewhere, &opts, &mut host);
+    assert!(ok, "{out}");
+    assert!(out.contains("claude: MCP server conde belongs to another conde instance (conde); this one registers as conde-2"), "{out}");
+    assert_eq!(host.take_calls(), [add_call(&elsewhere, "conde-2")]);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -563,7 +643,8 @@ fn both_skills_name_the_mcp_server_in_one_rewritable_place() {
         assert_eq!(skill.matches("tools of the `conde` MCP server").count(), 1);
         assert_eq!(setup::skill_text(skill, "conde"), skill);
         let renamed = setup::skill_text(skill, "conde-dakai");
-        assert!(renamed.contains("tools of the `conde-dakai` MCP server") && renamed.starts_with("---\nname: conde\n"));
+        assert!(renamed.contains("tools of the `conde-dakai` MCP server") && renamed.starts_with("---\nname: conde-dakai\n"));
+        assert_eq!(skill.matches("---\nname: conde\n").count(), 1);
     }
 }
 

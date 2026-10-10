@@ -16,6 +16,11 @@ pub fn socket_path() -> PathBuf {
     if let Some(s) = std::env::var_os("CONDE_SOCK").filter(|s| !s.is_empty()) {
         return PathBuf::from(s);
     }
+    default_socket_path()
+}
+
+/// The socket without `$CONDE_SOCK`: `$XDG_RUNTIME_DIR/conde/conde.sock`.
+pub fn default_socket_path() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)

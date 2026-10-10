@@ -3,8 +3,8 @@
 //!
 //! The server stays stateless: login transactions, browser sessions and one-time CLI codes
 //! live in the board's store behind [`WebStore`]; secrets are kept only as SHA-256 digests.
-//! Routes: `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /auth/cli`,
-//! `POST /auth/cli/redeem`, `GET /keys`, `POST /keys`, `GET /keys/created`,
+//! Routes: `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /auth/cli`
+//! (loopback, or `mode=code` for the pasted code), `POST /auth/cli/redeem`, `GET /keys`, `POST /keys`, `GET /keys/created`,
 //! `POST /keys/{host}/revoke`, `POST /keys/apps/{grant_id}/revoke`, the remote MCP's OAuth
 //! authorization server ([`oauth`]: metadata, `/oauth/authorize`, `/oauth/token`); with
 //! `CONDE_ADMIN_KEY` also the admin API under `/v1/admin`. The server adds the web app
@@ -275,7 +275,10 @@ pub struct LoginTxn {
     pub created_at: i64,
 }
 
-/// A one-time `conde login` code, keyed by the digest of the code; taken once by redeem.
+/// A signed-in `conde login`, taken once by redeem. The loopback flow keys it by the digest of
+/// the code it hands the loopback. The pasted-code flow keys it by the digest of
+/// `paste:<state>` and keeps the short code the page showed as a digest in `paste`; a wrong
+/// code puts it back with one more try, until [`PASTE_TRIES`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliCode {
     pub user_id: i64,
@@ -285,7 +288,16 @@ pub struct CliCode {
     /// The CLI run's PKCE S256 challenge; redeem must present its verifier.
     pub challenge: String,
     pub created_at: i64,
+    /// The pasted-code flow: the digest of `<state>:<code>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste: Option<String>,
+    /// Failed redeems so far (pasted-code flow).
+    #[serde(default)]
+    pub tries: u32,
 }
+
+/// Failed redeems a pasted-code login survives; the last one ends it.
+pub const PASTE_TRIES: u32 = 5;
 
 /// A just-created key awaiting its one display after the redirect, keyed by the digest of a
 /// one-time display token; taken once. The key itself is not stored, only its digest.

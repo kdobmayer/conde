@@ -498,6 +498,26 @@ async fn browser_leg<S>(env: &Env<S>, b: &Browser, run: &CliRun) -> String {
 }
 
 
+/// Runs the pasted-code browser leg; returns the code the page shows (`ABCD-EFGH`).
+async fn paste_leg<S>(env: &Env<S>, b: &Browser, run: &CliRun) -> String {
+    let url = env.url(&format!(
+        "/auth/cli?mode=code&state={}&challenge={}",
+        run.state, run.challenge
+    ));
+    let (status, at, body) = b.get(&url).await;
+    assert_eq!((status, at.as_str()), (StatusCode::OK, url.as_str()), "{body}");
+    assert!(body.contains("Sign-in code for conde login"), "{body}");
+    let code = key_of(&body);
+    assert_eq!(code.len(), 9, "{code}");
+    code
+}
+
+/// A pasted-code redeem of `run` with `code`.
+async fn paste_redeem<S>(env: &Env<S>, run: &CliRun, code: &str) -> (StatusCode, Value) {
+    redeem(env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "Head-Less"})).await
+}
+
+
 async fn admin<S>(
     env: &Env<S>,
     path: &str,

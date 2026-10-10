@@ -811,6 +811,129 @@ async fn conde_login_links_are_validated() {
     }
 }
 
+// --- conde login, pasted code ----------------------------------------------------------------
+
+#[tokio::test]
+async fn a_pasted_code_redeems_once_with_the_runs_verifier() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    assert!(env.store.m().creds.is_empty(), "nothing is minted before the redeem");
+    let stored = format!("{:?}", env.store.m().codes.values().collect::<Vec<_>>());
+    assert!(!stored.contains(&shown.replace('-', "")), "the code is stored only as a digest: {stored}");
+
+    // typed as read aloud: lower case, a space instead of the dash
+    let typed = shown.to_lowercase().replace('-', " ");
+    let (status, got) = paste_redeem(&env, &run, &typed).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!((got["host_id"].as_str(), got["user"].as_str()), (Some("head-less"), Some("krisztian-dobmayer")));
+    assert_eq!(env.store.live_host_of(got["key"].as_str().unwrap()).as_deref(), Some("head-less"));
+
+    // used: nothing waits under this run any more (the CLI has dropped it on success)
+    let (status, again) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!((status, again["error"].as_str()), (StatusCode::BAD_REQUEST, Some("authorization_pending")));
+    assert_eq!(env.store.m().creds.len(), 1);
+}
+
+#[tokio::test]
+async fn wrong_pasted_codes_use_up_the_tries_then_the_login_dies() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+
+    // the right code from another run (another verifier) counts as a miss too
+    let thief = CliRun { state: run.state.clone(), ..cli_run() };
+    let (status, got) = paste_redeem(&env, &thief, &shown).await;
+    assert_eq!((status, got["error"].as_str(), got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some("invalid_code"), Some(4)));
+    for left in [3, 2, 1] {
+        let (status, got) = paste_redeem(&env, &run, wrong).await;
+        assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
+    }
+    let (status, got) = paste_redeem(&env, &run, wrong).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
+    assert!(got["message"].as_str().unwrap().contains("last try"), "{got}");
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("authorization_pending")), "{got}");
+    assert!(env.store.m().creds.is_empty() && env.store.m().codes.is_empty(), "the login is gone");
+
+    // a malformed code is refused before any lookup and costs no try
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let (status, got) = paste_redeem(&env, &run, "O0O0-I1I1").await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_request")), "{got}");
+    // expiry
+    env.advance(301);
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(got["message"].as_str().unwrap().contains("expired"), "{got}");
+}
+
+#[tokio::test]
+async fn the_pasted_code_is_shown_only_to_the_account_that_signed_in() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let run = cli_run();
+    let link = format!("/auth/cli?mode=code&state={}&challenge={}", run.state, run.challenge);
+
+    // signed out: the sign-in comes first and returns to the same link
+    let (status, loc) = Browser::new().peek(&env.url(&link)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(loc.starts_with("/auth/login?next=%2Fauth%2Fcli%3Fmode%3Dcode%26state%3D"), "{loc}");
+    assert!(env.store.m().codes.is_empty(), "nothing is pending before the sign-in");
+
+    let b = Browser::new();
+    let first = paste_leg(&env, &b, &run).await;
+    // a reload by the same account issues a new code; the old one is dead
+    let second = paste_leg(&env, &b, &run).await;
+    assert_ne!(first, second);
+
+    // another account opening the same link gets no code and cannot take the login over
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.oid = "oid-bob".into();
+        p.upn = "bob@dakai.example".into();
+        p.name = "Bob".into();
+    }
+    let (status, _, body) = Browser::new().get(&env.url(&link)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(!body.contains("<pre id=\"key\">"), "{body}");
+
+    let (status, got) = paste_redeem(&env, &run, &first).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    let (status, got) = paste_redeem(&env, &run, &second).await;
+    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+}
+
+#[tokio::test]
+async fn pasted_code_links_are_validated_and_the_two_flows_do_not_mix() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let run = cli_run();
+    for query in [
+        format!("mode=code&port=5000&state={}&challenge={}", run.state, run.challenge),
+        format!("mode=paste&state={}&challenge={}", run.state, run.challenge),
+        format!("mode=code&state=short&challenge={}", run.challenge),
+        format!("mode=code&state={}", run.state),
+    ] {
+        let (status, _) = b.peek(&env.url(&format!("/auth/cli?{query}"))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    // a loopback login is not redeemable with a short code, nor a pasted one with a 64-hex code
+    let code = browser_leg(&env, &b, &run).await;
+    let (status, got) = paste_redeem(&env, &run, "2345-6789").await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("authorization_pending")), "{got}");
+    let other = cli_run();
+    paste_leg(&env, &b, &other).await;
+    let (status, _) = paste_redeem(&env, &other, &format!("{:064x}", 7)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, got) =
+        redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "h"})).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(env.store.m().creds.len(), 1);
+}
+
 // --- key display, disabled users ------------------------------------------------------------------
 
 #[tokio::test]

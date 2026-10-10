@@ -123,7 +123,10 @@ pub fn enroll(server: &str, host: Option<&str>, board: Option<&str>, key_stdin: 
     let key = if key_stdin {
         credentials::read_stdin_secret()?
     } else {
-        credentials::prompt_secret(&format!("host key for {host} at {server}: "))?
+        credentials::prompt_secret(
+            &format!("host key for {host} at {server}: "),
+            "enroll needs a terminal for the key prompt (or pipe the key with --key-stdin)",
+        )?
     };
     if key.is_empty() || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
         bail!("that is not a host key (empty or contains whitespace)");

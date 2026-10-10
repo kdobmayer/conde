@@ -2,14 +2,20 @@
 //! listener on 127.0.0.1 receives a one-time code bound to this run (state + PKCE S256);
 //! the code is redeemed over TLS for the host key, which never appears in a URL. The key is
 //! stored exactly as `conde enroll` stores it (`boards/<alias>.json`, mode 0600).
+//!
+//! A headless host (`--code`, `--no-browser`, or no display) uses the pasted code instead: the
+//! human opens the printed URL on any device, signs in, and the page shows a short one-time
+//! code, which is typed at the masked prompt or given back with `--code <CODE>`. The run's
+//! state and PKCE verifier wait in `login/<server>.json` (mode 0600) between the two steps.
 
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,6 +28,8 @@ use crate::boards::{self, BoardConfig};
 pub const BROWSER_WAIT: Duration = Duration::from_secs(300);
 /// The redeem request's deadline.
 pub const REDEEM_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a started pasted-code login waits on this host for its code.
+pub const PENDING_FOR: Duration = Duration::from_secs(900);
 
 /// What the server returns once for a redeemed code.
 #[derive(Clone, Deserialize)]
@@ -166,13 +174,19 @@ pub(crate) fn tls() -> anyhow::Result<rustls::ClientConfig> {
         .with_no_client_auth())
 }
 
-async fn redeem(origin: &str, run: &Run, code: &str, host: &str) -> anyhow::Result<Enrolled> {
+/// A redeem the server refused: its error code and message.
+#[derive(Debug)]
+pub struct Refused {
+    pub error: String,
+    pub message: String,
+}
+
+async fn post_redeem(origin: &str, body: Value) -> anyhow::Result<Result<Enrolled, Refused>> {
     let client = reqwest::Client::builder()
         .tls_backend_preconfigured(tls()?)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REDEEM_TIMEOUT)
         .build()?;
-    let body = json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": host});
     let response = client
         .post(format!("{origin}/auth/cli/redeem"))
         .json(&body)
@@ -182,14 +196,155 @@ async fn redeem(origin: &str, run: &Run, code: &str, host: &str) -> anyhow::Resu
     let status = response.status();
     if !status.is_success() {
         let detail: Value = response.json().await.unwrap_or_default();
-        let message = detail["message"].as_str().map(str::to_string).unwrap_or_else(|| status.to_string());
-        bail!("the server refused the sign-in: {message}");
+        let field = |k: &str| detail[k].as_str().map(str::to_string);
+        return Ok(Err(Refused {
+            error: field("error").unwrap_or_default(),
+            message: field("message").unwrap_or_else(|| status.to_string()),
+        }));
     }
     let enrolled: Enrolled = response.json().await.context("the server's redeem answer is not a host key")?;
     if enrolled.key.is_empty() || enrolled.key.chars().any(|c| c.is_whitespace() || c.is_control()) || enrolled.host_id.is_empty() {
         bail!("the server's redeem answer is not a host key");
     }
-    Ok(enrolled)
+    Ok(Ok(enrolled))
+}
+
+async fn redeem(origin: &str, run: &Run, code: &str, host: &str) -> anyhow::Result<Enrolled> {
+    let body = json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": host});
+    post_redeem(origin, body).await?.map_err(|r| anyhow::anyhow!("the server refused the sign-in: {}", r.message))
+}
+
+/// A pasted-code login waiting on this host for its code.
+#[derive(Serialize, Deserialize)]
+pub struct Pending {
+    /// The server's origin.
+    pub server: String,
+    state: String,
+    verifier: String,
+    /// Unix seconds.
+    pub started_at: u64,
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending").field("server", &self.server).field("started_at", &self.started_at).finish_non_exhaustive()
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
+}
+
+/// Where a pasted-code login for `server` waits: `$XDG_CONFIG_HOME/conde/login/<digest>.json`.
+pub fn pending_path(server: &str) -> anyhow::Result<std::path::PathBuf> {
+    let origin = origin(server)?;
+    let name: String = Sha256::digest(origin.as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect();
+    Ok(boards::config_dir()?.join("login").join(format!("{name}.json")))
+}
+
+/// Starts a pasted-code login: stores the run at `path` (mode 0600) and returns the URL the
+/// human opens on any device.
+pub fn start_code(server: &str, path: &std::path::Path) -> anyhow::Result<String> {
+    let origin = origin(server)?;
+    let run = Run::new()?;
+    let pending = Pending { server: origin.clone(), state: run.state.clone(), verifier: run.verifier, started_at: unix_now() };
+    let dir = path.parent().context("the login path has no directory")?;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    let tmp = dir.join(format!(".login.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    std::io::Write::write_all(&mut f, serde_json::to_string(&pending)?.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(format!("{origin}/auth/cli?mode=code&state={}&challenge={}", run.state, run.challenge))
+}
+
+/// The login waiting at `path` for `server`, if it is still fresh.
+fn load_pending(server: &str, path: &std::path::Path) -> anyhow::Result<Pending> {
+    let start = format!("start one with: conde login --server {server} --code");
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("no conde login is waiting for a code from {} on this host; {start}", origin(server)?)
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let pending: Pending = serde_json::from_slice(&raw).with_context(|| format!("{} is not a conde login", path.display()))?;
+    if pending.server != origin(server)? {
+        bail!("{} belongs to {}; {start}", path.display(), pending.server);
+    }
+    if unix_now().saturating_sub(pending.started_at) > PENDING_FOR.as_secs() {
+        let _ = std::fs::remove_file(path);
+        bail!("the waiting conde login expired; {start}");
+    }
+    Ok(pending)
+}
+
+/// How a pasted code fared.
+#[derive(Debug)]
+pub enum CodeOutcome {
+    Enrolled(Enrolled),
+    /// A wrong code, or none signed in yet; the login waits for another try.
+    Retry(String),
+}
+
+/// Redeems `typed` for the login waiting at `path`. The waiting login is removed once the
+/// server is done with it (enrolled, expired, out of tries); a wrong code keeps it.
+pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host: &str) -> anyhow::Result<CodeOutcome> {
+    let pending = load_pending(server, path)?;
+    let code: String = typed.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_uppercase()).collect();
+    if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Ok(CodeOutcome::Retry("that is not a sign-in code: 8 letters and digits, as the page shows it".into()));
+    }
+    let body = json!({"code": code, "state": pending.state, "code_verifier": pending.verifier, "host": host});
+    match post_redeem(&pending.server, body).await? {
+        Ok(enrolled) => {
+            let _ = std::fs::remove_file(path);
+            Ok(CodeOutcome::Enrolled(enrolled))
+        }
+        Err(r) if r.error == "invalid_code" || r.error == "authorization_pending" => Ok(CodeOutcome::Retry(r.message)),
+        Err(r) => {
+            if r.error != "internal" {
+                let _ = std::fs::remove_file(path);
+            }
+            bail!("the server refused the sign-in: {}", r.message)
+        }
+    }
+}
+
+/// Whether this machine has no desktop to open a browser on.
+pub fn headless(os_is_linux: bool, display: Option<&str>, wayland: Option<&str>) -> bool {
+    let set = |v: Option<&str>| v.is_some_and(|v| !v.is_empty());
+    os_is_linux && !set(display) && !set(wayland)
+}
+
+/// The pasted-code login: `code` is what `--code` carried (empty: start one).
+fn code_login(server: &str, host: &str, finish_hint: &str, code: &str, runtime: &tokio::runtime::Runtime) -> anyhow::Result<Option<Enrolled>> {
+    let path = pending_path(server)?;
+    if !code.is_empty() {
+        return match runtime.block_on(finish_code(server, &path, code, host))? {
+            CodeOutcome::Enrolled(e) => Ok(Some(e)),
+            CodeOutcome::Retry(why) => bail!("{why}; run again with the code the page shows: {finish_hint}"),
+        };
+    }
+    let url = start_code(server, &path)?;
+    eprintln!("Open this URL in a browser on any device and sign in:\n\n  {url}\n\nThe page then shows a one-time sign-in code.");
+    // SAFETY: isatty on the process's own stdin descriptor.
+    if unsafe { libc::isatty(0) } != 1 {
+        eprintln!("When you have it, finish with:\n\n  {finish_hint}\n");
+        return Ok(None);
+    }
+    loop {
+        let typed = crate::credentials::prompt_secret("Sign-in code: ", "conde login needs a terminal for the code prompt")?;
+        if typed.is_empty() {
+            eprintln!("No code entered. To finish later: {finish_hint}");
+            return Ok(None);
+        }
+        match runtime.block_on(finish_code(server, &path, &typed, host))? {
+            CodeOutcome::Enrolled(e) => return Ok(Some(e)),
+            CodeOutcome::Retry(why) => eprintln!("{why}"),
+        }
+    }
 }
 
 /// Opens `url` in the desktop browser; the URL is printed first for headless use.
@@ -207,27 +362,40 @@ fn open_browser(url: &str) {
     }
 }
 
-/// `conde login --server <url> [--host <id>] [--board <alias>] [--no-browser]`.
-pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool) -> anyhow::Result<i32> {
+/// `conde login --server <url> [--host <id>] [--board <alias>] [--no-browser] [--code [<CODE>]]`.
+/// `code`: None without `--code`, empty for a bare `--code`.
+pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool, code: Option<&str>) -> anyhow::Result<i32> {
     origin(server)?;
     if let Some(alias) = board {
         boards::check_shared_alias(alias)?;
         boards::check_pin(&boards::path(alias)?, alias, server, None)?;
     }
+    let paste = code.is_some()
+        || !browser
+        || headless(
+            cfg!(target_os = "linux"),
+            std::env::var("DISPLAY").ok().as_deref(),
+            std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        );
+    let given_host = host;
     let host = host.map(str::to_lowercase).unwrap_or_else(crate::util::local_host);
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let enrolled = runtime.block_on(sign_in(
-        server,
-        &host,
-        |url| {
-            if browser {
-                open_browser(url)
-            } else {
-                eprintln!("Open this URL in a browser to sign in:\n\n  {url}\n")
-            }
-        },
-        BROWSER_WAIT,
-    ))?;
+    let enrolled = if paste {
+        let mut hint = format!("conde login --server {server}");
+        if let Some(h) = given_host {
+            hint.push_str(&format!(" --host {h}"));
+        }
+        if let Some(b) = board {
+            hint.push_str(&format!(" --board {b}"));
+        }
+        hint.push_str(" --code <CODE>");
+        match code_login(server, &host, &hint, code.unwrap_or_default(), &runtime)? {
+            Some(e) => e,
+            None => return Ok(0),
+        }
+    } else {
+        runtime.block_on(sign_in(server, &host, open_browser, BROWSER_WAIT))?
+    };
     drop(runtime);
     let alias = match board {
         Some(a) => a.to_string(),

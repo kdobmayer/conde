@@ -98,13 +98,9 @@ pub fn same_server(a: &str, b: &str) -> anyhow::Result<bool> {
     Ok(origin(a)? == origin(b)?)
 }
 
-/// Read a key at a prompt on the terminal with echo off.
-pub fn prompt_secret(prompt: &str) -> anyhow::Result<String> {
-    let tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .context("enroll needs a terminal for the key prompt (or pipe the key with --key-stdin)")?;
+/// Read a secret at a prompt on the terminal with echo off; `no_tty` is the error without one.
+pub fn prompt_secret(prompt: &str, no_tty: &'static str) -> anyhow::Result<String> {
+    let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").context(no_tty)?;
     let fd = std::os::fd::AsRawFd::as_raw_fd(&tty);
     // SAFETY: tcgetattr/tcsetattr on an open tty fd with a zeroed termios out-parameter.
     let mut saved: libc::termios = unsafe { std::mem::zeroed() };

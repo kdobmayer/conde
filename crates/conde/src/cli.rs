@@ -211,7 +211,9 @@ enum Cmd {
     },
     /// Enroll this host with a shared board by signing in in the browser: the server mints the
     /// host key and the CLI stores it as `conde enroll` does (under --board <alias>). The key
-    /// never appears in a URL. Publishes nothing.
+    /// never appears in a URL. Publishes nothing. On a machine without a desktop (or with
+    /// --code / --no-browser) it prints the URL to open on any device; the page then shows a
+    /// one-time code to type at the prompt, or to pass back with --code <CODE>.
     Login {
         /// The server URL (https://host).
         #[arg(long, value_name = "URL")]
@@ -219,9 +221,14 @@ enum Cmd {
         /// Host name to enroll as (default: this machine's); the server may suffix it.
         #[arg(long)]
         host: Option<String>,
-        /// Print the sign-in URL instead of opening the browser (headless machines).
+        /// Print the sign-in URL instead of opening the browser and take the code the page
+        /// shows (headless machines); the same as --code.
         #[arg(long)]
         no_browser: bool,
+        /// Sign in with a pasted code: bare, it prints the URL (and prompts for the code on a
+        /// terminal); with the code the page showed, it finishes that login.
+        #[arg(long, value_name = "CODE", num_args = 0..=1, default_missing_value = "")]
+        code: Option<String>,
     },
     /// Server administration on the board itself (the human only).
     Admin {
@@ -521,8 +528,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Enroll { server, host, key_stdin } => {
             return admin::enroll(&server, host.as_deref(), cli.board.as_deref(), key_stdin);
         }
-        Cmd::Login { server, host, no_browser } => {
-            return crate::login::run(&server, host.as_deref(), cli.board.as_deref(), !no_browser);
+        Cmd::Login { server, host, no_browser, code } => {
+            return crate::login::run(&server, host.as_deref(), cli.board.as_deref(), !no_browser, code.as_deref());
         }
         Cmd::Mcp => {
             no_board("mcp", "")?;

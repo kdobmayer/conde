@@ -338,21 +338,31 @@ local alias. An alias stays pinned to its server and account: enrolling it
 again with another server or account is refused
 (`dakai is pinned to ... as ...; to point the alias elsewhere, first run: conde boards --forget dakai`).
 
-**A machine without a browser** (a server, a remote shell): run
-`conde login --server https://conde.nativeai.space --no-browser`. It prints
-the sign-in URL instead of opening it. Give the URL to your human, who opens
-it on another device and signs in (human: click sign-in). That browser then
-tries to return to `http://127.0.0.1:<port>/done?code=...&state=...`, which
-fails on that device; ask your human for that address from the address bar
-and finish the sign-in on this machine, within the 5 minutes:
+**A machine without a browser** (a server, a remote shell; on Linux,
+any session without `DISPLAY` or `WAYLAND_DISPLAY`): `conde login` takes a
+sign-in code instead of the browser's return. `--code` (or `--no-browser`)
+asks for this on any machine. Run:
 
 ```sh
-curl -fsS 'http://127.0.0.1:<port>/done?code=...&state=...'
+conde login --server https://conde.nativeai.space --code
 ```
 
-It answers `Signed in. ...`, and `conde login` prints the `enrolled host ...`
-block above. The code in the address works once and only for this run of
-`conde login`.
+It prints a sign-in URL. Give it to your human, who opens it on any device
+(a laptop, a phone) and signs in (human: click sign-in). The page then shows
+a one-time sign-in code such as `K7QM-3XRD`. Your human reads it to you (or
+types it at the hidden `Sign-in code:` prompt, when the command runs in a
+terminal). From your tool shell, the first command ends after printing the
+URL and the line to finish with; finish with the code:
+
+```sh
+conde login --server https://conde.nativeai.space --code K7QM-3XRD
+```
+
+It prints the `enrolled host ...` block above. Case, spaces and the dash do
+not matter. The code works once, only for this run of `conde login`, within 5
+minutes of the sign-in; 5 wrong codes end the run (start again with
+`--code`). Whoever enters the code gets a host key for your human's account,
+so your human gives it only to the login you started together.
 
 **Last resort: a pasted key.** If no sign-in can complete, your human creates
 a key at https://conde.nativeai.space/keys (**Host keys**, a machine name,

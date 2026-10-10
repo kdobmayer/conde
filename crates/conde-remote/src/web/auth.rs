@@ -30,7 +30,7 @@ use thiserror::Error;
 
 use super::keys::{self, host_slug};
 use super::session::{self, WebError, digest, login_cookie, random_token, removal, same_secret};
-use super::{CliCode, CreateUser, Identity, LoginTxn, WebConfig, WebState, WebUser};
+use super::{CliCode, CreateUser, Identity, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
 
 /// Discovery and JWKS are re-read after this long (and at once when a token's key is unknown).
 const METADATA_MAX_AGE: Duration = Duration::from_secs(3600);
@@ -523,6 +523,8 @@ pub(crate) struct CliQuery {
     port: Option<u16>,
     state: Option<String>,
     challenge: Option<String>,
+    /// `code`: the pasted-code flow (no loopback); the page shows a short code.
+    mode: Option<String>,
 }
 
 fn url_safe(s: &str, min: usize, max: usize) -> bool {
@@ -531,38 +533,141 @@ fn url_safe(s: &str, min: usize, max: usize) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// The pasted code's alphabet: no 0/O, 1/I/L or U, so it reads aloud and types back cleanly.
+const PASTE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Characters in a pasted code (about 39 bits).
+const PASTE_LEN: usize = 8;
+
+/// A fresh pasted code, unbiased over [`PASTE_ALPHABET`].
+fn paste_code() -> String {
+    let n = PASTE_ALPHABET.len() as u8;
+    let limit = u8::MAX - u8::MAX % n;
+    let mut out = String::with_capacity(PASTE_LEN);
+    while out.len() < PASTE_LEN {
+        let b: u8 = rand::random();
+        if b < limit {
+            out.push(PASTE_ALPHABET[(b % n) as usize] as char);
+        }
+    }
+    out
+}
+
+/// A typed code in canonical form (upper case, no spaces or dashes), when it can be one.
+fn paste_normalized(typed: &str) -> Option<String> {
+    let code: String = typed
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    (code.len() == PASTE_LEN && code.bytes().all(|b| PASTE_ALPHABET.contains(&b))).then_some(code)
+}
+
+/// Where a pasted-code login is stored: never a loopback code's digest (those are 64 hex).
+fn paste_key(cli_state: &str) -> String {
+    digest(&format!("paste:{cli_state}"))
+}
+
+fn paste_digest(cli_state: &str, code: &str) -> String {
+    digest(&format!("{cli_state}:{code}"))
+}
+
 /// `GET /auth/cli?port=&state=&challenge=`: signs the browser in if needed, then sends it to
 /// the CLI's loopback listener with a one-time code bound to the CLI run's state and PKCE
-/// challenge. The key is minted only when the CLI redeems the code.
+/// challenge. With `mode=code` instead of `port`, the page shows a short code for the human to
+/// type at the CLI (a headless host has no loopback the browser can reach). The key is minted
+/// only when the CLI redeems the code.
 pub(crate) async fn cli_start(
     State(state): State<WebState>,
     jar: CookieJar,
     Query(q): Query<CliQuery>,
 ) -> Result<Response, WebError> {
-    let (Some(port), Some(cli_state), Some(challenge)) = (q.port, q.state, q.challenge) else {
+    let paste = match q.mode.as_deref() {
+        None => false,
+        Some("code") => true,
+        Some(_) => {
+            return Err(WebError::BadRequest(
+                "This `conde login` link is malformed.".into(),
+            ));
+        }
+    };
+    let (Some(cli_state), Some(challenge)) = (q.state, q.challenge) else {
         return Err(WebError::BadRequest(
             "This link needs port, state and challenge; start it with `conde login`.".into(),
         ));
     };
-    if port < 1024 || !url_safe(&cli_state, 16, 128) || !url_safe(&challenge, 43, 43) {
+    let port = match (q.port, paste) {
+        (Some(port), false) => port,
+        (None, true) => 0,
+        (None, false) => {
+            return Err(WebError::BadRequest(
+                "This link needs port, state and challenge; start it with `conde login`.".into(),
+            ));
+        }
+        (Some(_), true) => {
+            return Err(WebError::BadRequest(
+                "This `conde login` link is malformed.".into(),
+            ));
+        }
+    };
+    if (!paste && port < 1024) || !url_safe(&cli_state, 16, 128) || !url_safe(&challenge, 43, 43) {
         return Err(WebError::BadRequest(
             "This `conde login` link is malformed.".into(),
         ));
     }
     let Some(current) = session::current(&state, &jar).await? else {
-        let back = format!("/auth/cli?port={port}&state={cli_state}&challenge={challenge}");
+        let back = if paste {
+            format!("/auth/cli?mode=code&state={cli_state}&challenge={challenge}")
+        } else {
+            format!("/auth/cli?port={port}&state={cli_state}&challenge={challenge}")
+        };
         let back: String =
             openidconnect::url::form_urlencoded::byte_serialize(back.as_bytes()).collect();
         return Ok(Redirect::to(&format!("/auth/login?next={back}")).into_response());
     };
-    let code = random_token();
-    let record = CliCode {
+    let mut record = CliCode {
         user_id: current.record.user_id,
         user_name: current.record.user_name.clone(),
         state: cli_state.clone(),
         challenge,
         created_at: state.now(),
+        paste: None,
+        tries: 0,
     };
+    if paste {
+        let code = paste_code();
+        record.paste = Some(paste_digest(&cli_state, &code));
+        let key = paste_key(&cli_state);
+        let user_id = record.user_id;
+        // A reload by the same user issues a new code (the old one dies); a login another
+        // account completed stays theirs.
+        let issued = state
+            .store(move |s| {
+                if let Some(old) = s.take_cli_code(&key)?
+                    && old.user_id != user_id
+                {
+                    s.insert_cli_code(&key, &old)?;
+                    return Ok(false);
+                }
+                s.insert_cli_code(&key, &record)?;
+                Ok(true)
+            })
+            .await?;
+        if !issued {
+            return Err(WebError::Forbidden(
+                "Another account already signed in for this conde login. Run conde login again."
+                    .into(),
+            ));
+        }
+        let minutes = state.config().cli_code_ttl.as_secs().div_ceil(60);
+        let shown = format!("{}-{}", &code[..4], &code[4..]);
+        return Ok(pages::cli_code(
+            keys::header(&current),
+            &shown,
+            minutes,
+            &keys::idp_origin(&state),
+        ));
+    }
+    let code = random_token();
     let key = digest(&code);
     state
         .store(move |s| s.insert_cli_code(&key, &record))
@@ -575,6 +680,7 @@ pub(crate) async fn cli_start(
 
 #[derive(Deserialize)]
 pub(crate) struct RedeemRequest {
+    /// The loopback's one-time code (64 hex), or the code the page showed (pasted flow).
     code: String,
     state: String,
     code_verifier: String,
@@ -597,29 +703,39 @@ fn redeem_error(status: StatusCode, code: &str, message: &str) -> Response {
     r
 }
 
-/// `POST /auth/cli/redeem` `{code, state, code_verifier, host}`: takes the one-time code
-/// (whatever the outcome), checks expiry, state and PKCE, and mints the host key.
+fn store_failed(e: super::WebStoreError) -> Response {
+    tracing::error!(error = %e, "cli code store failed");
+    redeem_error(StatusCode::INTERNAL_SERVER_ERROR, "internal", "store failed")
+}
+
+fn pkce_matches(verifier: String, challenge: &str) -> bool {
+    if !(43..=128).contains(&verifier.len()) {
+        return false;
+    }
+    let expected = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(verifier));
+    same_secret(expected.as_str(), challenge)
+}
+
+/// `POST /auth/cli/redeem` `{code, state, code_verifier, host}`: a 64-hex `code` is the
+/// loopback's, taken whatever the outcome, then expiry, state and PKCE are checked; any other
+/// `code` is a pasted one (see [`paste_redeem`]). Both mint the host key the same way.
 pub(crate) async fn cli_redeem(
     State(state): State<WebState>,
     Json(req): Json<RedeemRequest>,
 ) -> Response {
     let invalid = |m: &str| redeem_error(StatusCode::BAD_REQUEST, "invalid_grant", m);
     if req.code.len() != 64 {
+        return paste_redeem(state, req).await;
+    }
+    if !req.code.bytes().all(|b| b.is_ascii_hexdigit()) {
         return invalid("unknown code");
     }
     let key = digest(&req.code);
     let taken = match state.store(move |s| s.take_cli_code(&key)).await {
         Ok(t) => t,
-        Err(e) => {
-            tracing::error!(error = %e, "cli code lookup failed");
-            return redeem_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "store failed",
-            );
-        }
+        Err(e) => return store_failed(e),
     };
-    let Some(code) = taken else {
+    let Some(code) = taken.filter(|c| c.paste.is_none()) else {
         return invalid("unknown or already used code");
     };
     if state.now() - code.created_at > state.limits().cli_code_ttl {
@@ -631,15 +747,84 @@ pub(crate) async fn cli_redeem(
     if !(43..=128).contains(&req.code_verifier.len()) {
         return invalid("bad code_verifier");
     }
-    let verifier = PkceCodeVerifier::new(req.code_verifier);
-    let expected = PkceCodeChallenge::from_code_verifier_sha256(&verifier);
-    if !same_secret(expected.as_str(), &code.challenge) {
+    if !pkce_matches(req.code_verifier, &code.challenge) {
         return invalid("the code_verifier does not match the challenge");
     }
-    let Some(base) = host_slug(&req.host) else {
+    mint_for(&state, code, &req.host).await
+}
+
+/// The pasted-code redeem: the login is found by the CLI run's state and must be signed in
+/// (else `authorization_pending`) and live; the typed code and the PKCE verifier must both
+/// match. A miss counts as a try and
+/// puts the login back; the [`PASTE_TRIES`]th ends it.
+async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
+    let invalid = |m: &str| redeem_error(StatusCode::BAD_REQUEST, "invalid_grant", m);
+    let Some(typed) = paste_normalized(&req.code) else {
+        return redeem_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "a sign-in code is 8 letters and digits, as the page shows it",
+        );
+    };
+    if !url_safe(&req.state, 16, 128) {
+        return invalid("bad state");
+    }
+    if host_slug(&req.host).is_none() {
+        return redeem_error(StatusCode::BAD_REQUEST, "invalid_request", "bad host name");
+    }
+    let key = paste_key(&req.state);
+    let lookup = key.clone();
+    let taken = match state.store(move |s| s.take_cli_code(&lookup)).await {
+        Ok(t) => t,
+        Err(e) => return store_failed(e),
+    };
+    let Some(mut code) = taken.filter(|c| c.paste.is_some()) else {
+        return redeem_error(
+            StatusCode::BAD_REQUEST,
+            "authorization_pending",
+            "no signed-in login waits for this run: open its URL, sign in, then enter the code that page shows",
+        );
+    };
+    if state.now() - code.created_at > state.limits().cli_code_ttl {
+        return invalid("the code expired; run conde login again");
+    }
+    let right_code = code
+        .paste
+        .as_deref()
+        .is_some_and(|d| same_secret(&paste_digest(&req.state, &typed), d));
+    let right_run = same_secret(&req.state, &code.state) && pkce_matches(req.code_verifier.clone(), &code.challenge);
+    if right_code && right_run {
+        return mint_for(&state, code, &req.host).await;
+    }
+    code.tries += 1;
+    let left = PASTE_TRIES.saturating_sub(code.tries);
+    tracing::info!(user = %code.user_name, tries = code.tries, "wrong conde login code");
+    if left == 0 {
+        return invalid("wrong code, and that was the last try; run conde login again");
+    }
+    if let Err(e) = state.store(move |s| s.insert_cli_code(&key, &code)).await {
+        return store_failed(e);
+    }
+    let mut r = (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "invalid_code",
+            "message": format!("wrong code; {left} {} left", if left == 1 { "try" } else { "tries" }),
+            "tries_left": left,
+        })),
+    )
+        .into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
+}
+
+/// Mints the host key a redeemed login asked for.
+async fn mint_for(state: &WebState, code: CliCode, host: &str) -> Response {
+    let Some(base) = host_slug(host) else {
         return redeem_error(StatusCode::BAD_REQUEST, "invalid_request", "bad host name");
     };
-    let label = req.host.trim().chars().take(64).collect::<String>();
+    let label = host.trim().chars().take(64).collect::<String>();
     match keys::mint(state.core(), code.user_id, base, label, keys::HOST_SUFFIXES).await {
         Ok(minted) => {
             let mut r = Json(RedeemResponse {

@@ -244,6 +244,21 @@ struct CreatedBody<'a> {
 #[derive(Template)]
 #[template(
     ext = "html",
+    source = r#"<h1>Sign-in code for conde login</h1>
+<p>Type this code at the <code>conde login</code> prompt, or read it to the agent that started the login.</p>
+<pre id="key">{{ code }}</pre>
+<p><button type="button" id="copy">Copy code</button></p>
+<p class="notice">It works once, only for the <code>conde login</code> run that opened this page, within {{ minutes }} minutes. Give it only to a login you started: whoever enters it gets a host key for your account.</p>
+<p><a href="/keys">Host keys</a></p>"#
+)]
+struct CliCodeBody<'a> {
+    code: &'a str,
+    minutes: u64,
+}
+
+#[derive(Template)]
+#[template(
+    ext = "html",
     source = r#"<h1>{{ title }}</h1>
 <p>{{ message }}</p>
 <p><a href="/keys">Back to host keys</a></p>"#
@@ -364,6 +379,12 @@ pub(crate) fn created(
         replaced,
     });
     page(StatusCode::OK, "New host key", Some(header), &body, true, &[idp])
+}
+
+/// The pasted-code flow's code, shown to the signed-in user who completed that login.
+pub(crate) fn cli_code(header: Header<'_>, code: &str, minutes: u64, idp: &str) -> Response {
+    let body = render(&CliCodeBody { code, minutes });
+    page(StatusCode::OK, "conde login code", Some(header), &body, true, &[idp])
 }
 
 /// A public document page (no header, no script) in the keys page's style.

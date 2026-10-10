@@ -129,6 +129,7 @@ on_both!(
     sessions_expire_and_disabled_users_are_signed_out,
     keys_page_mints_shows_once_and_revokes_with_a_wake,
     conde_login_codes_are_single_use_and_expire,
+    pasted_login_codes_count_tries_and_redeem_once,
     admin_binds_existing_users_and_disables_them,
 );
 
@@ -235,6 +236,33 @@ async fn conde_login_codes_are_single_use_and_expire(d: Arc<Dispatcher>) {
         redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "h"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(got["message"].as_str().unwrap().contains("expired"), "{got}");
+}
+
+async fn pasted_login_codes_count_tries_and_redeem_once(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    for left in [4, 3] {
+        let (status, got) = paste_redeem(&env, &run, wrong).await;
+        assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
+    }
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got["host_id"], "head-less");
+    assert!(authenticates(&d, got["key"].as_str().unwrap()).await);
+    assert_eq!(paste_redeem(&env, &run, &shown).await.0, StatusCode::BAD_REQUEST);
+
+    // the last wrong try ends the login
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    for _ in 0..5 {
+        assert_eq!(paste_redeem(&env, &run, wrong).await.0, StatusCode::BAD_REQUEST);
+    }
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("authorization_pending")), "{got}");
 }
 
 async fn admin_binds_existing_users_and_disables_them(d: Arc<Dispatcher>) {

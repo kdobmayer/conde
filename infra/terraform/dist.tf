@@ -46,6 +46,14 @@ resource "azurerm_role_assignment" "release_dist" {
   principal_id         = azuread_service_principal.release.object_id
 }
 
+# The owner tends the published files by hand (stray uploads, a pulled release); shared keys are off, so a role.
+resource "azurerm_role_assignment" "owner_dist" {
+  scope                = azurerm_storage_container.dist.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = local.owner_object_id
+  principal_type       = "User"
+}
+
 output "github" {
   value = {
     AZURE_CLIENT_ID       = azuread_application.release.client_id

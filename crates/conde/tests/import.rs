@@ -1,6 +1,7 @@
 //! `conde import`: a synthetic kond board covering every record type, the
 //! idempotent re-run, name conflicts, parse errors, and a dry run against a
 //! copy of the real board when one exists.
+#![cfg(unix)] // unix symlinks and file modes
 
 use std::collections::HashSet;
 use std::fs;

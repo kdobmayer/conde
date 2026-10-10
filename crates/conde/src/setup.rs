@@ -54,8 +54,9 @@ pub struct WindowsEnv {
     pub appdata: PathBuf,
     /// `%LOCALAPPDATA%`: the local board and the bridge's log.
     pub local_appdata: PathBuf,
-    /// `DOMAIN\user`, whose logon starts the task and who it runs as.
-    pub user: String,
+    /// The user's SID, whose logon starts the task and who it runs as (a SID, not
+    /// `DOMAIN\user`: Entra-joined machines name users `AzureAD\...`).
+    pub user_sid: String,
 }
 
 /// The machine as setup sees it.
@@ -96,19 +97,14 @@ impl Env {
         let uid = crate::util::own_uid();
         #[cfg(not(unix))]
         let uid = 0;
-        let windows = if cfg!(windows) {
-            let user = std::env::var("USERNAME").context("USERNAME is not set")?;
-            Some(WindowsEnv {
-                appdata: var("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")),
-                local_appdata: var("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData").join("Local")),
-                user: match std::env::var("USERDOMAIN").ok().filter(|d| !d.is_empty()) {
-                    Some(domain) => format!("{domain}\\{user}"),
-                    None => user,
-                },
-            })
-        } else {
-            None
-        };
+        #[cfg(windows)]
+        let windows = Some(WindowsEnv {
+            appdata: var("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")),
+            local_appdata: var("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData").join("Local")),
+            user_sid: conde_transport::win::own_user_sid().context("reading this user's SID")?,
+        });
+        #[cfg(not(windows))]
+        let windows = None;
         // a Windows path from current_exe() is used as is: canonicalize() gives a \\?\ path
         let exe = if cfg!(windows) { exe } else { exe.canonicalize().unwrap_or(exe) };
         Ok(Env {
@@ -901,7 +897,7 @@ fn xml_utf16_decl(body: &str) -> String {
 /// interactive session (where Claude Code's session-local pipes are), no time limit,
 /// also on battery, one instance.
 pub fn task_xml(env: &Env) -> String {
-    let user = xml(env.windows.as_ref().map_or("", |w| w.user.as_str()));
+    let user = xml(env.windows.as_ref().map_or("", |w| w.user_sid.as_str()));
     let exe = xml(&env.exe.to_string_lossy());
     let args = xml(&daemon_args().join(" "));
     xml_utf16_decl(&format!(
@@ -953,6 +949,32 @@ pub fn utf16_file(text: &str) -> Vec<u8> {
     out
 }
 
+/// `/End` then `/Run`, done only when both succeeded and the bridge answers again; else
+/// Err naming each step that failed. End is a hard stop; the local board's SQLite survives it.
+fn restart_task(env: &Env, host: &mut dyn Host) -> anyhow::Result<()> {
+    let mut failed = Vec::new();
+    for verb in ["/End", "/Run"] {
+        let r = host.run("schtasks", &[verb, "/TN", TASK_NAME])?;
+        if !r.ok {
+            failed.push(format!("`schtasks {verb} /TN {TASK_NAME}` failed: {}", r.stderr.trim()));
+        }
+    }
+    if failed.is_empty() {
+        let deadline = std::time::Instant::now() + DAEMON_WAIT;
+        while let Err(why) = host.reach(&env.socket) {
+            if std::time::Instant::now() >= deadline {
+                failed.push(format!("the bridge does not answer on {} afterwards ({why})", env.show(&env.socket)));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    if !failed.is_empty() {
+        bail!("restart of {TASK_NAME} incomplete: {}", failed.join("; "));
+    }
+    Ok(())
+}
+
 fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
     let file = env.windows_task();
     let change = write_bytes_if_changed(&file, &utf16_file(&task_xml(env)))?;
@@ -965,9 +987,7 @@ fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resu
     }
     let running = host.reach(&env.socket).is_ok();
     if running && (change == Change::Updated || predates_boards(env, host, out)?) {
-        // End is a hard stop; the local board's SQLite survives it
-        check(host, "schtasks", &["/End", "/TN", TASK_NAME])?;
-        check(host, "schtasks", &["/Run", "/TN", TASK_NAME])?;
+        restart_task(env, host)?;
         writeln!(out, "service: restarted {TASK_NAME}")?;
     } else if running {
         writeln!(out, "service: {TASK_NAME} already running")?;

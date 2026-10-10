@@ -148,7 +148,7 @@ pub(crate) fn proc_start(_pid: u32) -> Option<String> {
 
 /// `ps -o lstart=` under `LC_ALL=C TZ=UTC`: strftime `%c`, i.e.
 /// `%a %b %e %H:%M:%S %Y`.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn lstart_utc(secs: i64) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -174,7 +174,7 @@ fn lstart_utc(secs: i64) -> String {
 
 /// Published and observed start times agree, ignoring whitespace runs (ps
 /// pads the day of month).
-#[cfg(any(not(windows), test))]
+#[cfg(not(windows))]
 fn same_start(published: &str, observed: &str) -> bool {
     published.split_whitespace().eq(observed.split_whitespace())
 }
@@ -433,14 +433,19 @@ pub struct ClaudeSender {
 }
 
 impl ClaudeSender {
-    /// The sender for a session's recipients: its socket directory (Unix), its
-    /// sessions directory (Windows).
+    /// The sender for a session's recipients, bound in [`Self::scope`].
     pub fn for_session(s: &ClaudeSession) -> io::Result<Self> {
+        Self::new(Self::scope(s))
+    }
+
+    /// Where a session's sender lives, one sender per scope: the session's socket
+    /// directory (Unix), its sessions directory, where the reply key goes (Windows).
+    pub fn scope(s: &ClaudeSession) -> &Path {
         #[cfg(windows)]
-        let dir = s.key_path.parent().unwrap_or(Path::new(""));
+        let dir = s.key_path.parent();
         #[cfg(not(windows))]
-        let dir = s.sock.parent().unwrap_or(Path::new(""));
-        Self::new(dir)
+        let dir = s.sock.parent();
+        dir.unwrap_or(Path::new(""))
     }
 
     /// This sender's `uds:` address, the `from` of every frame it sends.
@@ -653,6 +658,14 @@ impl ClaudeSender {
         let payload = frame_payload(s, text, msg_id, &self.address);
         let deadline = Some(Instant::now() + SEND_TIMEOUT);
         let pipe = crate::win::PipeClient::connect(s.sock.as_os_str(), deadline)?;
+        // a pipe name can be taken first by another process: deliver only to the session's own
+        let server = pipe.server_pid()?;
+        if server != s.pid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is served by pid {server}, not by the session's pid {}", s.sock.display(), s.pid),
+            ));
+        }
         pipe.write_all(payload.as_bytes(), deadline)
     }
 
@@ -731,7 +744,7 @@ pub(crate) fn parse_receipts(line: &str) -> Vec<Receipt> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::BufRead;
@@ -1223,6 +1236,12 @@ mod tests {
             ["x"]
         );
     }
+}
+
+/// The Windows rules, pure functions: these build and run on every platform.
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
 
     #[test]
     fn windows_pipe_names_parse_as_claude_code_does() {

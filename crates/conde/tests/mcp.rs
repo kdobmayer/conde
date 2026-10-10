@@ -1,5 +1,6 @@
 //! `conde mcp` driven by a fake MCP client over pipes, against a real
 //! `conde daemon` on a temp socket and board.
+#![cfg(unix)] // drives the daemon over a unix socket
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

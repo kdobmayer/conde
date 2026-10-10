@@ -60,10 +60,12 @@
 
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $dest = Join-Path $dir 'conde.exe'
+        # binaries moved aside earlier; one a bridge still runs stays locked until it exits
+        Get-ChildItem -LiteralPath $dir -Filter 'conde.exe*.old' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $dest) {
-            # a running bridge locks conde.exe; a locked file can still be renamed
-            Remove-Item -LiteralPath "$dest.old" -Force -ErrorAction SilentlyContinue
-            Move-Item -LiteralPath $dest -Destination "$dest.old" -Force
+            # a running bridge locks conde.exe; a locked file can still be renamed, to a fresh name
+            Move-Item -LiteralPath $dest -Destination ("$dest." + [guid]::NewGuid().ToString('N') + '.old') -Force
         }
         Move-Item -LiteralPath $exe -Destination $dest -Force
         Write-Host "installed $dest ($(& $dest --version))"

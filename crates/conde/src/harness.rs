@@ -63,7 +63,7 @@ impl HarnessNotifier {
         let Some(session) = self.claude_sessions().into_iter().find(|s| s.session_id == session_id) else {
             return NotifyOutcome::Failed(format!("no live Claude session {session_id}"));
         };
-        let dir = session.sock.parent().map(Path::to_path_buf).unwrap_or_default();
+        let dir = ClaudeSender::scope(&session).to_path_buf();
         if !self.senders.contains_key(&dir) {
             match ClaudeSender::for_session(&session) {
                 Ok(sender) => {

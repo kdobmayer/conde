@@ -2,6 +2,7 @@
 //! CLI's loopback listener; the CLI redeems the code and stores the key as `conde enroll` does,
 //! as a board file pinned to its server and account; `board.info` names the board. The pasted
 //! code: the page shows a short code, the CLI redeems it with the run it kept on disk.
+#![cfg(unix)] // checks unix file modes
 
 use conde::{boards, credentials, login, util};
 

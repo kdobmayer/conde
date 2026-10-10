@@ -1,6 +1,7 @@
 //! Local mode end to end: `conde daemon` delivers into a fake Claude Code
 //! session over its socket, and receipts drive the notification state that
 //! `conde sent` shows.
+#![cfg(unix)] // drives the daemon over a unix socket
 
 mod support;
 

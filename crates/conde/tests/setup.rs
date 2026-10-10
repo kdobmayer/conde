@@ -332,7 +332,7 @@ fn windows_env(root: &Path) -> Env {
         windows: Some(WindowsEnv {
             appdata: root.join("home/AppData/Roaming"),
             local_appdata: root.join("home/AppData/Local"),
-            user: r"HOMEPC\krisz".into(),
+            user_sid: "S-1-5-21-1004336348-1177238915-682003330-1001".into(),
         }),
         path: r"C:\Windows\system32;C:\Users\krisz\AppData\Local\conde\bin".into(),
         socket: pipe.clone(),
@@ -367,7 +367,8 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
     let xml = utf16(&std::fs::read(&task).unwrap());
     for needle in [
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Task version=\"1.2\"",
-        "<LogonTrigger>\r\n      <Enabled>true</Enabled>\r\n      <UserId>HOMEPC\\krisz</UserId>",
+        "<LogonTrigger>\r\n      <Enabled>true</Enabled>\r\n      <UserId>S-1-5-21-1004336348-1177238915-682003330-1001</UserId>",
+        "<Principal id=\"Author\">\r\n      <UserId>S-1-5-21-1004336348-1177238915-682003330-1001</UserId>",
         "<LogonType>InteractiveToken</LogonType>",
         "<RunLevel>LeastPrivilege</RunLevel>",
         "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
@@ -411,6 +412,16 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
         ["schtasks /Query /TN conde".to_string(), create, "schtasks /End /TN conde".into(), "schtasks /Run /TN conde".into()]
     );
     assert!(out.contains("service: restarted conde"), "{out}");
+
+    // a restart that did not happen is reported, not claimed
+    let moved_back = Env { exe: root.join("bin3/conde.exe"), ..env.clone() };
+    host.fail = Some("schtasks /End");
+    let (ok, out) = run(&moved_back, &Options::select(false, false, true, false), &mut host);
+    assert!(!ok, "{out}");
+    assert!(out.contains("service: FAILED: restart of conde incomplete: `schtasks /End /TN conde` failed: boom"), "{out}");
+    assert!(!out.contains("service: restarted"), "{out}");
+    host.fail = None;
+    host.take_calls();
 
     // a directory relocated only in this shell does not reach the task: said so
     let relocated = Env { claude_config_dir: Some(root.join("cc")), ..env.clone() };
@@ -876,6 +887,7 @@ fn an_exited_job_is_not_a_running_bridge() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
 #[test]
 fn the_real_probe_needs_an_answer_within_the_timeout() {
     use std::os::unix::net::UnixListener;

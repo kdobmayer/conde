@@ -264,7 +264,9 @@ impl Rpc {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    #[cfg(unix)]
     use std::os::unix::net::UnixListener;
+    #[cfg(unix)]
     use std::thread;
 
     #[test]
@@ -318,6 +320,7 @@ mod tests {
 
     /// A fake app-server: answers each request by method, sends a stray
     /// notification first, and records what it received.
+    #[cfg(unix)]
     fn fake_app_server(sock: &Path, turn_error: bool) -> thread::JoinHandle<Vec<Value>> {
         let listener = UnixListener::bind(sock).unwrap();
         thread::spawn(move || {
@@ -353,6 +356,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     #[test]
     fn websocket_turn_against_fake_app_server() {
         let dir = tempfile::Builder::new()
@@ -380,6 +384,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn websocket_rpc_error_is_reported() {
         let dir = tempfile::Builder::new()

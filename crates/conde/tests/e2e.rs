@@ -1,5 +1,6 @@
 //! The real binary: `conde daemon` on a temp socket and board, driven by the
 //! CLI under fake harness parents (a process named `codex` / `claude`).
+#![cfg(unix)] // drives the daemon over a unix socket
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

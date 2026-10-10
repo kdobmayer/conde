@@ -3,6 +3,7 @@
 //! `conde enroll`, switched to v2 through `conde boards --migrate`, its agents published by
 //! `conde publish`. One host stays on v1 (`conde daemon --v1-bridge`) to show that v1 and
 //! v2 hosts keep exchanging messages.
+#![cfg(unix)] // drives the daemon over a unix socket
 
 mod support;
 #[path = "pg/mod.rs"]

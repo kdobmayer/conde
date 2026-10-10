@@ -95,7 +95,8 @@ pub fn detach_console(log: &Path) -> io::Result<bool> {
         return Ok(false);
     }
     if let Some(dir) = log.parent() {
-        std::fs::create_dir_all(dir)?;
+        // the data directory: created owner-only here, before the board opens in it
+        crate::private::create_dir(dir)?;
     }
     let file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     let h = file.into_raw_handle() as HANDLE;

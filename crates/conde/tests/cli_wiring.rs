@@ -1,5 +1,6 @@
 //! The installed binary's `conde mcp` and `conde setup`, as a harness and a
 //! teammate run them: real processes, temp HOME and socket, no real config.
+#![cfg(unix)] // drives the daemon over a unix socket
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;

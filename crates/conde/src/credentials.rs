@@ -153,6 +153,7 @@ mod tests {
         assert!(!same_server("https://conde.nativeai.space", "wss://evil.example").unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn store_is_private_and_load_refuses_open_modes() {
         let dir = std::env::temp_dir().join(format!("conde-cred-{}", crate::util::new_ulid()));

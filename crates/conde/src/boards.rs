@@ -269,8 +269,10 @@ pub fn adopt_legacy(config: &Path, alias: &str, owner: &str) -> anyhow::Result<P
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     fn cfg(server: &str, owner: &str) -> BoardConfig {
         BoardConfig { server: server.into(), host_id: "h".into(), owner: owner.into(), key: "k".into() }
     }
@@ -287,6 +289,7 @@ mod tests {
         assert!(check_shared_alias("dakai").is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_alias_stays_pinned_to_its_server_and_account() {
         let root = std::env::temp_dir().join(format!("conde-boards-{}", crate::util::new_ulid()));

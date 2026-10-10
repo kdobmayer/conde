@@ -280,6 +280,7 @@ mod tests {
         assert!(live.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));
     }
 
+    #[cfg(unix)]
     #[test]
     fn peers_are_accepted_only_with_the_same_uid() {
         assert_eq!(same_user(Ok(501), 501), Ok(()));
@@ -301,6 +302,7 @@ mod tests {
         assert!(err.contains("unreadable (gone)"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn own_uid_is_the_real_uid() {
         use std::os::unix::fs::MetadataExt;

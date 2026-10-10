@@ -250,9 +250,20 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
+      # the binary artifacts only: conde-web is the server image's, never a release file
       - uses: actions/download-artifact@v8.0.2
         with:
-          pattern: conde-*
+          pattern: conde-darwin-*
+          merge-multiple: true
+          path: out
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: conde-linux-*
+          merge-multiple: true
+          path: out
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: conde-windows-*
           merge-multiple: true
           path: out
       - name: Assemble
@@ -265,6 +276,19 @@ jobs:
           cp dist/install.sh out/install.sh
           cp dist/install.ps1 out/install.ps1
           echo "$version" > out/latest
+          # everything in out/ is published: refuse any file not on this list
+          expected=""
+          for bin in conde-darwin-arm64 conde-darwin-x86_64 conde-linux-x86_64 conde-linux-aarch64 conde-windows-x86_64.exe; do
+            expected="$expected $bin $bin.sha256"
+          done
+          expected="$expected install.sh install.ps1 latest"
+          unexpected=$(cd out && find . -mindepth 1 | sed 's|^\./||' | while read -r f; do
+            case " $expected " in *" $f "*) ;; *) echo "$f" ;; esac
+          done)
+          if [ -n "$unexpected" ]; then
+            printf 'out/ holds files that are not release files:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
           (cd out && sha256sum -c ./*.sha256)
           # the integrity contract install.sh checks: one line per published file
           sums=$(cd out && find . -maxdepth 1 -type f ! -name '*.sha256' ! -name SHA256SUMS -exec basename {} \; | sort | xargs sha256sum)

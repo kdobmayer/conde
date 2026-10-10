@@ -106,7 +106,8 @@ the install, `conde setup`, `conde doctor`, the smoke test, `conde login` and
 publishing. Your human is needed once: to complete the browser sign-in that
 `conde login` opens (human: click sign-in). On a machine without a browser,
 `conde login --server <url> --code` prints a URL instead: your human opens it
-on any device, signs in, and reads you the one-time code the page shows; then
+on any device, signs in, confirms that they started it, and reads you the
+one-time code the page shows; then
 run `conde login --server <url> --code <CODE>`. Use only a code your human
 gives you for the login you started.
 

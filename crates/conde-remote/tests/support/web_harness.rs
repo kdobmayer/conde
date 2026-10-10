@@ -498,14 +498,35 @@ async fn browser_leg<S>(env: &Env<S>, b: &Browser, run: &CliRun) -> String {
 }
 
 
-/// Runs the pasted-code browser leg; returns the code the page shows (`ABCD-EFGH`).
-async fn paste_leg<S>(env: &Env<S>, b: &Browser, run: &CliRun) -> String {
+/// Opens a pasted-code link: the confirm page, after sign-in when needed.
+async fn paste_confirm_page<S>(env: &Env<S>, b: &Browser, run: &CliRun) -> (StatusCode, String) {
     let url = env.url(&format!(
         "/auth/cli?mode=code&state={}&challenge={}",
         run.state, run.challenge
     ));
     let (status, at, body) = b.get(&url).await;
-    assert_eq!((status, at.as_str()), (StatusCode::OK, url.as_str()), "{body}");
+    if status == StatusCode::OK {
+        assert_eq!(at, url, "{body}");
+    }
+    (status, body)
+}
+
+/// Confirms a pasted-code login with the page's form: (status, page).
+async fn paste_confirm<S>(env: &Env<S>, b: &Browser, run: &CliRun, csrf: &str) -> (StatusCode, String) {
+    let r = b
+        .post_form(&env.url("/auth/cli"), &[("csrf", csrf), ("state", &run.state), ("challenge", &run.challenge)])
+        .await;
+    (r.status(), r.text().await.unwrap())
+}
+
+/// Runs the pasted-code browser leg (confirm page, then its POST); returns the code the page
+/// shows (`ABCD-EFGH`).
+async fn paste_leg<S>(env: &Env<S>, b: &Browser, run: &CliRun) -> String {
+    let (status, page) = paste_confirm_page(env, b, run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Confirm conde login") && !page.contains("<pre id=\"key\">"), "{page}");
+    let (status, body) = paste_confirm(env, b, run, &csrf_of(&page)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("Sign-in code for conde login"), "{body}");
     let code = key_of(&body);
     assert_eq!(code.len(), 9, "{code}");

@@ -244,6 +244,27 @@ struct CreatedBody<'a> {
 #[derive(Template)]
 #[template(
     ext = "html",
+    source = r#"<h1>Confirm conde login</h1>
+<p>A <code>conde login</code> wants a host key for <strong>{{ account }}</strong>.</p>
+<p class="notice">Continue only if you started <code>conde login --code</code> yourself in the last few minutes. Whoever holds the code the next page shows gets a host key for your account.</p>
+<form method="post" action="/auth/cli" class="row">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="state" value="{{ state }}">
+<input type="hidden" name="challenge" value="{{ challenge }}">
+<button>I started it: show the code</button>
+</form>
+<p><a href="/keys">Cancel</a></p>"#
+)]
+struct CliConfirmBody<'a> {
+    account: &'a str,
+    csrf: &'a str,
+    state: &'a str,
+    challenge: &'a str,
+}
+
+#[derive(Template)]
+#[template(
+    ext = "html",
     source = r#"<h1>Sign-in code for conde login</h1>
 <p>Type this code at the <code>conde login</code> prompt, or read it to the agent that started the login.</p>
 <pre id="key">{{ code }}</pre>
@@ -379,6 +400,12 @@ pub(crate) fn created(
         replaced,
     });
     page(StatusCode::OK, "New host key", Some(header), &body, true, &[idp])
+}
+
+/// The pasted-code flow's confirm page: asks the signed-in user before any code exists.
+pub(crate) fn cli_confirm(header: Header<'_>, account: &str, state: &str, challenge: &str, idp: &str) -> Response {
+    let body = render(&CliConfirmBody { account, csrf: header.csrf, state, challenge });
+    page(StatusCode::OK, "Confirm conde login", Some(header), &body, false, &[idp])
 }
 
 /// The pasted-code flow's code, shown to the signed-in user who completed that login.

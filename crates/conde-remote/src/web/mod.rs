@@ -4,7 +4,8 @@
 //! The server stays stateless: login transactions, browser sessions and one-time CLI codes
 //! live in the board's store behind [`WebStore`]; secrets are kept only as SHA-256 digests.
 //! Routes: `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /auth/cli`
-//! (loopback, or `mode=code` for the pasted code), `POST /auth/cli/redeem`, `GET /keys`, `POST /keys`, `GET /keys/created`,
+//! (loopback, or `mode=code` for the pasted code's confirm page), `POST /auth/cli` (that
+//! page's button: the code), `POST /auth/cli/redeem`, `GET /keys`, `POST /keys`, `GET /keys/created`,
 //! `POST /keys/{host}/revoke`, `POST /keys/apps/{grant_id}/revoke`, the remote MCP's OAuth
 //! authorization server ([`oauth`]: metadata, `/oauth/authorize`, `/oauth/token`); with
 //! `CONDE_ADMIN_KEY` also the admin API under `/v1/admin`. The server adds the web app
@@ -732,7 +733,7 @@ pub fn router(state: WebState) -> Router {
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))
-        .route("/auth/cli", get(auth::cli_start))
+        .route("/auth/cli", get(auth::cli_start).post(auth::cli_confirm))
         .route("/auth/cli/redeem", post(auth::cli_redeem))
         .route("/keys", get(keys::page).post(keys::create))
         .route("/keys/created", get(keys::created))

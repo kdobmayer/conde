@@ -872,7 +872,7 @@ async fn wrong_pasted_codes_use_up_the_tries_then_the_login_dies() {
 }
 
 #[tokio::test]
-async fn the_pasted_code_is_shown_only_to_the_account_that_signed_in() {
+async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_that_signed_in() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     let run = cli_run();
     let link = format!("/auth/cli?mode=code&state={}&challenge={}", run.state, run.challenge);
@@ -881,22 +881,39 @@ async fn the_pasted_code_is_shown_only_to_the_account_that_signed_in() {
     let (status, loc) = Browser::new().peek(&env.url(&link)).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert!(loc.starts_with("/auth/login?next=%2Fauth%2Fcli%3Fmode%3Dcode%26state%3D"), "{loc}");
-    assert!(env.store.m().codes.is_empty(), "nothing is pending before the sign-in");
 
+    // signed in, GET only asks: the account is named, nothing is issued
     let b = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &b, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("wants a host key for <strong>krisztian-dobmayer</strong>"), "{page}");
+    assert!(page.contains("Continue only if you started <code>conde login --code</code> yourself"), "{page}");
+    assert!(!page.contains("<pre id=\"key\">"), "{page}");
+    paste_confirm_page(&env, &b, &run).await;
+    assert!(env.store.m().codes.is_empty(), "GET has no side effect");
+    // the POST needs the session's CSRF token
+    let (status, body) = paste_confirm(&env, &b, &run, "forged").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = paste_confirm(&env, &Browser::new(), &run, &csrf_of(&page)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(env.store.m().codes.is_empty());
+
     let first = paste_leg(&env, &b, &run).await;
-    // a reload by the same account issues a new code; the old one is dead
+    // confirming again (a reload re-posts) issues a new code; the old one is dead
     let second = paste_leg(&env, &b, &run).await;
     assert_ne!(first, second);
 
-    // another account opening the same link gets no code and cannot take the login over
+    // another account may see the question but cannot take the login over
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
         p.upn = "bob@dakai.example".into();
         p.name = "Bob".into();
     }
-    let (status, _, body) = Browser::new().get(&env.url(&link)).await;
+    let bob = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &bob, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(!body.contains("<pre id=\"key\">"), "{body}");
 

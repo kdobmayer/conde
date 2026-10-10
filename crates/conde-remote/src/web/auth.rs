@@ -573,9 +573,9 @@ fn paste_digest(cli_state: &str, code: &str) -> String {
 
 /// `GET /auth/cli?port=&state=&challenge=`: signs the browser in if needed, then sends it to
 /// the CLI's loopback listener with a one-time code bound to the CLI run's state and PKCE
-/// challenge. With `mode=code` instead of `port`, the page shows a short code for the human to
-/// type at the CLI (a headless host has no loopback the browser can reach). The key is minted
-/// only when the CLI redeems the code.
+/// challenge. With `mode=code` instead of `port` (a headless host has no loopback the browser
+/// can reach), it shows a confirm page; its POST ([`cli_confirm`]) shows a short code for the
+/// human to type at the CLI. The key is minted only when the CLI redeems the code.
 pub(crate) async fn cli_start(
     State(state): State<WebState>,
     jar: CookieJar,
@@ -624,7 +624,17 @@ pub(crate) async fn cli_start(
             openidconnect::url::form_urlencoded::byte_serialize(back.as_bytes()).collect();
         return Ok(Redirect::to(&format!("/auth/login?next={back}")).into_response());
     };
-    let mut record = CliCode {
+    if paste {
+        // GET only asks; the code is issued by the confirming POST (no side effect here)
+        return Ok(pages::cli_confirm(
+            keys::header(&current),
+            &current.record.user_name,
+            &cli_state,
+            &challenge,
+            &keys::idp_origin(&state),
+        ));
+    }
+    let record = CliCode {
         user_id: current.record.user_id,
         user_name: current.record.user_name.clone(),
         state: cli_state.clone(),
@@ -633,40 +643,6 @@ pub(crate) async fn cli_start(
         paste: None,
         tries: 0,
     };
-    if paste {
-        let code = paste_code();
-        record.paste = Some(paste_digest(&cli_state, &code));
-        let key = paste_key(&cli_state);
-        let user_id = record.user_id;
-        // A reload by the same user issues a new code (the old one dies); a login another
-        // account completed stays theirs.
-        let issued = state
-            .store(move |s| {
-                if let Some(old) = s.take_cli_code(&key)?
-                    && old.user_id != user_id
-                {
-                    s.insert_cli_code(&key, &old)?;
-                    return Ok(false);
-                }
-                s.insert_cli_code(&key, &record)?;
-                Ok(true)
-            })
-            .await?;
-        if !issued {
-            return Err(WebError::Forbidden(
-                "Another account already signed in for this conde login. Run conde login again."
-                    .into(),
-            ));
-        }
-        let minutes = state.config().cli_code_ttl.as_secs().div_ceil(60);
-        let shown = format!("{}-{}", &code[..4], &code[4..]);
-        return Ok(pages::cli_code(
-            keys::header(&current),
-            &shown,
-            minutes,
-            &keys::idp_origin(&state),
-        ));
-    }
     let code = random_token();
     let key = digest(&code);
     state
@@ -676,6 +652,73 @@ pub(crate) async fn cli_start(
         "http://127.0.0.1:{port}/done?code={code}&state={cli_state}"
     ))
     .into_response())
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CliConfirmForm {
+    #[serde(default)]
+    csrf: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    challenge: String,
+}
+
+/// `POST /auth/cli` (the confirm page's button): issues the pasted-code login's code and shows
+/// it, to the signed-in session whose CSRF token the form carries. A new POST by the same
+/// account issues a new code (the old one dies); a login another account confirmed stays theirs.
+pub(crate) async fn cli_confirm(
+    State(state): State<WebState>,
+    jar: CookieJar,
+    Form(form): Form<CliConfirmForm>,
+) -> Result<Response, WebError> {
+    let current = session::current(&state, &jar)
+        .await?
+        .ok_or_else(keys::signed_out)?;
+    current.check_csrf(&form.csrf)?;
+    let (cli_state, challenge) = (form.state, form.challenge);
+    if !url_safe(&cli_state, 16, 128) || !url_safe(&challenge, 43, 43) {
+        return Err(WebError::BadRequest(
+            "This `conde login` link is malformed.".into(),
+        ));
+    }
+    let code = paste_code();
+    let record = CliCode {
+        user_id: current.record.user_id,
+        user_name: current.record.user_name.clone(),
+        state: cli_state.clone(),
+        challenge,
+        created_at: state.now(),
+        paste: Some(paste_digest(&cli_state, &code)),
+        tries: 0,
+    };
+    let key = paste_key(&cli_state);
+    let user_id = record.user_id;
+    let issued = state
+        .store(move |s| {
+            if let Some(old) = s.take_cli_code(&key)?
+                && old.user_id != user_id
+            {
+                s.insert_cli_code(&key, &old)?;
+                return Ok(false);
+            }
+            s.insert_cli_code(&key, &record)?;
+            Ok(true)
+        })
+        .await?;
+    if !issued {
+        return Err(WebError::Forbidden(
+            "Another account already signed in for this conde login. Run conde login again.".into(),
+        ));
+    }
+    let minutes = state.config().cli_code_ttl.as_secs().div_ceil(60);
+    let shown = format!("{}-{}", &code[..4], &code[4..]);
+    Ok(pages::cli_code(
+        keys::header(&current),
+        &shown,
+        minutes,
+        &keys::idp_origin(&state),
+    ))
 }
 
 #[derive(Deserialize)]

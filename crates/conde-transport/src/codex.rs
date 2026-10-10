@@ -1,6 +1,8 @@
 //! Codex transport: a turn over the app-server control websocket, with the
-//! `codex queue` command as the fallback.
+//! `codex queue` command as the fallback. The control endpoint is an AF_UNIX
+//! socket file on every platform (Codex on Windows uses AF_UNIX too).
 
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -42,6 +44,39 @@ pub fn codex_control_socket(codex_home: &Path) -> PathBuf {
     codex_home
         .join("app-server-control")
         .join("app-server-control.sock")
+}
+
+/// Whether the control socket file exists. On Windows an AF_UNIX socket is a
+/// reparse point that following metadata cannot open, so it is not followed.
+pub fn codex_control_present(sock: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        std::fs::symlink_metadata(sock).is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        sock.exists()
+    }
+}
+
+/// The control connection's stream: std's on Unix, socket2's AF_UNIX on Windows
+/// (std's is unstable there).
+#[cfg(unix)]
+type ControlStream = UnixStream;
+#[cfg(windows)]
+type ControlStream = socket2::Socket;
+
+fn connect_control(sock: &Path) -> std::io::Result<ControlStream> {
+    #[cfg(unix)]
+    {
+        UnixStream::connect(sock)
+    }
+    #[cfg(windows)]
+    {
+        let s = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        s.connect(&socket2::SockAddr::unix(sock)?)?;
+        Ok(s)
+    }
 }
 
 /// Delivers `text` (with the provenance line prepended) into a codex thread.
@@ -108,7 +143,7 @@ pub(crate) fn queue_command(thread_id: &str, text: &str) -> Command {
 }
 
 fn ensure_daemon(sock: &Path) -> std::result::Result<(), String> {
-    if sock.exists() {
+    if codex_control_present(sock) {
         return Ok(());
     }
     let status = daemon_command()
@@ -119,7 +154,7 @@ fn ensure_daemon(sock: &Path) -> std::result::Result<(), String> {
             "codex app-server daemon start exited with {status}"
         ));
     }
-    if !sock.exists() {
+    if !codex_control_present(sock) {
         return Err(format!(
             "daemon started but socket missing: {}",
             sock.display()
@@ -156,7 +191,7 @@ pub(crate) fn start_turn(
 ) -> std::result::Result<String, String> {
     let talk =
         |e: &dyn std::fmt::Display| format!("cannot talk to daemon at {}: {e}", sock.display());
-    let stream = UnixStream::connect(sock).map_err(|e| talk(&e))?;
+    let stream = connect_control(sock).map_err(|e| talk(&e))?;
     stream
         .set_read_timeout(Some(RESPONSE_TIMEOUT))
         .map_err(|e| talk(&e))?;
@@ -185,7 +220,7 @@ pub(crate) fn start_turn(
 }
 
 struct Rpc {
-    ws: WebSocket<UnixStream>,
+    ws: WebSocket<ControlStream>,
     next_id: u64,
 }
 

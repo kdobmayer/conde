@@ -62,11 +62,8 @@ impl Remote {
             ),
             other => add(false, format!("bridge: not connected to {} ({other:?})", self.url)),
         }
-        match credentials::mode(&self.credentials) {
-            Some(0o600) => add(true, format!("credentials: {} mode 600", self.credentials.display())),
-            Some(m) => add(false, format!("credentials: {} mode {m:03o}, expected 600", self.credentials.display())),
-            None => add(false, format!("credentials: {} missing", self.credentials.display())),
-        }
+        let (ok, text) = crate::private::doctor(&self.credentials);
+        add(ok, text);
         for (ok, text) in doctor_checks(&HarnessNotifier::new(None), actor) {
             add(ok, text);
         }

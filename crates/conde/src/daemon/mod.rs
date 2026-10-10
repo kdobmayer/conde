@@ -12,7 +12,8 @@ pub mod resolve;
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,8 +22,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -39,11 +39,12 @@ use crate::harness::{HarnessNotifier, doctor_checks};
 use crate::notify::Notifier;
 use crate::protocol::v2::{BoardPart, LOCAL_BOARD, label, op};
 use crate::protocol::{ErrorCode, MAX_FRAME, Request, Response};
+use crate::ipc;
 use crate::server;
 use crate::store::Tx;
 use crate::store::local::{BoardOpKind, LocalTx, PublicationState};
 use crate::store::sqlite::SqliteTx;
-use crate::util::{local_host, local_user, own_euid, same_user};
+use crate::util::{local_host, local_user};
 
 /// How often sessions are rescanned (endpoint reporting, session replacement).
 pub const ENDPOINT_RESCAN: Duration = Duration::from_secs(5);
@@ -122,7 +123,26 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves on Ctrl-C, Ctrl-Break, closing the console or system shutdown. A
+/// scheduled task's End is a hard stop that this never sees.
+#[cfg(windows)]
+pub async fn termination() {
+    use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+    let (Ok(mut brk), Ok(mut close), Ok(mut shutdown)) = (ctrl_break(), ctrl_close(), ctrl_shutdown()) else {
+        tracing::error!("cannot watch the console control events");
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => tracing::info!("Ctrl-C: shutting down"),
+        _ = brk.recv() => tracing::info!("Ctrl-Break: shutting down"),
+        _ = close.recv() => tracing::info!("console closed: shutting down"),
+        _ = shutdown.recv() => tracing::info!("system shutdown: shutting down"),
+    }
+}
+
 /// Resolves on SIGTERM or SIGINT.
+#[cfg(unix)]
 pub async fn termination() {
     let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
         Ok(s) => s,
@@ -143,11 +163,7 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 }
 
 fn open_local(opts: &Options) -> anyhow::Result<(Arc<Dispatcher>, Principal)> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&opts.data_dir)
-        .with_context(|| format!("creating {}", opts.data_dir.display()))?;
+    crate::private::create_dir(&opts.data_dir).with_context(|| format!("creating {}", opts.data_dir.display()))?;
     let db_path = opts.data_dir.join("conde.db");
     let d = Arc::new(Dispatcher::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?);
     if let Some(b) = opts.retry_backoff {
@@ -816,11 +832,8 @@ impl Core {
                 add(false, format!("{alias}: {note}"));
             }
             let path = boards::path_in(&self.config_dir, alias);
-            match crate::credentials::mode(&path) {
-                Some(0o600) => add(true, format!("credentials: {} mode 600", path.display())),
-                Some(m) => add(false, format!("credentials: {} mode {m:03o}, expected 600", path.display())),
-                None => add(false, format!("credentials: {} missing", path.display())),
-            }
+            let (ok, text) = crate::private::doctor(&path);
+            add(ok, text);
         }
         if let Some(legacy) = self.legacy.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             add(false, format!("credentials: {legacy}"));
@@ -902,9 +915,10 @@ pub fn pending_publish(core: &Core, alias: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The bound socket and the inode we own, so shutdown never unlinks a successor's.
+/// The bound socket and the inode we own, so shutdown never unlinks a successor's
+/// (a Windows pipe disappears with its handles; there is nothing to unlink).
 pub(crate) struct Socket {
-    listener: Option<UnixListener>,
+    listener: Option<ipc::Listener>,
     path: PathBuf,
     inode: (u64, u64),
 }
@@ -915,12 +929,19 @@ impl Socket {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn bind(path: &Path) -> anyhow::Result<Socket> {
     let listener = server::bind(path)?;
     let m = std::fs::symlink_metadata(path)?;
     Ok(Socket { listener: Some(listener), path: path.to_path_buf(), inode: (m.dev(), m.ino()) })
 }
 
+#[cfg(windows)]
+pub(crate) fn bind(path: &Path) -> anyhow::Result<Socket> {
+    Ok(Socket { listener: Some(ipc::bind(path)?), path: path.to_path_buf(), inode: (0, 0) })
+}
+
+#[cfg(unix)]
 fn unlink_own(path: &Path, inode: (u64, u64)) {
     if let Ok(m) = std::fs::symlink_metadata(path)
         && (m.dev(), m.ino()) == inode
@@ -929,18 +950,20 @@ fn unlink_own(path: &Path, inode: (u64, u64)) {
     }
 }
 
+#[cfg(windows)]
+fn unlink_own(_path: &Path, _inode: (u64, u64)) {}
+
 /// Serve CLI connections until `stop`; then stop accepting, unlink the
 /// socket, let in-flight requests finish and close idle connections.
 pub(crate) async fn serve(socket: Socket, handler: Arc<dyn Handler>, mut stop: watch::Receiver<bool>) {
-    let Some(listener) = socket.listener else { return };
-    let uid = own_euid();
+    let Some(mut listener) = socket.listener else { return };
     let mut conns = JoinSet::new();
     let conn_stop = stop.clone();
     loop {
         tokio::select! {
             _ = stop.wait_for(|s| *s) => break,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => match same_user(stream.peer_cred().map(|c| c.uid()), uid) {
+            accepted = ipc::accept(&mut listener) => match accepted {
+                Ok((stream, check)) => match check {
                     Ok(()) => {
                         conns.spawn(connection(stream, handler.clone(), conn_stop.clone()));
                     }
@@ -961,8 +984,11 @@ pub(crate) async fn serve(socket: Socket, handler: Arc<dyn Handler>, mut stop: w
     }
 }
 
-async fn connection(stream: UnixStream, handler: Arc<dyn Handler>, mut stop: watch::Receiver<bool>) {
-    let (read, mut write) = stream.into_split();
+async fn connection<S>(stream: S, handler: Arc<dyn Handler>, mut stop: watch::Receiver<bool>)
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (read, mut write) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
     loop {
         let frame = tokio::select! {

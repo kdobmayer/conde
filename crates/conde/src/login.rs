@@ -8,7 +8,6 @@
 //! code, which is typed at the masked prompt or given back with `--code <CODE>`. The run's
 //! state and PKCE verifier wait in `login/<server>.json` (mode 0600) between the two steps.
 
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -251,10 +250,10 @@ pub fn start_code(server: &str, path: &std::path::Path) -> anyhow::Result<String
     let run = Run::new()?;
     let pending = Pending { server: origin.clone(), state: run.state.clone(), verifier: run.verifier, started_at: unix_now() };
     let dir = path.parent().context("the login path has no directory")?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    crate::private::create_dir(dir)?;
     let tmp = dir.join(format!(".login.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    let mut f = crate::private::create_file(&tmp)?;
     std::io::Write::write_all(&mut f, serde_json::to_string(&pending)?.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
@@ -355,8 +354,7 @@ fn code_login(server: &str, host: &str, finish_hint: &str, code: &str, runtime: 
     }
     let url = start_code(server, &path)?;
     eprintln!("Open this URL in a browser on any device and sign in:\n\n  {url}\n\nThe page then shows a one-time sign-in code.");
-    // SAFETY: isatty on the process's own stdin descriptor.
-    if unsafe { libc::isatty(0) } != 1 {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!("When you have it, finish with:\n\n  {finish_hint}\n");
         return Ok(None);
     }

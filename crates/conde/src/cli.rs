@@ -508,6 +508,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
     match cli.cmd {
         Cmd::Daemon { interval, once, server, v1_bridge, retry_backoff, idle_timeout } => {
             no_board("daemon", "")?;
+            // Task Scheduler gives the bridge a console window of its own: log to a file instead
+            #[cfg(windows)]
+            let _ = crate::win::detach_console(&paths::data_dir().join("conde.log"));
             tracing_subscriber::fmt().with_writer(std::io::stderr).with_target(false).init();
             let mut opts = daemon::Options::new(paths::data_dir(), paths::socket_path());
             opts.interval = Duration::from_secs_f64(interval.max(0.05));

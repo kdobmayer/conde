@@ -86,7 +86,7 @@ impl Markers {
         Markers {
             codex_thread: var("CODEX_THREAD_ID"),
             claude_session: var("CLAUDE_CODE_SESSION_ID"),
-            user: var("USER"),
+            user: var(crate::util::USER_VAR),
         }
     }
 }
@@ -160,7 +160,17 @@ pub fn harness_ancestor() -> Ancestry {
     {
         walk(&SystemTable, std::process::id())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        match crate::win::process_snapshot() {
+            Ok(rows) => walk(
+                &WindowsTable { rows, created: conde_transport::win::process_created, cmdline: crate::win::command_line },
+                std::process::id(),
+            ),
+            Err(_) => Ancestry::Unknown,
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Ancestry::Unknown
     }
@@ -192,6 +202,73 @@ fn linux_entry(stat: &str, cmdline: Option<&[u8]>) -> Option<ProcEntry> {
     }
     names.push(comm);
     Some(ProcEntry { ppid, names })
+}
+
+// --- Windows: a Toolhelp snapshot --------------------------------------------
+
+/// A Windows process table: one snapshot (pid -> parent pid, image file name), with
+/// creation times and command lines read for the processes the walk visits.
+#[cfg(any(windows, test))]
+pub struct WindowsTable<C, L> {
+    pub rows: std::collections::HashMap<u32, (u32, String)>,
+    /// Creation time (FILETIME) of a live process.
+    pub created: C,
+    pub cmdline: L,
+}
+
+#[cfg(any(windows, test))]
+impl<C: Fn(u32) -> Option<u64>, L: Fn(u32) -> Option<String>> ProcessTable for WindowsTable<C, L> {
+    fn entry(&self, pid: u32) -> Option<ProcEntry> {
+        let (ppid, image) = self.rows.get(&pid)?;
+        // Windows keeps the pid of a parent that exited, and may reuse it: a parent that is
+        // gone, or younger than its child, makes the child a root of the walk.
+        let parent = self.rows.contains_key(ppid)
+            && match ((self.created)(*ppid), (self.created)(pid)) {
+                (Some(p), Some(c)) => p <= c,
+                _ => true,
+            };
+        Some(windows_entry(if parent { *ppid } else { 0 }, image, (self.cmdline)(pid).as_deref()))
+    }
+}
+
+/// A file name without directories or a `.exe` suffix, lowercased (`claude`).
+#[cfg(any(windows, test))]
+fn windows_program(path: &str) -> String {
+    let base = path.rsplit(['\\', '/']).next().unwrap_or(path).to_lowercase();
+    base.strip_suffix(".exe").map(str::to_string).unwrap_or(base)
+}
+
+/// The first word of a command line, quoted or not.
+#[cfg(any(windows, test))]
+fn windows_argv0(cmdline: &str) -> Option<&str> {
+    let line = cmdline.trim_start();
+    let word = match line.strip_prefix('"') {
+        Some(rest) => rest.split('"').next(),
+        None => line.split_whitespace().next(),
+    };
+    word.filter(|w| !w.is_empty())
+}
+
+/// A Windows process: its image name, argv0 from the command line, and for a script
+/// host (`node`, `bun`) the harness whose npm package the command line runs, since an
+/// npm-installed Claude Code is `node.exe ...\@anthropic-ai\claude-code\cli.js`.
+#[cfg(any(windows, test))]
+fn windows_entry(ppid: u32, image: &str, cmdline: Option<&str>) -> ProcEntry {
+    let mut names = vec![windows_program(image)];
+    if let Some(line) = cmdline {
+        if let Some(argv0) = windows_argv0(line).map(windows_program).filter(|a| !names.contains(a)) {
+            names.push(argv0);
+        }
+        if names.iter().any(|n| n == "node" || n == "bun") {
+            let line = line.to_lowercase().replace('\\', "/");
+            for (package, harness) in [("/@anthropic-ai/claude-code/", "claude"), ("/@openai/codex/", "codex")] {
+                if line.contains(package) {
+                    names.push(harness.to_string());
+                }
+            }
+        }
+    }
+    ProcEntry { ppid, names }
 }
 
 // --- macOS: libproc ----------------------------------------------------------
@@ -441,5 +518,61 @@ mod tests {
     fn live_walk_reads_this_process_table() {
         // whatever runs the tests, the walk itself must succeed here
         assert_ne!(harness_ancestor(), Ancestry::Unknown);
+    }
+
+    fn windows_table(
+        rows: &[(u32, u32, &str)],
+        created: &'static [(u32, u64)],
+        cmdlines: &'static [(u32, &'static str)],
+    ) -> WindowsTable<impl Fn(u32) -> Option<u64>, impl Fn(u32) -> Option<String>> {
+        WindowsTable {
+            rows: rows.iter().map(|(pid, ppid, image)| (*pid, (*ppid, image.to_string()))).collect(),
+            created: move |pid| created.iter().find(|(p, _)| *p == pid).map(|(_, t)| *t),
+            cmdline: move |pid| cmdlines.iter().find(|(p, _)| *p == pid).map(|(_, c)| c.to_string()),
+        }
+    }
+
+    #[test]
+    fn windows_walk_finds_the_harness_and_ends_at_an_exited_parent() {
+        // conde <- pwsh <- claude <- explorer, whose parent (userinit) exited long ago
+        let rows = [(40, 30, "conde.exe"), (30, 20, "pwsh.exe"), (20, 10, "claude.exe"), (10, 6, "explorer.exe")];
+        let t = windows_table(&rows, &[(40, 400), (30, 300), (20, 200), (10, 100)], &[]);
+        assert_eq!(walk(&t, 40), CLAUDE);
+        // a shell straight under explorer: no harness, and the dead parent is the root, not unknown
+        let rows = [(40, 30, "conde.exe"), (30, 10, "pwsh.exe"), (10, 6, "explorer.exe")];
+        let t = windows_table(&rows, &[(40, 400), (30, 300), (10, 100)], &[]);
+        assert_eq!(walk(&t, 40), Ancestry::NoHarness);
+        assert_eq!(t.entry(10).unwrap().ppid, 0);
+    }
+
+    #[test]
+    fn windows_walk_stops_at_a_reused_parent_pid() {
+        // the shell's real parent exited and its pid now belongs to a younger codex
+        let rows = [(40, 30, "conde.exe"), (30, 20, "cmd.exe"), (20, 1, "codex.exe")];
+        let t = windows_table(&rows, &[(40, 400), (30, 300), (20, 350)], &[]);
+        assert_eq!(walk(&t, 40), Ancestry::NoHarness);
+        // unreadable creation times (a protected process) keep the link
+        let t = windows_table(&rows, &[(40, 400)], &[]);
+        assert_eq!(walk(&t, 40), CODEX);
+        // a process missing from the snapshot is unknown
+        assert_eq!(walk(&t, 99), Ancestry::Unknown);
+    }
+
+    #[test]
+    fn windows_names_cover_npm_installs() {
+        let e = windows_entry(5, "Codex.EXE", Some(r#""C:\Users\k\AppData\Local\codex\codex.exe" app-server"#));
+        assert_eq!(e.names, ["codex"]);
+        let e = windows_entry(5, "node.exe", Some(
+            r#""C:\Program Files\nodejs\node.exe" C:\Users\k\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js --resume"#,
+        ));
+        assert_eq!(e.names, ["node", "claude"]);
+        assert_eq!(Harness::from_program(&e.names[1]), Some(Harness::Claude));
+        let e = windows_entry(5, "node.exe", Some(r#"node C:\npm\node_modules\@openai\codex\bin\codex.js"#));
+        assert_eq!(e.names, ["node", "codex"]);
+        // a script host running something else is just itself
+        let e = windows_entry(5, "node.exe", Some("node server.js"));
+        assert_eq!(e.names, ["node"]);
+        assert_eq!(windows_argv0("  plain.exe -x"), Some("plain.exe"));
+        assert_eq!(windows_argv0(""), None);
     }
 }

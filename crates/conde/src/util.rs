@@ -177,6 +177,12 @@ pub fn local_host() -> String {
         .unwrap_or_else(|| FALLBACK_HOST.into())
 }
 
+#[cfg(windows)]
+fn system_hostname() -> Option<String> {
+    crate::win::hostname()
+}
+
+#[cfg(unix)]
 fn system_hostname() -> Option<String> {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length; gethostname NUL-terminates
@@ -202,21 +208,36 @@ pub fn host_id(raw: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// The variable naming the login user: `USER`, on Windows `USERNAME`.
+pub const USER_VAR: &str = if cfg!(windows) { "USERNAME" } else { "USER" };
+
 /// The OS user that owns this process (the local-mode owner namespace).
 pub fn local_user() -> String {
-    std::env::var("USER")
+    std::env::var(USER_VAR)
         .ok()
         .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| format!("uid{}", own_uid()))
+        .unwrap_or_else(unnamed_user)
         .to_lowercase()
 }
 
+#[cfg(unix)]
+fn unnamed_user() -> String {
+    format!("uid{}", own_uid())
+}
+
+#[cfg(windows)]
+fn unnamed_user() -> String {
+    "user".into()
+}
+
+#[cfg(unix)]
 pub fn own_uid() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.
     unsafe { libc::getuid() }
 }
 
 /// The effective uid: what a peer sees through SO_PEERCRED / getpeereid.
+#[cfg(unix)]
 pub fn own_euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
@@ -229,6 +250,16 @@ pub fn same_user(peer_uid: std::io::Result<u32>, own: u32) -> Result<(), String>
         Ok(uid) if uid == own => Ok(()),
         Ok(uid) => Err(format!("refused connection from another user: peer uid {uid}, daemon uid {own}")),
         Err(e) => Err(format!("refused connection: peer credentials unreadable ({e}); daemon uid {own}")),
+    }
+}
+
+/// Windows local-mode trust: a pipe peer is accepted only when its process runs as
+/// the user (SID) `own`.
+pub fn same_sid(peer_sid: std::io::Result<String>, own: &str) -> Result<(), String> {
+    match peer_sid {
+        Ok(sid) if sid == own => Ok(()),
+        Ok(sid) => Err(format!("refused connection from another user: peer SID {sid}, daemon SID {own}")),
+        Err(e) => Err(format!("refused connection: peer process unreadable ({e}); daemon SID {own}")),
     }
 }
 
@@ -258,6 +289,16 @@ mod tests {
         assert!(err.contains("unreadable (gone); daemon uid 501"), "{err}");
         // this process's own uid is the one its peers report
         assert_eq!(same_user(Ok(own_euid()), own_euid()), Ok(()));
+    }
+
+    #[test]
+    fn pipe_peers_are_accepted_only_with_the_same_sid() {
+        let own = "S-1-5-21-1-2-3-1001";
+        assert_eq!(same_sid(Ok(own.into()), own), Ok(()));
+        let err = same_sid(Ok("S-1-5-21-1-2-3-1002".into()), own).unwrap_err();
+        assert!(err.contains("peer SID S-1-5-21-1-2-3-1002, daemon SID S-1-5-21-1-2-3-1001"), "{err}");
+        let err = same_sid(Err(std::io::Error::other("gone")), own).unwrap_err();
+        assert!(err.contains("unreadable (gone)"), "{err}");
     }
 
     #[test]

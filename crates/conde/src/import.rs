@@ -1485,7 +1485,7 @@ fn owner_and_host(owner: Option<&str>, host: Option<&str>, user: Option<String>)
 fn live_claude_sessions() -> Option<HashSet<String>> {
     let config = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
         Some(d) => PathBuf::from(d),
-        None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?).join(".claude"),
+        None => conde_transport::home_dir()?.join(".claude"),
     };
     config
         .join("sessions")
@@ -1507,7 +1507,7 @@ pub fn main(
         Some(p) => read_name_list(p)?,
         None => BTreeSet::new(),
     };
-    let (owner, host) = owner_and_host(owner, host, std::env::var("USER").ok().filter(|u| !u.is_empty()))?;
+    let (owner, host) = owner_and_host(owner, host, std::env::var(crate::util::USER_VAR).ok().filter(|u| !u.is_empty()))?;
     let data_dir = crate::paths::data_dir();
     let opts = Options {
         from: from.to_path_buf(),
@@ -1522,12 +1522,7 @@ pub fn main(
         skip_agents,
     };
     if !dry_run && opts.database_url.is_none() {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&data_dir)
-            .with_context(|| format!("creating {}", data_dir.display()))?;
+        crate::private::create_dir(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
     }
     let report = run(&opts)?;
     print!("{report}");

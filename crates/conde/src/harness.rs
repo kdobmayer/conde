@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use conde_transport::{
-    ClaudeSender, ClaudeSession, CodexOutcome, ReceiptStatus as Wire, codex_control_socket, codex_home,
-    codex_notify_with_id, discover_claude, msg_id_for,
+    ClaudeSender, ClaudeSession, CodexOutcome, ReceiptStatus as Wire, codex_control_present, codex_control_socket,
+    codex_home, codex_notify_with_id, discover_claude, msg_id_for,
 };
 
 use crate::address::{Address, Kind};
@@ -65,7 +65,7 @@ impl HarnessNotifier {
         };
         let dir = session.sock.parent().map(Path::to_path_buf).unwrap_or_default();
         if !self.senders.contains_key(&dir) {
-            match ClaudeSender::new(&dir) {
+            match ClaudeSender::for_session(&session) {
                 Ok(sender) => {
                     tracing::info!(reply = sender.address(), "claude reply socket bound");
                     self.senders.insert(dir.clone(), sender);
@@ -155,7 +155,7 @@ pub fn claude_sessions_dir(claude_config: Option<&Path>) -> Option<PathBuf> {
         Some(c) => c.to_path_buf(),
         None => match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
             Some(c) => PathBuf::from(c),
-            None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?).join(".claude"),
+            None => conde_transport::home_dir()?.join(".claude"),
         },
     };
     Some(config.join("sessions"))
@@ -192,7 +192,7 @@ pub fn doctor_checks(notifier: &HarnessNotifier, actor: Option<&str>) -> Vec<(bo
         },
     }
     match codex_home().map(|h| codex_control_socket(&h)) {
-        Some(sock) if sock.exists() => {
+        Some(sock) if codex_control_present(&sock) => {
             out.push((true, format!("codex: app-server control socket present at {}", sock.display())))
         }
         Some(sock) => out.push((

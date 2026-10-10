@@ -1,8 +1,10 @@
 //! The host's device credential: `$XDG_CONFIG_HOME/conde/credentials`
-//! (mode 0600), written by `conde enroll`, read by the bridge at start.
+//! (mode 0600; on Windows `%APPDATA%\conde\credentials`, owner-only), written by
+//! `conde enroll`, read by the bridge at start.
 
 use std::io::{BufRead, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
@@ -22,10 +24,14 @@ impl std::fmt::Debug for Credentials {
     }
 }
 
-/// `$XDG_CONFIG_HOME/conde/credentials`, else `~/.config/conde/credentials`.
+/// `$XDG_CONFIG_HOME/conde/credentials`, else `~/.config/conde/credentials`
+/// (Windows: `%APPDATA%\conde\credentials`).
 pub fn path() -> anyhow::Result<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(d) => PathBuf::from(d),
+        #[cfg(windows)]
+        None => PathBuf::from(std::env::var_os("APPDATA").filter(|h| !h.is_empty()).context("APPDATA is not set")?),
+        #[cfg(not(windows))]
         None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty()).context("HOME is not set")?)
             .join(".config"),
     };
@@ -33,6 +39,7 @@ pub fn path() -> anyhow::Result<PathBuf> {
 }
 
 /// The file's permission bits, when it exists.
+#[cfg(unix)]
 pub fn mode(path: &Path) -> Option<u32> {
     std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o777)
 }
@@ -41,21 +48,17 @@ pub fn mode(path: &Path) -> Option<u32> {
 pub fn load(path: &Path) -> anyhow::Result<Credentials> {
     let raw = std::fs::read(path)
         .with_context(|| format!("no host credential at {} (run: conde enroll --server <url>)", path.display()))?;
-    if let Some(m) = mode(path)
-        && m & 0o077 != 0
-    {
-        bail!("{} has mode {m:03o}; it holds a secret, make it 0600 (chmod 600 {})", path.display(), path.display());
-    }
+    crate::private::check(path)?;
     serde_json::from_slice(&raw).with_context(|| format!("{} is not a conde credential file", path.display()))
 }
 
 /// Write the credential atomically with mode 0600 (directory 0700).
 pub fn store(path: &Path, creds: &Credentials) -> anyhow::Result<()> {
     let dir = path.parent().context("credential path has no directory")?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    crate::private::create_dir(dir)?;
     let tmp = dir.join(format!(".credentials.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    let mut f = crate::private::create_file(&tmp)?;
     f.write_all(serde_json::to_string_pretty(creds)?.as_bytes())?;
     f.write_all(b"\n")?;
     f.sync_all()?;
@@ -99,6 +102,13 @@ pub fn same_server(a: &str, b: &str) -> anyhow::Result<bool> {
 }
 
 /// Read a secret at a prompt on the terminal with echo off; `no_tty` is the error without one.
+#[cfg(windows)]
+pub fn prompt_secret(prompt: &str, no_tty: &'static str) -> anyhow::Result<String> {
+    crate::win::read_secret(prompt).context(no_tty)
+}
+
+/// Read a secret at a prompt on the terminal with echo off; `no_tty` is the error without one.
+#[cfg(unix)]
 pub fn prompt_secret(prompt: &str, no_tty: &'static str) -> anyhow::Result<String> {
     let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").context(no_tty)?;
     let fd = std::os::fd::AsRawFd::as_raw_fd(&tty);

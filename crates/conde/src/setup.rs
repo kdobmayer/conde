@@ -1,6 +1,6 @@
 //! `conde setup`: make this machine's Claude Code and Codex sessions use
 //! conde. Installs the bridge as a user service (systemd on Linux, launchd on
-//! macOS) running the single daemon with the local board, the skills, and the MCP
+//! macOS, a scheduled task at logon on Windows) running the single daemon with the local board, the skills, and the MCP
 //! registration for both harnesses; offers the Claude receiver setting; then the
 //! host's boards (DESIGN-v2 §7, §9): the default board, and for an enrolled host
 //! the one review of which earlier names stay published. Enrolling a shared board
@@ -8,10 +8,11 @@
 //!
 //! Everything the run reads from the machine (OS, home, config dirs, the
 //! binary's path) arrives in [`Env`], and every external command goes through
-//! [`Host`], so the macOS branch is exercised on Linux in tests.
+//! [`Host`], so the macOS and Windows branches are exercised on Linux in tests.
 
 use std::fmt::Write as _;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,8 @@ pub const CLAUDE_SKILL: &str = include_str!("../../../skills/claude/SKILL.md");
 pub const CODEX_SKILL: &str = include_str!("../../../skills/codex/SKILL.md");
 
 pub const LAUNCHD_LABEL: &str = "space.nativeai.conde";
+/// The Windows scheduled task that runs the bridge at logon.
+pub const TASK_NAME: &str = "conde";
 /// The last step of every setup (owner's decision): report how it went.
 pub const FEEDBACK: &str = "Send a DM to kdobmayer/desk with how the setup went: what worked, what failed, what you \
 had to figure out yourself, roughly how long it took, and the OS.";
@@ -41,6 +44,18 @@ machine's local board, and teammates cannot reach one until you publish it";
 pub enum Os {
     Linux,
     MacOs,
+    Windows,
+}
+
+/// What setup needs on Windows only.
+#[derive(Clone, Debug)]
+pub struct WindowsEnv {
+    /// `%APPDATA%`: conde's config (board files, the default board).
+    pub appdata: PathBuf,
+    /// `%LOCALAPPDATA%`: the local board and the bridge's log.
+    pub local_appdata: PathBuf,
+    /// `DOMAIN\user`, whose logon starts the task and who it runs as.
+    pub user: String,
 }
 
 /// The machine as setup sees it.
@@ -67,26 +82,55 @@ pub struct Env {
     pub socket: PathBuf,
     /// The socket a conde process resolves without `$CONDE_SOCK` (an MCP entry without one).
     pub default_socket: PathBuf,
+    /// Set when `os` is Windows.
+    pub windows: Option<WindowsEnv>,
 }
 
 impl Env {
     pub fn from_process() -> anyhow::Result<Env> {
         let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-        let home = var("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
+        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let home = var(home_var).ok_or_else(|| anyhow!("{home_var} is not set"))?;
         let exe = std::env::current_exe().context("locating the conde binary")?;
+        #[cfg(unix)]
+        let uid = crate::util::own_uid();
+        #[cfg(not(unix))]
+        let uid = 0;
+        let windows = if cfg!(windows) {
+            let user = std::env::var("USERNAME").context("USERNAME is not set")?;
+            Some(WindowsEnv {
+                appdata: var("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")),
+                local_appdata: var("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData").join("Local")),
+                user: match std::env::var("USERDOMAIN").ok().filter(|d| !d.is_empty()) {
+                    Some(domain) => format!("{domain}\\{user}"),
+                    None => user,
+                },
+            })
+        } else {
+            None
+        };
+        // a Windows path from current_exe() is used as is: canonicalize() gives a \\?\ path
+        let exe = if cfg!(windows) { exe } else { exe.canonicalize().unwrap_or(exe) };
         Ok(Env {
-            os: if cfg!(target_os = "macos") { Os::MacOs } else { Os::Linux },
+            os: if cfg!(target_os = "macos") {
+                Os::MacOs
+            } else if cfg!(windows) {
+                Os::Windows
+            } else {
+                Os::Linux
+            },
             home,
-            uid: crate::util::own_uid(),
+            uid,
             xdg_config_home: var("XDG_CONFIG_HOME"),
             claude_config_dir: var("CLAUDE_CONFIG_DIR"),
             codex_home: var("CODEX_HOME"),
             xdg_data_home: var("XDG_DATA_HOME"),
             conde_data: var("CONDE_DATA"),
-            exe: exe.canonicalize().unwrap_or(exe),
+            exe,
             path: std::env::var("PATH").unwrap_or_default(),
             socket: crate::paths::socket_path(),
             default_socket: crate::paths::default_socket_path(),
+            windows,
         })
     }
 
@@ -150,9 +194,14 @@ impl Env {
         self.codex_dir().join("skills").join(name).join("SKILL.md")
     }
 
-    /// `$XDG_CONFIG_HOME/conde` (else `~/.config/conde`): board files and the default board.
+    /// `$XDG_CONFIG_HOME/conde` (else `~/.config/conde`; Windows `%APPDATA%\conde`): board
+    /// files and the default board.
     pub fn conde_config(&self) -> PathBuf {
-        self.xdg_config_home.clone().unwrap_or_else(|| self.home.join(".config")).join("conde")
+        match (&self.xdg_config_home, &self.windows) {
+            (Some(x), _) => x.join("conde"),
+            (None, Some(w)) => w.appdata.join("conde"),
+            (None, None) => self.home.join(".config").join("conde"),
+        }
     }
 
     pub fn boards_dir(&self) -> PathBuf {
@@ -180,8 +229,27 @@ impl Env {
         self.home.join("Library/Logs/conde")
     }
 
+    /// Windows: the local board's directory, as the daemon resolves it.
+    fn windows_data(&self) -> PathBuf {
+        match &self.conde_data {
+            Some(d) => d.clone(),
+            None => crate::paths::windows_data_dir(self.windows.as_ref().map(|w| w.local_appdata.clone()), Some(self.home.clone())),
+        }
+    }
+
+    /// Windows: the task definition setup registers (`schtasks /Create /XML`).
+    pub fn windows_task(&self) -> PathBuf {
+        self.windows_data().with_file_name("conde-task.xml")
+    }
+
+    /// Windows: where the bridge writes its log once it gives up its console.
+    pub fn windows_log(&self) -> PathBuf {
+        self.windows_data().join("conde.log")
+    }
+
     fn show(&self, p: &Path) -> String {
         match p.strip_prefix(&self.home) {
+            Ok(rest) if self.os == Os::Windows => format!("%USERPROFILE%\\{}", rest.display()),
             Ok(rest) => format!("~/{}", rest.display()),
             Err(_) => p.display().to_string(),
         }
@@ -297,7 +365,8 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 impl Host for System {
     fn reach(&mut self, socket: &Path) -> Result<(), String> {
         use std::io::{BufRead, BufReader};
-        let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| e.to_string())?;
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut stream = crate::ipc::connect(socket).map_err(|e| e.to_string())?;
         stream.set_read_timeout(Some(PROBE_TIMEOUT)).map_err(|e| e.to_string())?;
         stream.set_write_timeout(Some(PROBE_TIMEOUT)).map_err(|e| e.to_string())?;
         let req = crate::protocol::Request::new(crate::util::new_ulid(), "agent.whoami", json!({}));
@@ -314,11 +383,22 @@ impl Host for System {
         }
     }
 
+    #[cfg(unix)]
     fn which(&self, prog: &str) -> Option<PathBuf> {
         let path = std::env::var_os("PATH")?;
         std::env::split_paths(&path).map(|d| d.join(prog)).find(|p| {
             std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
         })
+    }
+
+    /// Windows: `prog` with each `%PATHEXT%` extension (`claude.exe`, `claude.cmd`).
+    #[cfg(windows)]
+    fn which(&self, prog: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        std::env::split_paths(&path)
+            .flat_map(|d| exts.split(';').filter(|e| !e.is_empty()).map(move |e| d.join(format!("{prog}{e}"))))
+            .find(|p| p.is_file())
     }
 
     fn run(&mut self, prog: &str, args: &[&str]) -> anyhow::Result<CmdOut> {
@@ -334,9 +414,15 @@ impl Host for System {
         })
     }
 
+    #[cfg(unix)]
     fn terminal(&self) -> bool {
         // SAFETY: isatty on the process's own stdin descriptor.
         unsafe { libc::isatty(0) == 1 }
+    }
+
+    #[cfg(not(unix))]
+    fn terminal(&self) -> bool {
+        std::io::IsTerminal::is_terminal(&std::io::stdin())
     }
 
     fn ask(&mut self, prompt: &str) -> Option<String> {
@@ -402,12 +488,17 @@ impl Change {
 /// Write `content` unless the file already holds it; atomic, keeps an
 /// existing file's mode, creates parents.
 pub fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<Change> {
+    write_bytes_if_changed(path, content.as_bytes())
+}
+
+/// [`write_if_changed`] for bytes (the UTF-16 task definition).
+pub fn write_bytes_if_changed(path: &Path, content: &[u8]) -> anyhow::Result<Change> {
     let old = match std::fs::read(path) {
         Ok(b) => Some(b),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    if old.as_deref() == Some(content.as_bytes()) {
+    if old.as_deref() == Some(content) {
         return Ok(Change::Unchanged);
     }
     let dir = path.parent().ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
@@ -441,6 +532,7 @@ pub fn run(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
         let r = match env.os {
             Os::Linux => systemd(env, host, out),
             Os::MacOs => launchd(env, host, out),
+            Os::Windows => schtasks(env, host, out),
         };
         part("service", r, out)?;
     }
@@ -472,9 +564,9 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         writeln!(out, "{kind:<8}{text}")?;
         Ok(())
     };
-    let file = |path: &Path, want: &str| -> anyhow::Result<Option<&'static str>> {
+    let file = |path: &Path, want: &[u8]| -> anyhow::Result<Option<&'static str>> {
         Ok(match std::fs::read(path) {
-            Ok(b) if b == want.as_bytes() => None,
+            Ok(b) if b == want => None,
             Ok(_) => Some("differs from what conde setup writes"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("missing"),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
@@ -484,8 +576,9 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
 
     if opts.service {
         let (path, want) = match env.os {
-            Os::Linux => (env.systemd_unit(), systemd_unit(env)),
-            Os::MacOs => (env.launchd_plist(), launchd_plist(env)),
+            Os::Linux => (env.systemd_unit(), systemd_unit(env).into_bytes()),
+            Os::MacOs => (env.launchd_plist(), launchd_plist(env).into_bytes()),
+            Os::Windows => (env.windows_task(), utf16_file(&task_xml(env))),
         };
         match file(&path, &want)? {
             None => line("ok", format!("service: {} up to date", env.show(&path)), out)?,
@@ -515,7 +608,7 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
                 line("note", format!("claude: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"), out)?;
             }
             let skill = env.claude_skill_for(&name);
-            match file(&skill, &skill_text(CLAUDE_SKILL, &name))? {
+            match file(&skill, skill_text(CLAUDE_SKILL, &name).as_bytes())? {
                 None => line("ok", format!("claude: skill {} up to date", env.show(&skill)), out)?,
                 Some(why) => line("ISSUE", format!("claude: skill {} {why}{fix}", env.show(&skill)), out)?,
             }
@@ -548,7 +641,7 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
                 line("note", format!("codex: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"), out)?;
             }
             let skill = env.codex_skill_for(&name);
-            match file(&skill, &skill_text(CODEX_SKILL, &name))? {
+            match file(&skill, skill_text(CODEX_SKILL, &name).as_bytes())? {
                 None => line("ok", format!("codex: skill {} up to date", env.show(&skill)), out)?,
                 Some(why) => line("ISSUE", format!("codex: skill {} {why}{fix}", env.show(&skill)), out)?,
             }
@@ -592,6 +685,16 @@ fn service_state(env: &Env, host: &mut dyn Host) -> anyhow::Result<String> {
         text.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
     };
     Ok(match env.os {
+        Os::Windows => {
+            let r = host.run("schtasks", &["/Query", "/TN", TASK_NAME, "/FO", "LIST", "/V"])?;
+            if !r.ok {
+                format!("task scheduler: no task {TASK_NAME}")
+            } else {
+                let state = field(&r.stdout, "Status:").unwrap_or_else(|| "unknown".into());
+                let last = field(&r.stdout, "Last Result:").unwrap_or_else(|| "unknown".into());
+                format!("task scheduler: {TASK_NAME} status {state}, last result {last}")
+            }
+        }
         Os::MacOs => {
             let r = host.run("launchctl", &["print", &format!("gui/{}/{LAUNCHD_LABEL}", env.uid)])?;
             if !r.ok {
@@ -787,6 +890,106 @@ fn launchd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
         }
     }
     writeln!(out, "service: logs in {}", env.show(&logs.join("conde.log")))?;
+    Ok(())
+}
+
+fn xml_utf16_decl(body: &str) -> String {
+    format!("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n{body}")
+}
+
+/// The task definition: `conde daemon` at this user's logon, as this user in the
+/// interactive session (where Claude Code's session-local pipes are), no time limit,
+/// also on battery, one instance.
+pub fn task_xml(env: &Env) -> String {
+    let user = xml(env.windows.as_ref().map_or("", |w| w.user.as_str()));
+    let exe = xml(&env.exe.to_string_lossy());
+    let args = xml(&daemon_args().join(" "));
+    xml_utf16_decl(&format!(
+        r#"<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>conde bridge; written by conde setup, rerun it instead of editing</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+      <Arguments>{args}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    ))
+}
+
+/// UTF-16LE with a byte order mark and CRLF line ends, as Task Scheduler writes its files.
+pub fn utf16_file(text: &str) -> Vec<u8> {
+    let crlf = text.replace("\r\n", "\n").replace('\n', "\r\n");
+    let mut out = vec![0xFF, 0xFE];
+    out.extend(crlf.encode_utf16().flat_map(u16::to_le_bytes));
+    out
+}
+
+fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+    let file = env.windows_task();
+    let change = write_bytes_if_changed(&file, &utf16_file(&task_xml(env)))?;
+    writeln!(out, "service: {} {}", change.verb(), env.show(&file))?;
+    let file_s = file.to_string_lossy().into_owned();
+    let registered = host.run("schtasks", &["/Query", "/TN", TASK_NAME])?.ok;
+    if change != Change::Unchanged || !registered {
+        check(host, "schtasks", &["/Create", "/TN", TASK_NAME, "/XML", &file_s, "/F"])?;
+        writeln!(out, "service: registered the scheduled task {TASK_NAME} (runs conde daemon at your logon)")?;
+    }
+    let running = host.reach(&env.socket).is_ok();
+    if running && (change == Change::Updated || predates_boards(env, host, out)?) {
+        // End is a hard stop; the local board's SQLite survives it
+        check(host, "schtasks", &["/End", "/TN", TASK_NAME])?;
+        check(host, "schtasks", &["/Run", "/TN", TASK_NAME])?;
+        writeln!(out, "service: restarted {TASK_NAME}")?;
+    } else if running {
+        writeln!(out, "service: {TASK_NAME} already running")?;
+    } else {
+        check(host, "schtasks", &["/Run", "/TN", TASK_NAME])?;
+        writeln!(out, "service: started {TASK_NAME}")?;
+    }
+    let inherited: Vec<&str> = env
+        .service_env()
+        .into_iter()
+        .map(|(k, _)| k)
+        .filter(|k| *k != "PATH" && (*k != "CONDE_SOCK" || env.socket != env.default_socket))
+        .collect();
+    if !inherited.is_empty() {
+        writeln!(
+            out,
+            "service: the task gets your logon environment, not this shell's: set {} persistently (setx NAME value) \
+             so the bridge resolves the same directories, then run conde setup again",
+            inherited.join(", ")
+        )?;
+    }
+    writeln!(out, "service: logs in {}", env.show(&env.windows_log()))?;
     Ok(())
 }
 
@@ -1166,10 +1369,14 @@ fn holder(env: &Env, present: bool, command: Option<&str>, sock: Option<&str>) -
         Some(s) => format!("{cmd}, CONDE_SOCK={s}"),
         None => cmd.to_string(),
     });
-    let resolved = if cmd.contains('/') {
+    let (sep, path_like) = match env.os {
+        Os::Windows => (';', cmd.contains(['/', '\\'])),
+        _ => (':', cmd.contains('/')),
+    };
+    let resolved = if path_like {
         Some(PathBuf::from(cmd))
     } else {
-        env.path.split(':').filter(|d| !d.is_empty()).map(|d| Path::new(d).join(cmd)).find(|p| p.is_file())
+        env.path.split(sep).filter(|d| !d.is_empty()).map(|d| Path::new(d).join(cmd)).find(|p| p.is_file())
     };
     let socket = sock.map_or_else(|| env.default_socket.clone(), PathBuf::from);
     match resolved {

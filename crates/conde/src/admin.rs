@@ -3,7 +3,6 @@
 
 use std::io::Read;
 use std::net::SocketAddr;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -34,11 +33,7 @@ fn open_board(data: Option<PathBuf>, how: PgOpen) -> anyhow::Result<Dispatcher> 
         return Dispatcher::connect(&url, how).context("connecting to the Postgres board (DATABASE_URL)");
     }
     let dir = data.unwrap_or_else(paths::data_dir);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    crate::private::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let db = dir.join("conde.db");
     Dispatcher::open(&db).with_context(|| format!("opening {}", db.display()))
 }

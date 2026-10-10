@@ -1,10 +1,16 @@
 //! Claude Code transport: discovery, the cross-session frame, receipts.
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -87,10 +93,16 @@ pub fn msg_id_for(key: &str) -> String {
 }
 
 /// The harness's address form: `uds:<path>`, every byte outside
-/// `[A-Za-z0-9:_/.\-]` percent-encoded as `%XX`.
+/// `[A-Za-z0-9:_/.\\-]` percent-encoded as `%XX` (on Windows, of the UTF-8 path).
 pub fn uds_address(path: &Path) -> String {
     let mut out = String::from("uds:");
-    for &b in path.as_os_str().as_bytes() {
+    #[cfg(unix)]
+    let bytes = path.as_os_str().as_bytes();
+    #[cfg(not(unix))]
+    let lossy = path.to_string_lossy();
+    #[cfg(not(unix))]
+    let bytes = lossy.as_bytes();
+    for &b in bytes {
         if b.is_ascii_alphanumeric() || b":_/.\\-".contains(&b) {
             out.push(b as char);
         } else {
@@ -123,7 +135,13 @@ pub(crate) fn proc_start(pid: u32) -> Option<String> {
     (got == size).then(|| lstart_utc(info.pbi_start_tvsec as i64))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows: the creation FILETIME as a decimal string, Claude Code's `procStartFt`.
+#[cfg(windows)]
+pub(crate) fn proc_start(pid: u32) -> Option<String> {
+    crate::win::process_created(pid).map(|ft| ft.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn proc_start(_pid: u32) -> Option<String> {
     None
 }
@@ -156,8 +174,100 @@ fn lstart_utc(secs: i64) -> String {
 
 /// Published and observed start times agree, ignoring whitespace runs (ps
 /// pads the day of month).
+#[cfg(any(not(windows), test))]
 fn same_start(published: &str, observed: &str) -> bool {
     published.split_whitespace().eq(observed.split_whitespace())
+}
+
+/// Windows, Claude Code's own rule: equal, or not comparable because one side is a
+/// FILETIME (`procStartFt`, below 3e17) and the other .NET ticks (`procStart` from
+/// PowerShell when the native call is unavailable, above 3e17).
+#[cfg(any(windows, test))]
+fn same_start_ft(published: &str, observed: &str) -> bool {
+    const TICKS_FLOOR: u64 = 300_000_000_000_000_000;
+    if published == observed {
+        return true;
+    }
+    match (published.trim().parse::<u64>(), observed.trim().parse::<u64>()) {
+        (Ok(p), Ok(o)) => (p > TICKS_FLOOR) != (o > TICKS_FLOOR),
+        _ => false,
+    }
+}
+
+/// The start-time fingerprint a session record publishes for this platform.
+fn published_start(info: &Value) -> Option<String> {
+    let field = |k: &str| info.get(k).and_then(scalar).filter(|s| !s.is_empty());
+    if cfg!(windows) { field("procStartFt").or_else(|| field("procStart")) } else { field("procStart") }
+}
+
+fn start_matches(published: &str, observed: &str) -> bool {
+    #[cfg(windows)]
+    {
+        same_start_ft(published, observed)
+    }
+    #[cfg(not(windows))]
+    {
+        same_start(published, observed)
+    }
+}
+
+/// The name of a local named pipe path (`\\.\pipe\<name>`, `\\?\pipe\LOCAL\<name>`,
+/// either slash), as Claude Code parses it: `LOCAL\<name>` for the session-local
+/// namespace; None for anything else, a remote host, extra segments or a trailing dot
+/// or space.
+#[cfg(any(windows, test))]
+pub(crate) fn pipe_name(path: &str) -> Option<String> {
+    let sep = |c: char| c == '\\' || c == '/';
+    let mut chars = path.chars();
+    let (a, b, dot, c) = (chars.next()?, chars.next()?, chars.next()?, chars.next()?);
+    if !(sep(a) && sep(b) && (dot == '.' || dot == '?') && sep(c)) {
+        return None;
+    }
+    let rest = &path[4..];
+    let (head, rest) = rest.split_at(rest.find(sep)?);
+    if !head.eq_ignore_ascii_case("pipe") {
+        return None;
+    }
+    let rest = &rest[1..];
+    let (local, name) = match rest.find(sep) {
+        Some(i) if rest[..i].eq_ignore_ascii_case("LOCAL") => (true, &rest[i + 1..]),
+        Some(_) => return None,
+        None => (false, rest),
+    };
+    if name.is_empty() || name.contains(sep) || name == "." || name == ".." || name.ends_with(['.', ' ']) {
+        return None;
+    }
+    if path.starts_with("\\\\?\\") && path.contains('/') {
+        return None;
+    }
+    Some(if local { format!("LOCAL\\{name}") } else { name.to_owned() })
+}
+
+/// The form Claude Code hashes into a key file name: a pipe as `\\.\pipe\` plus its
+/// ASCII-lowercased name; a socket path as published.
+fn canonical_endpoint(sock: &str) -> String {
+    #[cfg(any(windows, test))]
+    if let Some(name) = pipe_name(sock) {
+        return format!("\\\\.\\pipe\\{}", name.to_ascii_lowercase());
+    }
+    sock.to_owned()
+}
+
+/// `<pid>.<sha256hex(canonical endpoint)>.key`, the peer-token file of an inbox.
+pub(crate) fn key_file_name(pid: u32, sock: &str) -> String {
+    format!("{pid}.{}.key", sha256_hex(canonical_endpoint(sock).as_bytes()))
+}
+
+/// Whether the session's inbox exists: the socket file; on Windows a local pipe.
+fn endpoint_live(sock: &str) -> bool {
+    #[cfg(windows)]
+    {
+        pipe_name(sock).is_some() && crate::win::pipe_exists(std::ffi::OsStr::new(sock))
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(sock).exists()
+    }
 }
 
 fn sessions_dir(config_dir: Option<&Path>) -> Option<PathBuf> {
@@ -215,15 +325,12 @@ fn live_session(dir: &Path, info: &Value) -> Option<ClaudeSession> {
     let session_id = scalar(info.get("sessionId")?).filter(|s| !s.is_empty())?;
     let start = proc_start(pid)?;
     // Same rule as kond: an entry without procStart is trusted on the pid alone.
-    if let Some(published) = info
-        .get("procStart")
-        .and_then(scalar)
-        .filter(|s| !s.is_empty())
-        && !same_start(&published, &start)
+    if let Some(published) = published_start(info)
+        && !start_matches(&published, &start)
     {
         return None;
     }
-    if !Path::new(sock).exists() {
+    if !endpoint_live(sock) {
         return None;
     }
     Some(ClaudeSession {
@@ -233,7 +340,7 @@ fn live_session(dir: &Path, info: &Value) -> Option<ClaudeSession> {
         sock: PathBuf::from(sock),
         status: text_field(info, "status"),
         cwd: PathBuf::from(text_field(info, "cwd")),
-        key_path: dir.join(format!("{pid}.{}.key", sha256_hex(sock.as_bytes()))),
+        key_path: dir.join(key_file_name(pid, sock)),
     })
 }
 
@@ -304,6 +411,11 @@ pub(crate) fn frame_payload(s: &ClaudeSession, text: &str, msg_id: &str, from: &
 /// The recipient checks the `from` address against the connecting pid and the
 /// directory, and sends receipts to it, possibly long after the send, so a
 /// long-lived owner (the bridge) must hold one sender for all its sends.
+///
+/// On Windows the reply endpoint is a pipe `\\.\pipe\LOCAL\cc-msg-<32 hex>` (the
+/// only `from` Claude Code answers there), vouched for by a key file in the
+/// sessions directory whose token every receipt must open with.
+#[cfg(unix)]
 pub struct ClaudeSender {
     path: PathBuf,
     address: String,
@@ -311,6 +423,37 @@ pub struct ClaudeSender {
     inode: (u64, u64),
 }
 
+#[cfg(windows)]
+pub struct ClaudeSender {
+    path: PathBuf,
+    address: String,
+    listener: std::sync::Mutex<crate::win::PipeListener>,
+    key_file: PathBuf,
+    token: String,
+}
+
+impl ClaudeSender {
+    /// The sender for a session's recipients: its socket directory (Unix), its
+    /// sessions directory (Windows).
+    pub fn for_session(s: &ClaudeSession) -> io::Result<Self> {
+        #[cfg(windows)]
+        let dir = s.key_path.parent().unwrap_or(Path::new(""));
+        #[cfg(not(windows))]
+        let dir = s.sock.parent().unwrap_or(Path::new(""));
+        Self::new(dir)
+    }
+
+    /// This sender's `uds:` address, the `from` of every frame it sends.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(unix)]
 impl ClaudeSender {
     /// Binds `<sock_dir>/<ownpid>.sock` (0600), replacing a stale socket of that name.
     pub fn new(sock_dir: &Path) -> io::Result<Self> {
@@ -349,15 +492,6 @@ impl ClaudeSender {
         })
     }
 
-    /// This sender's `uds:` address, the `from` of every frame it sends.
-    pub fn address(&self) -> &str {
-        &self.address
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Writes one frame to the session's socket. Immediate acceptance sends no
     /// receipt; any receipt for `msg_id` arrives later via [`Self::receipts`].
     pub fn send(&self, s: &ClaudeSession, text: &str, msg_id: &str) -> io::Result<()> {
@@ -393,6 +527,7 @@ impl ClaudeSender {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ClaudeSender {
     fn drop(&mut self) {
         // Unlink only our own socket, not one a later sender bound at the same path.
@@ -405,6 +540,7 @@ impl Drop for ClaudeSender {
 }
 
 /// poll(2) for an incoming connection until `deadline` (a past deadline polls once).
+#[cfg(unix)]
 fn wait_readable(listener: &UnixListener, deadline: Instant) -> bool {
     let mut pfd = libc::pollfd {
         fd: listener.as_raw_fd(),
@@ -426,12 +562,23 @@ fn wait_readable(listener: &UnixListener, deadline: Instant) -> bool {
     }
 }
 
-fn read_receipts(mut conn: UnixStream) -> Vec<Receipt> {
+#[cfg(unix)]
+fn read_receipts(conn: UnixStream) -> Vec<Receipt> {
     if conn.set_nonblocking(false).is_err()
         || conn.set_read_timeout(Some(RECEIPT_READ_TIMEOUT)).is_err()
     {
         return Vec::new();
     }
+    let data = drain(conn, 1);
+    String::from_utf8_lossy(&data)
+        .lines()
+        .flat_map(parse_receipts)
+        .collect()
+}
+
+/// A connection's bytes until it ends, fails, passes the size cap, or has sent
+/// `lines` newline-terminated lines.
+fn drain(mut conn: impl Read, lines: usize) -> Vec<u8> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 65536];
     while data.len() < RECEIPT_MAX_BYTES {
@@ -439,7 +586,7 @@ fn read_receipts(mut conn: UnixStream) -> Vec<Receipt> {
             Ok(0) => break,
             Ok(n) => {
                 data.extend_from_slice(&chunk[..n]);
-                if data.ends_with(b"\n") {
+                if data.ends_with(b"\n") && data.iter().filter(|b| **b == b'\n').count() >= lines {
                     break;
                 }
             }
@@ -447,10 +594,104 @@ fn read_receipts(mut conn: UnixStream) -> Vec<Receipt> {
             Err(_) => break,
         }
     }
-    String::from_utf8_lossy(&data)
-        .lines()
-        .flat_map(parse_receipts)
-        .collect()
+    data
+}
+
+/// The receipts of one Windows reply connection: its first line must be
+/// `{"type":"auth","token":<ours>}`, as Claude Code sends to a vouched pipe;
+/// a connection without it settles nothing.
+#[cfg(any(windows, test))]
+pub(crate) fn authed_receipts(data: &str, token: &str) -> Vec<Receipt> {
+    let mut lines = data.lines().filter(|l| !l.trim().is_empty());
+    let authed = lines
+        .next()
+        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+        .is_some_and(|f| f["type"] == "auth" && f["token"] == token);
+    if !authed {
+        return Vec::new();
+    }
+    lines.flat_map(parse_receipts).collect()
+}
+
+#[cfg(windows)]
+impl ClaudeSender {
+    /// Binds a fresh `\\.\pipe\LOCAL\cc-msg-<32 hex>` (current user only) and
+    /// publishes its key `<ownpid>.<sha256(pipe)>.key` (`peerToken`, `procStartFt`)
+    /// in `sessions_dir`, so Claude Code vouches for the pipe and authenticates its
+    /// receipts with the token.
+    pub fn new(sessions_dir: &Path) -> io::Result<Self> {
+        use crate::win;
+        let name = format!("\\\\.\\pipe\\LOCAL\\cc-msg-{}", win::random_hex(16)?);
+        let listener = win::PipeListener::bind(std::ffi::OsStr::new(&name), win::Security::owner_only(false)?)?;
+        let token = win::random_hex(16)?;
+        let pid = std::process::id();
+        let key_file = sessions_dir.join(key_file_name(pid, &name));
+        let mut key = json!({"peerToken": token});
+        if let Some(ft) = win::process_created(pid) {
+            key["procStartFt"] = json!(ft.to_string());
+        }
+        let tmp = sessions_dir.join(format!("{}.tmp.{}", key_file.file_name().unwrap_or_default().to_string_lossy(), win::random_hex(4)?));
+        fs::write(&tmp, key.to_string())?;
+        if let Err(e) = fs::rename(&tmp, &key_file) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        let path = PathBuf::from(&name);
+        let address = uds_address(&path);
+        Ok(Self { path, address, listener: std::sync::Mutex::new(listener), key_file, token })
+    }
+
+    /// Writes one frame to the session's pipe. Claude Code requires the auth line
+    /// on Windows, so a session without a readable peer token is not attempted.
+    pub fn send(&self, s: &ClaudeSession, text: &str, msg_id: &str) -> io::Result<()> {
+        if peer_token(&s.key_path).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("no peer token at {}; Claude Code on Windows refuses frames without one", s.key_path.display()),
+            ));
+        }
+        let payload = frame_payload(s, text, msg_id, &self.address);
+        let deadline = Some(Instant::now() + SEND_TIMEOUT);
+        let pipe = crate::win::PipeClient::connect(s.sock.as_os_str(), deadline)?;
+        pipe.write_all(payload.as_bytes(), deadline)
+    }
+
+    /// Receipts that arrived: waits up to `wait` for the first connection,
+    /// then drains whatever else is pending without waiting.
+    pub fn receipts(&self, wait: Duration) -> Vec<Receipt> {
+        let mut out = Vec::new();
+        let mut deadline = Instant::now() + wait;
+        let mut listener = self.listener.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            let Ok(Some(conn)) = listener.accept(deadline) else {
+                return out;
+            };
+            deadline = Instant::now();
+            let reader = PipeReader { conn: &conn, deadline: Instant::now() + RECEIPT_READ_TIMEOUT };
+            let data = drain(reader, 2);
+            out.extend(authed_receipts(&String::from_utf8_lossy(&data), &self.token));
+        }
+    }
+}
+
+#[cfg(windows)]
+struct PipeReader<'a> {
+    conn: &'a crate::win::PipeConn,
+    deadline: Instant,
+}
+
+#[cfg(windows)]
+impl Read for PipeReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.conn.read(buf, Some(self.deadline))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ClaudeSender {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.key_file);
+    }
 }
 
 /// One receipt per id a `peer_message_status` frame settles: `orig_msg_id`
@@ -981,5 +1222,53 @@ mod tests {
             r.iter().map(|r| r.msg_id.as_str()).collect::<Vec<_>>(),
             ["x"]
         );
+    }
+
+    #[test]
+    fn windows_pipe_names_parse_as_claude_code_does() {
+        assert_eq!(pipe_name(r"\\.\pipe\LOCAL\cc-msg-0123").as_deref(), Some(r"LOCAL\cc-msg-0123"));
+        assert_eq!(pipe_name(r"\\?\PIPE\local\cc-msg-0123").as_deref(), Some(r"LOCAL\cc-msg-0123"));
+        assert_eq!(pipe_name("//./pipe/cc-msg-0123").as_deref(), Some("cc-msg-0123"));
+        assert_eq!(pipe_name(r"\\.\pipe\LOCAL").as_deref(), Some("LOCAL"));
+        for bad in [
+            r"\\host\pipe\x", r"\\.\pipe\a\b", r"\\.\pipe\x.", r"\\.\pipe\x ", r"\\.\pipe\..", r"\\.\pipe\",
+            r"\\?\pipe/x", r"\\.\nopipe\x", "/tmp/cc-socks/1.sock", "",
+        ] {
+            assert_eq!(pipe_name(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn windows_key_file_hashes_the_canonical_pipe() {
+        let canonical = sha256_hex(br"\\.\pipe\local\cc-msg-abcdef");
+        for spelled in [r"\\.\pipe\LOCAL\cc-msg-ABCDEF", r"\\?\pipe\local\cc-msg-abcdef", "//./PIPE/Local/cc-msg-AbCdEf"] {
+            assert_eq!(key_file_name(42, spelled), format!("42.{canonical}.key"), "{spelled}");
+        }
+        // a socket path is hashed as published, as before
+        assert_eq!(key_file_name(7, "/tmp/cc-socks/7.sock"), format!("7.{}.key", sha256_hex(b"/tmp/cc-socks/7.sock")));
+        assert_eq!(uds_address(Path::new(r"\\.\pipe\LOCAL\cc-msg-ab12")), r"uds:\\.\pipe\LOCAL\cc-msg-ab12");
+    }
+
+    #[test]
+    fn windows_start_times_compare_like_claude_code() {
+        let filetime = "134047584000000000";
+        assert!(same_start_ft(filetime, filetime));
+        assert!(!same_start_ft(filetime, "134047584000000001"));
+        // .NET ticks from the PowerShell fallback cannot be compared with a FILETIME
+        assert!(same_start_ft("639047584000000000", filetime));
+        assert!(!same_start_ft("639047584000000000", "639047584000000001"));
+        assert!(!same_start_ft("Thu Oct  8 22:20:00 2026", filetime));
+    }
+
+    #[test]
+    fn windows_receipts_need_the_auth_line() {
+        let receipt = r#"{"type":"control","action":"peer_message_status","status":"held","orig_msg_id":"m1"}"#;
+        let auth = r#"{"type":"auth","token":"t0k"}"#;
+        let got = authed_receipts(&format!("{auth}\n{receipt}\n"), "t0k");
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].msg_id.as_str(), &got[0].status), ("m1", &ReceiptStatus::Held));
+        assert!(authed_receipts(&format!("{receipt}\n"), "t0k").is_empty(), "no auth line");
+        assert!(authed_receipts(&format!("{}\n{receipt}\n", auth.replace("t0k", "bad")), "t0k").is_empty());
+        assert!(authed_receipts("", "t0k").is_empty());
     }
 }

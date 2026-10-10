@@ -1,5 +1,5 @@
-//! `conde setup` on temp homes, Linux and macOS branches, with a fake host
-//! standing in for systemctl, launchctl, the claude CLI and the terminal.
+//! `conde setup` on temp homes, Linux, macOS and Windows branches, with a fake host
+//! standing in for systemctl, launchctl, schtasks, the claude CLI and the terminal.
 //! Never touches the real ~/.claude, ~/.codex or ~/.config.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use conde::protocol::v2::BoardInfo;
-use conde::setup::{self, CmdOut, Env, Host, Options, Os, Publish};
+use conde::setup::{self, CmdOut, Env, Host, Options, Os, Publish, WindowsEnv};
 use conde::{paths, util};
 
 struct Fake {
@@ -146,6 +146,7 @@ fn env(root: &Path, os: Os) -> Env {
         path: "/usr/local/bin:/usr/bin:/bin".into(),
         socket: root.join("run/conde.sock"),
         default_socket: root.join("run/conde.sock"),
+        windows: None,
     }
 }
 
@@ -322,6 +323,99 @@ fn macos_launch_agent_runs_the_single_daemon() {
         [format!("launchctl print {target}"), format!("launchctl bootout {target}"), bootstrap]
     );
     assert!(!read(&plist_path).contains("--server"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn windows_env(root: &Path) -> Env {
+    let pipe = PathBuf::from(r"\\.\pipe\conde-krisz");
+    Env {
+        windows: Some(WindowsEnv {
+            appdata: root.join("home/AppData/Roaming"),
+            local_appdata: root.join("home/AppData/Local"),
+            user: r"HOMEPC\krisz".into(),
+        }),
+        path: r"C:\Windows\system32;C:\Users\krisz\AppData\Local\conde\bin".into(),
+        socket: pipe.clone(),
+        default_socket: pipe,
+        ..env(root, Os::Windows)
+    }
+}
+
+fn utf16(raw: &[u8]) -> String {
+    assert_eq!(&raw[..2], &[0xFF, 0xFE], "a byte order mark");
+    let units: Vec<u16> = raw[2..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    String::from_utf16(&units).unwrap()
+}
+
+#[test]
+fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_paths() {
+    let root = temp_root();
+    let env = windows_env(&root);
+    let opts = Options::select(true, true, true, false);
+    let mut host = Fake::new(&env, &["claude"]);
+    let task = env.windows_task();
+    assert_eq!(task, root.join("home/AppData/Local/conde/conde-task.xml"));
+    assert_eq!(env.boards_dir(), root.join("home/AppData/Roaming/conde/boards"));
+
+    let (ok, out) = run(&env, &opts, &mut host);
+    assert!(ok, "{out}");
+    let create = format!("schtasks /Create /TN conde /XML {} /F", task.display());
+    let calls = host.take_calls();
+    assert_eq!(calls[..3], ["schtasks /Query /TN conde".to_string(), create.clone(), "schtasks /Run /TN conde".into()]);
+    assert!(calls.contains(&add_call(&env, "conde")), "{calls:?}");
+    assert!(add_call(&env, "conde").contains(r"-e CONDE_SOCK=\\.\pipe\conde-krisz"));
+    let xml = utf16(&std::fs::read(&task).unwrap());
+    for needle in [
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Task version=\"1.2\"",
+        "<LogonTrigger>\r\n      <Enabled>true</Enabled>\r\n      <UserId>HOMEPC\\krisz</UserId>",
+        "<LogonType>InteractiveToken</LogonType>",
+        "<RunLevel>LeastPrivilege</RunLevel>",
+        "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+        "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
+        "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
+        "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+        &format!("<Command>{}</Command>\r\n      <Arguments>daemon</Arguments>", env.exe.display()),
+    ] {
+        assert!(xml.contains(needle), "missing {needle:?} in\n{xml}");
+    }
+    assert!(!xml.replace("\r\n", "").contains('\n'), "CRLF only");
+    assert!(out.contains("service: started conde"), "{out}");
+    assert!(out.contains("conde.log"), "{out}");
+    assert!(!out.contains("logon environment"), "nothing relocated: {out}");
+    // the Claude and Codex configs at their Windows homes (%USERPROFILE%\.claude.json, .codex)
+    let claude = serde_json::from_str::<Value>(&read(&env.claude_json())).unwrap();
+    assert_eq!(claude["mcpServers"]["conde"]["env"]["CONDE_SOCK"], r"\\.\pipe\conde-krisz");
+    assert_eq!(env.codex_config(), root.join("home/.codex/config.toml"));
+    let (exe, sock) = (env.exe.display().to_string(), env.socket.display().to_string());
+    assert_eq!(setup::codex_config_edit(&read(&env.codex_config()), "conde", &exe, &sock).unwrap(), None, "entry in place");
+    assert!(read(&env.codex_config()).contains(r"CONDE_SOCK = '\\.\pipe\conde-krisz'"), "{}", read(&env.codex_config()));
+    assert!(!files(&root).iter().any(|f| f.contains(".config") || f.contains("Library")), "{:?}", files(&root));
+
+    // a running bridge (one that knows boards) with the same task: nothing to do
+    host.alive = true;
+    host.daemon.insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
+    let (ok, out) = run(&env, &Options::select(false, false, true, false), &mut host);
+    assert!(ok, "{out}");
+    assert_eq!(host.take_calls(), ["schtasks /Query /TN conde"]);
+    assert!(out.contains("service: conde already running"), "{out}");
+    let (ok, check) = verify(&env, &Options::select(false, false, true, false), &mut host);
+    assert!(ok, "{check}");
+    assert!(check.contains("service: %USERPROFILE%\\AppData") && check.contains("up to date"), "{check}");
+
+    // a moved binary rewrites the task and restarts the running bridge
+    let moved = Env { exe: root.join("bin2/conde.exe"), ..env.clone() };
+    let (ok, out) = run(&moved, &Options::select(false, false, true, false), &mut host);
+    assert!(ok, "{out}");
+    assert_eq!(
+        host.take_calls(),
+        ["schtasks /Query /TN conde".to_string(), create, "schtasks /End /TN conde".into(), "schtasks /Run /TN conde".into()]
+    );
+    assert!(out.contains("service: restarted conde"), "{out}");
+
+    // a directory relocated only in this shell does not reach the task: said so
+    let relocated = Env { claude_config_dir: Some(root.join("cc")), ..env.clone() };
+    let (_, out) = run(&relocated, &Options::select(false, false, true, false), &mut host);
+    assert!(out.contains("set CLAUDE_CONFIG_DIR persistently (setx NAME value)"), "{out}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1099,9 +1193,9 @@ fn check_reports_the_boards() {
 
 #[test]
 fn a_running_bridge_that_predates_boards_is_restarted() {
-    for os in [Os::Linux, Os::MacOs] {
+    for os in [Os::Linux, Os::MacOs, Os::Windows] {
         let root = temp_root();
-        let env = env(&root, os);
+        let env = if os == Os::Windows { windows_env(&root) } else { env(&root, os) };
         let opts = Options::select(false, false, true, false);
         let mut host = Fake::new(&env, &["systemctl"]);
         run(&env, &opts, &mut host);
@@ -1116,13 +1210,14 @@ fn a_running_bridge_that_predates_boards_is_restarted() {
         let restarted = match os {
             Os::Linux => calls.contains(&"systemctl --user restart conde.service".to_string()),
             Os::MacOs => calls.contains(&"launchctl kickstart -k gui/501/space.nativeai.conde".to_string()),
+            Os::Windows => calls.ends_with(&["schtasks /End /TN conde".to_string(), "schtasks /Run /TN conde".to_string()]),
         };
         assert!(restarted, "{calls:?}");
         // a bridge that knows boards is left running
         host.daemon.insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
         let (_, out) = run(&env, &opts, &mut host);
         assert!(!out.contains("restarting"), "{out}");
-        assert!(!host.take_calls().iter().any(|c| c.contains("restart") || c.contains("-k")));
+        assert!(!host.take_calls().iter().any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End")));
         // until a board is enrolled that it has not loaded
         if os == Os::Linux {
             enrolled(&env);

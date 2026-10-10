@@ -1,21 +1,34 @@
 //! Unix-socket listener: NDJSON request frames in, response frames out.
 //! Local mode trusts the socket: only the owning OS user may connect.
+//! (Windows binds a named pipe instead, see [`crate::ipc`]; the frames are shared.)
 
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::sync::Arc;
 
+#[cfg(unix)]
 use anyhow::{Context, bail};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::io::BufReader;
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
+#[cfg(unix)]
 use crate::dispatch::{Dispatcher, Principal};
-use crate::protocol::{ErrorCode, MAX_FRAME, Request, Response};
+#[cfg(unix)]
+use crate::protocol::{ErrorCode, MAX_FRAME, Request};
+use crate::protocol::Response;
+#[cfg(unix)]
 use crate::util::{own_euid, same_user};
 
 /// Bind the socket (mode 0600, parent 0700), replacing a stale one but never
 /// a live daemon's.
+#[cfg(unix)]
 pub fn bind(path: &Path) -> anyhow::Result<UnixListener> {
     if let Some(dir) = path.parent() {
         std::fs::DirBuilder::new()
@@ -35,6 +48,7 @@ pub fn bind(path: &Path) -> anyhow::Result<UnixListener> {
     Ok(listener)
 }
 
+#[cfg(unix)]
 pub async fn serve(listener: UnixListener, dispatcher: Arc<Dispatcher>, principal: Principal) -> anyhow::Result<()> {
     let uid = own_euid();
     loop {
@@ -47,6 +61,7 @@ pub async fn serve(listener: UnixListener, dispatcher: Arc<Dispatcher>, principa
     }
 }
 
+#[cfg(unix)]
 async fn connection(stream: UnixStream, dispatcher: Arc<Dispatcher>, principal: Principal) {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
@@ -76,6 +91,7 @@ async fn connection(stream: UnixStream, dispatcher: Arc<Dispatcher>, principal: 
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 async fn write_frame(w: &mut (impl AsyncWriteExt + Unpin), resp: &Response) -> io::Result<()> {
     let mut line = serde_json::to_vec(resp).map_err(io::Error::other)?;
     line.push(b'\n');

@@ -5,7 +5,6 @@
 //! included, on the human's instruction).
 
 use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
@@ -99,11 +98,7 @@ pub fn enrolled_in(dir: &Path) -> anyhow::Result<Vec<String>> {
 /// Read a board file; refuse one other users could read.
 pub fn load(path: &Path) -> anyhow::Result<BoardConfig> {
     let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    if let Some(m) = credentials::mode(path)
-        && m & 0o077 != 0
-    {
-        bail!("{} has mode {m:03o}; it holds a secret, make it 0600 (chmod 600 {})", path.display(), path.display());
-    }
+    crate::private::check(path)?;
     serde_json::from_slice(&raw).with_context(|| format!("{} is not a conde board file", path.display()))
 }
 
@@ -137,10 +132,10 @@ pub fn check_pin(path: &Path, alias: &str, server: &str, owner: Option<&str>) ->
 pub fn store(path: &Path, alias: &str, cfg: &BoardConfig) -> anyhow::Result<()> {
     check_pin(path, alias, &cfg.server, Some(&cfg.owner))?;
     let dir = path.parent().context("board path has no directory")?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    crate::private::create_dir(dir)?;
     let tmp = dir.join(format!(".{alias}.json.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    let mut f = crate::private::create_file(&tmp)?;
     f.write_all(serde_json::to_string_pretty(cfg)?.as_bytes())?;
     f.write_all(b"\n")?;
     f.sync_all()?;
@@ -177,7 +172,7 @@ pub fn write_default(path: &Path, boards_dir: &Path, alias: &str) -> anyhow::Res
         bail!("no board '{alias}' is enrolled on this host; the default is local or one of: {}", list_or_none(boards_dir)?);
     }
     let dir = path.parent().context("default-board path has no directory")?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    crate::private::create_dir(dir)?;
     std::fs::write(path, format!("{alias}\n")).with_context(|| format!("writing {}", path.display()))
 }
 

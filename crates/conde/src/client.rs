@@ -1,21 +1,22 @@
-//! Blocking unix-socket client used by the CLI.
+//! Blocking client used by the CLI, over the local transport ([`crate::ipc`]).
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use anyhow::{Context, bail};
 
 use crate::protocol::{Request, Response};
 
+use crate::ipc::Stream;
+
 pub struct Client {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<Stream>,
+    writer: Stream,
 }
 
 impl Client {
     pub fn connect(path: &Path) -> anyhow::Result<Client> {
-        let stream = UnixStream::connect(path).with_context(|| {
+        let stream = crate::ipc::connect(path).with_context(|| {
             format!("cannot reach the conde daemon at {} (start it with: conde daemon)", path.display())
         })?;
         Ok(Client { reader: BufReader::new(stream.try_clone()?), writer: stream })

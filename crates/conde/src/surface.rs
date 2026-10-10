@@ -199,7 +199,8 @@ pub fn unknown_board(alias: &str, enrolled: &[String]) -> String {
 pub fn stale_daemon(surface: Surface) -> String {
     format!(
         "the running conde daemon predates boards and would ignore {}; restart it (Linux: systemctl --user restart \
-         conde; macOS: launchctl kickstart -k gui/$(id -u)/space.nativeai.conde), then run this again",
+         conde; macOS: launchctl kickstart -k gui/$(id -u)/space.nativeai.conde; Windows: schtasks /End /TN conde, then \
+         schtasks /Run /TN conde), then run this again",
         surface.flag()
     )
 }

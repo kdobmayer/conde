@@ -232,12 +232,18 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
     let mut mine_retry = tokio::time::Instant::now();
     loop {
         let Some(core) = core.upgrade() else { return };
+        // replaced by a reload, or forgotten: this connection fences itself off
+        if !core.is_current(&conn) {
+            client.shutdown();
+            core.mux.stop_client(&conn.alias, &client, "replaced");
+            return;
+        }
         if let BridgeState::Stopped(reason) = client.state() {
             // A refused key may have been replaced by `conde login` without a reload (an older
             // CLI, or a reload that did not reach this daemon): read the board file once.
             if reason == StopReason::Unauthorized && core.is_current(&conn) {
-                match super::reload_board(&core, &conn.alias, true) {
-                    Ok(super::Reloaded::Reloaded) => {
+                match super::reload_board(&core, &conn.alias, Some(&conn)) {
+                    Ok(super::Reloaded::Replaced) => {
                         tracing::info!(board = conn.alias, "the board refused the key; the board file holds a new one: reconnecting");
                         return;
                     }

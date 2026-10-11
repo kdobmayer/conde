@@ -236,6 +236,8 @@ pub fn list(core: &Core) -> Result<Value, Refusal> {
 /// `board.forget` (alias in the envelope): human only; never touches the server.
 pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     require_human(core, req, "a board's configuration")?;
+    // no reload reopens the board between its removal and its file's
+    let _one = core.reloads.lock().unwrap_or_else(|p| p.into_inner());
     let conn = board_of(core, req)?;
     let alias = conn.alias.clone();
     // From here no late answer applies to this board and nothing starts it again.
@@ -259,10 +261,14 @@ pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
 /// `board.reload` (alias in the envelope): re-reads the board's file and reconnects with it.
 /// Any caller on this host's socket: it only reads a file the caller could write.
 pub fn reload(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
-    let alias = req.board.clone().filter(|a| a != LOCAL_BOARD).ok_or_else(|| refuse(ErrorCode::BadRequest, "name the shared board to reload"))?;
-    let state = match super::reload_board(core, &alias, false) {
+    let alias = req
+        .board
+        .clone()
+        .filter(|a| a != LOCAL_BOARD && boards::is_alias(a))
+        .ok_or_else(|| refuse(ErrorCode::BadRequest, "name the shared board to reload"))?;
+    let state = match super::reload_board(core, &alias, None) {
         Ok(super::Reloaded::Opened) => "opened",
-        Ok(super::Reloaded::Reloaded) => "reloaded",
+        Ok(super::Reloaded::Replaced) => "reloaded",
         Ok(super::Reloaded::Unchanged) => "unchanged",
         Err(e) => return Err(refuse(ErrorCode::NotFound, format!("{alias}: {e:#}"))),
     };

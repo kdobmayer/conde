@@ -181,6 +181,9 @@ pub struct Core {
     pub(crate) principal: Principal,
     pub(crate) mux: Arc<Mux>,
     boards: Mutex<BTreeMap<String, Arc<BoardConn>>>,
+    /// Held by [`reload_board`] and `board.forget`: one replacement of a board's connection at
+    /// a time, so two reloads never leave a second, untracked connection.
+    pub(crate) reloads: Mutex<()>,
     pub(crate) config_dir: PathBuf,
     pub(crate) db_path: PathBuf,
     claude_config: Option<PathBuf>,
@@ -305,6 +308,7 @@ impl Daemon {
             principal: principal.clone(),
             mux: mux.clone(),
             boards: Mutex::default(),
+            reloads: Mutex::default(),
             config_dir,
             db_path: opts.data_dir.join("conde.db"),
             claude_config: opts.claude_config.clone(),
@@ -390,28 +394,44 @@ pub(crate) enum Reloaded {
     /// A board this daemon did not have: opened as at start.
     Opened,
     /// The connection was replaced by one with the file's credential.
-    Reloaded,
+    Replaced,
     /// The file holds what the running connection uses.
     Unchanged,
 }
 
 /// Re-reads `boards/<alias>.json` (written by `conde login` or `conde enroll`) and replaces the
-/// board's connection with one that uses it, as a restart would. `only_if_changed`: leave a
-/// connection whose file is unchanged alone even when it stopped (the refused-key reread);
-/// otherwise a stopped or broken one is reopened.
-pub(crate) fn reload_board(core: &Arc<Core>, alias: &str, only_if_changed: bool) -> anyhow::Result<Reloaded> {
+/// board's connection with one that uses it, as a restart would.
+///
+/// `refused`: the reread after the board refused that connection's key; it replaces only that
+/// connection, only when the file holds another credential. Otherwise (`board.reload`) a file
+/// that does not load is refused and the running connection kept; an unchanged file reopens a
+/// stopped connection and leaves a live one alone.
+pub(crate) fn reload_board(core: &Arc<Core>, alias: &str, refused: Option<&Arc<BoardConn>>) -> anyhow::Result<Reloaded> {
+    let _one = core.reloads.lock().unwrap_or_else(|p| p.into_inner());
+    let old = core.board(alias);
+    if let Some(r) = refused
+        && !old.as_ref().is_some_and(|o| Arc::ptr_eq(o, r))
+    {
+        // another reload replaced it already
+        return Ok(Reloaded::Unchanged);
+    }
     let path = boards::path_in(&core.config_dir, alias);
     if !path.exists() {
         anyhow::bail!("no board file {}", path.display());
     }
-    let config = boards::load(&path);
-    let old = core.board(alias);
+    let config = match boards::load(&path) {
+        Err(e) if refused.is_none() => return Err(e.context("the running connection is kept")),
+        c => c,
+    };
     if let Some(old) = &old {
         let unchanged = matches!((&old.config, &config), (Some(a), Ok(b)) if a == b);
         let live = !matches!(old.status(), Status::Stopped(_) | Status::Broken(_));
-        if unchanged && (live || only_if_changed) {
+        if unchanged && (live || refused.is_some()) {
             return Ok(Reloaded::Unchanged);
         }
+    }
+    if let Some(d) = core.mux.tuning.reload_delay {
+        std::thread::sleep(d);
     }
     let conn = Arc::new(BoardConn::new(alias, config));
     // registered first: from here the old connection's tasks and callbacks apply nothing
@@ -425,7 +445,7 @@ pub(crate) fn reload_board(core: &Arc<Core>, alias: &str, only_if_changed: bool)
     }
     tracing::info!(board = alias, "board file reloaded");
     activate(core, &conn);
-    Ok(if old.is_some() { Reloaded::Reloaded } else { Reloaded::Opened })
+    Ok(if old.is_some() { Reloaded::Replaced } else { Reloaded::Opened })
 }
 
 /// Connects a registered board, or waits for its migration as at start.
@@ -1149,6 +1169,7 @@ impl Core {
             principal,
             mux: Arc::new(Mux::new(Tuning::default())),
             boards: Mutex::default(),
+            reloads: Mutex::default(),
             config_dir: dir.join("config"),
             db_path: dir.join("conde.db"),
             claude_config: None,

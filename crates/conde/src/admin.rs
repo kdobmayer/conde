@@ -148,7 +148,7 @@ pub fn reload_bridge(socket: &std::path::Path, alias: &str) -> String {
     let why = match client.call(&req) {
         Ok(r) if r.ok => {
             return match r.result.as_ref().and_then(|v| v["state"].as_str()) {
-                Some("unchanged") => format!("bridge: {alias} already uses this key"),
+                Some("unchanged") => format!("bridge: {alias} uses the stored key"),
                 Some("opened") => format!("bridge: {alias} loaded"),
                 _ => format!("bridge: {alias} reloaded"),
             };

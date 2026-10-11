@@ -1033,11 +1033,69 @@ fn a_re_login_takes_effect_without_a_restart() {
     assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai reloaded");
     wait_for("connected with the new key", || (a.status() == "connected" && board.connected("homepc")).then_some(()));
     dm_reaches_worker(&board, &a, "after the re-login");
-    assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai already uses this key");
+    assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai uses the stored key");
     assert!(a.doctor().contains("dakai: connected to"), "{}", a.doctor());
+
+    // a file that does not load is refused and the live connection kept
+    let path = boards::path_in(&a.config(), "dakai");
+    let good = std::fs::read(&path).unwrap();
+    std::fs::write(&path, "{not json").unwrap();
+    let line = conde::admin::reload_bridge(&a.sock(), "dakai");
+    assert!(line.starts_with("bridge: dakai not reloaded (") && line.contains("the running connection is kept"), "{line}");
+    std::fs::write(&path, good).unwrap();
+    assert_eq!(a.status(), "connected");
+    dm_reaches_worker(&board, &a, "after a refused reload");
+    // only an alias names a board file
+    let refused = a.request(&a.human(), "board.reload", json!({}), Some("../dakai")).unwrap_err();
+    assert_eq!(refused.0, ErrorCode::BadRequest, "{refused:?}");
 
     let gone = a.dir.path().join("nobody.sock");
     assert_eq!(conde::admin::reload_bridge(&gone, "dakai"), "bridge: not running; it reads the new key at start");
+}
+
+/// The distinct bridge instances whose hello the board saw in `frames`.
+fn hello_instances(frames: &[String]) -> HashSet<String> {
+    frames
+        .iter()
+        .filter_map(|f| serde_json::from_str::<Value>(f).ok())
+        .filter_map(|v| v["bridge_instance"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Reloads racing each other and the refused-key reread replace the connection once: one
+/// connection says hello with the new key, none is left behind to fence it.
+#[test]
+fn racing_reloads_leave_one_connection() {
+    let board = FakeBoard::start();
+    // a window between the decision to replace and the replacement, for the race to hit
+    let tuning = Tuning { reload_delay: Some(Duration::from_millis(100)), ..fast() };
+    let (a, _) = published_host(&board, "kdobmayer", "homepc", "worker", "s-worker", tuning);
+    let from = board.capture("homepc").len();
+    let key = board.rotate("homepc", false);
+    store_key(&a, &board, key);
+    // the reread (on the old key's refusal) and three CLI reloads 30 ms apart: each later one
+    // reads the connection while an earlier one is between its read and its replacement
+    board.drop_connection("homepc");
+    let reloads: Vec<_> = (0..3)
+        .map(|i| {
+            let sock = a.sock();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30 * i));
+                conde::admin::reload_bridge(&sock, "dakai")
+            })
+        })
+        .collect();
+    for r in reloads {
+        let line = r.join().unwrap();
+        assert!(line == "bridge: dakai reloaded" || line == "bridge: dakai uses the stored key", "{line}");
+    }
+    dm_reaches_worker(&board, &a, "after the racing reloads");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(a.status(), "connected");
+    assert!(!a.doctor().contains("fenced"), "{}", a.doctor());
+    dm_reaches_worker(&board, &a, "still delivering");
+    let hellos = hello_instances(&board.capture("homepc")[from..]);
+    assert_eq!(hellos.len(), 1, "one replacement connection: {hellos:?}");
 }
 
 /// The refused-key reread: a new key stored without a reload (an older CLI, or a daemon that

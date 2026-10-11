@@ -62,6 +62,10 @@ pub struct Tuning {
     /// Tests only: how long the routes callback waits before applying a snapshot.
     #[doc(hidden)]
     pub routes_delay: Option<Duration>,
+    /// Tests only: how long a board reload waits between deciding to replace the connection
+    /// and replacing it.
+    #[doc(hidden)]
+    pub reload_delay: Option<Duration>,
 }
 
 impl Default for Tuning {
@@ -79,6 +83,7 @@ impl Default for Tuning {
             outcome_ack_timeout: None,
             outcome_resend: None,
             routes_delay: None,
+            reload_delay: None,
         }
     }
 }

@@ -226,13 +226,14 @@ impl WebStore for WebBoard {
             if t.user_by_id(user_id)?.is_none_or(|u| u.disabled) {
                 return Ok(Minted::Disabled);
             }
+            let new_host = t.host_owner(host_id)?.is_none();
             if t.ensure_host(host_id, user_id)? != user_id {
                 return Ok(Minted::HostTaken);
             }
             let at = iso(now);
             let replaced = t.revoke_host_credentials(host_id, &at)?;
             t.insert_credential(token_digest, user_id, host_id, label, &at)?;
-            Ok(Minted::Stored { replaced })
+            Ok(Minted::Stored { replaced, new_host })
         })
     }
 

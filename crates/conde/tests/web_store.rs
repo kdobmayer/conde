@@ -129,6 +129,7 @@ on_both!(
     sessions_expire_and_disabled_users_are_signed_out,
     keys_page_mints_shows_once_and_revokes_with_a_wake,
     conde_login_codes_are_single_use_and_expire,
+    a_re_enrolled_host_keeps_one_live_key,
     pasted_login_codes_count_tries_and_redeem_once,
     admin_binds_existing_users_and_disables_them,
 );
@@ -236,6 +237,49 @@ async fn conde_login_codes_are_single_use_and_expire(d: Arc<Dispatcher>) {
         redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "h"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(got["message"].as_str().unwrap().contains("expired"), "{got}");
+}
+
+/// `conde login` again on an enrolled host: the server says so, revokes the previous key in
+/// the same transaction, and the keys page shows the host once.
+async fn a_re_enrolled_host_keeps_one_live_key(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    let b = Browser::new();
+    let mut keys = Vec::new();
+    let mut events = d.store().pending().events();
+    for again in [false, true, true] {
+        let run = cli_run();
+        let code = browser_leg(&env, &b, &run).await;
+        let (status, got) = redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "NUC"})).await;
+        assert_eq!(status, StatusCode::OK, "{got}");
+        assert_eq!((got["host_id"].as_str(), got["reenrolled"].as_bool()), (Some("nuc"), Some(again)), "{got}");
+        if again {
+            assert_eq!(next_revoked(&mut events).await, "nuc");
+        }
+        keys.push(got["key"].as_str().unwrap().to_string());
+    }
+    let (newest, older) = keys.split_last().unwrap();
+    assert!(authenticates(&d, newest).await);
+    for old in older {
+        assert!(!authenticates(&d, old).await, "a previous key is revoked");
+    }
+    let s = env.store.clone();
+    let stored = blocking(move || {
+        let user = s.user_by_identity(TENANT, "oid-krisztian").unwrap().unwrap();
+        s.host_keys(user.user_id).unwrap()
+    })
+    .await;
+    let live = stored.iter().filter(|k| k.host_id == "nuc" && k.revoked_at.is_none()).count();
+    assert_eq!((stored.len(), live), (3, 1), "the history stays, one key is live");
+    let (_, _, page) = b.get(&env.url("/keys")).await;
+    assert_eq!(page.matches("<code>nuc</code>").count(), 1, "{page}");
+    assert!(!page.contains("revoked "), "the row is the live key: {page}");
+
+    // a host id another user owns gets a suffix: a new host, not a re-enrollment
+    admin_cli_key(&d, "bob", "lab").await;
+    let run = cli_run();
+    let code = browser_leg(&env, &b, &run).await;
+    let (_, got) = redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "lab"})).await;
+    assert_eq!((got["host_id"].as_str(), got["reenrolled"].as_bool()), (Some("lab-2"), Some(false)), "{got}");
 }
 
 async fn pasted_login_codes_count_tries_and_redeem_once(d: Arc<Dispatcher>) {

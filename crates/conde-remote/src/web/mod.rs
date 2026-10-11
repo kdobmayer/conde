@@ -406,8 +406,9 @@ pub enum McpHuman {
 /// Result of [`WebStore::mint_host_key`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Minted {
-    /// Stored; `replaced` live keys of the same host were revoked in the same transaction.
-    Stored { replaced: u64 },
+    /// Stored; `replaced` live keys of the same host were revoked in the same transaction;
+    /// `new_host`: the host did not exist before this key.
+    Stored { replaced: u64, new_host: bool },
     /// The host id belongs to another user.
     HostTaken,
     /// The user is disabled (checked in the same transaction as the mint).

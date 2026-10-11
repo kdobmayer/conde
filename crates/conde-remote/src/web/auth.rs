@@ -736,6 +736,9 @@ pub struct RedeemResponse {
     pub host_id: String,
     pub key: String,
     pub user: String,
+    /// The host existed before: its previous keys are revoked.
+    #[serde(default)]
+    pub reenrolled: bool,
 }
 
 fn redeem_error(status: StatusCode, code: &str, message: &str) -> Response {
@@ -873,6 +876,7 @@ async fn mint_for(state: &WebState, code: CliCode, host: &str) -> Response {
                 host_id: minted.host_id,
                 key: minted.key,
                 user: code.user_name,
+                reenrolled: !minted.new_host,
             })
             .into_response();
             r.headers_mut()

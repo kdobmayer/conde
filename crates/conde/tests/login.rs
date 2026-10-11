@@ -32,6 +32,15 @@ struct Board {
     refuse: Mutex<Option<String>>,
     /// Answer every redeem with this `invalid_request` message.
     bad_request: Mutex<Option<String>>,
+    /// Hosts a key was minted for: a second mint is a re-enrollment.
+    hosts: Mutex<std::collections::HashSet<String>>,
+}
+
+impl Board {
+    fn minted(&self, host: &Value) -> Response {
+        let reenrolled = !self.hosts.lock().unwrap().insert(host.as_str().unwrap_or_default().to_string());
+        Json(json!({"host_id": host, "key": KEY, "user": "krisztian", "reenrolled": reenrolled})).into_response()
+    }
 }
 
 async fn cli(State(b): State<Arc<Board>>, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -64,7 +73,7 @@ async fn redeem(State(b): State<Arc<Board>>, Json(req): Json<Value>) -> Response
             return (StatusCode::BAD_REQUEST, Json(json!({"error": "authorization_pending", "message": "no signed-in login waits for this run"}))).into_response();
         };
         if code == shown && URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) == challenge {
-            return Json(json!({"host_id": req["host"], "key": KEY, "user": "krisztian"})).into_response();
+            return b.minted(&req["host"]);
         }
         if tries + 1 >= 5 {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant", "message": "wrong code, and that was the last try"}))).into_response();
@@ -79,7 +88,7 @@ async fn redeem(State(b): State<Arc<Board>>, Json(req): Json<Value>) -> Response
     if req["state"] != state.as_str() || URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) != challenge {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant", "message": "mismatch"}))).into_response();
     }
-    Json(json!({"host_id": req["host"], "key": KEY, "user": "krisztian"})).into_response()
+    b.minted(&req["host"])
 }
 
 fn rand_u128() -> u128 {
@@ -348,9 +357,24 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     let (ok, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
     assert!(ok, "{out}{err}");
     assert!(out.contains("signed in as krisztian"), "{out}");
+    assert!(out.contains(&format!("\nenrolled host box-9 with {server} as board dakai (account krisztian)")), "{out}");
+    assert!(!out.contains("re-enrolled"), "{out}");
     let path = config.path().join("conde/boards/dakai.json");
     assert_eq!(credentials::mode(&path), Some(0o600));
     let stored = boards::load(&path).unwrap();
     assert_eq!((stored.host_id.as_str(), stored.key.as_str()), ("box-9", KEY));
     assert_eq!(std::fs::read_dir(config.path().join("conde/login")).unwrap().count(), 0, "nothing waits any more");
+
+    // the same host again: the server revoked its previous key, and the CLI says so
+    let start = vec!["login".into(), "--server".into(), server.clone(), "--host".into(), "box-9".into(), "--no-browser".into()];
+    let (ok, _, err) = conde(start).await.unwrap();
+    assert!(ok, "{err}");
+    let url = err.lines().map(str::trim).find(|l| l.starts_with(&format!("{server}/auth/cli?mode=code"))).unwrap().to_string();
+    let shown = shown_code(&url).await;
+    let finish = vec!["login", "--server", &server, "--host", "box-9", "--code", &shown, "--board", "dakai"];
+    let (ok, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("\nre-enrolled host box-9: the previous key for this host is revoked\n"), "{out}");
+    assert!(out.contains(&format!("\nboard dakai at {server} (account krisztian); credential stored at")), "{out}");
+    assert!(!out.contains("\nenrolled host"), "{out}");
 }

@@ -9,7 +9,7 @@ use axum_extra::extract::cookie::{CookieJar, SameSite};
 use serde::Deserialize;
 
 use super::session::{self, Session, WebError, digest, random_token};
-use super::{Core, Minted, WebState, pages};
+use super::{Core, HostKey, Minted, WebState, pages};
 
 /// How many `-N` suffixes the browser flows try when a host id belongs to another user.
 pub(crate) const HOST_SUFFIXES: u32 = 20;
@@ -49,6 +49,8 @@ pub(crate) struct NewKey {
     pub key: String,
     /// Live keys of the same host that the new one replaced.
     pub replaced: u64,
+    /// The host did not exist before this key (else it is a re-enrollment).
+    pub new_host: bool,
 }
 
 /// Why a key was not minted.
@@ -100,7 +102,9 @@ pub(crate) async fn mint(
                     continue;
                 }
                 match s.mint_host_key(user_id, &host, &label, &token_digest, now)? {
-                    Minted::Stored { replaced } => return Ok(Ok((host, replaced))),
+                    Minted::Stored { replaced, new_host } => {
+                        return Ok(Ok((host, replaced, new_host)));
+                    }
                     Minted::Disabled => return Ok(Err(MintError::Disabled)),
                     Minted::HostTaken => continue,
                 }
@@ -109,16 +113,31 @@ pub(crate) async fn mint(
         })
         .await
         .map_err(MintError::Store)??;
-    let (host_id, replaced) = minted;
+    let (host_id, replaced, new_host) = minted;
     if replaced > 0 {
         core.registry.disconnect_host(&host_id);
     }
-    tracing::info!(user_id, host = %host_id, replaced, "host key minted");
+    tracing::info!(user_id, host = %host_id, replaced, new_host, "host key minted");
     Ok(NewKey {
         host_id,
         key,
         replaced,
+        new_host,
     })
+}
+
+/// One row per host, in the newest-first order of `keys`: its live key, else its newest
+/// (revoked) one. A re-enrolled host's revoked keys stay in the store, not on the page.
+pub(crate) fn one_per_host(keys: Vec<HostKey>) -> Vec<HostKey> {
+    let mut rows: Vec<HostKey> = Vec::new();
+    for k in keys {
+        match rows.iter_mut().find(|r| r.host_id == k.host_id) {
+            Some(row) if row.revoked_at.is_some() && k.revoked_at.is_none() => *row = k,
+            Some(_) => {}
+            None => rows.push(k),
+        }
+    }
+    rows
 }
 
 /// The identity provider's origin, which the sign-out form is allowed to reach.
@@ -155,7 +174,7 @@ pub(crate) async fn page(
     Ok(pages::keys(
         header(&session),
         &state.config().public_url,
-        &keys,
+        &one_per_host(keys),
         &apps,
         &idp_origin(&state),
     ))
@@ -319,6 +338,29 @@ pub(crate) async fn revoke_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_page_shows_one_row_per_host() {
+        let key = |id: &str, host: &str, revoked: bool| HostKey {
+            key_id: id.into(),
+            host_id: host.into(),
+            label: None,
+            created_at: None,
+            last_seen: None,
+            revoked_at: revoked.then(|| "2026-10-11T06:08:51Z".into()),
+        };
+        // newest first: nuc re-enrolled twice, box revoked, an older live key under a revoked one
+        let rows = one_per_host(vec![
+            key("n3", "nuc", false),
+            key("b1", "box", true),
+            key("o2", "old", true),
+            key("n2", "nuc", true),
+            key("o1", "old", false),
+            key("n1", "nuc", true),
+        ]);
+        let ids: Vec<&str> = rows.iter().map(|k| k.key_id.as_str()).collect();
+        assert_eq!(ids, ["n3", "b1", "o1"]);
+    }
 
     #[test]
     fn host_slugs() {

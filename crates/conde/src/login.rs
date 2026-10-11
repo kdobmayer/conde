@@ -38,11 +38,19 @@ pub struct Enrolled {
     pub host_id: String,
     pub key: String,
     pub user: String,
+    /// The host existed on the server, which revoked its previous key (absent from an older
+    /// server: false).
+    #[serde(default)]
+    pub reenrolled: bool,
 }
 
 impl std::fmt::Debug for Enrolled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Enrolled").field("host_id", &self.host_id).field("user", &self.user).finish_non_exhaustive()
+        f.debug_struct("Enrolled")
+            .field("host_id", &self.host_id)
+            .field("user", &self.user)
+            .field("reenrolled", &self.reenrolled)
+            .finish_non_exhaustive()
     }
 }
 
@@ -429,7 +437,7 @@ pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool,
     let path = boards::path(&alias)?;
     let cfg = save(&path, &alias, server, &enrolled)?;
     println!("signed in as {}", enrolled.user);
-    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path));
+    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path, enrolled.reenrolled));
     Ok(0)
 }
 

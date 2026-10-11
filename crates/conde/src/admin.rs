@@ -132,20 +132,25 @@ pub fn enroll(server: &str, host: Option<&str>, board: Option<&str>, key_stdin: 
     let path = boards::path(&alias)?;
     let cfg = BoardConfig { server: server.to_string(), host_id: info.host.clone(), owner: info.owner.clone(), key };
     boards::store(&path, &alias, &cfg)?;
-    print!("{}", enrolled_text(&alias, &cfg, &path));
+    print!("{}", enrolled_text(&alias, &cfg, &path, false));
     Ok(0)
 }
 
-/// What `conde enroll` and `conde login` print once the board file is stored.
-pub fn enrolled_text(alias: &str, cfg: &BoardConfig, path: &std::path::Path) -> String {
+/// What `conde enroll` and `conde login` print once the board file is stored; `reenrolled`:
+/// the server said the host existed and revoked its previous key.
+pub fn enrolled_text(alias: &str, cfg: &BoardConfig, path: &std::path::Path, reenrolled: bool) -> String {
+    let (host, server, owner, path) = (&cfg.host_id, &cfg.server, &cfg.owner, path.display());
+    let head = if reenrolled {
+        format!(
+            "re-enrolled host {host}: the previous key for this host is revoked\n\
+             board {alias} at {server} (account {owner}); credential stored at {path} (mode 0600)\n"
+        )
+    } else {
+        format!("enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} (mode 0600)\n")
+    };
     format!(
-        "enrolled host {} with {} as board {alias} (account {}); credential stored at {} (mode 0600)\n\
-         {}: conde publish <name> --board {alias}\n\
+        "{head}{}: conde publish <name> --board {alias}\n\
          next: conde setup (the default board, and the review of this host's earlier names on {alias})\n",
-        cfg.host_id,
-        cfg.server,
-        cfg.owner,
-        path.display(),
         crate::setup::ENROLL_SCOPE
     )
 }

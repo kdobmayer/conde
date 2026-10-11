@@ -247,6 +247,7 @@ impl WebStore for MemStore {
             return Ok(Minted::Disabled);
         }
         let mut m = self.m();
+        let new_host = !m.hosts.contains_key(host_id);
         if *m.hosts.entry(host_id.into()).or_insert(user_id) != user_id {
             return Ok(Minted::HostTaken);
         }
@@ -267,7 +268,7 @@ impl WebStore for MemStore {
             created_at: now,
             revoked_at: None,
         });
-        Ok(Minted::Stored { replaced })
+        Ok(Minted::Stored { replaced, new_host })
     }
     fn revoke_host(&self, user_id: i64, host_id: &str, now: i64) -> WebResult<u64> {
         let mut m = self.m();
@@ -723,6 +724,7 @@ async fn conde_login_signs_in_mints_on_redeem_and_codes_are_single_use() {
     assert_eq!(status, StatusCode::OK, "{got}");
     assert_eq!(got["host_id"], "test-box.local");
     assert_eq!(got["user"], "krisztian-dobmayer");
+    assert_eq!(got["reenrolled"], false, "a new host");
     let key = got["key"].as_str().unwrap();
     assert_eq!(
         env.store.live_host_of(key).as_deref(),

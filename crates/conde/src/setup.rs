@@ -533,8 +533,12 @@ pub fn run(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
         part("service", r, out)?;
     }
     if opts.claude {
-        let r = claude(env, opts, host, out);
-        part("claude", r, out)?;
+        if claude_installed(env, host) {
+            let r = claude(env, opts, host, out);
+            part("claude", r, out)?;
+        } else {
+            writeln!(out, "skip    {CLAUDE_ABSENT}")?;
+        }
     }
     if opts.codex {
         if codex_installed(env, host) {
@@ -601,8 +605,8 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
 
     let exe = env.exe.to_string_lossy().into_owned();
     if opts.claude {
-        if host.which("claude").is_none() && !env.claude_dir().exists() {
-            line("skip", "claude: Claude Code not found on this machine".into(), out)?;
+        if !claude_installed(env, host) {
+            line("skip", CLAUDE_ABSENT.into(), out)?;
         } else {
             let (name, displaced) = claude_name(env)?;
             if let Some(what) = displaced {
@@ -1580,6 +1584,15 @@ pub fn codex_name(env: &Env, text: &str) -> anyhow::Result<(String, Option<Strin
         let sock = field("env").and_then(|e| e.get("CONDE_SOCK")).and_then(|v| v.as_str());
         holder(env, entry.is_some(), command, sock)
     })
+}
+
+/// What setup and `--check` both say on a machine without Claude Code.
+const CLAUDE_ABSENT: &str = "claude: Claude Code not found on this machine";
+
+/// Claude Code is installed when `claude` is on PATH or its config directory exists
+/// (installed somewhere PATH does not reach); setup and `--check` skip it otherwise.
+fn claude_installed(env: &Env, host: &dyn Host) -> bool {
+    host.which("claude").is_some() || env.claude_dir().exists()
 }
 
 /// What setup and `--check` both say on a machine without Codex.

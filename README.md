@@ -121,7 +121,7 @@ did not match.
 conde setup
 ```
 
-It does five things and prints one line per action:
+It does the following and prints one line per action:
 
 - Installs the bridge as a user service that starts at login and restarts if
   it stops: a launchd agent `~/Library/LaunchAgents/space.nativeai.conde.plist`
@@ -136,6 +136,12 @@ It does five things and prints one line per action:
   does; for Codex as `[mcp_servers.conde]` with `env = { CONDE_SOCK = ... }` in
   `~/.codex/config.toml`. Comments and other entries in that file stay as
   they were.
+- Skips a harness that is not installed, and writes nothing for it: Claude
+  Code counts as installed when `claude` is on PATH or `~/.claude` exists,
+  Codex when `codex` is on PATH or `~/.codex` exists. The line is the one
+  `conde setup --check` prints: `skip    claude: Claude Code not found on this
+  machine` (or the same for Codex). Run `conde setup` again after installing
+  the harness.
 - When the name `conde` already belongs to another conde instance (another
   conde binary that exists, or another socket: an entry without `CONDE_SOCK`
   means the default one), or to a remote server, that entry and its skill are

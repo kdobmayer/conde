@@ -526,7 +526,7 @@ fn a_failing_part_is_reported_and_the_rest_still_runs() {
     let root = temp_root();
     let env = env(&root, Os::Linux);
     let opts = Options::select(false, false, false, false);
-    let mut host = Fake::new(&env, &["systemctl"]);
+    let mut host = Fake::new(&env, &["systemctl", "claude"]);
     host.fail = Some("systemctl --user enable");
     std::fs::create_dir_all(env.codex_config().parent().unwrap()).unwrap();
     std::fs::write(env.codex_config(), "[mcp_servers.a\ncommand = \"a\"\n").unwrap();
@@ -888,6 +888,40 @@ fn setup_and_check_agree_on_whether_codex_is_installed() {
         let (ok, out) = verify(&env, &opts, &mut host);
         assert!(ok && !out.contains("skip"), "{out}");
         assert!(out.contains("ok      codex: skill ~/.codex/skills/conde/SKILL.md up to date"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[test]
+fn setup_and_check_agree_on_whether_claude_code_is_installed() {
+    let opts = Options::select(true, false, false, false);
+    let skip = "skip    claude: Claude Code not found on this machine\n";
+
+    // neither the binary nor ~/.claude: both skip with the same line, nothing is written
+    let root = temp_root();
+    let bare = env(&root, Os::Linux);
+    let mut host = Fake::new(&bare, &[]);
+    let (ok, out) = run(&bare, &opts, &mut host);
+    assert!(ok && out.contains(skip) && !out.contains("claude: skill"), "{out}");
+    assert!(files(&root).is_empty() && !root.join("home/.claude").exists(), "{:?}", files(&root));
+    let (ok, out) = verify(&bare, &opts, &mut host);
+    assert!(ok && out.contains(skip), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+
+    // the binary on PATH, or ~/.claude without one (installed where PATH does not reach)
+    for (on_path, dir) in [(&["claude"][..], false), (&[][..], true)] {
+        let root = temp_root();
+        let env = env(&root, Os::Linux);
+        if dir {
+            std::fs::create_dir_all(root.join("home/.claude")).unwrap();
+        }
+        let mut host = Fake::new(&env, on_path);
+        let (ok, out) = run(&env, &opts, &mut host);
+        assert!(ok && !out.contains("skip"), "{out}");
+        assert_eq!(read(&env.claude_skill()), setup::CLAUDE_SKILL);
+        let (ok, out) = verify(&env, &opts, &mut host);
+        assert!(ok && !out.contains("skip"), "{out}");
+        assert!(out.contains("ok      claude: MCP server conde registered at user scope"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

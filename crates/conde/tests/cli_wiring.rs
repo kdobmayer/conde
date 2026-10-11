@@ -133,20 +133,24 @@ fn conde_setup_runs_the_single_daemon_and_enrolls_nothing() {
     let (ok, out) = r.setup(&[]);
     assert!(ok, "{out}");
     assert!(out.contains("service: systemctl not found"), "{out}");
-    assert!(out.contains("claude: claude CLI not found; wrote the user-scope MCP entry conde into ~/.claude.json directly"), "{out}");
-    assert!(out.contains("claude: set crossSessionInbound to \"accept\" in ~/.claude/settings.json"), "{out}");
-    // no codex on PATH and no ~/.codex: skipped as --check skips it
+    // neither harness on PATH nor its directory: both skipped as --check skips them
+    assert!(out.contains("skip    claude: Claude Code not found on this machine\n"), "{out}");
     assert!(out.contains("skip    codex: Codex not found on this machine\n"), "{out}");
-    assert!(!home.join(".codex").exists());
+    assert!(!home.join(".claude").exists() && !home.join(".claude.json").exists() && !home.join(".codex").exists());
     assert!(out.contains("boards: no shared board enrolled; this host works on its local board. Joining a team's board is a separate step: conde login --server"), "{out}");
     assert!(out.contains("Enrolling publishes nothing and uploads no history"), "{out}");
     let unit = std::fs::read_to_string(home.join(".config/systemd/user/conde.service")).unwrap();
     assert!(unit.contains(" daemon\n"), "{unit}");
     assert!(!home.join(".config/conde/boards").exists(), "setup enrolls nothing");
-    // ~/.codex without a binary on PATH: Codex is installed elsewhere
+    // ~/.codex or ~/.claude without a binary on PATH: installed elsewhere
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     let (ok, out) = r.setup(&["--codex"]);
     assert!(ok && out.contains("codex: added MCP server conde to ~/.codex/config.toml"), "{out}");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let (ok, out) = r.setup(&["--claude"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("claude: claude CLI not found; wrote the user-scope MCP entry conde into ~/.claude.json directly"), "{out}");
+    assert!(out.contains("claude: set crossSessionInbound to \"accept\" in ~/.claude/settings.json"), "{out}");
 
     // a v1 credential whose board does not answer stays where it is; the unit never names a server
     let cred = home.join(".config/conde/credentials");

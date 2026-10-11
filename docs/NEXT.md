@@ -264,10 +264,9 @@ finds. Until then: system-default account works; injected dirs do not.
 
 ## J. From the NUC run 2026-10-11
 
-Fixed in this batch: the build id in `conde --version`, `conde doctor` and `conde setup --check`; the `re-enrolled host` line and one keys-page row per host; `conde setup` skipping Codex where `--check` does; a new key from `conde login` or `conde enroll` reaching the running bridge without a restart (`board.reload`, and a reread of the board file when the board refuses the key). Found on the way, not fixed:
+Fixed in this batch: the build id in `conde --version`, `conde doctor` and `conde setup --check`; the `re-enrolled host` line and one keys-page row per host; `conde setup` skipping Claude Code and Codex where `--check` does; a new key from `conde login` or `conde enroll` reaching the running bridge without a restart (`board.reload`, and a reread of the board file when the board refuses the key). Found on the way, not fixed:
 
 - `conde admin key create` (`ops::hosts::insert_key`) adds a key without revoking the host's live ones. It is the only way to get a second live key for a host: the login redeem, the keys page and the admin API revoke and insert in one transaction, and Postgres writes are serialized by the writer advisory lock. Decide whether it revokes too, or stays as the overlap path for a hand-over rotation.
-- `conde setup` still writes the Claude part (skill, `~/.claude.json`, settings) on a host without Claude Code, while `--check` says `skip claude: Claude Code not found on this machine`. This is the same disagreement as the Codex one, left as is because `cli_wiring` pins writing `~/.claude.json` directly when the claude CLI is missing.
 - `conde doctor` prints the build of the binary it runs, not of the running bridge. A reinstall replaces the file under a running service, and setup does not restart it for that. Doctor could show the daemon's build id and flag a mismatch.
 - Until the server runs this batch, its redeem answer has no `reenrolled` field and the CLI prints `enrolled host` for a re-enrollment too.
 - A local build's id names HEAD; uncommitted changes are not marked.

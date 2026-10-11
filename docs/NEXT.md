@@ -261,3 +261,14 @@ finds. Until then: system-default account works; injected dirs do not.
 - A second use of an authorization code does not revoke the tokens issued from it.
 - `search` with a never-matching pattern scans all visible history, bounded only by the 120/min bucket.
 - A sign-in `next` path over 2048 characters is dropped silently: a very long authorize request lands on /keys.
+
+## J. From the NUC run 2026-10-11
+
+Fixed in this batch: the build id in `conde --version`, `conde doctor` and `conde setup --check`; the `re-enrolled host` line and one keys-page row per host; `conde setup` skipping Codex where `--check` does. Found on the way, not fixed:
+
+- A re-enrolled host's running bridge keeps the revoked key (read from the source, not reproduced live). The daemon reads board files only at start (`daemon/mod.rs`, `board::start` copies the key). The server disconnects the host's bridge when it rotates the key, the bridge reconnects with the old key, and the board stops with "the board rejected this host's credential (revoked?); re-enroll with conde login". The `next: conde setup` line does not help: setup restarts the bridge only when the unit changed or an enrolled alias is unknown to it (`setup.rs` `predates_boards`). The board stays stopped until the service restarts. Fix: setup or login restarts the bridge when a board file's key differs from the one the running connection holds, or the daemon reloads a changed board file.
+- `conde admin key create` (`ops::hosts::insert_key`) adds a key without revoking the host's live ones. It is the only way to get a second live key for a host: the login redeem, the keys page and the admin API revoke and insert in one transaction, and Postgres writes are serialized by the writer advisory lock. Decide whether it revokes too, or stays as the overlap path for a hand-over rotation.
+- `conde setup` still writes the Claude part (skill, `~/.claude.json`, settings) on a host without Claude Code, while `--check` says `skip claude: Claude Code not found on this machine`. This is the same disagreement as the Codex one, left as is because `cli_wiring` pins writing `~/.claude.json` directly when the claude CLI is missing.
+- `conde doctor` prints the build of the binary it runs, not of the running bridge. A reinstall replaces the file under a running service, and setup does not restart it for that. Doctor could show the daemon's build id and flag a mismatch.
+- Until the server runs this batch, its redeem answer has no `reenrolled` field and the CLI prints `enrolled host` for a re-enrollment too.
+- A local build's id names HEAD; uncommitted changes are not marked.

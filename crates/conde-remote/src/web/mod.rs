@@ -523,9 +523,10 @@ pub trait WebStore: Send + Sync {
     fn mcp_human(&self, _user_id: i64) -> WebResult<McpHuman> {
         Err(no_mcp())
     }
-    /// Deletes codes older than `code_ttl` and expired or revoked grants and tokens.
+    /// Deletes codes older than `code_ttl` and expired or revoked grants and tokens. Without
+    /// MCP there is nothing to purge (the hourly sweep calls it on every store).
     fn purge_mcp(&self, _now: i64, _code_ttl: i64) -> WebResult<()> {
-        Err(no_mcp())
+        Ok(())
     }
 }
 

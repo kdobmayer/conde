@@ -175,6 +175,8 @@ CREATE TABLE IF NOT EXISTS mcp_refresh(
     consumed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS mcp_refresh_by_grant ON mcp_refresh(grant_id);
+CREATE INDEX IF NOT EXISTS mcp_refresh_unconsumed_by_expiry ON mcp_refresh(expires_at) WHERE consumed_at IS NULL;
+CREATE INDEX IF NOT EXISTS mcp_tokens_by_expiry ON mcp_tokens(expires_at);
 CREATE TABLE IF NOT EXISTS mcp_codes(
     code_digest TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(user_id),

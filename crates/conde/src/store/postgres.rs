@@ -67,6 +67,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (6, "mailbox", include_str!("migrations/0006_mailbox.sql")),
     (7, "route_revision", include_str!("migrations/0007_route_revision.sql")),
     (8, "mcp", include_str!("migrations/0008_mcp.sql")),
+    (9, "mcp_expiry", include_str!("migrations/0009_mcp_expiry.sql")),
 ];
 
 /// Session lock held while migrating.

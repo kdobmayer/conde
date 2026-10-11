@@ -55,7 +55,8 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
   `mcp_grants(grant_id, user_id, client_id, client_host, client_name, resource, created_at,
   last_used_at, expires_at, revoked_at)`, `mcp_tokens(token_digest, grant_id, audience, expires_at)`,
   `mcp_refresh(digest, grant_id, issued_at, expires_at, consumed_at)` (the grant's refresh-token
-  family: every refresh token ever issued for the grant, kept until it expires),
+  family: an unconsumed refresh token is kept until its expiry, a consumed one until its grant
+  expires or is revoked, so a replay within the grant's life is still recognised),
   `mcp_codes(code_digest, user_id, client_id, client_name, redirect_uri, challenge, resource,
   created_at)`. SHA-256 digests only. Separate from host keys: neither credential is accepted where
   the other is.
@@ -69,7 +70,10 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
   endpoint refuses a token whose audience is not its own URL.
 - Access token `conde_at_<64 hex>`, 1 h. Refresh token `conde_rt_<64 hex>`, rotated on every use,
   30 days. Grant life 90 days, then Claude shows Connect again; tokens never outlive their grant.
-  `purge_mcp` (on each consent) drops old codes, expired tokens and ended grants.
+  `purge_mcp` runs on each consent, on every refresh, and in an hourly sweep on each replica: it
+  drops old codes, expired access tokens, unconsumed refresh tokens past their expiry, and ended
+  (expired or revoked) grants with all their refresh tokens. Partial indexes on the expiry columns
+  (`0009_mcp_expiry.sql`) keep the per-refresh purge cheap.
 - Each request: one lookup, token -> live grant -> user not disabled -> audience, else 401;
   `last_used_at` at most once a minute. Revocation: the keys page. A disabled user's grants stop at
   the next request (kept, like host keys). A superseded refresh token presented again revokes its

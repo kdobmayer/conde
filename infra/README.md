@@ -49,19 +49,25 @@ AZURE_SUBSCRIPTION_ID under `environment: release`).
 `local.sso_users` in terraform/entra.tf (object ids); adding a person is one line and an apply. Nobody else in the
 tenant can sign in (the enterprise app requires assignment).
 
-## kond import (one-off, cutover)
+## Read-only queries against the database
 
-The job caj-conde-import runs the conde image against the cloud Postgres with the kond snapshot mounted read-only
-at /mnt/kond from the SMB share kond-snapshot (storage account stcondeimport, temporary: `import_enabled = false`
-removes job, share and account after the cutover).
+The job caj-conde-psql (psql.tf, official postgres image, DATABASE_URL from the vault) is the way to read the board's
+Postgres: no VPN reaches the private endpoint. Its own command only proves the connection; a query is passed at start
+time as a container override (SELECT-only scripts; the job runs as the server's user), base64 so no shell touches it:
 
-    # upload the snapshot (owner identity, no key)
-    az storage file upload-batch --auth-mode login --account-name stcondeimport --destination kond-snapshot --source <snapshot dir>
-    # dry run (the job's default args), then the real run with overridden args
-    az containerapp job start -g rg-conde -n caj-conde-import
-    az containerapp job start -g rg-conde -n caj-conde-import --args import --from /mnt/kond --owner kdobmayer --host homepc
-    az containerapp job execution list -g rg-conde -n caj-conde-import -o table
-    az containerapp logs show -g rg-conde -n caj-conde-import --type console --tail 200
+    B64=$(base64 -w0 < query.sql)
+    az rest --method post --url "https://management.azure.com/subscriptions/60df47fc-ce8f-4f52-a970-43a412d78007/resourceGroups/rg-conde/providers/Microsoft.App/jobs/caj-conde-psql/start?api-version=2025-01-01" \
+      --body "{\"containers\":[{\"name\":\"psql\",\"image\":\"docker.io/library/postgres:18-alpine\",\"command\":[\"sh\",\"-c\",\"echo $B64 | base64 -d > /tmp/q.sql && psql \\\"\$DATABASE_URL\\\" -v ON_ERROR_STOP=1 -A -f /tmp/q.sql\"],\"env\":[{\"name\":\"DATABASE_URL\",\"secretRef\":\"database-url\"}],\"resources\":{\"cpu\":0.5,\"memory\":\"1Gi\"}}]}"
+    az containerapp job execution list -g rg-conde -n caj-conde-psql -o table
+    az containerapp job logs show -g rg-conde -n caj-conde-psql --execution <name> --container psql --format text --tail 300
+
+A start-time override drops the job's volumes, so this path has none. `az containerapp job start --args` cannot
+pass `--` tokens, hence the REST start.
+
+## kond import (done 2026-10-09)
+
+The kond board was imported once through a temporary job and SMB share (import.tf, `import_enabled`); both were
+removed after the cutover and the flag stays false.
 
 ## Known limits
 

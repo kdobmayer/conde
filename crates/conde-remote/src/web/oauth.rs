@@ -463,8 +463,16 @@ async fn refresh_grant(state: &WebState, p: &HashMap<String, String>) -> Respons
         return token_error("invalid_request", "client_id is required");
     }
     let (access, refresh, tokens) = new_tokens(state);
-    let (key, now) = (digest(presented), state.now());
-    match state.store(move |s| s.refresh_mcp_grant(&key, &client_id, &tokens, now)).await {
+    let (key, now, ttl) = (digest(presented), state.now(), state.config().mcp.code_ttl.as_secs() as i64);
+    let refreshed = state.store(move |s| {
+        let refreshed = s.refresh_mcp_grant(&key, &client_id, &tokens, now)?;
+        // After the rotation, which is committed: a failed purge must not cost the new tokens.
+        if let Err(e) = s.purge_mcp(now, ttl) {
+            tracing::warn!("mcp purge on refresh failed: {e}");
+        }
+        Ok(refreshed)
+    });
+    match refreshed.await {
         Ok(McpRefreshed::Rotated { grant, access_expires_at }) => {
             tracing::info!(user_id = grant.user_id, grant = %grant.grant_id, client = %grant.client_host, "mcp token refreshed");
             issued(&access, &refresh, access_expires_at - now)
@@ -479,6 +487,24 @@ async fn refresh_grant(state: &WebState, p: &HashMap<String, String>) -> Respons
             token_error("invalid_grant", "unknown, expired or revoked refresh token")
         }
         Err(e) => server_error(e),
+    }
+}
+
+/// Deletes expired codes, tokens and grants every `sweep_every` until shutdown (each replica
+/// sweeps; the deletes are idempotent).
+pub(crate) async fn sweep(state: WebState, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    let every = state.config().mcp.sweep_every;
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = crate::protocol::shutdown_signal(&mut shutdown) => return,
+            _ = tick.tick() => {}
+        }
+        let (now, ttl) = (state.now(), state.config().mcp.code_ttl.as_secs() as i64);
+        if let Err(e) = state.store(move |s| s.purge_mcp(now, ttl)).await {
+            tracing::warn!("mcp sweep failed: {e}");
+        }
     }
 }
 

@@ -723,8 +723,9 @@ pub trait Tx {
     fn revoke_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<bool>;
     /// The user's grants, newest first.
     fn mcp_grants_of(&self, user_id: i64) -> StoreResult<Vec<McpGrantRow>>;
-    /// Deletes codes older than `code_ttl`, expired tokens, and grants expired or revoked
-    /// (with their tokens).
+    /// Deletes codes older than `code_ttl`, expired access tokens, expired unconsumed refresh
+    /// tokens, and grants expired or revoked (with their tokens). A consumed refresh token is
+    /// kept until its grant ends, so a replay within the grant's life still revokes it.
     fn purge_mcp(&self, now: i64, code_ttl: i64) -> StoreResult<()>;
 
     // import

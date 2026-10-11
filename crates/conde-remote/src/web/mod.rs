@@ -17,7 +17,7 @@ mod auth;
 pub mod cimd;
 mod keys;
 pub(crate) mod mcp;
-mod oauth;
+pub(crate) mod oauth;
 mod pages;
 mod ratelimit;
 pub(crate) use pages::document;
@@ -84,6 +84,8 @@ pub struct McpConfig {
     pub refresh_ttl: Duration,
     /// A grant ends this long after consent, whatever its refreshes.
     pub grant_ttl: Duration,
+    /// Period of the server's sweep of expired codes, tokens and grants.
+    pub sweep_every: Duration,
     pub limits: McpLimits,
 }
 
@@ -97,6 +99,7 @@ impl Default for McpConfig {
             access_ttl: Duration::from_secs(3600),
             refresh_ttl: Duration::from_secs(30 * 86400),
             grant_ttl: Duration::from_secs(90 * 86400),
+            sweep_every: Duration::from_secs(3600),
             limits: McpLimits::default(),
         }
     }

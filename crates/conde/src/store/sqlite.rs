@@ -1541,7 +1541,13 @@ impl Tx for SqliteTx<'_> {
     fn purge_mcp(&self, now: i64, code_ttl: i64) -> StoreResult<()> {
         self.exec("DELETE FROM mcp_codes WHERE created_at < ?1 - ?2", params![now, code_ttl])?;
         self.exec("DELETE FROM mcp_tokens WHERE expires_at < ?1", [now])?;
-        self.exec("DELETE FROM mcp_refresh WHERE expires_at < ?1", [now])?;
+        // A consumed refresh token stays while its grant lives, so a replay is still recognised.
+        self.exec("DELETE FROM mcp_refresh WHERE consumed_at IS NULL AND expires_at < ?1", [now])?;
+        self.exec(
+            "DELETE FROM mcp_refresh WHERE grant_id IN
+                 (SELECT grant_id FROM mcp_grants WHERE expires_at < ?1 OR revoked_at IS NOT NULL)",
+            [now],
+        )?;
         self.exec("DELETE FROM mcp_grants WHERE expires_at < ?1 OR revoked_at IS NOT NULL", [now])?;
         Ok(())
     }

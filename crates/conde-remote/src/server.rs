@@ -368,6 +368,7 @@ pub async fn start(
             let app = app.merge(routes);
             match state {
                 Some(web) => {
+                    tokio::spawn(crate::web::oauth::sweep(web.clone(), shutdown_rx.clone()));
                     let mcp = crate::web::mcp::McpState { web: web.clone(), dispatcher: shared.dispatcher.clone() };
                     let ui = crate::web::app::AppState {
                         web,

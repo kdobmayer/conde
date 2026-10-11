@@ -111,6 +111,8 @@ on_both!(
     the_buckets_run_out,
     no_human_name_refuses_writes_with_the_hint,
     a_disabled_user_is_refused_at_the_next_request,
+    expired_rows_go_at_every_refresh_and_a_spent_token_stays_with_its_grant,
+    the_sweep_purges_expired_rows_without_a_refresh,
 );
 
 // --- the in-test client metadata documents --------------------------------------------------------
@@ -924,5 +926,129 @@ async fn a_disabled_user_is_refused_at_the_next_request(d: Arc<Dispatcher>) {
     let s = m.env.store.clone();
     blocking(move || s.set_disabled(USER, false).unwrap()).await;
     m.ok(&tk.access, "inbox", json!({})).await;
+    m.server.shutdown().await.unwrap();
+}
+
+// --- purging expired rows -------------------------------------------------------------------------
+
+/// Unix seconds: the server runs on the system clock.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+fn new_refresh() -> String {
+    format!("conde_rt_{}", conde_remote::token_digest(&conde::util::new_ulid()))
+}
+
+/// Rows planted behind the server's back, as digests: on the live grant, an expired access
+/// token, an expired unspent refresh token and a refresh token spent and past its own expiry
+/// (`spent` is its plaintext: presenting it is a replay); and an expired grant with a spent
+/// refresh token.
+struct Stale {
+    access: String,
+    refresh: String,
+    spent: String,
+    dead_grant: String,
+    dead_refresh: String,
+}
+
+impl Mcp {
+    async fn plant(&self, tk: &Tokens) -> Stale {
+        let (d, live) = (self.d.clone(), conde_remote::token_digest(&tk.access));
+        let spent = new_refresh();
+        let stale = Stale {
+            access: conde_remote::token_digest("conde_at_stale"),
+            refresh: conde_remote::token_digest(&new_refresh()),
+            spent: spent.clone(),
+            dead_grant: format!("g-dead-{}", conde::util::new_ulid()),
+            dead_refresh: conde_remote::token_digest(&new_refresh()),
+        };
+        let (access, refresh, dead_grant, dead_refresh) =
+            (stale.access.clone(), stale.refresh.clone(), stale.dead_grant.clone(), stale.dead_refresh.clone());
+        blocking(move || {
+            d.with_tx(|t| {
+                let now = unix_now();
+                let (grant_id, audience, _) = t.mcp_token(&live)?.unwrap();
+                let mut g = t.mcp_grant(&grant_id)?.unwrap();
+                t.insert_mcp_token(&access, &grant_id, &audience, now - 10)?;
+                t.insert_mcp_refresh(&refresh, &grant_id, now - 100, now - 10)?;
+                let spent = conde_remote::token_digest(&spent);
+                t.insert_mcp_refresh(&spent, &grant_id, now - 100, now - 10)?;
+                assert!(t.consume_mcp_refresh(&spent, now - 50)?);
+                g.grant_id = dead_grant.clone();
+                (g.created_at, g.expires_at) = (now - 100, now - 10);
+                t.insert_mcp_grant(&g)?;
+                t.insert_mcp_refresh(&dead_refresh, &dead_grant, now - 100, now - 10)?;
+                assert!(t.consume_mcp_refresh(&dead_refresh, now - 50)?);
+                Ok(())
+            })
+            .unwrap()
+        })
+        .await;
+        stale
+    }
+
+    /// Whether each row is still stored: (access token, refresh token, grant).
+    async fn stored(&self, access: Option<&str>, refresh: Option<&str>, grant: Option<&str>) -> (bool, bool, bool) {
+        let d = self.d.clone();
+        let (a, r, g) = (access.map(str::to_string), refresh.map(str::to_string), grant.map(str::to_string));
+        blocking(move || {
+            d.with_tx(|t| {
+                Ok((
+                    a.map_or(Ok(false), |a| t.mcp_token(&a).map(|x| x.is_some()))?,
+                    r.map_or(Ok(false), |r| t.mcp_refresh(&r).map(|x| x.is_some()))?,
+                    g.map_or(Ok(false), |g| t.mcp_grant(&g).map(|x| x.is_some()))?,
+                ))
+            })
+            .unwrap()
+        })
+        .await
+    }
+
+    async fn assert_purged(&self, s: &Stale) {
+        assert_eq!(self.stored(Some(&s.access), Some(&s.refresh), None).await, (false, false, false), "expired tokens");
+        assert_eq!(self.stored(None, Some(&s.dead_refresh), Some(&s.dead_grant)).await, (false, false, false), "expired grant");
+        let spent = conde_remote::token_digest(&s.spent);
+        assert_eq!(self.stored(None, Some(&spent), None).await, (false, true, false), "a spent token stays while its grant lives");
+    }
+}
+
+async fn expired_rows_go_at_every_refresh_and_a_spent_token_stays_with_its_grant(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let tk = m.connect(&b).await;
+    let s = m.plant(&tk).await;
+    let (status, v) = m.refresh(&tk.refresh).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let current = tokens(&v);
+    m.assert_purged(&s).await;
+    let rotated = conde_remote::token_digest(&tk.refresh);
+    assert_eq!(m.stored(None, Some(&rotated), None).await, (false, true, false), "nor on its consumption");
+    m.ok(&current.access, "inbox", json!({})).await;
+    // The kept token is still recognised: its replay revokes the grant.
+    let (status, v) = m.refresh(&s.spent).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{v}");
+    assert!(v["error_description"].as_str().unwrap().contains("already used"), "{v}");
+    let (status, _, _) = m.post(Some(&current.access), &[], json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    m.server.shutdown().await.unwrap();
+}
+
+async fn the_sweep_purges_expired_rows_without_a_refresh(d: Arc<Dispatcher>) {
+    let m = mcp_with(&d, |c| c.mcp.sweep_every = Duration::from_millis(100)).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let tk = m.connect(&b).await;
+    let s = m.plant(&tk).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while m.stored(Some(&s.access), None, None).await.0 {
+        assert!(tokio::time::Instant::now() < deadline, "no sweep within 10 s");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    m.assert_purged(&s).await;
+    m.ok(&tk.access, "inbox", json!({})).await;
+    let (status, v) = m.refresh(&tk.refresh).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
     m.server.shutdown().await.unwrap();
 }

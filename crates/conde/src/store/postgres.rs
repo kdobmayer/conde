@@ -2045,7 +2045,13 @@ impl Tx for PgTx {
     fn purge_mcp(&self, now: i64, code_ttl: i64) -> StoreResult<()> {
         self.execute("DELETE FROM mcp_codes WHERE created_at < $1::BIGINT - $2::BIGINT", &[&now, &code_ttl])?;
         self.execute("DELETE FROM mcp_tokens WHERE expires_at < $1", &[&now])?;
-        self.execute("DELETE FROM mcp_refresh WHERE expires_at < $1", &[&now])?;
+        // A consumed refresh token stays while its grant lives, so a replay is still recognised.
+        self.execute("DELETE FROM mcp_refresh WHERE consumed_at IS NULL AND expires_at < $1", &[&now])?;
+        self.execute(
+            "DELETE FROM mcp_refresh WHERE grant_id IN
+                 (SELECT grant_id FROM mcp_grants WHERE expires_at < $1 OR revoked_at IS NOT NULL)",
+            &[&now],
+        )?;
         self.execute("DELETE FROM mcp_grants WHERE expires_at < $1 OR revoked_at IS NOT NULL", &[&now])?;
         Ok(())
     }

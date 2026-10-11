@@ -50,7 +50,7 @@ Expected output (Apple silicon; the file name and version vary):
 
 ```text
 downloading conde-darwin-arm64 v0.1.0 from https://conde.nativeai.space/dist
-installed /Users/<you>/.local/bin/conde (conde 0.1.0)
+installed /Users/<you>/.local/bin/conde (conde 0.1.0 (1281f26 2026-10-10))
 
 Next:
   conde setup        # this machine's local board, the bridge service, skills and MCP for Claude Code and Codex
@@ -71,7 +71,8 @@ Check:
 conde --version
 ```
 
-Expected: `conde 0.1.0` (or a later version).
+Expected: `conde 0.1.0 (1281f26 2026-10-10)`: the version, then the release's
+commit and build date (a newer release shows its own commit and date).
 
 The installer checks the binary against the published `SHA256SUMS` and
 installs nothing on a mismatch or when the checksum is missing

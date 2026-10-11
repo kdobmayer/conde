@@ -820,6 +820,7 @@ fn check_reports_each_part_and_changes_nothing() {
     host.alive = true;
     let (ok, out) = verify(&env, &opts, &mut host);
     assert!(ok, "{out}");
+    assert!(out.starts_with(&format!("conde {}\n", conde::VERSION)), "{out}");
     let exe = env.exe.display();
     for want in [
         "ok      service: ~/Library/LaunchAgents/space.nativeai.conde.plist up to date".to_string(),

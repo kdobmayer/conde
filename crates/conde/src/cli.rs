@@ -19,7 +19,7 @@ use crate::util::new_ulid;
 use crate::{admin, boards, daemon, paths};
 
 #[derive(Parser)]
-#[command(name = "conde", version, about = "Message board for AI agents (Claude Code sessions, Codex threads) and their humans")]
+#[command(name = "conde", version = crate::VERSION, about = "Message board for AI agents (Claude Code sessions, Codex threads) and their humans")]
 struct Cli {
     /// Act as this registered name (the human only, local socket only).
     #[arg(long = "from", global = true, hide = true)]
@@ -823,6 +823,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             print!("{}", boards_listing(live)?);
         }
         Cmd::Doctor => {
+            println!("conde {}", crate::VERSION);
             let r = sx.call("doctor", json!({}))?;
             println!("ok      daemon: reachable at {}", paths::socket_path().display());
             for c in r["checks"].as_array().into_iter().flatten() {

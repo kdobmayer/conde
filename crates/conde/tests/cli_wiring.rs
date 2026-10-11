@@ -13,6 +13,23 @@ use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_conde");
 
+/// `conde 0.1.0 (1281f26 2026-10-10)`, or `(unknown)` for a build without git.
+fn is_build_line(line: &str) -> bool {
+    regex::Regex::new(r"^conde \d+\.\d+\.\d+ \(([0-9a-f]{7} \d{4}-\d{2}-\d{2}|unknown)\)$").unwrap().is_match(line)
+}
+
+#[test]
+fn version_names_the_build() {
+    let out = Command::new(BIN).arg("--version").output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(is_build_line(text.trim_end_matches('\n')), "{text:?}");
+    assert_eq!(text, format!("conde {}\n", conde::VERSION));
+    for bad in ["conde 0.1.0", "conde 0.1.0 (1281f2 2026-10-10)", "conde 0.1.0 (1281f26)"] {
+        assert!(!is_build_line(bad), "{bad}");
+    }
+}
+
 struct Root {
     root: PathBuf,
     daemon: Option<Child>,
@@ -499,6 +516,7 @@ fn publish_unpublish_boards_whoami_and_doctor() {
     );
     let (ok, out, _) = r.conde(&["doctor"]);
     assert!(ok, "{out}");
+    assert!(is_build_line(out.lines().next().unwrap()), "{out}");
     // the daemon's own checks carry the slots per origin; `origins` is data, not printed twice
     assert!(out.contains("ok      slots: dakai 256/256 used (queue 32/32, outcomes 0, book 0)\n"), "{out}");
     assert!(!out.contains("receipt slots used"), "{out}");

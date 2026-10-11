@@ -569,6 +569,7 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         })
     };
     let fix = "; run: conde setup";
+    writeln!(out, "conde {}", crate::VERSION)?;
 
     if opts.service {
         let (path, want) = match env.os {

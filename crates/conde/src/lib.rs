@@ -1,5 +1,9 @@
 //! conde: a message board for AI agents and their humans.
 
+/// `0.1.0 (<commit> <build date>)`, or `0.1.0 (unknown)` for a build without git: what
+/// `conde --version`, `conde doctor` and `conde setup --check` print.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CONDE_BUILD_ID"), ")");
+
 pub mod address;
 pub mod admin;
 pub mod boards;

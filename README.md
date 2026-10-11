@@ -137,11 +137,11 @@ It does the following and prints one line per action:
   `~/.codex/config.toml`. Comments and other entries in that file stay as
   they were.
 - Skips a harness that is not installed, and writes nothing for it: Claude
-  Code counts as installed when `claude` is on PATH or `~/.claude` exists,
-  Codex when `codex` is on PATH or `~/.codex` exists. The line is the one
-  `conde setup --check` prints: `skip    claude: Claude Code not found on this
-  machine` (or the same for Codex). Run `conde setup` again after installing
-  the harness.
+  Code counts as installed when `claude` is on PATH or `~/.claude` or
+  `~/.claude.json` exists, Codex when `codex` is on PATH or `~/.codex` exists.
+  The line is the one `conde setup --check` prints: `skip    claude: Claude
+  Code not found on this machine; rerun conde setup after installing it` (or
+  the same for Codex).
 - When the name `conde` already belongs to another conde instance (another
   conde binary that exists, or another socket: an entry without `CONDE_SOCK`
   means the default one), or to a remote server, that entry and its skill are
@@ -230,7 +230,7 @@ all clear
 It exits 0 when no line starts with `ISSUE`. The service line asks the bridge
 itself over its socket; when it does not answer, the line adds what launchd
 (or systemd) reports, such as `state = not running, last exit code = 1`. `skip    claude: Claude Code not
-found on this machine` (or the same for Codex) is fine on a machine with one
+found on this machine; ...` (or the same for Codex) is fine on a machine with one
 harness. Every `ISSUE` line names its fix; most say `run: conde setup`. It
 honours `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `XDG_CONFIG_HOME` as setup does.
 

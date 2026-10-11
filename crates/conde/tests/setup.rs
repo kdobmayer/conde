@@ -851,7 +851,7 @@ fn check_skips_a_harness_that_is_not_installed_and_reads_toml_semantically() {
 
     let (ok, out) = verify(&env, &Options::select(false, false, false, true), &mut host);
     assert!(ok, "{out}");
-    assert!(out.contains("skip    claude: Claude Code not found on this machine"), "{out}");
+    assert!(out.contains("skip    claude: Claude Code not found on this machine; rerun conde setup after installing it"), "{out}");
     assert!(out.contains("ok      codex: MCP server conde registered in ~/.codex/config.toml"), "{out}");
     assert!(out.contains("ok      service: the bridge answers on"), "{out}");
     let _ = std::fs::remove_dir_all(&root);
@@ -860,7 +860,7 @@ fn check_skips_a_harness_that_is_not_installed_and_reads_toml_semantically() {
 #[test]
 fn setup_and_check_agree_on_whether_codex_is_installed() {
     let opts = Options::select(false, true, false, false);
-    let skip = "skip    codex: Codex not found on this machine\n";
+    let skip = "skip    codex: Codex not found on this machine; rerun conde setup after installing it\n";
 
     // neither the binary nor ~/.codex: both skip with the same line, nothing is written
     let root = temp_root();
@@ -895,7 +895,7 @@ fn setup_and_check_agree_on_whether_codex_is_installed() {
 #[test]
 fn setup_and_check_agree_on_whether_claude_code_is_installed() {
     let opts = Options::select(true, false, false, false);
-    let skip = "skip    claude: Claude Code not found on this machine\n";
+    let skip = "skip    claude: Claude Code not found on this machine; rerun conde setup after installing it\n";
 
     // neither the binary nor ~/.claude: both skip with the same line, nothing is written
     let root = temp_root();
@@ -908,12 +908,15 @@ fn setup_and_check_agree_on_whether_claude_code_is_installed() {
     assert!(ok && out.contains(skip), "{out}");
     let _ = std::fs::remove_dir_all(&root);
 
-    // the binary on PATH, or ~/.claude without one (installed where PATH does not reach)
-    for (on_path, dir) in [(&["claude"][..], false), (&[][..], true)] {
+    // the binary on PATH, or ~/.claude or ~/.claude.json without one (installed where PATH
+    // does not reach)
+    for (on_path, marker) in [(&["claude"][..], None), (&[][..], Some(".claude")), (&[][..], Some(".claude.json"))] {
         let root = temp_root();
         let env = env(&root, Os::Linux);
-        if dir {
-            std::fs::create_dir_all(root.join("home/.claude")).unwrap();
+        match marker {
+            Some(".claude") => std::fs::create_dir_all(root.join("home/.claude")).unwrap(),
+            Some(file) => std::fs::write(root.join("home").join(file), "{}").unwrap(),
+            None => {}
         }
         let mut host = Fake::new(&env, on_path);
         let (ok, out) = run(&env, &opts, &mut host);

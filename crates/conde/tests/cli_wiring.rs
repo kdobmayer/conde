@@ -134,8 +134,8 @@ fn conde_setup_runs_the_single_daemon_and_enrolls_nothing() {
     assert!(ok, "{out}");
     assert!(out.contains("service: systemctl not found"), "{out}");
     // neither harness on PATH nor its directory: both skipped as --check skips them
-    assert!(out.contains("skip    claude: Claude Code not found on this machine\n"), "{out}");
-    assert!(out.contains("skip    codex: Codex not found on this machine\n"), "{out}");
+    assert!(out.contains("skip    claude: Claude Code not found on this machine; rerun conde setup after installing it\n"), "{out}");
+    assert!(out.contains("skip    codex: Codex not found on this machine; rerun conde setup after installing it\n"), "{out}");
     assert!(!home.join(".claude").exists() && !home.join(".claude.json").exists() && !home.join(".codex").exists());
     assert!(out.contains("boards: no shared board enrolled; this host works on its local board. Joining a team's board is a separate step: conde login --server"), "{out}");
     assert!(out.contains("Enrolling publishes nothing and uploads no history"), "{out}");

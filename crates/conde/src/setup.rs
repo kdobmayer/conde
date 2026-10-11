@@ -1587,16 +1587,17 @@ pub fn codex_name(env: &Env, text: &str) -> anyhow::Result<(String, Option<Strin
 }
 
 /// What setup and `--check` both say on a machine without Claude Code.
-const CLAUDE_ABSENT: &str = "claude: Claude Code not found on this machine";
+const CLAUDE_ABSENT: &str = "claude: Claude Code not found on this machine; rerun conde setup after installing it";
 
-/// Claude Code is installed when `claude` is on PATH or its config directory exists
-/// (installed somewhere PATH does not reach); setup and `--check` skip it otherwise.
+/// Claude Code is installed when `claude` is on PATH or its config directory or
+/// `.claude.json` exists (installed somewhere PATH does not reach); setup and `--check` skip
+/// it otherwise.
 fn claude_installed(env: &Env, host: &dyn Host) -> bool {
-    host.which("claude").is_some() || env.claude_dir().exists()
+    host.which("claude").is_some() || env.claude_dir().exists() || env.claude_json().exists()
 }
 
 /// What setup and `--check` both say on a machine without Codex.
-const CODEX_ABSENT: &str = "codex: Codex not found on this machine";
+const CODEX_ABSENT: &str = "codex: Codex not found on this machine; rerun conde setup after installing it";
 
 /// Codex is installed when `codex` is on PATH or its config directory exists (installed
 /// somewhere PATH does not reach); setup and `--check` skip it otherwise.

@@ -197,7 +197,7 @@ fn linux_full_setup_then_idempotent_rerun() {
     let root = temp_root();
     let env = env(&root, Os::Linux);
     let opts = Options::select(false, false, false, false);
-    let mut host = Fake::new(&env, &["systemctl", "claude"]);
+    let mut host = Fake::new(&env, &["systemctl", "claude", "codex"]);
     let exe = env.exe.display().to_string();
 
     let (ok, out) = run(&env, &opts, &mut host);
@@ -352,7 +352,7 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
     let root = temp_root();
     let env = windows_env(&root);
     let opts = Options::select(true, true, true, false);
-    let mut host = Fake::new(&env, &["claude"]);
+    let mut host = Fake::new(&env, &["claude", "codex"]);
     let task = env.windows_task();
     assert_eq!(task, root.join("home/AppData/Local/conde/conde-task.xml"));
     assert_eq!(env.boards_dir(), root.join("home/AppData/Roaming/conde/boards"));
@@ -855,6 +855,41 @@ fn check_skips_a_harness_that_is_not_installed_and_reads_toml_semantically() {
     assert!(out.contains("ok      codex: MCP server conde registered in ~/.codex/config.toml"), "{out}");
     assert!(out.contains("ok      service: the bridge answers on"), "{out}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn setup_and_check_agree_on_whether_codex_is_installed() {
+    let opts = Options::select(false, true, false, false);
+    let skip = "skip    codex: Codex not found on this machine\n";
+
+    // neither the binary nor ~/.codex: both skip with the same line, nothing is written
+    let root = temp_root();
+    let bare = env(&root, Os::Linux);
+    let mut host = Fake::new(&bare, &[]);
+    let (ok, out) = run(&bare, &opts, &mut host);
+    assert!(ok && out.contains(skip) && !out.contains("codex: skill"), "{out}");
+    assert!(!root.join("home/.codex").exists(), "{:?}", files(&root));
+    let (ok, out) = verify(&bare, &opts, &mut host);
+    assert!(ok && out.contains(skip), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+
+    // the binary on PATH, or ~/.codex without one (installed where PATH does not reach)
+    for (on_path, dir) in [(&["codex"][..], false), (&[][..], true)] {
+        let root = temp_root();
+        let env = env(&root, Os::Linux);
+        if dir {
+            std::fs::create_dir_all(root.join("home/.codex")).unwrap();
+        }
+        let mut host = Fake::new(&env, on_path);
+        let (ok, out) = run(&env, &opts, &mut host);
+        assert!(ok && !out.contains("skip"), "{out}");
+        assert!(out.contains("codex: added MCP server conde to ~/.codex/config.toml"), "{out}");
+        assert_eq!(read(&env.codex_skill()), setup::CODEX_SKILL);
+        let (ok, out) = verify(&env, &opts, &mut host);
+        assert!(ok && !out.contains("skip"), "{out}");
+        assert!(out.contains("ok      codex: skill ~/.codex/skills/conde/SKILL.md up to date"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[test]

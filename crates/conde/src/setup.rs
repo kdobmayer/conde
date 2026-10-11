@@ -537,8 +537,12 @@ pub fn run(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
         part("claude", r, out)?;
     }
     if opts.codex {
-        let r = codex(env, out);
-        part("codex", r, out)?;
+        if codex_installed(env, host) {
+            let r = codex(env, out);
+            part("codex", r, out)?;
+        } else {
+            writeln!(out, "skip    {CODEX_ABSENT}")?;
+        }
     }
     if opts.boards {
         let r = boards_part(env, opts, host, out);
@@ -628,8 +632,8 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         }
     }
     if opts.codex {
-        if host.which("codex").is_none() && !env.codex_dir().exists() {
-            line("skip", "codex: Codex not found on this machine".into(), out)?;
+        if !codex_installed(env, host) {
+            line("skip", CODEX_ABSENT.into(), out)?;
         } else {
             let config = env.codex_config();
             let text = read_text(&config)?;
@@ -1576,6 +1580,15 @@ pub fn codex_name(env: &Env, text: &str) -> anyhow::Result<(String, Option<Strin
         let sock = field("env").and_then(|e| e.get("CONDE_SOCK")).and_then(|v| v.as_str());
         holder(env, entry.is_some(), command, sock)
     })
+}
+
+/// What setup and `--check` both say on a machine without Codex.
+const CODEX_ABSENT: &str = "codex: Codex not found on this machine";
+
+/// Codex is installed when `codex` is on PATH or its config directory exists (installed
+/// somewhere PATH does not reach); setup and `--check` skip it otherwise.
+fn codex_installed(env: &Env, host: &dyn Host) -> bool {
+    host.which("codex").is_some() || env.codex_dir().exists()
 }
 
 fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {

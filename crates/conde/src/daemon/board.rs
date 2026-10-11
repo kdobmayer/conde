@@ -87,7 +87,7 @@ impl BoardConn {
         self.status.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    fn set_status(&self, s: Status) {
+    pub(crate) fn set_status(&self, s: Status) {
         *self.status.lock().unwrap_or_else(|p| p.into_inner()) = s;
     }
 
@@ -157,7 +157,7 @@ pub fn describe_stop(reason: &StopReason) -> String {
 
 /// Starts the board's v2 connection and its task.
 pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
-    if conn.forgotten.load(Ordering::SeqCst) {
+    if conn.forgotten.load(Ordering::SeqCst) || !core.is_current(conn) {
         return;
     }
     let Some(cfg) = conn.config.clone() else { return };
@@ -191,9 +191,14 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
     }
     let alias = conn.alias.clone();
     let weak: Weak<Core> = Arc::downgrade(core);
+    let me = Arc::downgrade(conn);
     let _rt = core.rt.enter();
     let client = BridgeClient::start_events(config, move |event| {
         let Some(core) = weak.upgrade() else { return };
+        // a reloaded board's previous connection applies nothing
+        if !me.upgrade().is_some_and(|me| core.is_current(&me)) {
+            return;
+        }
         match event {
             Inbound::Connected => {
                 // In callback order: the reset, then the request that reconciles this connection.
@@ -228,9 +233,21 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
     loop {
         let Some(core) = core.upgrade() else { return };
         if let BridgeState::Stopped(reason) = client.state() {
+            // A refused key may have been replaced by `conde login` without a reload (an older
+            // CLI, or a reload that did not reach this daemon): read the board file once.
+            if reason == StopReason::Unauthorized && core.is_current(&conn) {
+                match super::reload_board(&core, &conn.alias, true) {
+                    Ok(super::Reloaded::Reloaded) => {
+                        tracing::info!(board = conn.alias, "the board refused the key; the board file holds a new one: reconnecting");
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(board = conn.alias, "board file not reread: {e:#}"),
+                }
+            }
             let why = describe_stop(&reason);
             tracing::warn!(board = conn.alias, "{why}");
-            core.mux.stop_board(&conn.alias, &why);
+            core.mux.stop_client(&conn.alias, &client, &why);
             conn.set_status(Status::Stopped(why));
             return;
         }
@@ -601,7 +618,7 @@ pub fn finish_op(core: &Core, conn: &BoardConn, op: &BoardOp, outcome: OpOutcome
 pub async fn resume_migration(core: Arc<Core>, conn: Arc<BoardConn>, op: BoardOp) {
     let mut delay = Duration::from_secs(1);
     loop {
-        if conn.forgotten.load(Ordering::SeqCst) {
+        if conn.forgotten.load(Ordering::SeqCst) || !core.is_current(&conn) {
             return;
         }
         let outcome = send_op(&conn, &op, core.mux.tuning.call_timeout).await;
@@ -682,7 +699,7 @@ pub async fn probe_migrated(core: Weak<Core>, conn: Arc<BoardConn>) {
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
         let Some(c) = core.upgrade() else { return };
-        if conn.status() != Status::NotMigrated || conn.forgotten.load(Ordering::SeqCst) {
+        if conn.status() != Status::NotMigrated || conn.forgotten.load(Ordering::SeqCst) || !c.is_current(&conn) {
             return;
         }
         let wait = c.mux.tuning.call_timeout;

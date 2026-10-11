@@ -334,6 +334,8 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
             let out = std::process::Command::new(env!("CARGO_BIN_EXE_conde"))
                 .args(&args)
                 .env("XDG_CONFIG_HOME", &config)
+                // no bridge runs on this socket
+                .env("CONDE_SOCK", config.join("conde.sock"))
                 .env("DISPLAY", ":0")
                 .stdin(std::process::Stdio::null())
                 .output()
@@ -359,6 +361,7 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     assert!(out.contains("signed in as krisztian"), "{out}");
     assert!(out.contains(&format!("\nenrolled host box-9 with {server} as board dakai (account krisztian)")), "{out}");
     assert!(!out.contains("re-enrolled"), "{out}");
+    assert!(out.contains("\nbridge: not running; it reads the new key at start\nnext: conde setup"), "{out}");
     let path = config.path().join("conde/boards/dakai.json");
     assert_eq!(credentials::mode(&path), Some(0o600));
     let stored = boards::load(&path).unwrap();

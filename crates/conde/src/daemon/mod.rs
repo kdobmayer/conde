@@ -211,6 +211,11 @@ impl Core {
         self.boards.lock().unwrap_or_else(|p| p.into_inner()).insert(conn.alias.clone(), conn);
     }
 
+    /// `conn` is the board's connection, not one a reload replaced (or a forgotten one).
+    pub(crate) fn is_current(&self, conn: &Arc<BoardConn>) -> bool {
+        self.board(&conn.alias).is_some_and(|c| Arc::ptr_eq(&c, conn))
+    }
+
     pub(crate) fn remove_board(&self, alias: &str) {
         self.boards.lock().unwrap_or_else(|p| p.into_inner()).remove(alias);
     }
@@ -376,17 +381,67 @@ impl Drop for Daemon {
 fn open_board(core: &Arc<Core>, alias: &str, config: anyhow::Result<boards::BoardConfig>) {
     let conn = Arc::new(BoardConn::new(alias, config));
     core.add_board(conn.clone());
+    activate(core, &conn);
+}
+
+/// What [`reload_board`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reloaded {
+    /// A board this daemon did not have: opened as at start.
+    Opened,
+    /// The connection was replaced by one with the file's credential.
+    Reloaded,
+    /// The file holds what the running connection uses.
+    Unchanged,
+}
+
+/// Re-reads `boards/<alias>.json` (written by `conde login` or `conde enroll`) and replaces the
+/// board's connection with one that uses it, as a restart would. `only_if_changed`: leave a
+/// connection whose file is unchanged alone even when it stopped (the refused-key reread);
+/// otherwise a stopped or broken one is reopened.
+pub(crate) fn reload_board(core: &Arc<Core>, alias: &str, only_if_changed: bool) -> anyhow::Result<Reloaded> {
+    let path = boards::path_in(&core.config_dir, alias);
+    if !path.exists() {
+        anyhow::bail!("no board file {}", path.display());
+    }
+    let config = boards::load(&path);
+    let old = core.board(alias);
+    if let Some(old) = &old {
+        let unchanged = matches!((&old.config, &config), (Some(a), Ok(b)) if a == b);
+        let live = !matches!(old.status(), Status::Stopped(_) | Status::Broken(_));
+        if unchanged && (live || only_if_changed) {
+            return Ok(Reloaded::Unchanged);
+        }
+    }
+    let conn = Arc::new(BoardConn::new(alias, config));
+    // registered first: from here the old connection's tasks and callbacks apply nothing
+    core.add_board(conn.clone());
+    if let Some(old) = &old {
+        old.set_status(Status::Stopped("replaced by a reload".into()));
+        if let Some(client) = old.client() {
+            client.shutdown();
+            core.mux.stop_client(alias, &client, "reloaded");
+        }
+    }
+    tracing::info!(board = alias, "board file reloaded");
+    activate(core, &conn);
+    Ok(if old.is_some() { Reloaded::Reloaded } else { Reloaded::Opened })
+}
+
+/// Connects a registered board, or waits for its migration as at start.
+fn activate(core: &Arc<Core>, conn: &Arc<BoardConn>) {
+    let alias = conn.alias.as_str();
     if conn.config.is_none() {
         return;
     }
     match core.local_tx(|tx| Ok(tx.migrate_op(alias)?)) {
-        Ok(Some(op)) if op.state == crate::store::local::BoardOpState::Done => board::start(core, &conn),
+        Ok(Some(op)) if op.state == crate::store::local::BoardOpState::Done => board::start(core, conn),
         Ok(Some(op)) => {
-            core.rt.spawn(board::resume_migration(core.clone(), conn, op));
+            core.rt.spawn(board::resume_migration(core.clone(), conn.clone(), op));
         }
         Ok(None) => {
             tracing::info!(board = alias, "not migrated: no connection until conde setup confirms it");
-            core.rt.spawn(board::probe_migrated(Arc::downgrade(core), conn));
+            core.rt.spawn(board::probe_migrated(Arc::downgrade(core), conn.clone()));
         }
         Err(e) => tracing::error!(board = alias, "cannot read the board's ops: {e:#}"),
     }
@@ -478,6 +533,7 @@ impl Core {
             op::MAILBOX_UNPUBLISH => done(publish::unpublish(&self, &req).await),
             crate::surface::BOARD_LIST => done(publish::list(&self)),
             crate::surface::BOARD_FORGET => done(publish::forget(&self, &req)),
+            crate::surface::BOARD_RELOAD => done(publish::reload(&self, &req)),
             op::BOARD_INFO => done(publish::board_info(&self, &req).await),
             op::HOST_MIGRATE_PREVIEW => done(publish::migrate_preview(&self, &req).await),
             op::HOST_MIGRATE_V2 => done(publish::migrate(&self, &req).await),

@@ -531,6 +531,19 @@ impl FakeBoard {
         }
     }
 
+    /// A re-enrollment: a new key for the host, its previous keys revoked. `close`: the bridge
+    /// is disconnected too, as the server does when it rotates a key.
+    pub fn rotate(&self, host: &str, close: bool) -> String {
+        let key = format!("key-{host}-{}", conde::util::new_ulid());
+        let mut st = self.lock();
+        st.keys.retain(|_, h| h != host);
+        st.keys.insert(key.clone(), host.into());
+        if close && let Some((_, tx, _)) = st.conns.remove(host) {
+            let _ = tx.send(Cmd::Close);
+        }
+        key
+    }
+
     /// Another instance of the host takes over: the connected one is fenced.
     pub fn fence(&self, host: &str) {
         let mut st = self.lock();

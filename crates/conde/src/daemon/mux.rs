@@ -305,7 +305,22 @@ impl Mux {
     /// The board's connection stopped for good: its jobs, outcomes and slots are dropped (the
     /// board re-attempts them through its next instance).
     pub fn stop_board(&self, alias: &str, why: &str) {
+        self.stop_if(alias, why, |_| true);
+    }
+
+    /// [`stop_board`](Self::stop_board) when `client` is still the board's connection: a
+    /// reloaded board's new connection is never stopped by its predecessor.
+    pub fn stop_client(&self, alias: &str, client: &BridgeClient, why: &str) {
+        self.stop_if(alias, why, |o| {
+            o.and_then(|o| o.client.as_ref()).is_some_and(|c| c.bridge_instance() == client.bridge_instance())
+        });
+    }
+
+    fn stop_if(&self, alias: &str, why: &str, current: impl Fn(Option<&Origin>) -> bool) {
         let mut st = self.lock();
+        if !current(st.origins.get(alias)) {
+            return;
+        }
         let tokens: Vec<String> =
             st.entries.iter().filter(|(_, e)| e.origin == alias).map(|(t, _)| t.clone()).collect();
         for t in tokens {

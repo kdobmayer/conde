@@ -375,8 +375,13 @@ command prints:
 signed in as <user>
 enrolled host <host> with https://conde.nativeai.space as board dakai (account <user>); credential stored at /Users/<you>/.config/conde/boards/dakai.json (mode 0600)
 Enrolling publishes nothing and uploads no history: every agent stays on this machine's local board, and teammates cannot reach one until you publish it: conde publish <name> --board dakai
+bridge: dakai loaded
 next: conde setup (the default board, and the review of this host's earlier names on dakai)
 ```
+
+The `bridge:` line says how the running bridge took the new key, with no
+restart: `dakai loaded` (a new board), `dakai reloaded` (a new key for a
+board it had), or `not running; it reads the new key at start`.
 
 `dakai` is the name the board advertises; `--board <alias>` picks another
 local alias. An alias stays pinned to its server and account: enrolling it
@@ -385,7 +390,8 @@ again with another server or account is refused
 Signing in again on a host that is already enrolled replaces its key: the
 server revokes the previous key at once, keeps one key per host, and the
 command prints `re-enrolled host <host>: the previous key for this host is revoked`
-in place of the `enrolled host` line.
+in place of the `enrolled host` line. The running bridge switches to the new
+key at once (`bridge: dakai reloaded`).
 
 **A machine without a browser** (a server, a remote shell; on Linux,
 any session without `DISPLAY` or `WAYLAND_DISPLAY`): `conde login` takes a

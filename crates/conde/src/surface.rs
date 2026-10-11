@@ -33,6 +33,9 @@ use crate::protocol::v2::LOCAL_BOARD;
 pub const BOARD_LIST: &str = "board.list";
 /// Daemon-only op: forget a board alias (its file, publications and ops; never the server).
 pub const BOARD_FORGET: &str = "board.forget";
+/// Daemon-only op: re-read a board's file (a new key from `conde login` or `conde enroll`)
+/// and reconnect with it.
+pub const BOARD_RELOAD: &str = "board.reload";
 
 /// Which surface renders: the hints name its own spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

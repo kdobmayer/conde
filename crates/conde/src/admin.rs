@@ -132,13 +132,37 @@ pub fn enroll(server: &str, host: Option<&str>, board: Option<&str>, key_stdin: 
     let path = boards::path(&alias)?;
     let cfg = BoardConfig { server: server.to_string(), host_id: info.host.clone(), owner: info.owner.clone(), key };
     boards::store(&path, &alias, &cfg)?;
-    print!("{}", enrolled_text(&alias, &cfg, &path, false));
+    let bridge = reload_bridge(&paths::socket_path(), &alias);
+    print!("{}", enrolled_text(&alias, &cfg, &path, false, &bridge));
     Ok(0)
 }
 
+/// Tells the running bridge to re-read board `alias`'s file, so a new key takes effect
+/// without a restart; the line that says how it went.
+pub fn reload_bridge(socket: &std::path::Path, alias: &str) -> String {
+    let Ok(mut client) = crate::client::Client::connect(socket) else {
+        return "bridge: not running; it reads the new key at start".into();
+    };
+    let mut req = crate::protocol::Request::new(crate::util::new_ulid(), crate::surface::BOARD_RELOAD, serde_json::json!({}));
+    req.board = Some(alias.to_string());
+    let why = match client.call(&req) {
+        Ok(r) if r.ok => {
+            return match r.result.as_ref().and_then(|v| v["state"].as_str()) {
+                Some("unchanged") => format!("bridge: {alias} already uses this key"),
+                Some("opened") => format!("bridge: {alias} loaded"),
+                _ => format!("bridge: {alias} reloaded"),
+            };
+        }
+        Ok(r) => r.error.map(|e| e.message).unwrap_or_else(|| "no answer".into()),
+        Err(e) => format!("{e:#}"),
+    };
+    format!("bridge: {alias} not reloaded ({why}); restart the bridge to use the new key")
+}
+
 /// What `conde enroll` and `conde login` print once the board file is stored; `reenrolled`:
-/// the server said the host existed and revoked its previous key.
-pub fn enrolled_text(alias: &str, cfg: &BoardConfig, path: &std::path::Path, reenrolled: bool) -> String {
+/// the server said the host existed and revoked its previous key; `bridge`: the
+/// [`reload_bridge`] line.
+pub fn enrolled_text(alias: &str, cfg: &BoardConfig, path: &std::path::Path, reenrolled: bool, bridge: &str) -> String {
     let (host, server, owner, path) = (&cfg.host_id, &cfg.server, &cfg.owner, path.display());
     let head = if reenrolled {
         format!(
@@ -150,6 +174,7 @@ pub fn enrolled_text(alias: &str, cfg: &BoardConfig, path: &std::path::Path, ree
     };
     format!(
         "{head}{}: conde publish <name> --board {alias}\n\
+         {bridge}\n\
          next: conde setup (the default board, and the review of this host's earlier names on {alias})\n",
         crate::setup::ENROLL_SCOPE
     )

@@ -437,7 +437,8 @@ pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool,
     let path = boards::path(&alias)?;
     let cfg = save(&path, &alias, server, &enrolled)?;
     println!("signed in as {}", enrolled.user);
-    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path, enrolled.reenrolled));
+    let bridge = crate::admin::reload_bridge(&crate::paths::socket_path(), &alias);
+    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path, enrolled.reenrolled, &bridge));
     Ok(0)
 }
 

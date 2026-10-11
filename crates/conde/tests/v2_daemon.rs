@@ -1005,6 +1005,55 @@ fn g12_a_lost_board_stops_only_its_connection() {
     }
 }
 
+/// Stores `key` as the host's dakai board file, as `conde login` does.
+fn store_key(h: &Host, board: &FakeBoard, key: String) {
+    let cfg = BoardConfig { server: board.url(), host_id: h.host.clone(), owner: h.user.clone(), key };
+    boards::store(&boards::path_in(&h.config(), "dakai"), "dakai", &cfg).unwrap();
+}
+
+/// A teammate's DM reaches the published `worker`: the connection works.
+fn dm_reaches_worker(board: &FakeBoard, h: &Host, text: &str) {
+    let relay = board.mailbox("balazs", &format!("relay-{}", new_ulid().to_lowercase()), "box-b");
+    let msg = board.dm(&relay, "kdobmayer", "worker", text);
+    assert_eq!(h.harness.wait_pushes(&msg, 1)[0].address, "claude:s-worker@homepc");
+}
+
+/// `conde login` on an enrolled host: the server rotates the key and disconnects the bridge,
+/// whose old key is then refused; the CLI stores the new key and tells the daemon, which
+/// reconnects with it, no restart.
+#[test]
+fn a_re_login_takes_effect_without_a_restart() {
+    let board = FakeBoard::start();
+    let (a, _) = published_host(&board, "kdobmayer", "homepc", "worker", "s-worker", fast());
+    let key = board.rotate("homepc", true);
+    wait_for("the old key refused", || a.status().starts_with("stopped").then_some(()));
+    assert!(a.status().contains("rejected this host's credential"), "{}", a.status());
+
+    store_key(&a, &board, key);
+    assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai reloaded");
+    wait_for("connected with the new key", || (a.status() == "connected" && board.connected("homepc")).then_some(()));
+    dm_reaches_worker(&board, &a, "after the re-login");
+    assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai already uses this key");
+    assert!(a.doctor().contains("dakai: connected to"), "{}", a.doctor());
+
+    let gone = a.dir.path().join("nobody.sock");
+    assert_eq!(conde::admin::reload_bridge(&gone, "dakai"), "bridge: not running; it reads the new key at start");
+}
+
+/// The refused-key reread: a new key stored without a reload (an older CLI, or a daemon that
+/// did not answer) is read from the board file when the board refuses the old one.
+#[test]
+fn a_refused_key_rereads_the_board_file() {
+    let board = FakeBoard::start();
+    let (a, _) = published_host(&board, "kdobmayer", "homepc", "worker", "s-worker", fast());
+    let key = board.rotate("homepc", false);
+    store_key(&a, &board, key);
+    board.drop_connection("homepc");
+    // the old key is revoked: only the reread key can connect and deliver
+    dm_reaches_worker(&board, &a, "after the reread");
+    assert_eq!(a.status(), "connected");
+}
+
 // --- G13 --------------------------------------------------------------------------------
 
 /// G13 session replacement without a disconnected interval: the held attempt on the old session

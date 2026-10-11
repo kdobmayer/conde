@@ -256,6 +256,19 @@ pub fn forget(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
               "default_reset": default_reset, "default": core.default_board()}))
 }
 
+/// `board.reload` (alias in the envelope): re-reads the board's file and reconnects with it.
+/// Any caller on this host's socket: it only reads a file the caller could write.
+pub fn reload(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
+    let alias = req.board.clone().filter(|a| a != LOCAL_BOARD).ok_or_else(|| refuse(ErrorCode::BadRequest, "name the shared board to reload"))?;
+    let state = match super::reload_board(core, &alias, false) {
+        Ok(super::Reloaded::Opened) => "opened",
+        Ok(super::Reloaded::Reloaded) => "reloaded",
+        Ok(super::Reloaded::Unchanged) => "unchanged",
+        Err(e) => return Err(refuse(ErrorCode::NotFound, format!("{alias}: {e:#}"))),
+    };
+    Ok(json!({"board": alias, "state": state}))
+}
+
 /// `host.migrate_preview` (alias in the envelope): the board's read-only preview, over HTTPS.
 pub async fn migrate_preview(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     let conn = board_of(core, req)?;

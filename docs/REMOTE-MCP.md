@@ -72,8 +72,9 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
   30 days. Grant life 90 days, then Claude shows Connect again; tokens never outlive their grant.
   `purge_mcp` runs on each consent, on every refresh, and in an hourly sweep on each replica: it
   drops old codes, expired access tokens, unconsumed refresh tokens past their expiry, and ended
-  (expired or revoked) grants with all their refresh tokens. Partial indexes on the expiry columns
-  (`0009_mcp_expiry.sql`) keep the per-refresh purge cheap.
+  (expired or revoked) grants with all their refresh tokens. Indexes on the expiry columns
+  (`0009_mcp_expiry.sql`; partial on `mcp_refresh`, unconsumed rows only, full on `mcp_tokens`)
+  keep the per-refresh purge cheap.
 - Each request: one lookup, token -> live grant -> user not disabled -> audience, else 401;
   `last_used_at` at most once a minute. Revocation: the keys page. A disabled user's grants stop at
   the next request (kept, like host keys). A superseded refresh token presented again revokes its

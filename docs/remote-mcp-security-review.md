@@ -27,7 +27,7 @@ ingress uses.
    FIXED 2026-10-11: bd83337 (purge on every refresh and in an hourly sweep), bc3c164 (expiry
    indexes).
 5. Grants per user are unbounded: cap live grants per user and client.
-   FIXED 2026-10-12: d958e24 (at most `CONDE_MCP_GRANTS_PER_CLIENT` live grants per user and
+   FIXED 2026-10-12: 27e3759 (at most `CONDE_MCP_GRANTS_PER_CLIENT` live grants per user and
    client, default 10; the oldest are revoked when a new grant is created).
 6. The root `/.well-known/oauth-protected-resource` returns `resource=<origin>/mcp`; RFC 9728 §3.3
    expects the origin there: serve it only for the origin, or drop it.

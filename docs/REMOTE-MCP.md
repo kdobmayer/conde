@@ -42,7 +42,7 @@ Mounted only with Entra configured. Issuer `https://conde.nativeai.space`, resou
 | `GET /.well-known/oauth-authorization-server` | issuer, the two endpoints, code flow + refresh, `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]`, `client_id_metadata_document_supported: true`, `scopes_supported: ["conde"]`, `authorization_response_iss_parameter_supported: true` |
 | `GET /oauth/authorize` | Checks `response_type=code`, client_id, redirect_uri, `code_challenge` with `S256`, `state`, and `resource` if sent (must be the resource URI). Errors before the redirect URI is trusted are a page, never a redirect. Then sign-in if needed, then consent: client = host of the `client_id` URL (its `client_name` only quoted), redirect host, the human name it will act as (or decision 3's refusal), Allow / Deny. |
 | `POST /oauth/authorize` | Session + CSRF; repeats every check (nothing pending is stored). Allow: code (256-bit, 60 s, single use) bound to user, client_id, redirect_uri, challenge; redirect with `code`, `state`, `iss`. Deny: `error=access_denied`. |
-| `POST /oauth/token` | Form-encoded, public client. `authorization_code` (code taken once, verifier, same client_id and redirect_uri) creates the grant; `refresh_token` rotates. RFC 6749 errors (`invalid_grant`, ...), `no-store`. |
+| `POST /oauth/token` | Form-encoded, public client. `authorization_code` (code taken once, verifier, same client_id and redirect_uri) creates the grant; a code presented again revokes the grant made from it (RFC 6749 §4.1.2); `refresh_token` rotates. RFC 6749 errors (`invalid_grant`, ...), `no-store`. |
 | `GET /keys` | New "Connected apps" section: per live grant client host, created, last used, expiry, Revoke. |
 | `POST /keys/apps/{grant_id}/revoke` | Session + CSRF; the grant ends at once. |
 
@@ -54,7 +54,9 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
 
 - Tables (Postgres `0008_mcp.sql`, same in `sqlite_schema.sql`, behind `WebStore`):
   `mcp_grants(grant_id, user_id, client_id, client_host, client_name, resource, created_at,
-  last_used_at, expires_at, revoked_at)`, `mcp_tokens(token_digest, grant_id, audience, expires_at)`,
+  last_used_at, expires_at, revoked_at, code_digest)` (`code_digest`: the code the grant was
+  minted from, `0010_mcp_grant_code.sql`, so a replay finds it after the code row is gone),
+  `mcp_tokens(token_digest, grant_id, audience, expires_at)`,
   `mcp_refresh(digest, grant_id, issued_at, expires_at, consumed_at)` (the grant's refresh-token
   family: an unconsumed refresh token is kept until its expiry, a consumed one until its grant
   expires or is revoked, so a replay within the grant's life is still recognised),

@@ -36,6 +36,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("attempts", "settled_at", "TEXT"),
     ("hosts", "route_revision", "INTEGER NOT NULL DEFAULT 0"),
     ("hosts", "mailbox_only", "INTEGER NOT NULL DEFAULT 0"),
+    ("mcp_grants", "code_digest", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -103,7 +104,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS attempts_by_instance ON attempts(bridge_instance, status);
          CREATE INDEX IF NOT EXISTS credentials_by_host ON device_credentials(host_id);
-         CREATE INDEX IF NOT EXISTS notifications_by_recipient ON notifications(recipient_agent_id);",
+         CREATE INDEX IF NOT EXISTS notifications_by_recipient ON notifications(recipient_agent_id);
+         CREATE UNIQUE INDEX IF NOT EXISTS mcp_grants_by_code ON mcp_grants(code_digest) WHERE code_digest IS NOT NULL;",
     )?;
     rebuild_agents(conn)
 }
@@ -1528,6 +1530,15 @@ impl Tx for SqliteTx<'_> {
         self.exec("DELETE FROM mcp_tokens WHERE grant_id = ?1", [grant_id])?;
         self.exec("DELETE FROM mcp_refresh WHERE grant_id = ?1", [grant_id])?;
         Ok(n == 1)
+    }
+
+    fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()> {
+        self.exec("UPDATE mcp_grants SET code_digest = ?2 WHERE grant_id = ?1", params![grant_id, code_digest])?;
+        Ok(())
+    }
+
+    fn mcp_grant_of_code(&self, code_digest: &str) -> StoreResult<Option<String>> {
+        self.opt("SELECT grant_id FROM mcp_grants WHERE code_digest = ?1", [code_digest], |r| r.get(0))
     }
 
     fn mcp_grants_of(&self, user_id: i64) -> StoreResult<Vec<McpGrantRow>> {

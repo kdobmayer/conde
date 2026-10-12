@@ -408,16 +408,33 @@ async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
     if code.len() != 64 {
         return token_error("invalid_grant", "unknown code");
     }
-    let key = digest(code);
-    let taken = match state.store(move |s| s.take_mcp_code(&key)).await {
-        Ok(t) => t,
-        Err(e) => return server_error(e),
+    let (key, now) = (digest(code), state.now());
+    let taken = {
+        let key = key.clone();
+        match state.store(move |s| s.take_mcp_code(&key)).await {
+            Ok(t) => t,
+            Err(e) => return server_error(e),
+        }
     };
     let Some(c) = taken else {
-        tracing::warn!("mcp token: unknown or used code");
-        return token_error("invalid_grant", "unknown or already used code");
+        // A code is taken once; presented again it may have leaked: the grant it made ends.
+        let replayed = {
+            let key = key.clone();
+            state.store(move |s| s.revoke_mcp_code_grant(&key, now)).await
+        };
+        return match replayed {
+            Ok(Some(g)) => {
+                tracing::warn!(user_id = g.user_id, grant = %g.grant_id, client = %g.client_host,
+                    by = "authorization code replay", "mcp code presented again; grant revoked");
+                token_error("invalid_grant", "this code was already used; the connection it made was revoked")
+            }
+            Ok(None) => {
+                tracing::warn!("mcp token: unknown or used code");
+                token_error("invalid_grant", "unknown or already used code")
+            }
+            Err(e) => server_error(e),
+        };
     };
-    let now = state.now();
     let m = &state.config().mcp;
     if now - c.created_at > m.code_ttl.as_secs() as i64 {
         return token_error("invalid_grant", "the code expired");
@@ -451,7 +468,7 @@ async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
     };
     let (access, refresh, tokens) = new_tokens(state);
     let (stored, cap) = (grant.clone(), m.grants_per_client);
-    match state.store(move |s| s.create_mcp_grant(&stored, &tokens, cap, now)).await {
+    match state.store(move |s| s.create_mcp_grant(&stored, &key, &tokens, cap, now)).await {
         Ok(Some(McpCreated { access_expires_at, revoked })) => {
             for old in &revoked {
                 tracing::info!(user_id = grant.user_id, grant = %old, client = %grant.client_host,

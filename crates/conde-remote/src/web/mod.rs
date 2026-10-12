@@ -514,12 +514,13 @@ pub trait WebStore: Send + Sync {
     fn take_mcp_code(&self, _code_digest: &str) -> WebResult<Option<McpCode>> {
         Err(no_mcp())
     }
-    /// Stores the grant with its first token pair unless the user is disabled (checked in the
-    /// same transaction), first revoking the user's oldest live grants of the same client so at
+    /// Stores the grant, minted from the authorization code `code_digest`, with its first token
+    /// pair unless the user is disabled (checked in the same transaction), first revoking the user's oldest live grants of the same client so at
     /// most `max_live` stay live with it; None when refused.
     fn create_mcp_grant(
         &self,
         _grant: &McpGrant,
+        _code_digest: &str,
         _tokens: &McpTokens,
         _max_live: u32,
         _now: i64,
@@ -548,6 +549,11 @@ pub trait WebStore: Send + Sync {
     }
     /// Revokes the user's grant with its tokens; false when it is not the user's or not live.
     fn revoke_mcp_grant(&self, _user_id: i64, _grant_id: &str, _now: i64) -> WebResult<bool> {
+        Err(no_mcp())
+    }
+    /// A used authorization code presented again (RFC 6749 §4.1.2): revokes the grant minted
+    /// from it with its tokens and returns it; None when no stored grant came from that code.
+    fn revoke_mcp_code_grant(&self, _code_digest: &str, _now: i64) -> WebResult<Option<McpGrant>> {
         Err(no_mcp())
     }
     fn mcp_human(&self, _user_id: i64) -> WebResult<McpHuman> {

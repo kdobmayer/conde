@@ -336,7 +336,14 @@ impl WebStore for WebBoard {
         }))
     }
 
-    fn create_mcp_grant(&self, g: &McpGrant, tokens: &McpTokens, max_live: u32, now: i64) -> WebResult<Option<McpCreated>> {
+    fn create_mcp_grant(
+        &self,
+        g: &McpGrant,
+        code_digest: &str,
+        tokens: &McpTokens,
+        max_live: u32,
+        now: i64,
+    ) -> WebResult<Option<McpCreated>> {
         let row = McpGrantRow {
             grant_id: g.grant_id.clone(),
             user_id: g.user_id,
@@ -367,6 +374,7 @@ impl WebStore for WebBoard {
                 }
             }
             t.insert_mcp_grant(&row)?;
+            t.set_mcp_grant_code(&row.grant_id, code_digest)?;
             Ok(Some(McpCreated { access_expires_at: store_tokens(t, &row, tokens, now)?, revoked }))
         })
     }
@@ -432,6 +440,14 @@ impl WebStore for WebBoard {
         self.write(|t| match t.mcp_grant(grant_id)? {
             Some(g) if g.user_id == user_id => Ok(t.revoke_mcp_grant(grant_id, now)?),
             _ => Ok(false),
+        })
+    }
+
+    fn revoke_mcp_code_grant(&self, code_digest: &str, now: i64) -> WebResult<Option<McpGrant>> {
+        self.write(|t| {
+            let Some(grant_id) = t.mcp_grant_of_code(code_digest)? else { return Ok(None) };
+            t.revoke_mcp_grant(&grant_id, now)?;
+            Ok(t.mcp_grant(&grant_id)?.map(grant))
         })
     }
 

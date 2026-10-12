@@ -68,6 +68,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (7, "route_revision", include_str!("migrations/0007_route_revision.sql")),
     (8, "mcp", include_str!("migrations/0008_mcp.sql")),
     (9, "mcp_expiry", include_str!("migrations/0009_mcp_expiry.sql")),
+    (10, "mcp_grant_code", include_str!("migrations/0010_mcp_grant_code.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -2033,6 +2034,17 @@ impl Tx for PgTx {
         self.execute("DELETE FROM mcp_tokens WHERE grant_id = $1", &[&grant_id])?;
         self.execute("DELETE FROM mcp_refresh WHERE grant_id = $1", &[&grant_id])?;
         Ok(n == 1)
+    }
+
+    fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()> {
+        self.execute("UPDATE mcp_grants SET code_digest = $2 WHERE grant_id = $1", &[&grant_id, &code_digest])?;
+        Ok(())
+    }
+
+    fn mcp_grant_of_code(&self, code_digest: &str) -> StoreResult<Option<String>> {
+        Ok(self
+            .query_opt("SELECT grant_id FROM mcp_grants WHERE code_digest = $1", &[&code_digest])?
+            .map(|r| r.get(0)))
     }
 
     fn mcp_grants_of(&self, user_id: i64) -> StoreResult<Vec<McpGrantRow>> {

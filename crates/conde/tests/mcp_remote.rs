@@ -105,6 +105,7 @@ on_both!(
     metadata_and_the_challenge_point_at_this_server,
     a_connected_app_reads_and_writes_as_the_human_until_revoked,
     a_replayed_refresh_token_revokes_the_whole_grant,
+    a_replayed_code_revokes_the_grant_it_made,
     client_metadata_refusals_are_pages_never_redirects,
     pkce_code_and_audience_refusals,
     protocol_errors_map_to_their_statuses,
@@ -518,8 +519,7 @@ async fn a_connected_app_reads_and_writes_as_the_human_until_revoked(d: Arc<Disp
     let (status, t) = m.redeem(&q["code"], &p).await;
     assert_eq!(status, StatusCode::OK, "{t}");
     let tk = tokens(&t);
-    let (status, again) = m.redeem(&q["code"], &p).await;
-    assert_eq!((status, again["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "a code is single use");
+    // A code is single use; a second use revokes this grant (a_replayed_code_revokes_the_grant_it_made).
 
     // Both eras list the human subset of tools.
     let (status, v) = m.modern(&tk.access, "tools/list", json!({})).await;
@@ -780,7 +780,7 @@ async fn pkce_code_and_audience_refusals(d: Arc<Dispatcher>) {
     let tokens = McpTokens { access_digest: conde_remote::token_digest(&foreign), refresh_digest: "r-foreign".into(),
                              access_ttl: 600, refresh_ttl: 600 };
     let s = store.clone();
-    assert!(blocking(move || s.create_mcp_grant(&grant, &tokens, 10, now).unwrap()).await.is_some());
+    assert!(blocking(move || s.create_mcp_grant(&grant, "c-foreign", &tokens, 10, now).unwrap()).await.is_some());
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
     let (status, h, _) = m.post(Some(&foreign), &[], ping.clone()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong audience");
@@ -1083,7 +1083,7 @@ async fn grants_beyond_the_cap_revoke_the_oldest_of_that_client(d: Arc<Dispatche
         let (mut grant, tokens, access) = planted(id, user_id, client, at, expires_at);
         grant.resource = resource.clone();
         let s = store.clone();
-        async move { (blocking(move || s.create_mcp_grant(&grant, &tokens, cap, at).unwrap().unwrap().revoked).await, access) }
+        async move { (blocking(move || s.create_mcp_grant(&grant, &format!("c-{}", grant.grant_id), &tokens, cap, at).unwrap().unwrap().revoked).await, access) }
     };
     let other = "https://claude.ai/oauth/other";
     let (_, other_access) = create("g-other", other, now - 50, now + 3600, 3).await;
@@ -1144,5 +1144,34 @@ async fn connecting_past_the_cap_keeps_the_newest_grants_live(d: Arc<Dispatcher>
     m.ok(&third.access, "inbox", json!({})).await;
     let page = b.get(&m.url("/keys")).await.2;
     assert_eq!(page.matches("<code>claude.ai</code>").count(), 2, "{page}");
+    m.server.shutdown().await.unwrap();
+}
+
+async fn a_replayed_code_revokes_the_grant_it_made(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let p = pkce();
+    let code = m.code(&b, &p).await;
+    let (status, v) = m.redeem(&code, &p).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let tk = tokens(&v);
+    let other = m.connect(&b).await;
+    m.ok(&tk.access, "inbox", json!({})).await;
+    // The code row is gone after the first redemption; the grant remembers its code.
+    let (status, v) = m.redeem(&code, &p).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{v}");
+    assert!(v["error_description"].as_str().unwrap().contains("already used"), "{v}");
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    let (status, _, _) = m.post(Some(&tk.access), &[], ping.clone()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the access token died with its grant");
+    let (status, v) = m.refresh(&tk.refresh).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "and the refresh token");
+    let (status, v) = m.redeem(&code, &p).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "a third use: {v}");
+    // The grant from another code is untouched.
+    m.ok(&other.access, "inbox", json!({})).await;
+    let (status, v) = m.refresh(&other.refresh).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
     m.server.shutdown().await.unwrap();
 }

@@ -157,7 +157,8 @@ CREATE TABLE IF NOT EXISTS mcp_grants(
     created_at INTEGER NOT NULL,
     last_used_at INTEGER,
     expires_at INTEGER NOT NULL,
-    revoked_at INTEGER
+    revoked_at INTEGER,
+    code_digest TEXT
 );
 CREATE INDEX IF NOT EXISTS mcp_grants_by_user ON mcp_grants(user_id);
 CREATE TABLE IF NOT EXISTS mcp_tokens(

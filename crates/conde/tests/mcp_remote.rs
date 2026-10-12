@@ -1126,8 +1126,16 @@ async fn connecting_past_the_cap_keeps_the_newest_grants_live(d: Arc<Dispatcher>
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
     let mut alive = 0;
     for t in [&first, &second] {
-        let (status, _, _) = m.post(Some(&t.access), &[], ping.clone()).await;
-        alive += usize::from(status == StatusCode::OK);
+        let (status, h, _) = m.post(Some(&t.access), &[], ping.clone()).await;
+        if status == StatusCode::OK {
+            alive += 1;
+            continue;
+        }
+        // the cap-revoked grant: its access token is refused with the challenge, its refresh ended
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(h[header::WWW_AUTHENTICATE].to_str().unwrap().contains("error=\"invalid_token\""), "{h:?}");
+        let (status, v) = m.refresh(&t.refresh).await;
+        assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{v}");
     }
     // Grants made within the same second tie on age: which of the older two ends is not fixed.
     assert_eq!(alive, 1, "one of the older grants was revoked");

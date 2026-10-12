@@ -446,7 +446,7 @@ async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
         Ok(Some(McpCreated { access_expires_at, revoked })) => {
             for old in &revoked {
                 tracing::info!(user_id = grant.user_id, grant = %old, client = %grant.client_host,
-                    by = "grant cap", cap, "mcp grant revoked");
+                    client_id = %grant.client_id, by = "grant cap", cap, "mcp grant revoked");
             }
             tracing::info!(user_id = grant.user_id, grant = %grant.grant_id, client = %grant.client_host,
                 client_id = %grant.client_id, "mcp grant created");

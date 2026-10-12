@@ -24,7 +24,11 @@ ingress uses.
 3. Client metadata trust is per host, not per URL (cimd.rs:206-233): pin the exact client_id URLs
    once the hosted one is seen in the log.
 4. Old tokens are purged only on consent (oauth.rs:313): purge on refresh or on a timer.
+   FIXED 2026-10-11: bd83337 (purge on every refresh and in an hourly sweep), bc3c164 (expiry
+   indexes).
 5. Grants per user are unbounded: cap live grants per user and client.
+   FIXED 2026-10-12: d958e24 (at most `CONDE_MCP_GRANTS_PER_CLIENT` live grants per user and
+   client, default 10; the oldest are revoked when a new grant is created).
 6. The root `/.well-known/oauth-protected-resource` returns `resource=<origin>/mcp`; RFC 9728 §3.3
    expects the origin there: serve it only for the origin, or drop it.
 7. No RFC 7009 revocation endpoint: a connector removed in the client stays listed on the keys

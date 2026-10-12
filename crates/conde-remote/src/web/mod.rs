@@ -131,6 +131,11 @@ pub enum ConfigError {
     NotPositive(&'static str),
 }
 
+/// `CONDE_MCP_GRANTS_PER_CLIENT`: a whole number of at least 1 (surrounding spaces allowed).
+fn grants_per_client(raw: &str) -> Result<u32, ConfigError> {
+    raw.trim().parse().ok().filter(|n| *n >= 1).ok_or(ConfigError::NotPositive("CONDE_MCP_GRANTS_PER_CLIENT"))
+}
+
 impl WebConfig {
     /// Builds the Entra configuration for `tenant_id` with the default lifetimes.
     pub fn entra(
@@ -183,8 +188,7 @@ impl WebConfig {
             config.mcp.client_hosts = hosts.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
         }
         if let Some(cap) = var("CONDE_MCP_GRANTS_PER_CLIENT") {
-            const NAME: &str = "CONDE_MCP_GRANTS_PER_CLIENT";
-            config.mcp.grants_per_client = cap.trim().parse().ok().filter(|n| *n >= 1).ok_or(ConfigError::NotPositive(NAME))?;
+            config.mcp.grants_per_client = grants_per_client(&cap)?;
         }
         Ok(Some(config))
     }
@@ -779,4 +783,19 @@ pub fn router(state: WebState) -> Router {
         .route("/oauth/authorize", get(oauth::authorize).post(oauth::consent))
         .route("/oauth/token", post(oauth::token))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_grant_cap_is_a_whole_number_of_at_least_one() {
+        assert_eq!(grants_per_client(" 5 ").unwrap(), 5);
+        assert_eq!(grants_per_client("1").unwrap(), 1);
+        for bad in ["0", "-1", "abc", "4294967296", "", "2.5"] {
+            let e = grants_per_client(bad).unwrap_err();
+            assert_eq!(e.to_string(), "CONDE_MCP_GRANTS_PER_CLIENT must be a whole number of at least 1", "{bad:?}");
+        }
+    }
 }

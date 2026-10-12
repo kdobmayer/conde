@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-12 13:30: PR 3 integrated 7005b7d 9a1aa77 (Konstantin's) + c8027c1 follow-ups; full run 549 passed on both stores. main = squash 61b5128 of c8027c1; release run 38239147612; image conde:c8027c1 building, roll ordered on completion; local binary rebuilt.
 - 2026-10-12 13:00: PR 3 (Konstantin's agent: root resource metadata per RFC 9728; code replay revokes the grant, migration 0010) reviewed by Opus: ready, no P1/P2; integration lane running with follow-ups. Astra's session stalled: PR 3 request unread 45 min, inline experiment unanswered since 11:22; Opus fallback used.
 - 2026-10-12 12:15: release of 8d72e85 GREEN (run 38230514002); ROLLED conde:8d72e85 = revision ca-conde--0000014. Konstantin's agent told; next item handed (root resource metadata per RFC 9728 + code-replay revocation).
 - 2026-10-12 12:00: PR 2 integrated 27e3759 (Konstantin's) + 10349aa follow-ups; Astra's IPC candidate was REAL: Client::call had no read timeout, every CLI/MCP/login daemon request could hang forever; fixed feba6b6 (60 s deadline per request, error names the daemon; import/history use the store directly, unaffected); full run 545 passed on both stores. main = squash 8e6e362 of 8d72e85; release run 38230514002; image conde:8d72e85 building, roll ordered on completion; local binary rebuilt.

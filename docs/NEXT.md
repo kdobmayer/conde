@@ -254,7 +254,6 @@ finds. Until then: system-default account works; injected dirs do not.
 
 - Refresh reuse revokes strictly: if the live check shows Claude refreshing in parallel, a token consumed less than 10 s ago answers `invalid_grant` without revoking.
 - Client metadata trust is per host: pin the exact client_id URLs once the hosted one is seen in the log.
-- Live grants per user are unbounded: cap them per user and client.
 - The root `/.well-known/oauth-protected-resource` names `<origin>/mcp` (RFC 9728 §3.3 expects the origin): serve it for the origin only, or drop it.
 - No RFC 7009 revocation endpoint: a connector removed in Claude stays on the keys page until it expires.
 - A second use of an authorization code does not revoke the tokens issued from it.

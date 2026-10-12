@@ -21,7 +21,7 @@ use super::cimd::{Client, Refusal};
 use super::keys;
 use super::ratelimit::ClientIp;
 use super::session::{self, WebError, digest, random_token, same_secret};
-use super::{McpCode, McpGrant, McpHuman, McpRefreshed, McpTokens, WebState, pages};
+use super::{McpCode, McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, WebState, pages};
 
 /// The one scope: the board as the signed-in user.
 pub(crate) const SCOPE: &str = "conde";
@@ -441,12 +441,16 @@ async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
         revoked_at: None,
     };
     let (access, refresh, tokens) = new_tokens(state);
-    let stored = grant.clone();
-    match state.store(move |s| s.create_mcp_grant(&stored, &tokens, now)).await {
-        Ok(Some(expires_at)) => {
+    let (stored, cap) = (grant.clone(), m.grants_per_client);
+    match state.store(move |s| s.create_mcp_grant(&stored, &tokens, cap, now)).await {
+        Ok(Some(McpCreated { access_expires_at, revoked })) => {
+            for old in &revoked {
+                tracing::info!(user_id = grant.user_id, grant = %old, client = %grant.client_host,
+                    by = "grant cap", cap, "mcp grant revoked");
+            }
             tracing::info!(user_id = grant.user_id, grant = %grant.grant_id, client = %grant.client_host,
                 client_id = %grant.client_id, "mcp grant created");
-            issued(&access, &refresh, expires_at - now)
+            issued(&access, &refresh, access_expires_at - now)
         }
         Ok(None) => token_error("invalid_grant", "this account is disabled"),
         Err(e) => server_error(e),

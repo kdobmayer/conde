@@ -111,6 +111,8 @@ on_both!(
     the_buckets_run_out,
     no_human_name_refuses_writes_with_the_hint,
     a_disabled_user_is_refused_at_the_next_request,
+    grants_beyond_the_cap_revoke_the_oldest_of_that_client,
+    connecting_past_the_cap_keeps_the_newest_grants_live,
     expired_rows_go_at_every_refresh_and_a_spent_token_stays_with_its_grant,
     the_sweep_purges_expired_rows_without_a_refresh,
 );
@@ -776,7 +778,7 @@ async fn pkce_code_and_audience_refusals(d: Arc<Dispatcher>) {
     let tokens = McpTokens { access_digest: conde_remote::token_digest(&foreign), refresh_digest: "r-foreign".into(),
                              access_ttl: 600, refresh_ttl: 600 };
     let s = store.clone();
-    assert!(blocking(move || s.create_mcp_grant(&grant, &tokens, now).unwrap()).await.is_some());
+    assert!(blocking(move || s.create_mcp_grant(&grant, &tokens, 10, now).unwrap()).await.is_some());
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
     let (status, h, _) = m.post(Some(&foreign), &[], ping.clone()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong audience");
@@ -1050,5 +1052,87 @@ async fn the_sweep_purges_expired_rows_without_a_refresh(d: Arc<Dispatcher>) {
     m.ok(&tk.access, "inbox", json!({})).await;
     let (status, v) = m.refresh(&tk.refresh).await;
     assert_eq!(status, StatusCode::OK, "{v}");
+    m.server.shutdown().await.unwrap();
+}
+
+// --- the cap on live grants -----------------------------------------------------------------------
+
+/// A grant of the signed-in user stored directly, with `access` as its access token.
+fn planted(id: &str, user_id: i64, client_id: &str, created_at: i64, expires_at: i64) -> (McpGrant, McpTokens, String) {
+    let access = format!("conde_at_{}", conde_remote::token_digest(id));
+    let grant = McpGrant {
+        grant_id: id.into(), user_id, client_id: client_id.into(), client_host: "claude.ai".into(), client_name: None,
+        resource: String::new(), created_at, last_used_at: None, expires_at, revoked_at: None,
+    };
+    let tokens = McpTokens { access_digest: conde_remote::token_digest(&access), refresh_digest: format!("r-{id}"),
+                             access_ttl: 600, refresh_ttl: 600 };
+    (grant, tokens, access)
+}
+
+async fn grants_beyond_the_cap_revoke_the_oldest_of_that_client(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let _signed_in = signed_in(&m).await;
+    cast(&m, true).await;
+    let store = m.env.store.clone();
+    let user_id = blocking({ let s = store.clone(); move || s.user_by_identity(TENANT, "oid-krisztian").unwrap().unwrap().user_id }).await;
+    let now = unix_now();
+    let resource = m.resource();
+    let create = |id: &str, client: &str, at: i64, expires_at: i64, cap: u32| {
+        let (mut grant, tokens, access) = planted(id, user_id, client, at, expires_at);
+        grant.resource = resource.clone();
+        let s = store.clone();
+        async move { (blocking(move || s.create_mcp_grant(&grant, &tokens, cap, at).unwrap().unwrap().revoked).await, access) }
+    };
+    let other = "https://claude.ai/oauth/other";
+    let (_, other_access) = create("g-other", other, now - 50, now + 3600, 3).await;
+    // An ended grant of the same client does not count.
+    let (none, _) = create("g-ended", CLIENT, now - 3700, now - 100, 3).await;
+    assert!(none.is_empty());
+    let mut access = HashMap::new();
+    for (i, id) in ["g-1", "g-2", "g-3"].into_iter().enumerate() {
+        let (revoked, a) = create(id, CLIENT, now - 40 + 10 * i as i64, now + 3600, 3).await;
+        assert!(revoked.is_empty(), "{id} fits under the cap: {revoked:?}");
+        access.insert(id, a);
+    }
+    let (revoked, a) = create("g-4", CLIENT, now - 5, now + 3600, 3).await;
+    assert_eq!(revoked, ["g-1"], "the oldest of the client ends");
+    access.insert("g-4", a);
+    // A lower cap ends as many as needed, oldest first.
+    let (revoked, _) = create("g-5", CLIENT, now, now + 3600, 2).await;
+    assert_eq!(revoked, ["g-2", "g-3"]);
+    let s = store.clone();
+    let mut live: Vec<String> = blocking(move || s.mcp_grants(user_id, now).unwrap()).await.into_iter().map(|g| g.grant_id).collect();
+    live.sort();
+    assert_eq!(live, ["g-4", "g-5", "g-other"], "another client's grant is untouched");
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    for id in ["g-1", "g-2", "g-3"] {
+        let (status, _, _) = m.post(Some(&access[id]), &[], ping.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{id} was revoked with its tokens");
+    }
+    for token in [&access["g-4"], &other_access] {
+        let (status, _, _) = m.post(Some(token), &[], ping.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    m.server.shutdown().await.unwrap();
+}
+
+async fn connecting_past_the_cap_keeps_the_newest_grants_live(d: Arc<Dispatcher>) {
+    let m = mcp_with(&d, |c| c.mcp.grants_per_client = 2).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let first = m.connect(&b).await;
+    let second = m.connect(&b).await;
+    let third = m.connect(&b).await;
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    let mut alive = 0;
+    for t in [&first, &second] {
+        let (status, _, _) = m.post(Some(&t.access), &[], ping.clone()).await;
+        alive += usize::from(status == StatusCode::OK);
+    }
+    // Grants made within the same second tie on age: which of the older two ends is not fixed.
+    assert_eq!(alive, 1, "one of the older grants was revoked");
+    m.ok(&third.access, "inbox", json!({})).await;
+    let page = b.get(&m.url("/keys")).await.2;
+    assert_eq!(page.matches("<code>claude.ai</code>").count(), 2, "{page}");
     m.server.shutdown().await.unwrap();
 }

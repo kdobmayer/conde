@@ -79,6 +79,9 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
   `last_used_at` at most once a minute. Revocation: the keys page. A disabled user's grants stop at
   the next request (kept, like host keys). A superseded refresh token presented again revokes its
   grant (above). Entra logout is not revocation.
+- Live grants per user per `client_id`: at most `CONDE_MCP_GRANTS_PER_CLIENT` (default 10). A new
+  grant past the cap revokes the oldest live ones of that user and client in the same
+  transaction (logged `mcp grant revoked`, `by = "grant cap"`); other clients' grants are untouched.
 - Limits: in-process token buckets (`governor` 0.10.4), per replica (with two replicas a client
   gets at most twice the rate; the per-IP key is the address the ingress appends to
   `X-Forwarded-For` when the peer is private): `tools/call` 120/min per grant (burst 30), `send` +

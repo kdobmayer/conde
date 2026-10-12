@@ -84,6 +84,9 @@ pub struct McpConfig {
     pub refresh_ttl: Duration,
     /// A grant ends this long after consent, whatever its refreshes.
     pub grant_ttl: Duration,
+    /// Live grants a user may hold per client_id; a new grant beyond it revokes the oldest
+    /// (`CONDE_MCP_GRANTS_PER_CLIENT`, default 10).
+    pub grants_per_client: u32,
     /// Period of the server's sweep of expired codes, tokens and grants.
     pub sweep_every: Duration,
     pub limits: McpLimits,
@@ -99,6 +102,7 @@ impl Default for McpConfig {
             access_ttl: Duration::from_secs(3600),
             refresh_ttl: Duration::from_secs(30 * 86400),
             grant_ttl: Duration::from_secs(90 * 86400),
+            grants_per_client: 10,
             sweep_every: Duration::from_secs(3600),
             limits: McpLimits::default(),
         }
@@ -123,6 +127,8 @@ pub enum ConfigError {
     AdminKey(usize),
     #[error("ENTRA_REDIRECT_URI '{0}' must be an https URL ending in /auth/callback")]
     RedirectUri(String),
+    #[error("{0} must be a whole number of at least 1")]
+    NotPositive(&'static str),
 }
 
 impl WebConfig {
@@ -175,6 +181,10 @@ impl WebConfig {
         }
         if let Some(hosts) = var("CONDE_MCP_CLIENT_HOSTS") {
             config.mcp.client_hosts = hosts.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
+        }
+        if let Some(cap) = var("CONDE_MCP_GRANTS_PER_CLIENT") {
+            const NAME: &str = "CONDE_MCP_GRANTS_PER_CLIENT";
+            config.mcp.grants_per_client = cap.trim().parse().ok().filter(|n| *n >= 1).ok_or(ConfigError::NotPositive(NAME))?;
         }
         Ok(Some(config))
     }
@@ -385,6 +395,15 @@ pub struct McpAccess {
     pub expires_at: i64,
 }
 
+/// Result of [`WebStore::create_mcp_grant`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpCreated {
+    /// The first access token's expiry.
+    pub access_expires_at: i64,
+    /// The grants revoked to stay within the cap, oldest first.
+    pub revoked: Vec<String>,
+}
+
 /// Result of [`WebStore::refresh_mcp_grant`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpRefreshed {
@@ -492,8 +511,15 @@ pub trait WebStore: Send + Sync {
         Err(no_mcp())
     }
     /// Stores the grant with its first token pair unless the user is disabled (checked in the
-    /// same transaction); the access token's expiry, or None when refused.
-    fn create_mcp_grant(&self, _grant: &McpGrant, _tokens: &McpTokens, _now: i64) -> WebResult<Option<i64>> {
+    /// same transaction), first revoking the user's oldest live grants of the same client so at
+    /// most `max_live` stay live with it; None when refused.
+    fn create_mcp_grant(
+        &self,
+        _grant: &McpGrant,
+        _tokens: &McpTokens,
+        _max_live: u32,
+        _now: i64,
+    ) -> WebResult<Option<McpCreated>> {
         Err(no_mcp())
     }
     /// The access token with its grant and user, whatever their state; records the grant's use

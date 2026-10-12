@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use conde_remote::web::{
     AdminKey, BindUser, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits, LoginTxn, McpAccess, McpCode,
-    McpGrant, McpHuman, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore, WebStoreError, WebUser,
+    McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore, WebStoreError,
+    WebUser,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -335,7 +336,7 @@ impl WebStore for WebBoard {
         }))
     }
 
-    fn create_mcp_grant(&self, g: &McpGrant, tokens: &McpTokens, now: i64) -> WebResult<Option<i64>> {
+    fn create_mcp_grant(&self, g: &McpGrant, tokens: &McpTokens, max_live: u32, now: i64) -> WebResult<Option<McpCreated>> {
         let row = McpGrantRow {
             grant_id: g.grant_id.clone(),
             user_id: g.user_id,
@@ -352,8 +353,21 @@ impl WebStore for WebBoard {
             if t.user_by_id(row.user_id)?.is_none_or(|u| u.disabled) {
                 return Ok(None);
             }
+            // Room for the new grant: the user's live grants of this client beyond the cap end,
+            // oldest first (newest first from the store; ties broken by grant_id).
+            let live: Vec<McpGrantRow> = t
+                .mcp_grants_of(row.user_id)?
+                .into_iter()
+                .filter(|o| o.client_id == row.client_id && o.revoked_at.is_none() && o.expires_at > now)
+                .collect();
+            let mut revoked = Vec::new();
+            for old in live.into_iter().skip(max_live.max(1) as usize - 1).rev() {
+                if t.revoke_mcp_grant(&old.grant_id, now)? {
+                    revoked.push(old.grant_id);
+                }
+            }
             t.insert_mcp_grant(&row)?;
-            Ok(Some(store_tokens(t, &row, tokens, now)?))
+            Ok(Some(McpCreated { access_expires_at: store_tokens(t, &row, tokens, now)?, revoked }))
         })
     }
 

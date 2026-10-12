@@ -60,12 +60,21 @@ fn metadata(body: Value) -> Response {
         .into_response()
 }
 
-/// `GET /.well-known/oauth-protected-resource[/mcp]` (RFC 9728).
+/// `GET /.well-known/oauth-protected-resource/mcp` (RFC 9728): the MCP endpoint's metadata.
 pub(crate) async fn protected_resource(State(state): State<WebState>) -> Response {
-    let c = state.config();
+    resource_metadata(state.config().mcp_resource(), &state)
+}
+
+/// `GET /.well-known/oauth-protected-resource` (RFC 9728 §3.3: the well-known URI without a path
+/// suffix describes the origin itself), with the same authorization server.
+pub(crate) async fn origin_resource(State(state): State<WebState>) -> Response {
+    resource_metadata(state.config().public_url.clone(), &state)
+}
+
+fn resource_metadata(resource: String, state: &WebState) -> Response {
     metadata(json!({
-        "resource": c.mcp_resource(),
-        "authorization_servers": [c.mcp_issuer()],
+        "resource": resource,
+        "authorization_servers": [state.config().mcp_issuer()],
         "scopes_supported": [SCOPE],
         "bearer_methods_supported": ["header"],
     }))

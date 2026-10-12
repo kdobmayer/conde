@@ -37,7 +37,8 @@ Mounted only with Entra configured. Issuer `https://conde.nativeai.space`, resou
 | Path | Behaviour |
 |---|---|
 | `POST /mcp` | Bearer token on every request, `initialize` included. Body cap 512 KiB (413). `Origin`, when present, must be the public origin or `https://claude.ai` / `https://claude.com`, else 403. Cookies never read. GET/DELETE: 405. |
-| `GET /.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-protected-resource` | `resource`, `authorization_servers: [issuer]`, `scopes_supported: ["conde"]`, `bearer_methods_supported: ["header"]` |
+| `GET /.well-known/oauth-protected-resource/mcp` | `resource` (the MCP endpoint URL), `authorization_servers: [issuer]`, `scopes_supported: ["conde"]`, `bearer_methods_supported: ["header"]` |
+| `GET /.well-known/oauth-protected-resource` | The same with `resource` = the origin (RFC 9728 §3.3: the URI without a path suffix describes the origin itself). |
 | `GET /.well-known/oauth-authorization-server` | issuer, the two endpoints, code flow + refresh, `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]`, `client_id_metadata_document_supported: true`, `scopes_supported: ["conde"]`, `authorization_response_iss_parameter_supported: true` |
 | `GET /oauth/authorize` | Checks `response_type=code`, client_id, redirect_uri, `code_challenge` with `S256`, `state`, and `resource` if sent (must be the resource URI). Errors before the redirect URI is trusted are a page, never a redirect. Then sign-in if needed, then consent: client = host of the `client_id` URL (its `client_name` only quoted), redirect host, the human name it will act as (or decision 3's refusal), Allow / Deny. |
 | `POST /oauth/authorize` | Session + CSRF; repeats every check (nothing pending is stored). Allow: code (256-bit, 60 s, single use) bound to user, client_id, redirect_uri, challenge; redirect with `code`, `state`, `iss`. Deny: `error=access_denied`. |

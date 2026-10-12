@@ -458,11 +458,13 @@ async fn metadata_and_the_challenge_point_at_this_server(d: Arc<Dispatcher>) {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(h[header::WWW_AUTHENTICATE], format!("{challenge}, error=\"invalid_token\"").as_str());
 
-    for path in ["/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource"] {
+    // The /mcp suffix names the endpoint; the bare well-known URI names the origin (RFC 9728 §3.3).
+    for (path, resource) in [("/.well-known/oauth-protected-resource/mcp", format!("{base}/mcp")),
+                             ("/.well-known/oauth-protected-resource", base.clone())] {
         let v: Value = m.http.get(m.url(path)).send().await.unwrap().json().await.unwrap();
         assert_eq!(
             v,
-            json!({"resource": format!("{base}/mcp"), "authorization_servers": [base], "scopes_supported": ["conde"],
+            json!({"resource": resource, "authorization_servers": [base], "scopes_supported": ["conde"],
                    "bearer_methods_supported": ["header"]}),
             "{path}"
         );

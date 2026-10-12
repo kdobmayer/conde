@@ -777,7 +777,7 @@ pub fn router(state: WebState) -> Router {
         .route("/keys/created", get(keys::created))
         .route("/keys/{host}/revoke", post(keys::revoke))
         .route("/keys/apps/{grant_id}/revoke", post(keys::revoke_app))
-        .route("/.well-known/oauth-protected-resource", get(oauth::protected_resource))
+        .route("/.well-known/oauth-protected-resource", get(oauth::origin_resource))
         .route("/.well-known/oauth-protected-resource/mcp", get(oauth::protected_resource))
         .route("/.well-known/oauth-authorization-server", get(oauth::authorization_server))
         .route("/oauth/authorize", get(oauth::authorize).post(oauth::consent))

@@ -83,6 +83,9 @@ fn main() {
     if wanted("sqlite::old_board_file_gains_topics") {
         report.run("sqlite::old_board_file_gains_topics", old_board_file_gains_topics);
     }
+    if wanted("sqlite::old_board_file_gains_grant_codes") {
+        report.run("sqlite::old_board_file_gains_grant_codes", old_board_file_gains_grant_codes);
+    }
     if wanted("sqlite::deliveries_without_a_settled_time_still_count_as_reached") {
         report.run(
             "sqlite::deliveries_without_a_settled_time_still_count_as_reached",
@@ -1225,6 +1228,55 @@ fn old_board_file_gains_topics() {
         tx.set_channel_topic("ch1", Some("back")).unwrap();
     });
     assert_eq!(read(&s, |tx| tx.channel_by_name("dev").unwrap().unwrap().topic).as_deref(), Some("back"));
+}
+
+/// A board file from before migration 0010 (`mcp_grants` without `code_digest` and its index):
+/// opening it adds both, its grants intact.
+fn old_board_file_gains_grant_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    {
+        let s = SqliteStore::open(&path).unwrap();
+        write(&s, |tx| {
+            let user_id = tx.ensure_user("krisz").unwrap();
+            tx.insert_mcp_grant(&conde::store::McpGrantRow {
+                grant_id: "g-old".into(),
+                user_id,
+                client_id: "https://claude.ai/oauth".into(),
+                client_host: "claude.ai".into(),
+                client_name: None,
+                resource: "https://conde.test/mcp".into(),
+                created_at: 1,
+                last_used_at: None,
+                expires_at: i64::MAX,
+                revoked_at: None,
+            })
+            .unwrap();
+        });
+    }
+    // the pre-0010 shape of the table
+    let columns = |c: &rusqlite::Connection| -> Vec<String> {
+        let mut st = c.prepare("SELECT name FROM pragma_table_info('mcp_grants')").unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    let index = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'mcp_grants_by_code'";
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("DROP INDEX mcp_grants_by_code; ALTER TABLE mcp_grants DROP COLUMN code_digest").unwrap();
+        assert!(!columns(&c).contains(&"code_digest".to_string()));
+    }
+    let s = SqliteStore::open(&path).unwrap();
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        assert!(columns(&c).contains(&"code_digest".to_string()));
+        assert_eq!(c.query_row(index, [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+    write(&s, |tx| {
+        assert_eq!(tx.mcp_grant("g-old").unwrap().unwrap().client_host, "claude.ai");
+        assert_eq!(tx.mcp_grant_of_code("c-1").unwrap(), None);
+        tx.set_mcp_grant_code("g-old", "c-1").unwrap();
+    });
+    assert_eq!(read(&s, |tx| tx.mcp_grant_of_code("c-1").unwrap()).as_deref(), Some("g-old"));
 }
 
 /// A database the phase-one binary migrated (version 1 only) gets migration 2 on the next start.

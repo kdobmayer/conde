@@ -1532,6 +1532,10 @@ impl Tx for SqliteTx<'_> {
         Ok(n == 1)
     }
 
+    fn has_mcp_code(&self, code_digest: &str) -> StoreResult<bool> {
+        Ok(self.opt("SELECT 1 FROM mcp_codes WHERE code_digest = ?1", [code_digest], |r| r.get::<_, i64>(0))?.is_some())
+    }
+
     fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()> {
         self.exec("UPDATE mcp_grants SET code_digest = ?2 WHERE grant_id = ?1", params![grant_id, code_digest])?;
         Ok(())

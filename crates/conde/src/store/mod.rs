@@ -721,6 +721,8 @@ pub trait Tx {
     /// Ends a live grant: sets revoked_at and deletes its access and refresh tokens. False when
     /// the grant was not live.
     fn revoke_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<bool>;
+    /// Whether an authorization code with this digest waits to be redeemed.
+    fn has_mcp_code(&self, code_digest: &str) -> StoreResult<bool>;
     /// Records the authorization code (its digest) the grant was minted from.
     fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()>;
     /// The stored grant minted from the authorization code.

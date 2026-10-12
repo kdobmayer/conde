@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use conde_remote::web::{
     AdminKey, BindUser, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits, LoginTxn, McpAccess, McpCode,
-    McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore, WebStoreError,
-    WebUser,
+    McpCodeState, McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore,
+    WebStoreError, WebUser,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -443,11 +443,33 @@ impl WebStore for WebBoard {
         })
     }
 
-    fn revoke_mcp_code_grant(&self, code_digest: &str, now: i64) -> WebResult<Option<McpGrant>> {
+    fn mcp_code_state(&self, code_digest: &str) -> WebResult<McpCodeState> {
+        self.read(|t| {
+            Ok(if t.has_mcp_code(code_digest)? {
+                McpCodeState::Issued
+            } else if t.mcp_grant_of_code(code_digest)?.is_some() {
+                McpCodeState::Redeemed
+            } else {
+                McpCodeState::Unknown
+            })
+        })
+    }
+
+    fn revoke_mcp_code_grant(
+        &self,
+        code_digest: &str,
+        client_id: &str,
+        now: i64,
+    ) -> WebResult<Option<(McpGrant, bool)>> {
         self.write(|t| {
             let Some(grant_id) = t.mcp_grant_of_code(code_digest)? else { return Ok(None) };
-            t.revoke_mcp_grant(&grant_id, now)?;
-            Ok(t.mcp_grant(&grant_id)?.map(grant))
+            match t.mcp_grant(&grant_id)? {
+                Some(g) if g.client_id == client_id => {
+                    let revoked = t.revoke_mcp_grant(&grant_id, now)?;
+                    Ok(t.mcp_grant(&grant_id)?.map(|g| (grant(g), revoked)))
+                }
+                _ => Ok(None),
+            }
         })
     }
 

@@ -2036,6 +2036,10 @@ impl Tx for PgTx {
         Ok(n == 1)
     }
 
+    fn has_mcp_code(&self, code_digest: &str) -> StoreResult<bool> {
+        Ok(self.query_opt("SELECT 1 FROM mcp_codes WHERE code_digest = $1", &[&code_digest])?.is_some())
+    }
+
     fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()> {
         self.execute("UPDATE mcp_grants SET code_digest = $2 WHERE grant_id = $1", &[&grant_id, &code_digest])?;
         Ok(())

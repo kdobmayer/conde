@@ -106,6 +106,7 @@ on_both!(
     a_connected_app_reads_and_writes_as_the_human_until_revoked,
     a_replayed_refresh_token_revokes_the_whole_grant,
     a_replayed_code_revokes_the_grant_it_made,
+    a_replay_after_a_failed_redemption_revokes_nothing,
     client_metadata_refusals_are_pages_never_redirects,
     pkce_code_and_audience_refusals,
     protocol_errors_map_to_their_statuses,
@@ -1158,6 +1159,20 @@ async fn a_replayed_code_revokes_the_grant_it_made(d: Arc<Dispatcher>) {
     let tk = tokens(&v);
     let other = m.connect(&b).await;
     m.ok(&tk.access, "inbox", json!({})).await;
+    // Another client presenting the code revokes nothing.
+    let resource = m.resource();
+    let (status, v) = m
+        .token(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", REDIRECT_PORTED),
+            ("client_id", "https://claude.ai/oauth/other"),
+            ("code_verifier", &p.verifier),
+            ("resource", &resource),
+        ])
+        .await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{v}");
+    m.ok(&tk.access, "inbox", json!({})).await;
     // The code row is gone after the first redemption; the grant remembers its code.
     let (status, v) = m.redeem(&code, &p).await;
     assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{v}");
@@ -1172,6 +1187,26 @@ async fn a_replayed_code_revokes_the_grant_it_made(d: Arc<Dispatcher>) {
     // The grant from another code is untouched.
     m.ok(&other.access, "inbox", json!({})).await;
     let (status, v) = m.refresh(&other.refresh).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    m.server.shutdown().await.unwrap();
+}
+
+/// A first redemption refused after the code was taken (a wrong verifier) mints no grant, so a
+/// second use has nothing to revoke: it is refused and every grant stays live.
+async fn a_replay_after_a_failed_redemption_revokes_nothing(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let live = m.connect(&b).await;
+    let p = pkce();
+    let code = m.code(&b, &p).await;
+    let (status, v) = m.redeem(&code, &pkce()).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "wrong verifier: {v}");
+    let (status, v) = m.redeem(&code, &p).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{v}");
+    assert_eq!(v["error_description"], "unknown or already used code", "{v}");
+    m.ok(&live.access, "inbox", json!({})).await;
+    let (status, v) = m.refresh(&live.refresh).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     m.server.shutdown().await.unwrap();
 }

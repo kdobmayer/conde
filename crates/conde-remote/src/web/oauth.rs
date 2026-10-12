@@ -21,7 +21,9 @@ use super::cimd::{Client, Refusal};
 use super::keys;
 use super::ratelimit::ClientIp;
 use super::session::{self, WebError, digest, random_token, same_secret};
-use super::{McpCode, McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, WebState, pages};
+use super::{
+    McpCode, McpCodeState, McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, WebState, pages,
+};
 
 /// The one scope: the board as the signed-in user.
 pub(crate) const SCOPE: &str = "conde";
@@ -403,37 +405,64 @@ pub(crate) async fn token(State(state): State<WebState>, ClientIp(ip): ClientIp,
     }
 }
 
+/// A redeemed code presented again may have leaked: the grant it made for this client ends.
+async fn code_replayed(state: &WebState, key: String, client_id: String, now: i64) -> Response {
+    match state
+        .store(move |s| s.revoke_mcp_code_grant(&key, &client_id, now))
+        .await
+    {
+        Ok(Some((g, true))) => {
+            tracing::warn!(user_id = g.user_id, grant = %g.grant_id, client = %g.client_host, client_id = %g.client_id,
+                by = "authorization code replay", "mcp code presented again; grant revoked");
+            token_error("invalid_grant", "this code was already used; the connection it made was revoked")
+        }
+        Ok(Some((g, false))) => {
+            tracing::warn!(user_id = g.user_id, grant = %g.grant_id, client = %g.client_host, client_id = %g.client_id,
+                "mcp code presented again; grant already revoked");
+            token_error("invalid_grant", "unknown or already used code")
+        }
+        Ok(None) => {
+            tracing::warn!("mcp token: unknown or used code");
+            token_error("invalid_grant", "unknown or already used code")
+        }
+        Err(e) => server_error(e),
+    }
+}
+
 async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
     let code = get(p, "code");
     if code.len() != 64 {
         return token_error("invalid_grant", "unknown code");
     }
     let (key, now) = (digest(code), state.now());
-    let taken = {
+    // One read decides; a made-up code never opens a write.
+    let known = {
         let key = key.clone();
-        match state.store(move |s| s.take_mcp_code(&key)).await {
-            Ok(t) => t,
+        match state.store(move |s| s.mcp_code_state(&key)).await {
+            Ok(k) => k,
             Err(e) => return server_error(e),
         }
     };
-    let Some(c) = taken else {
-        // A code is taken once; presented again it may have leaked: the grant it made ends.
-        let replayed = {
+    let taken = match known {
+        McpCodeState::Unknown => None,
+        McpCodeState::Redeemed => {
+            return code_replayed(state, key, get(p, "client_id").to_string(), now).await;
+        }
+        McpCodeState::Issued => {
             let key = key.clone();
-            state.store(move |s| s.revoke_mcp_code_grant(&key, now)).await
-        };
-        return match replayed {
-            Ok(Some(g)) => {
-                tracing::warn!(user_id = g.user_id, grant = %g.grant_id, client = %g.client_host,
-                    by = "authorization code replay", "mcp code presented again; grant revoked");
-                token_error("invalid_grant", "this code was already used; the connection it made was revoked")
+            match state.store(move |s| s.take_mcp_code(&key)).await {
+                Ok(t) => t,
+                Err(e) => return server_error(e),
             }
-            Ok(None) => {
-                tracing::warn!("mcp token: unknown or used code");
-                token_error("invalid_grant", "unknown or already used code")
-            }
-            Err(e) => server_error(e),
-        };
+        }
+    };
+    let Some(c) = taken else {
+        if known == McpCodeState::Issued {
+            // taken by a concurrent redemption between the read and the take
+            return code_replayed(state, key, get(p, "client_id").to_string(), now).await;
+        }
+        tracing::warn!("mcp token: unknown or used code");
+        return token_error("invalid_grant", "unknown or already used code");
     };
     let m = &state.config().mcp;
     if now - c.created_at > m.code_ttl.as_secs() as i64 {

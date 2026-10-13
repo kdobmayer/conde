@@ -409,14 +409,25 @@ pub struct McpCreated {
 }
 
 /// Result of [`WebStore::mcp_code_state`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpCodeState {
     /// Neither issued nor redeemed here (made up, expired and purged, or its grant purged).
     Unknown,
     /// Issued and not redeemed yet.
-    Issued,
+    Issued(McpCode),
     /// Redeemed: a stored grant was minted from it.
     Redeemed,
+}
+
+/// Result of [`WebStore::redeem_mcp_code`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpRedeemed {
+    /// The code was taken and the grant stored, in one transaction.
+    Created(McpCreated),
+    /// The code was no longer there: another redemption took it.
+    Taken,
+    /// The code was taken (spent) but the user is disabled: no grant.
+    Disabled,
 }
 
 /// Result of [`WebStore::refresh_mcp_grant`].
@@ -529,6 +540,19 @@ pub trait WebStore: Send + Sync {
     fn mcp_code_state(&self, _code_digest: &str) -> WebResult<McpCodeState> {
         Err(no_mcp())
     }
+    /// Takes the authorization code and stores the grant minted from it in ONE transaction (as
+    /// [`WebStore::create_mcp_grant`]), so a concurrent reader sees either the code or its grant,
+    /// never neither: a replay always finds the grant to revoke.
+    fn redeem_mcp_code(
+        &self,
+        _code_digest: &str,
+        _grant: &McpGrant,
+        _tokens: &McpTokens,
+        _max_live: u32,
+        _now: i64,
+    ) -> WebResult<McpRedeemed> {
+        Err(no_mcp())
+    }
     /// Stores the grant, minted from the authorization code `code_digest`, with its first
     /// token pair unless the user is disabled (checked in the same transaction), first revoking
     /// the user's oldest live grants of the same client so at most `max_live` stay live with
@@ -571,6 +595,12 @@ pub trait WebStore: Send + Sync {
     /// grant minted from it with its tokens and returns it with whether this call revoked it
     /// (false: it had already ended); None when no stored grant came from that code or the
     /// grant belongs to another client.
+    /// RFC 7009: revokes the grant of an access or refresh token (whichever it is) with all its
+    /// tokens when the grant belongs to `client_id`; the grant and whether it was live, or None
+    /// when the token is unknown or another client's.
+    fn revoke_mcp_token(&self, _token_digest: &str, _client_id: &str, _now: i64) -> WebResult<Option<(McpGrant, bool)>> {
+        Err(no_mcp())
+    }
     fn revoke_mcp_code_grant(
         &self,
         _code_digest: &str,
@@ -811,6 +841,7 @@ pub fn router(state: WebState) -> Router {
         .route("/.well-known/oauth-authorization-server", get(oauth::authorization_server))
         .route("/oauth/authorize", get(oauth::authorize).post(oauth::consent))
         .route("/oauth/token", post(oauth::token))
+        .route("/oauth/revoke", post(oauth::revoke))
         .with_state(state)
 }
 

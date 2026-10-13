@@ -39,11 +39,12 @@ Mounted only with Entra configured. Issuer `https://conde.nativeai.space`, resou
 | `POST /mcp` | Bearer token on every request, `initialize` included. Body cap 512 KiB (413). `Origin`, when present, must be the public origin or `https://claude.ai` / `https://claude.com`, else 403. Cookies never read. GET/DELETE: 405. |
 | `GET /.well-known/oauth-protected-resource/mcp` | `resource` (the MCP endpoint URL), `authorization_servers: [issuer]`, `scopes_supported: ["conde"]`, `bearer_methods_supported: ["header"]` |
 | `GET /.well-known/oauth-protected-resource` | The same with `resource` = the origin (RFC 9728 §3.3: the URI without a path suffix describes the origin itself). |
-| `GET /.well-known/oauth-authorization-server` | issuer, the two endpoints, code flow + refresh, `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]`, `client_id_metadata_document_supported: true`, `scopes_supported: ["conde"]`, `authorization_response_iss_parameter_supported: true` |
+| `GET /.well-known/oauth-authorization-server` | issuer, the authorization, token and revocation endpoints (`revocation_endpoint_auth_methods_supported: ["none"]`), code flow + refresh, `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]`, `client_id_metadata_document_supported: true`, `scopes_supported: ["conde"]`, `authorization_response_iss_parameter_supported: true` |
 | `GET /oauth/authorize` | Checks `response_type=code`, client_id, redirect_uri, `code_challenge` with `S256`, `state`, and `resource` if sent (must be the resource URI). Errors before the redirect URI is trusted are a page, never a redirect. Then sign-in if needed, then consent: client = host of the `client_id` URL (its `client_name` only quoted), redirect host, the human name it will act as (or decision 3's refusal), Allow / Deny. |
 | `POST /oauth/authorize` | Session + CSRF; repeats every check (nothing pending is stored). Allow: code (256-bit, 60 s, single use) bound to user, client_id, redirect_uri, challenge; redirect with `code`, `state`, `iss`. Deny: `error=access_denied`. |
-| `POST /oauth/token` | Form-encoded, public client. `authorization_code` (code taken once, verifier, same client_id and redirect_uri) creates the grant; a code presented again revokes the grant made from it (RFC 6749 §4.1.2); `refresh_token` rotates. RFC 6749 errors (`invalid_grant`, ...), `no-store`. |
+| `POST /oauth/token` | Form-encoded, public client. `authorization_code` (code taken once, verifier, same client_id and redirect_uri) creates the grant: the code's take and the grant's insert are one transaction, so a concurrent reader sees the code or its grant, never neither; a code presented again (even racing the first redemption) revokes the grant made from it (RFC 6749 §4.1.2); `refresh_token` rotates. RFC 6749 errors (`invalid_grant`, ...), `no-store`. |
 | `GET /keys` | New "Connected apps" section: per live grant client host, created, last used, expiry, Revoke. |
+| `POST /oauth/revoke` | RFC 7009, form-encoded, public client: `token` (access or refresh token), optional `token_type_hint` (only orders the lookup), `client_id` (required; must be the grant's client). Ends the token's whole grant with every token of it, so a connector removed in Claude leaves the keys page at once. Always 200 `{}` once the request is well formed (unknown token, another client's, already revoked); 400 `invalid_request` without `token` or `client_id` or with a repeated parameter. Same per-IP bucket as the other OAuth endpoints; `no-store`. |
 | `POST /keys/apps/{grant_id}/revoke` | Session + CSRF; the grant ends at once. |
 
 CIMD: https URL on an allowed host, fetched without redirects (5 s, 64 KiB, cached 1 h), its
@@ -73,13 +74,14 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
   endpoint refuses a token whose audience is not its own URL.
 - Access token `conde_at_<64 hex>`, 1 h. Refresh token `conde_rt_<64 hex>`, rotated on every use,
   30 days. Grant life 90 days, then Claude shows Connect again; tokens never outlive their grant.
-  `purge_mcp` runs on each consent, on every refresh, and in an hourly sweep on each replica: it
+  `purge_mcp` runs on each consent, on every refresh, and in an hourly sweep on each replica (it ends
+  at shutdown, and the server handle waits for a running purge): it
   drops old codes, expired access tokens, unconsumed refresh tokens past their expiry, and ended
   (expired or revoked) grants with all their refresh tokens. Indexes on the expiry columns
   (`0009_mcp_expiry.sql`; partial on `mcp_refresh`, unconsumed rows only, full on `mcp_tokens`)
   keep the per-refresh purge cheap.
 - Each request: one lookup, token -> live grant -> user not disabled -> audience, else 401;
-  `last_used_at` at most once a minute. Revocation: the keys page. A disabled user's grants stop at
+  `last_used_at` at most once a minute. Revocation: the keys page, or the client through `POST /oauth/revoke`. A disabled user's grants stop at
   the next request (kept, like host keys). A superseded refresh token presented again revokes its
   grant (above). Entra logout is not revocation.
 - Live grants per user per `client_id`: at most `CONDE_MCP_GRANTS_PER_CLIENT` (default 10). A new

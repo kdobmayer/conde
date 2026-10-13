@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use conde_remote::web::{
     AdminKey, BindUser, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits, LoginTxn, McpAccess, McpCode,
-    McpCodeState, McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore,
+    McpCodeState, McpCreated, McpGrant, McpHuman, McpRedeemed, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore,
     WebStoreError, WebUser,
 };
 use serde::Serialize;
@@ -79,6 +79,52 @@ fn grant(g: McpGrantRow) -> McpGrant {
 const TOUCH_EVERY: i64 = 60;
 
 /// Stores a token pair of the grant, each capped at the grant's end; the access token's expiry.
+fn grant_row(g: &McpGrant) -> McpGrantRow {
+    McpGrantRow {
+        grant_id: g.grant_id.clone(),
+        user_id: g.user_id,
+        client_id: g.client_id.clone(),
+        client_host: g.client_host.clone(),
+        client_name: g.client_name.clone(),
+        resource: g.resource.clone(),
+        created_at: g.created_at,
+        last_used_at: g.last_used_at,
+        expires_at: g.expires_at,
+        revoked_at: None,
+    }
+}
+
+/// Stores the grant with its first token pair unless the user is disabled, first revoking the
+/// user's oldest live grants of the same client beyond `max_live`.
+fn create_grant(
+    t: &dyn Tx,
+    row: &McpGrantRow,
+    code_digest: &str,
+    tokens: &McpTokens,
+    max_live: u32,
+    now: i64,
+) -> Result<Option<McpCreated>, StoreError> {
+    if t.user_by_id(row.user_id)?.is_none_or(|u| u.disabled) {
+        return Ok(None);
+    }
+    // Room for the new grant: the user's live grants of this client beyond the cap end,
+    // oldest first (newest first from the store; ties broken by grant_id).
+    let live: Vec<McpGrantRow> = t
+        .mcp_grants_of(row.user_id)?
+        .into_iter()
+        .filter(|o| o.client_id == row.client_id && o.revoked_at.is_none() && o.expires_at > now)
+        .collect();
+    let mut revoked = Vec::new();
+    for old in live.into_iter().skip(max_live.max(1) as usize - 1).rev() {
+        if t.revoke_mcp_grant(&old.grant_id, now)? {
+            revoked.push(old.grant_id);
+        }
+    }
+    t.insert_mcp_grant(row)?;
+    t.set_mcp_grant_code(&row.grant_id, code_digest)?;
+    Ok(Some(McpCreated { access_expires_at: store_tokens(t, row, tokens, now)?, revoked }))
+}
+
 fn store_tokens(t: &dyn Tx, g: &McpGrantRow, tokens: &McpTokens, now: i64) -> Result<i64, StoreError> {
     let access_expires_at = (now + tokens.access_ttl).min(g.expires_at);
     t.insert_mcp_token(&tokens.access_digest, &g.grant_id, &g.resource, access_expires_at)?;
@@ -344,38 +390,28 @@ impl WebStore for WebBoard {
         max_live: u32,
         now: i64,
     ) -> WebResult<Option<McpCreated>> {
-        let row = McpGrantRow {
-            grant_id: g.grant_id.clone(),
-            user_id: g.user_id,
-            client_id: g.client_id.clone(),
-            client_host: g.client_host.clone(),
-            client_name: g.client_name.clone(),
-            resource: g.resource.clone(),
-            created_at: g.created_at,
-            last_used_at: g.last_used_at,
-            expires_at: g.expires_at,
-            revoked_at: None,
-        };
+        let row = grant_row(g);
+        self.write(|t| Ok(create_grant(t, &row, code_digest, tokens, max_live, now)?))
+    }
+
+    fn redeem_mcp_code(
+        &self,
+        code_digest: &str,
+        g: &McpGrant,
+        tokens: &McpTokens,
+        max_live: u32,
+        now: i64,
+    ) -> WebResult<McpRedeemed> {
+        let row = grant_row(g);
         self.write(|t| {
-            if t.user_by_id(row.user_id)?.is_none_or(|u| u.disabled) {
-                return Ok(None);
+            if t.take_mcp_code(code_digest)?.is_none() {
+                return Ok(McpRedeemed::Taken);
             }
-            // Room for the new grant: the user's live grants of this client beyond the cap end,
-            // oldest first (newest first from the store; ties broken by grant_id).
-            let live: Vec<McpGrantRow> = t
-                .mcp_grants_of(row.user_id)?
-                .into_iter()
-                .filter(|o| o.client_id == row.client_id && o.revoked_at.is_none() && o.expires_at > now)
-                .collect();
-            let mut revoked = Vec::new();
-            for old in live.into_iter().skip(max_live.max(1) as usize - 1).rev() {
-                if t.revoke_mcp_grant(&old.grant_id, now)? {
-                    revoked.push(old.grant_id);
-                }
-            }
-            t.insert_mcp_grant(&row)?;
-            t.set_mcp_grant_code(&row.grant_id, code_digest)?;
-            Ok(Some(McpCreated { access_expires_at: store_tokens(t, &row, tokens, now)?, revoked }))
+            // Committed either way: a refused redemption still spends the code.
+            Ok(match create_grant(t, &row, code_digest, tokens, max_live, now)? {
+                Some(created) => McpRedeemed::Created(created),
+                None => McpRedeemed::Disabled,
+            })
         })
     }
 
@@ -445,13 +481,40 @@ impl WebStore for WebBoard {
 
     fn mcp_code_state(&self, code_digest: &str) -> WebResult<McpCodeState> {
         self.read(|t| {
-            Ok(if t.has_mcp_code(code_digest)? {
-                McpCodeState::Issued
+            Ok(if let Some(c) = t.mcp_code(code_digest)? {
+                McpCodeState::Issued(McpCode {
+                    user_id: c.user_id,
+                    client_id: c.client_id,
+                    client_name: c.client_name,
+                    redirect_uri: c.redirect_uri,
+                    challenge: c.challenge,
+                    resource: c.resource,
+                    created_at: c.created_at,
+                })
             } else if t.mcp_grant_of_code(code_digest)?.is_some() {
                 McpCodeState::Redeemed
             } else {
                 McpCodeState::Unknown
             })
+        })
+    }
+
+    fn revoke_mcp_token(&self, token_digest: &str, client_id: &str, now: i64) -> WebResult<Option<(McpGrant, bool)>> {
+        self.write(|t| {
+            let grant_id = match t.mcp_token(token_digest)? {
+                Some((grant_id, _, _)) => grant_id,
+                None => match t.mcp_refresh(token_digest)? {
+                    Some(r) => r.grant_id,
+                    None => return Ok(None),
+                },
+            };
+            match t.mcp_grant(&grant_id)? {
+                Some(g) if g.client_id == client_id => {
+                    let revoked = t.revoke_mcp_grant(&grant_id, now)?;
+                    Ok(t.mcp_grant(&grant_id)?.map(|g| (grant(g), revoked)))
+                }
+                _ => Ok(None),
+            }
         })
     }
 

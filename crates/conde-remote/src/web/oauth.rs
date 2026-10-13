@@ -22,7 +22,7 @@ use super::keys;
 use super::ratelimit::ClientIp;
 use super::session::{self, WebError, digest, random_token, same_secret};
 use super::{
-    McpCode, McpCodeState, McpCreated, McpGrant, McpHuman, McpRefreshed, McpTokens, WebState, pages,
+    McpCode, McpCodeState, McpCreated, McpGrant, McpHuman, McpRedeemed, McpRefreshed, McpTokens, WebState, pages,
 };
 
 /// The one scope: the board as the signed-in user.
@@ -90,6 +90,8 @@ pub(crate) async fn authorization_server(State(state): State<WebState>) -> Respo
         "issuer": issuer,
         "authorization_endpoint": format!("{issuer}/oauth/authorize"),
         "token_endpoint": format!("{issuer}/oauth/token"),
+        "revocation_endpoint": format!("{issuer}/oauth/revoke"),
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
@@ -377,16 +379,22 @@ fn issued(access: &str, refresh: &str, expires_in: i64) -> Response {
 }
 
 /// `POST /oauth/token` (form): `authorization_code` creates the grant, `refresh_token` rotates.
+/// The OAuth endpoints' per-IP bucket: None, or the 429 to answer.
+fn oauth_limited(state: &WebState, ip: std::net::IpAddr, endpoint: &'static str) -> Option<Response> {
+    let wait = state.0.limits.oauth(ip).err()?;
+    tracing::info!(client_ip = %ip, wait, endpoint, "oauth rate limited");
+    let mut r = token_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({"error": "rate_limited", "error_description": format!("retry in {wait} s")}),
+    );
+    if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
+        r.headers_mut().insert(header::RETRY_AFTER, v);
+    }
+    Some(r)
+}
+
 pub(crate) async fn token(State(state): State<WebState>, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    if let Err(wait) = state.0.limits.oauth(ip) {
-        tracing::info!(client_ip = %ip, wait, endpoint = "token", "oauth rate limited");
-        let mut r = token_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            json!({"error": "rate_limited", "error_description": format!("retry in {wait} s")}),
-        );
-        if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
-            r.headers_mut().insert(header::RETRY_AFTER, v);
-        }
+    if let Some(r) = oauth_limited(&state, ip, "token") {
         return r;
     }
     let Some(p) = params(&body) else {
@@ -429,12 +437,35 @@ async fn code_replayed(state: &WebState, key: String, client_id: String, now: i6
     }
 }
 
+/// Why a presented code is refused before it is redeemed, as the `invalid_grant` description.
+fn check_code(c: &McpCode, p: &HashMap<String, String>, now: i64, code_ttl: i64) -> Result<(), &'static str> {
+    if now - c.created_at > code_ttl {
+        return Err("the code expired");
+    }
+    if get(p, "client_id") != c.client_id {
+        return Err("the code was issued to another client");
+    }
+    if get(p, "redirect_uri") != c.redirect_uri {
+        return Err("redirect_uri differs from the authorization request");
+    }
+    let verifier = get(p, "code_verifier");
+    if !pkce_safe(verifier) {
+        return Err("bad code_verifier");
+    }
+    let expected = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(verifier.to_string()));
+    if !same_secret(expected.as_str(), &c.challenge) {
+        return Err("the code_verifier does not match the challenge");
+    }
+    Ok(())
+}
+
 async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
     let code = get(p, "code");
     if code.len() != 64 {
         return token_error("invalid_grant", "unknown code");
     }
     let (key, now) = (digest(code), state.now());
+    let client_id = get(p, "client_id").to_string();
     // One read decides; a made-up code never opens a write.
     let known = {
         let key = key.clone();
@@ -443,44 +474,26 @@ async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
             Err(e) => return server_error(e),
         }
     };
-    let taken = match known {
-        McpCodeState::Unknown => None,
-        McpCodeState::Redeemed => {
-            return code_replayed(state, key, get(p, "client_id").to_string(), now).await;
+    let c = match known {
+        McpCodeState::Unknown => {
+            tracing::warn!("mcp token: unknown or used code");
+            return token_error("invalid_grant", "unknown or already used code");
         }
-        McpCodeState::Issued => {
-            let key = key.clone();
-            match state.store(move |s| s.take_mcp_code(&key)).await {
-                Ok(t) => t,
-                Err(e) => return server_error(e),
-            }
-        }
-    };
-    let Some(c) = taken else {
-        if known == McpCodeState::Issued {
-            // taken by a concurrent redemption between the read and the take
-            return code_replayed(state, key, get(p, "client_id").to_string(), now).await;
-        }
-        tracing::warn!("mcp token: unknown or used code");
-        return token_error("invalid_grant", "unknown or already used code");
+        McpCodeState::Redeemed => return code_replayed(state, key, client_id, now).await,
+        McpCodeState::Issued(c) => c,
     };
     let m = &state.config().mcp;
-    if now - c.created_at > m.code_ttl.as_secs() as i64 {
-        return token_error("invalid_grant", "the code expired");
-    }
-    if get(p, "client_id") != c.client_id {
-        return token_error("invalid_grant", "the code was issued to another client");
-    }
-    if get(p, "redirect_uri") != c.redirect_uri {
-        return token_error("invalid_grant", "redirect_uri differs from the authorization request");
-    }
-    let verifier = get(p, "code_verifier");
-    if !pkce_safe(verifier) {
-        return token_error("invalid_grant", "bad code_verifier");
-    }
-    let expected = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(verifier.to_string()));
-    if !same_secret(expected.as_str(), &c.challenge) {
-        return token_error("invalid_grant", "the code_verifier does not match the challenge");
+    if let Err(why) = check_code(&c, p, now, m.code_ttl.as_secs() as i64) {
+        // A refused attempt spends the code too; gone already means a concurrent redemption.
+        let taken = {
+            let key = key.clone();
+            state.store(move |s| s.take_mcp_code(&key)).await
+        };
+        return match taken {
+            Ok(Some(_)) => token_error("invalid_grant", why),
+            Ok(None) => code_replayed(state, key, client_id, now).await,
+            Err(e) => server_error(e),
+        };
     }
     let client_host = Url::parse(&c.client_id).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
     let grant = McpGrant {
@@ -496,9 +509,10 @@ async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
         revoked_at: None,
     };
     let (access, refresh, tokens) = new_tokens(state);
-    let (stored, cap) = (grant.clone(), m.grants_per_client);
-    match state.store(move |s| s.create_mcp_grant(&stored, &key, &tokens, cap, now)).await {
-        Ok(Some(McpCreated { access_expires_at, revoked })) => {
+    let (stored, cap, code_key) = (grant.clone(), m.grants_per_client, key.clone());
+    // The take and the grant are one transaction: a replay sees the code or the grant.
+    match state.store(move |s| s.redeem_mcp_code(&code_key, &stored, &tokens, cap, now)).await {
+        Ok(McpRedeemed::Created(McpCreated { access_expires_at, revoked })) => {
             for old in &revoked {
                 tracing::info!(user_id = grant.user_id, grant = %old, client = %grant.client_host,
                     client_id = %grant.client_id, by = "grant cap", cap, "mcp grant revoked");
@@ -507,7 +521,8 @@ async fn code_grant(state: &WebState, p: &HashMap<String, String>) -> Response {
                 client_id = %grant.client_id, "mcp grant created");
             issued(&access, &refresh, access_expires_at - now)
         }
-        Ok(None) => token_error("invalid_grant", "this account is disabled"),
+        Ok(McpRedeemed::Taken) => code_replayed(state, key, client_id, now).await,
+        Ok(McpRedeemed::Disabled) => token_error("invalid_grant", "this account is disabled"),
         Err(e) => server_error(e),
     }
 }
@@ -547,6 +562,40 @@ async fn refresh_grant(state: &WebState, p: &HashMap<String, String>) -> Respons
         }
         Err(e) => server_error(e),
     }
+}
+
+/// `POST /oauth/revoke` (RFC 7009): a public client names itself by `client_id`; an access or
+/// refresh token of one of its grants ends that grant with every token of it. 200 whether or not
+/// the token was known or the client's (§2.2), so the answer says nothing about other tokens.
+pub(crate) async fn revoke(State(state): State<WebState>, ClientIp(ip): ClientIp, body: Bytes) -> Response {
+    if let Some(r) = oauth_limited(&state, ip, "revoke") {
+        return r;
+    }
+    let Some(p) = params(&body) else {
+        return token_error("invalid_request", "a parameter is repeated");
+    };
+    let (presented, client_id) = (get(&p, "token"), get(&p, "client_id").to_string());
+    if presented.is_empty() {
+        return token_error("invalid_request", "token is required");
+    }
+    if client_id.is_empty() {
+        return token_error("invalid_request", "client_id is required");
+    }
+    // token_type_hint only orders a lookup (§2.1); both kinds are found by their digest.
+    let known = [ACCESS_PREFIX, REFRESH_PREFIX].iter().any(|kind| presented.starts_with(kind) && presented.len() == kind.len() + 64);
+    if known {
+        let (key, now) = (digest(presented), state.now());
+        let client = client_id.clone();
+        match state.store(move |s| s.revoke_mcp_token(&key, &client, now)).await {
+            Ok(Some((g, live))) => {
+                tracing::info!(user_id = g.user_id, grant = %g.grant_id, client = %g.client_host, client_id = %g.client_id,
+                    by = "revocation endpoint", already = !live, "mcp grant revoked");
+            }
+            Ok(None) => tracing::info!(%client_id, "mcp revoke: unknown token or another client's"),
+            Err(e) => return server_error(e),
+        }
+    }
+    token_response(StatusCode::OK, json!({}))
 }
 
 /// Deletes expired codes, tokens and grants every `sweep_every` until shutdown (each replica

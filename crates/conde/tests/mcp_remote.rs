@@ -29,7 +29,7 @@ use conde::protocol::Request;
 use conde::web_store::WebBoard;
 use conde_remote::web::cimd::{ClientMetadataFetcher, FetchError};
 use conde_remote::web::{
-    self, BridgeRegistry, McpGrant, McpLimits, McpTokens, WebConfig, WebSetup, WebState, WebStore,
+    self, BridgeRegistry, McpCode, McpCodeState, McpGrant, McpLimits, McpRedeemed, McpTokens, WebConfig, WebSetup, WebState, WebStore,
 };
 use conde_remote::{ServerConfig, ServerHandle};
 use rsa::pkcs1v15::SigningKey;
@@ -113,6 +113,10 @@ on_both!(
     the_buckets_run_out,
     no_human_name_refuses_writes_with_the_hint,
     a_disabled_user_is_refused_at_the_next_request,
+    a_code_and_its_replay_interleaved_leave_no_live_grant,
+    concurrent_redemptions_of_one_code_leave_no_live_grant,
+    the_revocation_endpoint_ends_the_whole_grant,
+    a_refresh_token_replay_purges_its_family,
     grants_beyond_the_cap_revoke_the_oldest_of_that_client,
     connecting_past_the_cap_keeps_the_newest_grants_live,
     expired_rows_go_at_every_refresh_and_a_spent_token_stays_with_its_grant,
@@ -478,6 +482,8 @@ async fn metadata_and_the_challenge_point_at_this_server(d: Arc<Dispatcher>) {
             "issuer": base,
             "authorization_endpoint": format!("{base}/oauth/authorize"),
             "token_endpoint": format!("{base}/oauth/token"),
+            "revocation_endpoint": format!("{base}/oauth/revoke"),
+            "revocation_endpoint_auth_methods_supported": ["none"],
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
@@ -884,6 +890,9 @@ async fn the_buckets_run_out(d: Arc<Dispatcher>) {
     let r = m.http.post(m.url("/oauth/token")).form(&[("grant_type", "password")]).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(r.headers()[header::RETRY_AFTER].to_str().unwrap().parse::<u64>().unwrap() >= 1);
+    // The revocation endpoint spends the same per-IP bucket.
+    let r = m.http.post(m.url("/oauth/revoke")).form(&[("token", "x"), ("client_id", CLIENT)]).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     m.server.shutdown().await.unwrap();
 }
 
@@ -1208,5 +1217,168 @@ async fn a_replay_after_a_failed_redemption_revokes_nothing(d: Arc<Dispatcher>) 
     m.ok(&live.access, "inbox", json!({})).await;
     let (status, v) = m.refresh(&live.refresh).await;
     assert_eq!(status, StatusCode::OK, "{v}");
+    m.server.shutdown().await.unwrap();
+}
+
+// --- a code raced by its replay -------------------------------------------------------------------
+
+async fn user_id(m: &Mcp) -> i64 {
+    let s = m.env.store.clone();
+    blocking(move || s.user_by_identity(TENANT, "oid-krisztian").unwrap().unwrap().user_id).await
+}
+
+async fn live_grants(m: &Mcp, user_id: i64) -> Vec<String> {
+    let s = m.env.store.clone();
+    blocking(move || s.mcp_grants(user_id, unix_now()).unwrap()).await.into_iter().map(|g| g.grant_id).collect()
+}
+
+/// The store calls of two redemptions of one code, interleaved as the old code path allowed: the
+/// second reads the code's state while the first is between its read and its write.
+async fn a_code_and_its_replay_interleaved_leave_no_live_grant(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let _signed_in = signed_in(&m).await;
+    cast(&m, true).await;
+    let (store, user_id, now) = (m.env.store.clone(), user_id(&m).await, unix_now());
+    let code = McpCode { user_id, client_id: CLIENT.into(), client_name: None, redirect_uri: REDIRECT_PORTED.into(),
+                         challenge: "c".into(), resource: m.resource(), created_at: now };
+    let key = conde_remote::token_digest("raced-code");
+    let state = |k: String| { let s = store.clone(); async move { blocking(move || s.mcp_code_state(&k).unwrap()).await } };
+    {
+        let (s, k, c) = (store.clone(), key.clone(), code.clone());
+        blocking(move || s.insert_mcp_code(&k, &c).unwrap()).await;
+    }
+    // Both read the code as issued.
+    assert_eq!(state(key.clone()).await, McpCodeState::Issued(code.clone()));
+    assert_eq!(state(key.clone()).await, McpCodeState::Issued(code.clone()));
+    // The first redeems: the take and the grant commit together, so from here on every reader
+    // sees the grant (never a moment with neither).
+    let (grant, tokens, access) = planted("g-raced", user_id, CLIENT, now, now + 3600);
+    let mut grant = grant;
+    grant.resource = m.resource();
+    let (s, k, g, t) = (store.clone(), key.clone(), grant.clone(), tokens.clone());
+    let first = blocking(move || s.redeem_mcp_code(&k, &g, &t, 10, now).unwrap()).await;
+    assert!(matches!(first, McpRedeemed::Created(_)), "{first:?}");
+    assert_eq!(state(key.clone()).await, McpCodeState::Redeemed);
+    // The second finds the code taken, and revokes what the first made.
+    let (other, other_tokens, _) = planted("g-second", user_id, CLIENT, now, now + 3600);
+    let (s, k) = (store.clone(), key.clone());
+    let second = blocking(move || s.redeem_mcp_code(&k, &other, &other_tokens, 10, now).unwrap()).await;
+    assert_eq!(second, McpRedeemed::Taken);
+    let (s, k) = (store.clone(), key.clone());
+    let revoked = blocking(move || s.revoke_mcp_code_grant(&k, CLIENT, now).unwrap()).await;
+    assert_eq!(revoked.map(|(g, live)| (g.grant_id, live)), Some(("g-raced".to_string(), true)));
+    assert!(live_grants(&m, user_id).await.is_empty());
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    let (status, _, _) = m.post(Some(&access), &[], ping).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    m.server.shutdown().await.unwrap();
+}
+
+/// The same race over HTTP: two redemptions of each code at once; one gets tokens, the other
+/// revokes them, whichever order the store serialises them in.
+async fn concurrent_redemptions_of_one_code_leave_no_live_grant(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let user_id = user_id(&m).await;
+    for round in 0..8 {
+        let p = pkce();
+        let code = m.code(&b, &p).await;
+        let ((s1, v1), (s2, v2)) = tokio::join!(m.redeem(&code, &p), m.redeem(&code, &p));
+        let ok = [s1, s2].iter().filter(|s| **s == StatusCode::OK).count();
+        assert_eq!(ok, 1, "round {round}: exactly one redemption gets tokens: {v1} {v2}");
+        let refused = if s1 == StatusCode::OK { &v2 } else { &v1 };
+        assert_eq!(refused["error"], "invalid_grant", "round {round}: {refused}");
+        assert!(live_grants(&m, user_id).await.is_empty(), "round {round}: the grant the code made was revoked");
+    }
+    m.server.shutdown().await.unwrap();
+}
+
+// --- RFC 7009 revocation --------------------------------------------------------------------------
+
+impl Mcp {
+    async fn revoke(&self, form: &[(&str, &str)]) -> (StatusCode, Value) {
+        let r = self.http.post(self.url("/oauth/revoke")).form(form).send().await.unwrap();
+        let status = r.status();
+        assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store");
+        (status, r.json().await.unwrap())
+    }
+}
+
+async fn the_revocation_endpoint_ends_the_whole_grant(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let user_id = user_id(&m).await;
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    let first = m.connect(&b).await;
+    let (status, v) = m.refresh(&first.refresh).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let current = tokens(&v);
+    let second = m.connect(&b).await;
+    assert_eq!(live_grants(&m, user_id).await.len(), 2);
+
+    // A refresh token ends its grant: the latest access and refresh tokens die with it.
+    let (status, v) = m.revoke(&[("token", &current.refresh), ("token_type_hint", "refresh_token"), ("client_id", CLIENT)]).await;
+    assert_eq!((status, v), (StatusCode::OK, json!({})));
+    let (status, _, _) = m.post(Some(&current.access), &[], ping.clone()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, v) = m.refresh(&current.refresh).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")));
+    assert_eq!(live_grants(&m, user_id).await.len(), 1, "the keys page drops it at once");
+    let page = b.get(&m.url("/keys")).await.2;
+    assert_eq!(page.matches("<code>claude.ai</code>").count(), 1, "{page}");
+    // Again, or a superseded token of the same grant: still 200.
+    for token in [&current.refresh, &first.refresh, &first.access] {
+        assert_eq!(m.revoke(&[("token", token), ("client_id", CLIENT)]).await.0, StatusCode::OK);
+    }
+
+    // Another client's token is not revoked, and the answer does not say so.
+    let other = "https://claude.ai/oauth/other";
+    assert_eq!(m.revoke(&[("token", &second.access), ("client_id", other)]).await.0, StatusCode::OK);
+    m.ok(&second.access, "inbox", json!({})).await;
+    // An access token works too; a wrong hint only reorders the lookup.
+    let (status, _) = m.revoke(&[("token", &second.access), ("token_type_hint", "refresh_token"), ("client_id", CLIENT)]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = m.post(Some(&second.access), &[], ping.clone()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = m.refresh(&second.refresh).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "the refresh token went with the access token's grant");
+    assert!(live_grants(&m, user_id).await.is_empty());
+
+    // Unknown tokens answer 200; a request without a token or a client_id is malformed.
+    for token in ["conde_at_nope", &format!("conde_rt_{}", "ab".repeat(32)), "anything"] {
+        assert_eq!(m.revoke(&[("token", token), ("client_id", CLIENT)]).await.0, StatusCode::OK, "{token}");
+    }
+    let (status, v) = m.revoke(&[("token", &second.access)]).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_request")));
+    let (status, v) = m.revoke(&[("client_id", CLIENT)]).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_request")));
+    let (status, v) = m.revoke(&[("token", "a"), ("token", "b"), ("client_id", CLIENT)]).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_request")));
+    m.server.shutdown().await.unwrap();
+}
+
+// --- the purge after a refresh-token replay -------------------------------------------------------
+
+async fn a_refresh_token_replay_purges_its_family(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let first = m.connect(&b).await;
+    let d2 = d.clone();
+    let digest = conde_remote::token_digest(&first.access);
+    let grant_id = blocking(move || d2.with_tx(|t| Ok(t.mcp_token(&digest)?)).unwrap()).await.unwrap().0;
+    let (status, v) = m.refresh(&first.refresh).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let current = tokens(&v);
+    let digests = |t: &Tokens| (conde_remote::token_digest(&t.access), conde_remote::token_digest(&t.refresh));
+    let ((a1, r1), (a2, r2)) = (digests(&first), digests(&current));
+    assert_eq!(m.stored(Some(&a2), Some(&r1), Some(&grant_id)).await, (true, true, true), "the spent token is kept");
+    // The replay revokes the grant, and the purge in the same refresh deletes the whole family.
+    let (status, v) = m.refresh(&first.refresh).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{v}");
+    assert_eq!(m.stored(Some(&a1), Some(&r1), Some(&grant_id)).await, (false, false, false), "first pair and grant");
+    assert_eq!(m.stored(Some(&a2), Some(&r2), None).await, (false, false, false), "latest pair");
     m.server.shutdown().await.unwrap();
 }

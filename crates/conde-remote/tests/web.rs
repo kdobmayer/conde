@@ -69,6 +69,10 @@ struct Mem {
     displays: HashMap<String, KeyDisplay>,
     hosts: HashMap<String, i64>,
     creds: Vec<Cred>,
+    /// MCP purges started and finished, and how long each takes.
+    purges_started: usize,
+    purges_done: usize,
+    purge_takes: Duration,
 }
 
 type UserRow = (i64, Option<(String, String)>, Option<String>);
@@ -120,6 +124,16 @@ impl MemStore {
 }
 
 impl WebStore for MemStore {
+    fn purge_mcp(&self, _now: i64, _code_ttl: i64) -> WebResult<()> {
+        let takes = {
+            let mut m = self.m();
+            m.purges_started += 1;
+            m.purge_takes
+        };
+        std::thread::sleep(takes);
+        self.m().purges_done += 1;
+        Ok(())
+    }
     fn user_by_identity(&self, tid: &str, oid: &str) -> WebResult<Option<WebUser>> {
         let id = Some((tid.to_string(), oid.to_string()));
         Ok(self
@@ -1446,4 +1460,41 @@ async fn the_keys_page_needs_sign_in_and_unknown_paths_are_404() {
     );
     let r = b.step.get(env.url("/nope")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mcp_sweep_ends_at_shutdown_and_the_handle_waits_for_it() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let store = Arc::new(MemStore::default());
+    store.m().purge_takes = Duration::from_millis(300);
+    let mut entra = web::WebConfig::entra(TENANT, CLIENT_ID, CLIENT_SECRET, "https://board.example/auth/callback").unwrap();
+    entra.mcp.sweep_every = Duration::from_millis(20);
+    let config = conde_remote::ServerConfig {
+        web: Some(web::WebSetup { entra: Some(entra), admin_key: None, store: store.clone() }),
+        ..conde_remote::ServerConfig::default()
+    };
+    let board = Arc::new(NoBoard::default());
+    let server = conde_remote::start(
+        "127.0.0.1:0".parse().unwrap(),
+        config,
+        Arc::new(MemAuth(store.clone())),
+        board.clone(),
+        board,
+    )
+    .await
+    .unwrap();
+    // Shut down while a sweep is purging: the handle returns only after it finished.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while store.m().purges_started == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a sweep starts");
+    server.shutdown().await.unwrap();
+    let (started, done) = { let m = store.m(); (m.purges_started, m.purges_done) };
+    assert_eq!(done, started, "shutdown waited for the running purge");
+    // And no sweep runs after it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(store.m().purges_started, started, "the sweep ended");
 }

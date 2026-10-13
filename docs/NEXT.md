@@ -254,11 +254,8 @@ finds. Until then: system-default account works; injected dirs do not.
 
 - Refresh reuse revokes strictly: if the live check shows Claude refreshing in parallel, a token consumed less than 10 s ago answers `invalid_grant` without revoking.
 - Client metadata trust is per host: pin the exact client_id URLs once the hosted one is seen in the log.
-- No RFC 7009 revocation endpoint: a connector removed in Claude stays on the keys page until it expires.
 - `search` with a never-matching pattern scans all visible history, bounded only by the 120/min bucket.
 - A sign-in `next` path over 2048 characters is dropped silently: a very long authorize request lands on /keys.
-- A code replayed between its take and the grant's creation (milliseconds) finds no grant to revoke yet, so the grant made by the first redemption stays live; closing it needs the take and the create in one transaction, or a tombstone the create checks.
-- From the review of the token purge (purge on every refresh and in an hourly sweep, landed 2026-10-11): no test runs the purge after a refresh-token replay; no test shows the sweep ends at shutdown; the sweep task is spawned detached in `server::start`, so the server's handle does not wait for it.
 
 ## J. From the NUC run 2026-10-11
 

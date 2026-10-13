@@ -2036,8 +2036,22 @@ impl Tx for PgTx {
         Ok(n == 1)
     }
 
-    fn has_mcp_code(&self, code_digest: &str) -> StoreResult<bool> {
-        Ok(self.query_opt("SELECT 1 FROM mcp_codes WHERE code_digest = $1", &[&code_digest])?.is_some())
+    fn mcp_code(&self, code_digest: &str) -> StoreResult<Option<McpCodeRow>> {
+        Ok(self
+            .query_opt(
+                "SELECT user_id, client_id, client_name, redirect_uri, challenge, resource, created_at
+                 FROM mcp_codes WHERE code_digest = $1",
+                &[&code_digest],
+            )?
+            .map(|r| McpCodeRow {
+                user_id: r.get(0),
+                client_id: r.get(1),
+                client_name: r.get(2),
+                redirect_uri: r.get(3),
+                challenge: r.get(4),
+                resource: r.get(5),
+                created_at: r.get(6),
+            }))
     }
 
     fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()> {

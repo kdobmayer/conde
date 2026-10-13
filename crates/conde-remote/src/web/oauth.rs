@@ -378,7 +378,6 @@ fn issued(access: &str, refresh: &str, expires_in: i64) -> Response {
     )
 }
 
-/// `POST /oauth/token` (form): `authorization_code` creates the grant, `refresh_token` rotates.
 /// The OAuth endpoints' per-IP bucket: None, or the 429 to answer.
 fn oauth_limited(state: &WebState, ip: std::net::IpAddr, endpoint: &'static str) -> Option<Response> {
     let wait = state.0.limits.oauth(ip).err()?;
@@ -393,6 +392,7 @@ fn oauth_limited(state: &WebState, ip: std::net::IpAddr, endpoint: &'static str)
     Some(r)
 }
 
+/// `POST /oauth/token` (form): `authorization_code` creates the grant, `refresh_token` rotates.
 pub(crate) async fn token(State(state): State<WebState>, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     if let Some(r) = oauth_limited(&state, ip, "token") {
         return r;
@@ -591,7 +591,11 @@ pub(crate) async fn revoke(State(state): State<WebState>, ClientIp(ip): ClientIp
                 tracing::info!(user_id = g.user_id, grant = %g.grant_id, client = %g.client_host, client_id = %g.client_id,
                     by = "revocation endpoint", already = !live, "mcp grant revoked");
             }
-            Ok(None) => tracing::info!(%client_id, "mcp revoke: unknown token or another client's"),
+            Ok(None) => {
+                // Caller-supplied: escaped and cut short in the log.
+                let client_id: String = client_id.chars().take(256).collect();
+                tracing::info!(?client_id, "mcp revoke: unknown token or another client's");
+            }
             Err(e) => return server_error(e),
         }
     }
@@ -606,6 +610,7 @@ pub(crate) async fn sweep(state: WebState, mut shutdown: tokio::sync::watch::Rec
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            biased;
             _ = crate::protocol::shutdown_signal(&mut shutdown) => return,
             _ = tick.tick() => {}
         }

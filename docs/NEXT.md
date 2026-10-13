@@ -256,6 +256,7 @@ finds. Until then: system-default account works; injected dirs do not.
 - Client metadata trust is per host: pin the exact client_id URLs once the hosted one is seen in the log.
 - `search` with a never-matching pattern scans all visible history, bounded only by the 120/min bucket.
 - A sign-in `next` path over 2048 characters is dropped silently: a very long authorize request lands on /keys.
+- Known: `conde server` never calls ServerHandle::wait, so a listener failure goes unnoticed in production (shutdown is called with a timeout from cloud.rs).
 
 ## J. From the NUC run 2026-10-11
 

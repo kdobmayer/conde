@@ -29,7 +29,7 @@ use conde::protocol::Request;
 use conde::web_store::WebBoard;
 use conde_remote::web::cimd::{ClientMetadataFetcher, FetchError};
 use conde_remote::web::{
-    self, BridgeRegistry, McpCode, McpCodeState, McpGrant, McpLimits, McpRedeemed, McpTokens, WebConfig, WebSetup, WebState, WebStore,
+    self, BridgeRegistry, McpCode, McpCodeState, McpCreated, McpGrant, McpLimits, McpRedeemed, McpTokens, WebConfig, WebSetup, WebState, WebStore,
 };
 use conde_remote::{ServerConfig, ServerHandle};
 use rsa::pkcs1v15::SigningKey;
@@ -115,6 +115,7 @@ on_both!(
     a_disabled_user_is_refused_at_the_next_request,
     a_code_and_its_replay_interleaved_leave_no_live_grant,
     concurrent_redemptions_of_one_code_leave_no_live_grant,
+    a_disabled_users_redemption_spends_the_code,
     the_revocation_endpoint_ends_the_whole_grant,
     a_refresh_token_replay_purges_its_family,
     grants_beyond_the_cap_revoke_the_oldest_of_that_client,
@@ -787,7 +788,7 @@ async fn pkce_code_and_audience_refusals(d: Arc<Dispatcher>) {
     let tokens = McpTokens { access_digest: conde_remote::token_digest(&foreign), refresh_digest: "r-foreign".into(),
                              access_ttl: 600, refresh_ttl: 600 };
     let s = store.clone();
-    assert!(blocking(move || s.create_mcp_grant(&grant, "c-foreign", &tokens, 10, now).unwrap()).await.is_some());
+    assert!(blocking(move || seed_grant(&s, &grant, "c-foreign", &tokens, 10, now)).await.is_some());
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
     let (status, h, _) = m.post(Some(&foreign), &[], ping.clone()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong audience");
@@ -1070,6 +1071,18 @@ async fn the_sweep_purges_expired_rows_without_a_refresh(d: Arc<Dispatcher>) {
 // --- the cap on live grants -----------------------------------------------------------------------
 
 /// A grant of the signed-in user stored directly, with `access` as its access token.
+/// Stores a grant the way a redemption does: a code for it, redeemed at once (None: disabled).
+fn seed_grant(s: &WebBoard, grant: &McpGrant, code_digest: &str, tokens: &McpTokens, max_live: u32, now: i64) -> Option<McpCreated> {
+    let code = McpCode { user_id: grant.user_id, client_id: grant.client_id.clone(), client_name: grant.client_name.clone(),
+                         redirect_uri: REDIRECT_PORTED.into(), challenge: "c".into(), resource: grant.resource.clone(), created_at: now };
+    s.insert_mcp_code(code_digest, &code).unwrap();
+    match s.redeem_mcp_code(code_digest, grant, tokens, max_live, now).unwrap() {
+        McpRedeemed::Created(created) => Some(created),
+        McpRedeemed::Disabled => None,
+        McpRedeemed::Taken => panic!("the seeded code {code_digest} was taken"),
+    }
+}
+
 fn planted(id: &str, user_id: i64, client_id: &str, created_at: i64, expires_at: i64) -> (McpGrant, McpTokens, String) {
     let access = format!("conde_at_{}", conde_remote::token_digest(id));
     let grant = McpGrant {
@@ -1093,7 +1106,7 @@ async fn grants_beyond_the_cap_revoke_the_oldest_of_that_client(d: Arc<Dispatche
         let (mut grant, tokens, access) = planted(id, user_id, client, at, expires_at);
         grant.resource = resource.clone();
         let s = store.clone();
-        async move { (blocking(move || s.create_mcp_grant(&grant, &format!("c-{}", grant.grant_id), &tokens, cap, at).unwrap().unwrap().revoked).await, access) }
+        async move { (blocking(move || seed_grant(&s, &grant, &format!("c-{}", grant.grant_id), &tokens, cap, at).unwrap().revoked).await, access) }
     };
     let other = "https://claude.ai/oauth/other";
     let (_, other_access) = create("g-other", other, now - 50, now + 3600, 3).await;
@@ -1291,6 +1304,52 @@ async fn concurrent_redemptions_of_one_code_leave_no_live_grant(d: Arc<Dispatche
         assert_eq!(refused["error"], "invalid_grant", "round {round}: {refused}");
         assert!(live_grants(&m, user_id).await.is_empty(), "round {round}: the grant the code made was revoked");
     }
+    m.server.shutdown().await.unwrap();
+}
+
+/// A disabled user's redemption is refused and still spends the code: presented again, it is
+/// already taken (the replay path), and no grant was stored for a replay to revoke.
+async fn a_disabled_users_redemption_spends_the_code(d: Arc<Dispatcher>) {
+    let m = mcp(&d).await;
+    let b = signed_in(&m).await;
+    cast(&m, true).await;
+    let user_id = user_id(&m).await;
+    // Over HTTP: a code issued before the user was disabled.
+    let p = pkce();
+    let code = m.code(&b, &p).await;
+    let s = m.env.store.clone();
+    blocking(move || s.set_disabled(USER, true).unwrap()).await;
+    let (status, v) = m.redeem(&code, &p).await;
+    assert_eq!((status, v["error_description"].as_str()), (StatusCode::BAD_REQUEST, Some("this account is disabled")), "{v}");
+    let (status, v) = m.redeem(&code, &p).await;
+    assert_eq!((status, v["error_description"].as_str()), (StatusCode::BAD_REQUEST, Some("unknown or already used code")), "{v}");
+    let s = m.env.store.clone();
+    blocking(move || s.set_disabled(USER, false).unwrap()).await;
+    let (status, v) = m.redeem(&code, &p).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "enabling the user again does not bring the code back: {v}");
+    assert!(live_grants(&m, user_id).await.is_empty());
+
+    // In the store: Disabled, then the same code is Taken.
+    let s = m.env.store.clone();
+    blocking(move || s.set_disabled(USER, true).unwrap()).await;
+    let (store, now) = (m.env.store.clone(), unix_now());
+    let key = conde_remote::token_digest("disabled-code");
+    let c = McpCode { user_id, client_id: CLIENT.into(), client_name: None, redirect_uri: REDIRECT_PORTED.into(),
+                      challenge: "c".into(), resource: m.resource(), created_at: now };
+    {
+        let (s, k) = (store.clone(), key.clone());
+        blocking(move || s.insert_mcp_code(&k, &c).unwrap()).await;
+    }
+    let (mut grant, tokens, _) = planted("g-disabled", user_id, CLIENT, now, now + 3600);
+    grant.resource = m.resource();
+    let redeem = |grant: McpGrant, tokens: McpTokens| {
+        let (s, k) = (store.clone(), key.clone());
+        async move { blocking(move || s.redeem_mcp_code(&k, &grant, &tokens, 10, now).unwrap()).await }
+    };
+    assert_eq!(redeem(grant.clone(), tokens.clone()).await, McpRedeemed::Disabled);
+    assert_eq!(redeem(grant, tokens).await, McpRedeemed::Taken, "the refused redemption spent the code");
+    let (s, k) = (store.clone(), key.clone());
+    assert_eq!(blocking(move || s.mcp_code_state(&k).unwrap()).await, McpCodeState::Unknown, "and stored no grant");
     m.server.shutdown().await.unwrap();
 }
 

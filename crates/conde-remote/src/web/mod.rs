@@ -399,7 +399,7 @@ pub struct McpAccess {
     pub expires_at: i64,
 }
 
-/// Result of [`WebStore::create_mcp_grant`].
+/// A grant stored by [`WebStore::redeem_mcp_code`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpCreated {
     /// The first access token's expiry.
@@ -540,9 +540,11 @@ pub trait WebStore: Send + Sync {
     fn mcp_code_state(&self, _code_digest: &str) -> WebResult<McpCodeState> {
         Err(no_mcp())
     }
-    /// Takes the authorization code and stores the grant minted from it in ONE transaction (as
-    /// [`WebStore::create_mcp_grant`]), so a concurrent reader sees either the code or its grant,
-    /// never neither: a replay always finds the grant to revoke.
+    /// Takes the authorization code and stores the grant minted from it in ONE transaction, so a
+    /// concurrent reader sees either the code or its grant, never neither: a replay always finds
+    /// the grant to revoke. The grant gets its first token pair unless the user is disabled
+    /// (checked in the same transaction; the code is spent either way), first revoking the user's
+    /// oldest live grants of the same client so at most `max_live` stay live with it.
     fn redeem_mcp_code(
         &self,
         _code_digest: &str,
@@ -551,20 +553,6 @@ pub trait WebStore: Send + Sync {
         _max_live: u32,
         _now: i64,
     ) -> WebResult<McpRedeemed> {
-        Err(no_mcp())
-    }
-    /// Stores the grant, minted from the authorization code `code_digest`, with its first
-    /// token pair unless the user is disabled (checked in the same transaction), first revoking
-    /// the user's oldest live grants of the same client so at most `max_live` stay live with
-    /// it; None when refused.
-    fn create_mcp_grant(
-        &self,
-        _grant: &McpGrant,
-        _code_digest: &str,
-        _tokens: &McpTokens,
-        _max_live: u32,
-        _now: i64,
-    ) -> WebResult<Option<McpCreated>> {
         Err(no_mcp())
     }
     /// The access token with its grant and user, whatever their state; records the grant's use
@@ -591,16 +579,16 @@ pub trait WebStore: Send + Sync {
     fn revoke_mcp_grant(&self, _user_id: i64, _grant_id: &str, _now: i64) -> WebResult<bool> {
         Err(no_mcp())
     }
-    /// A used authorization code presented again (RFC 6749 §4.1.2) by `client_id`: revokes the
-    /// grant minted from it with its tokens and returns it with whether this call revoked it
-    /// (false: it had already ended); None when no stored grant came from that code or the
-    /// grant belongs to another client.
     /// RFC 7009: revokes the grant of an access or refresh token (whichever it is) with all its
     /// tokens when the grant belongs to `client_id`; the grant and whether it was live, or None
     /// when the token is unknown or another client's.
     fn revoke_mcp_token(&self, _token_digest: &str, _client_id: &str, _now: i64) -> WebResult<Option<(McpGrant, bool)>> {
         Err(no_mcp())
     }
+    /// A used authorization code presented again (RFC 6749 §4.1.2) by `client_id`: revokes the
+    /// grant minted from it with its tokens and returns it with whether this call revoked it
+    /// (false: it had already ended); None when no stored grant came from that code or the
+    /// grant belongs to another client.
     fn revoke_mcp_code_grant(
         &self,
         _code_digest: &str,

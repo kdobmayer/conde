@@ -78,7 +78,7 @@ fn grant(g: McpGrantRow) -> McpGrant {
 /// A grant's last use is written at most this often (seconds).
 const TOUCH_EVERY: i64 = 60;
 
-/// Stores a token pair of the grant, each capped at the grant's end; the access token's expiry.
+/// The store row of a new grant (live: no revocation yet).
 fn grant_row(g: &McpGrant) -> McpGrantRow {
     McpGrantRow {
         grant_id: g.grant_id.clone(),
@@ -125,6 +125,7 @@ fn create_grant(
     Ok(Some(McpCreated { access_expires_at: store_tokens(t, row, tokens, now)?, revoked }))
 }
 
+/// Stores a token pair of the grant, each capped at the grant's end; the access token's expiry.
 fn store_tokens(t: &dyn Tx, g: &McpGrantRow, tokens: &McpTokens, now: i64) -> Result<i64, StoreError> {
     let access_expires_at = (now + tokens.access_ttl).min(g.expires_at);
     t.insert_mcp_token(&tokens.access_digest, &g.grant_id, &g.resource, access_expires_at)?;
@@ -382,18 +383,6 @@ impl WebStore for WebBoard {
         }))
     }
 
-    fn create_mcp_grant(
-        &self,
-        g: &McpGrant,
-        code_digest: &str,
-        tokens: &McpTokens,
-        max_live: u32,
-        now: i64,
-    ) -> WebResult<Option<McpCreated>> {
-        let row = grant_row(g);
-        self.write(|t| Ok(create_grant(t, &row, code_digest, tokens, max_live, now)?))
-    }
-
     fn redeem_mcp_code(
         &self,
         code_digest: &str,
@@ -500,7 +489,8 @@ impl WebStore for WebBoard {
     }
 
     fn revoke_mcp_token(&self, token_digest: &str, client_id: &str, now: i64) -> WebResult<Option<(McpGrant, bool)>> {
-        self.write(|t| {
+        // A read finds the client's grant; an unknown, foreign or revoked one never opens a write.
+        let found = self.read(|t| {
             let grant_id = match t.mcp_token(token_digest)? {
                 Some((grant_id, _, _)) => grant_id,
                 None => match t.mcp_refresh(token_digest)? {
@@ -508,13 +498,15 @@ impl WebStore for WebBoard {
                     None => return Ok(None),
                 },
             };
-            match t.mcp_grant(&grant_id)? {
-                Some(g) if g.client_id == client_id => {
-                    let revoked = t.revoke_mcp_grant(&grant_id, now)?;
-                    Ok(t.mcp_grant(&grant_id)?.map(|g| (grant(g), revoked)))
-                }
-                _ => Ok(None),
-            }
+            Ok(t.mcp_grant(&grant_id)?.filter(|g| g.client_id == client_id))
+        })?;
+        let Some(found) = found else { return Ok(None) };
+        if found.revoked_at.is_some() {
+            return Ok(Some((grant(found), false)));
+        }
+        self.write(|t| {
+            let revoked = t.revoke_mcp_grant(&found.grant_id, now)?;
+            Ok(t.mcp_grant(&found.grant_id)?.map(|g| (grant(g), revoked)))
         })
     }
 

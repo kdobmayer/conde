@@ -1,0 +1,28 @@
+// The web app only reads: a request carries no idempotency key, and a read refused for a stale
+// session (another sign-in replaced it) reloads the session and retries once with its token.
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+test('a stale session is reloaded and the read retried once with the new token', async () => {
+	let sessionReads = 0;
+	const requests = [];
+	globalThis.fetch = async (url, options) => {
+		if (url === '/v1/session') {
+			sessionReads++;
+			return Response.json({ user: 'alice', csrf: `token-${sessionReads}`, csrf_header: 'x-csrf-token' });
+		}
+		assert.equal(url, '/v1/rpc');
+		requests.push({ request: JSON.parse(options.body), csrf: options.headers['x-csrf-token'] });
+		if (requests.length === 1) {
+			return Response.json({ ok: false, error: { code: 'stale_session', message: 'session replaced' } }, { status: 403 });
+		}
+		return Response.json({ ok: true, result: { owner: 'alice', agents: [] } });
+	};
+	const { rpc } = await import('../src/lib/api.ts');
+	const rail = await rpc('owner.list');
+	assert.equal(rail.owner, 'alice');
+	assert.equal(requests.length, 2);
+	assert.equal(sessionReads, 2);
+	assert.deepEqual(requests.map((r) => r.csrf), ['token-1', 'token-2']);
+	assert.ok(requests.every((r) => r.request.idempotency_key === undefined), 'reads carry no key');
+});

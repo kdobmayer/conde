@@ -215,6 +215,60 @@ fn later_channel_read(b: Board, announce: bool) {
     assert_eq!((&again["jobs"], &again["open"], &again["held"]), (&json!([]), &json!([]), &json!([])), "{again}");
 }
 
+/// The cursor settle is bounded both ways: a notification for a message above the cursor stays
+/// open, and one already terminal (delivered, denied) below it keeps its status. On the test
+/// store and on SQLite.
+#[test]
+fn a_channel_cursor_settle_leaves_messages_above_it_open() {
+    for b in [setup(), sqlite_setup()] {
+        let ([_, _, below, above], settled) = cursor_settle(&b);
+        assert_eq!(settled, 1);
+        assert_eq!(b.status_of(&below, "carol"), "read", "an open one below the cursor settles");
+        assert_eq!(b.status_of(&above, "carol"), "pending", "above the cursor: not read yet");
+    }
+}
+
+#[test]
+fn a_channel_cursor_settle_leaves_terminal_notifications_alone() {
+    for b in [setup(), sqlite_setup()] {
+        let ([delivered, denied, ..], _) = cursor_settle(&b);
+        assert_eq!(b.status_of(&delivered, "carol"), "delivered");
+        assert_eq!(b.status_of(&denied, "carol"), "denied");
+    }
+}
+
+fn sqlite_setup() -> Board {
+    let b = Board::sqlite();
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    b.register(CAROL, "carol");
+    b
+}
+
+/// Four posts mentioning Carol in #dev: the first delivered, the second denied, the third and
+/// fourth open; settles at the third's seq. Returns the four ids and the number settled.
+fn cursor_settle(b: &Board) -> ([String; 4], u64) {
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    b.ok(CAROL, "channel.join", json!({"channel": "#dev"}));
+    let ids: [String; 4] = std::array::from_fn(|i| b.send(ALICE, "#dev", &format!("@carol post {i}")));
+    let carol = b.agent_id("carol");
+    let settled = b
+        .d
+        .with_tx(|tx| {
+            for n in tx.notifications()?.iter().filter(|n| n.recipient_id == carol) {
+                match n.message_id.as_str() {
+                    m if m == ids[0] => tx.set_notification_status(&n.id, "delivered")?,
+                    m if m == ids[1] => tx.set_notification_status(&n.id, "denied")?,
+                    _ => {}
+                }
+            }
+            let cursor = tx.message_by_id(&ids[2])?.unwrap();
+            Ok(tx.settle_read_in_channel(cursor.channel_id.as_deref().unwrap(), &carol, cursor.seq)?)
+        })
+        .unwrap();
+    (ids, settled)
+}
+
 #[test]
 fn fence_makes_one_instance_active_and_open_attempts_follow_it() {
     let b = setup();

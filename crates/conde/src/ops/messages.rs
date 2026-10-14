@@ -249,23 +249,32 @@ fn page(mut rows: Vec<MsgRow>) -> (Vec<MsgRow>, Option<i64>) {
     }
 }
 
-/// Marks `m` read for `me`, and settles `me`'s notification of it as read while it is still
+/// Marks `rows` read for `me`, and settles `me`'s notifications of them as read while still
 /// open: a hold or an acceptance that landed before the read is not left standing (counted as
-/// held, reopened on a reconnect) for a message already read.
-fn mark_read(ctx: &Ctx, me: &Agent, m: &MsgRow) -> OpResult<()> {
-    let settled = match &m.channel_id {
-        // The cursor reads everything up to it: every open notification below it settles too.
-        Some(c) => {
-            channels::advance_cursor(ctx.db, c, &me.id, m.seq)?;
-            let cursor = channels::read_seq(ctx.db, c, &me.id)?.unwrap_or(m.seq);
-            ctx.db.settle_read_in_channel(c, &me.id, cursor)? > 0
+/// held, reopened on a reconnect) for a message already read. A DM settles by itself; a channel
+/// cursor reads everything up to it, so each channel moves once to its page maximum and every
+/// open notification below the resulting cursor settles in one update.
+fn mark_read(ctx: &Ctx, me: &Agent, rows: &[MsgRow]) -> OpResult<()> {
+    let mut settled = false;
+    let mut cursors: Vec<(&str, i64)> = Vec::new();
+    for m in rows {
+        match &m.channel_id {
+            Some(c) => match cursors.iter_mut().find(|(id, _)| id == c) {
+                Some((_, seq)) => *seq = (*seq).max(m.seq),
+                None => cursors.push((c, m.seq)),
+            },
+            None if m.recipient_id.as_deref() == Some(me.id.as_str()) => {
+                ctx.db.mark_dm_read(&m.id, &me.id, &ctx.now_iso())?;
+                settled |= ctx.db.settle_read(&m.id, &me.id)?;
+            }
+            None => {}
         }
-        None if m.recipient_id.as_deref() == Some(me.id.as_str()) => {
-            ctx.db.mark_dm_read(&m.id, &me.id, &ctx.now_iso())?;
-            ctx.db.settle_read(&m.id, &me.id)?
-        }
-        None => return Ok(()),
-    };
+    }
+    for (c, seq) in cursors {
+        channels::advance_cursor(ctx.db, c, &me.id, seq)?;
+        let cursor = channels::read_seq(ctx.db, c, &me.id)?.unwrap_or(seq);
+        settled |= ctx.db.settle_read_in_channel(c, &me.id, cursor)? > 0;
+    }
     if settled {
         ctx.db.announce(topics::DELIVERY);
     }
@@ -284,11 +293,8 @@ pub fn read(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         ctx.db.unread_all(&me.id, PAGE as i64 + 1)?
     };
     let (rows, next) = page(rows);
-    let mut messages = Vec::with_capacity(rows.len());
-    for m in &rows {
-        mark_read(ctx, &me, m)?;
-        messages.push(view(ctx.db, m)?);
-    }
+    mark_read(ctx, &me, &rows)?;
+    let messages = rows.iter().map(|m| view(ctx.db, m)).collect::<OpResult<Vec<_>>>()?;
     Ok(json!({"messages": messages, "more": next.is_some()}))
 }
 

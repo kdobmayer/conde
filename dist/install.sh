@@ -89,9 +89,9 @@ fi
 "$tmp/$name" --version >/dev/null 2>&1 || die "the downloaded binary does not run on this machine ($name)"
 
 # An upgrade: a conde is already in place. What it says it is, at most 5 s: an old binary that
-# hangs must not stop the upgrade. The probe runs in the background; a watchdog (killing its own
-# sleep when it is told to stop, so none is left behind) ends it; its output counts only when it
-# exited on its own and cleanly.
+# hangs must not stop the upgrade. The probe runs in the background; a watchdog ends it; its
+# output counts only when it exited on its own and cleanly. Told to stop, the watchdog kills its
+# own sleep, even when the stop lands between starting the sleep and knowing its pid.
 upgrade=0
 previous="unknown version"
 if [ -e "$dir/conde" ]; then
@@ -100,9 +100,14 @@ if [ -e "$dir/conde" ]; then
 		"$dir/conde" --version >"$tmp/previous" 2>/dev/null </dev/null &
 		probe=$!
 		(
+			nap= stop=0
+			trap 'if [ -n "$nap" ]; then kill "$nap" 2>/dev/null; exit 0; fi; stop=1' TERM
 			sleep 5 &
 			nap=$!
-			trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+			if [ "$stop" = 1 ]; then
+				kill "$nap" 2>/dev/null
+				exit 0
+			fi
 			wait "$nap"
 			kill -KILL "$probe" 2>/dev/null
 		) &

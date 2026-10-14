@@ -65,13 +65,19 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
         std::fs::write(dist.join("SHA256SUMS"), format!("{sum}  {name}\n")).unwrap();
         std::fs::write(dist.join("latest"), "v0.1.0\n").unwrap();
     };
-    // Each run has an outer deadline: an installer that hangs fails the test instead of the suite.
+    // Each run carries its own marker in the environment, inherited by everything it starts, so
+    // what a run leaves behind is found without looking at anyone else's processes. Each run has
+    // an outer deadline: an installer that hangs fails the test instead of the suite.
+    let runs = std::cell::Cell::new(0);
     let install = || {
+        runs.set(runs.get() + 1);
+        let mark = format!("{}#{}", root.path().display(), runs.get());
         let mut child = std::process::Command::new("sh")
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/install.sh"))
             .env("CONDE_DIST_URL", format!("file://{}", dist.display()))
             .env("CONDE_INSTALL_DIR", &bin)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env(RUN_MARK, &mark)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -79,10 +85,25 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while child.try_wait().unwrap().is_none() {
             if std::time::Instant::now() > deadline {
+                kill(&marked(&mark));
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("install.sh did not finish within 20 s");
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Checked before reading the output: a leftover holding the pipe would hold that read.
+        // A process the installer ended may take a moment to go; a leftover lives for seconds.
+        let gone = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut left = marked(&mark);
+        while !left.is_empty() && std::time::Instant::now() < gone {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            left = marked(&mark);
+        }
+        if !left.is_empty() {
+            kill(&left);
+            let _ = child.wait();
+            panic!("the installer left processes behind: {left:?}");
         }
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -112,20 +133,18 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
     assert!(second.contains("Next (an upgrade; your enrollment and names stay as they are, no sign-in):"), "{second}");
     assert!(second.contains("\n  conde setup ") && second.contains("\n  conde doctor "), "{second}");
     assert!(!second.contains("conde login"), "no sign-in on an upgrade: {second}");
-    // the old binary answered at once: its watchdog is gone with its sleep
-    let ps = std::process::Command::new("ps").args(["-eo", "args"]).output().unwrap();
-    assert!(!String::from_utf8_lossy(&ps.stdout).lines().any(|l| l.trim() == "sleep 5"), "no watchdog sleep is left behind");
+    // the old binary answered at once: install() found its watchdog gone with its sleep
 
     // An old binary that never answers: its probe is cut off after 5 s, the upgrade goes on,
-    // and nothing it started is left behind.
-    old("#!/bin/sh\nexec sleep 120\n", 0o755);
+    // and nothing it started is left behind (install() checks; the pid file shows it ran).
+    let probe = root.path().join("probe.pid");
+    old(&format!("#!/bin/sh\necho $$ >'{}'\nexec sleep 120\n", probe.display()), 0o755);
     let t = std::time::Instant::now();
     let hung = install();
+    assert!(std::fs::read_to_string(&probe).unwrap().trim().parse::<i32>().is_ok(), "the probe ran");
     assert!(t.elapsed() < std::time::Duration::from_secs(15), "{:?}", t.elapsed());
     assert!(hung.contains(&format!("replaced {}/conde (unknown version) with conde 0.1.0 (bbbbbbb 2026-10-14)", bin.display())), "{hung}");
     assert!(hung.contains("Next (an upgrade;"), "{hung}");
-    let ps = std::process::Command::new("ps").args(["-eo", "args"]).output().unwrap();
-    assert!(!String::from_utf8_lossy(&ps.stdout).lines().any(|l| l.trim() == "sleep 120"), "the old binary's probe was ended");
 
     // A silent or non-executable old conde is still an upgrade, of an unknown version.
     for (script, mode) in [("#!/bin/sh\nexit 0\n", 0o755), ("not a program\n", 0o644)] {
@@ -134,4 +153,32 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
         assert!(out.contains(&format!("replaced {}/conde (unknown version) with", bin.display())), "{mode:o}: {out}");
         assert!(out.contains("Next (an upgrade;") && !out.contains("conde login"), "{mode:o}: {out}");
     }
+}
+
+#[cfg(target_os = "linux")]
+const RUN_MARK: &str = "CONDE_INSTALL_TEST_RUN";
+
+#[cfg(target_os = "linux")]
+fn kill(procs: &[(i32, String)]) {
+    for (pid, _) in procs {
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+}
+
+/// The live processes (pid, command line) whose environment carries this run's marker.
+#[cfg(target_os = "linux")]
+fn marked(mark: &str) -> Vec<(i32, String)> {
+    let needle = format!("{RUN_MARK}={mark}");
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            // unreadable (another user's) or a zombie (an empty environment): not this run's
+            std::fs::read(format!("/proc/{pid}/environ"))
+                .is_ok_and(|env| env.split(|b| *b == 0).any(|kv| kv == needle.as_bytes()))
+        })
+        .map(|pid| {
+            let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            (pid, String::from_utf8_lossy(&cmd).replace('\0', " ").trim().to_string())
+        })
+        .collect()
 }

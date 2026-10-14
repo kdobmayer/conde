@@ -49,6 +49,10 @@ Review and integration by desk, one batch at a time; one release per batch.
   run: loginctl enable-linger $USER" on every run; check `loginctl show-user
   $USER -p Linger` first and print the line only when linger is off. Area:
   crates/conde setup (Linux service part), tests.
+- B20. install.sh staging dir: the new binary is staged under the default temp
+  directory and moved over the target, so the final mv is a copy when temp and
+  the target are on different filesystems (not atomic); stage next to the target
+  instead. Area: dist/install.sh, dist_files test.
 
 ## Waiting on a decision or an observation (do not take)
 

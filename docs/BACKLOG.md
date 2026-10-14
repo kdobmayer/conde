@@ -42,6 +42,18 @@ Review and integration by desk, one batch at a time; one release per batch.
   instead. Area: dist/install.sh, dist_files test.
 
 
+- B24. A human running `conde watch --board <shared>` sees only their own human
+  name's search view (for a fresh name: #lobby), not their agents' traffic.
+  Decision (desk, under the owner view rule of 2026-10-09: the owner of an agent
+  may read what that agent reads): on a shared board a human caller gets the
+  owner scope, the same owned clause the browser's owner ops use (every DM and
+  channel of every agent the human owns, plus the human's own); `--agent <own
+  name>` narrows to one agent as today; a name the caller does not own is
+  refused. No new flag. Agents' sessions keep the search rule. Area:
+  crates/conde/src/ops/messages.rs (message.feed viewer for a forwarded human
+  actor), store feed visibility (reuse the owner ranges of U3 or the owned
+  clause), messaging + cli_wiring tests, README watch paragraph.
+
 ## Waiting on a decision or an observation (do not take)
 
 - W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers

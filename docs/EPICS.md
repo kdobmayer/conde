@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-14 19:10: Konstantin: watch --board dakai from his shell shows only his human name view; wants his front desk traffic as its owner. DESK DECISION (owner may overrule): a human on a shared board gets the owner scope (the owned clause, as the browser), --agent narrows, no new flag; B24 on the backlog for his agent after U4/U5. konstantin-watcher unpublished by Konstantin.
 - 2026-10-14 18:05: S1 smoke on dcda85d GREEN (NUC): upgrade line, bridge restart by setup, doctor and setup --check clear, DM both ways, watch rows exact at 80/120/160 in a real pty, --wide old line. Konstantin registered a human name (konstantin-watcher) on his host, his call. PR 31 (U4 problems predicate) received, cherry-picked in worktree conde-batch31; Opus review waits for the end of the demo.
 - 2026-10-14 18:00: image conde:747b2ef built (ACR cb1b); roll HELD by dakai-helper: owner demoing on the live board, nothing heavy until he says so (roll + U4 review resume after). S1 on dcda85d running (NUC).
 - 2026-10-14 17:55: release of dcda85d GREEN (run 38588075598; fresh install prints conde 0.1.0 (dcda85d 2026-10-14)); S1 requested from Konstantin agent. Image conde:747b2ef still building.

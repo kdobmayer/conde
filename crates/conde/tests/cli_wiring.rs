@@ -82,8 +82,12 @@ impl Root {
     fn start_daemon(&mut self) {
         let child = self.cmd(Path::new(BIN)).args(["daemon", "--interval", "0.1"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         self.daemon = Some(child);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while UnixStream::connect(self.root.join("run/conde.sock")).is_err() {
+        // Up means answering a request, not only accepting a connection: a daemon still starting
+        // (a loaded box) accepts first and misses the 2 s probe of `setup --check`.
+        use conde::setup::Host as _;
+        let sock = self.root.join("run/conde.sock");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while UnixStream::connect(&sock).is_err() || conde::setup::System.reach(&sock).is_err() {
             assert!(Instant::now() < deadline, "daemon did not come up");
             std::thread::sleep(Duration::from_millis(20));
         }

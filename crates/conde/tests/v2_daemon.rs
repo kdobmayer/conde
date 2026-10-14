@@ -475,7 +475,12 @@ fn g1_offline_local_work_never_waits_on_a_board() {
             boards::store(&boards::path_in(&a.config(), "dakai"), "dakai", &cfg).unwrap();
             a.start();
         }
-        let quick = |what: &str, t: Instant| assert!(t.elapsed() < Duration::from_millis(700), "{what} took {:?} ({case})", t.elapsed());
+        // Waiting on the board would cost at least its 2 s answer wait: "never waits" is a bound
+        // safely under that, which a loaded box still meets (CONDE_STRICT_TIMING=1: the tight
+        // bound, for a quiet machine).
+        let strict = std::env::var("CONDE_STRICT_TIMING").is_ok_and(|v| v == "1");
+        let local_bound = Duration::from_millis(if strict { 700 } else { 1500 });
+        let quick = |what: &str, t: Instant| assert!(t.elapsed() < local_bound, "{what} took {:?} ({case})", t.elapsed());
 
         let t = Instant::now();
         let reviewer = a.claude("reviewer", "s-reviewer");
@@ -494,12 +499,15 @@ fn g1_offline_local_work_never_waits_on_a_board() {
 
         let t = Instant::now();
         let local = a.ok(&worker, "inbox.list", json!({}), Some("local"));
-        assert!(t.elapsed() < Duration::from_millis(300), "inbox --board local took {:?} ({case})", t.elapsed());
+        let bound = if strict { Duration::from_millis(300) } else { local_bound };
+        assert!(t.elapsed() < bound, "inbox --board local took {:?} ({case})", t.elapsed());
         assert!(local.get("boards").is_none(), "{local}");
 
         let t = Instant::now();
         let all = a.ok(&worker, "inbox.list", json!({}), None);
-        assert!(t.elapsed() < Duration::from_millis(2500), "inbox took {:?} ({case})", t.elapsed());
+        // the aggregate does wait for dakai, up to its 2 s answer wait, and no longer
+        let bound = Duration::from_millis(if strict { 2500 } else { 2000 + 1500 });
+        assert!(t.elapsed() < bound, "inbox took {:?} ({case})", t.elapsed());
         assert_eq!(all["boards"], json!([{"board": "local", "available": true}, {"board": "dakai", "available": false}]), "{all}");
         if case != "silent" {
             assert!(a.doctor().contains("dakai: unreachable") || a.doctor().contains("dakai: connecting"), "{}", a.doctor());

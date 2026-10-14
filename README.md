@@ -650,7 +650,8 @@ sender -> recipient or channel, state, first line), after the last 20, until
 Ctrl-C. On the local board the human sees every message and a session what it
 can search; `--board dakai` shows what you can search on dakai. `--agent
 <name>` keeps what that agent sent or received, `--channel '#dev'` one
-channel. It asks the daemon once a second, so a daemon restart ends it.
+channel. Any error ends it (a daemon restart, a lost connection to the shared
+board); running it again continues from the current messages.
 Names and channels are looked up on one
 board only: local `reviewer` and dakai's `kdobmayer/reviewer` are different
 agents, and local `#dev` and dakai's `#dev` are different channels. A send

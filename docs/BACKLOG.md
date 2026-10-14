@@ -50,6 +50,10 @@ Review and integration by desk, one batch at a time; one release per batch.
   message, counts in agent_health held and is re-offered through open_attempts
   on reconnect until the endpoint leaves. Decide the rule for each and test.
   Area: crates/conde ops/bridge.rs, store queries, tests/recovery.rs.
+- B19. `conde setup` on Linux prints "without a desktop login session, also
+  run: loginctl enable-linger $USER" on every run; check `loginctl show-user
+  $USER -p Linger` first and print the line only when linger is off. Area:
+  crates/conde setup (Linux service part), tests.
 
 ## Waiting on a decision or an observation (do not take)
 

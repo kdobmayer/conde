@@ -578,9 +578,21 @@ pub trait Tx {
     /// Unread DMs plus unread channel messages, own posts included.
     fn unread_all(&self, agent_id: &str, limit: i64) -> StoreResult<Vec<Message>>;
     fn sent_by(&self, agent_id: &str, after: i64, limit: i64) -> StoreResult<Vec<Message>>;
+    /// The lowest commit seq of a message dated on or after `day` (`YYYY-MM-DD`, compared with
+    /// the first ten characters of `created_at`, which every stored ISO 8601 date shares): where a
+    /// time search can start, since no later-dated message has a lower seq.
+    fn first_seq_from_day(&self, day: &str) -> StoreResult<Option<i64>>;
     /// Messages visible to `agent_id` (own DMs, joined channels) in `scope`,
-    /// after `after`, in commit order; the caller filters and pages.
-    fn search_scan(&self, agent_id: &str, after: i64, scope: SearchScope, limit: i64) -> StoreResult<Vec<Message>>;
+    /// after `after`, dated on or after `from_day` when given (as [`Tx::first_seq_from_day`]
+    /// compares), in commit order; the caller filters and pages.
+    fn search_scan(
+        &self,
+        agent_id: &str,
+        after: i64,
+        scope: SearchScope,
+        from_day: Option<&str>,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>>;
     fn attachment_list(&self, message_id: &str) -> StoreResult<Vec<AttachmentMeta>>;
     fn attachment(&self, id: &str) -> StoreResult<Option<Attachment>>;
     /// (recorded size, stored byte length) of a message's attachment by filename.
@@ -702,7 +714,14 @@ pub trait Tx {
     fn announce(&self, topics: u8);
     /// Like [`Tx::search_scan`] over what the owner's agents can read (the
     /// [`Tx::owner_message`] rule), after `after`, oldest first.
-    fn owner_search_scan(&self, owner_id: i64, after: i64, scope: SearchScope, limit: i64) -> StoreResult<Vec<Message>>;
+    fn owner_search_scan(
+        &self,
+        owner_id: i64,
+        after: i64,
+        scope: SearchScope,
+        from_day: Option<&str>,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>>;
 
     // remote MCP (docs/REMOTE-MCP.md §3)
     fn insert_mcp_code(&self, code_digest: &str, c: &McpCodeRow) -> StoreResult<()>;

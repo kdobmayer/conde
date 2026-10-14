@@ -264,3 +264,47 @@ fn search_scan_is_bounded_on_the_test_store() {
     // Postgres when CONDE_TEST_PG is set, else SQLite again.
     search_scan_is_bounded(Board::new());
 }
+
+/// The reviewer's probe: a time-only search over a long history finds a recent match in one
+/// call (it starts where that date begins, not at the oldest message), and a recent message
+/// copied in at a low seq is found too. On SQLite and, with CONDE_TEST_PG, on Postgres.
+fn a_time_search_starts_at_its_date(b: Board) {
+    use conde::protocol::SEARCH_SCAN;
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    let (sender, recipient) = (b.agent_id("alice"), b.agent_id("bob"));
+    let dm = |tx: &dyn conde::store::Tx, text: &str, at: &str| -> anyhow::Result<()> {
+        tx.insert_message(&conde::store::NewMessage {
+            id: &conde::util::new_ulid(), sender_id: &sender, recipient_id: Some(&recipient), channel_id: None,
+            text, reply_to: None, created_at: at,
+        })?;
+        Ok(())
+    };
+    b.d.with_tx(|tx| {
+        // copied history: a recent message at a low seq, then a long old history after it
+        dm(tx, "needle copied recent", "2026-10-13T09:00:00+02:00")?;
+        for n in 0..SEARCH_SCAN + 50 {
+            dm(tx, &format!("old {n}"), "2020-01-01T00:00:00.000Z")?;
+        }
+        dm(tx, "needle recent", "2026-10-13T08:00:00.000Z")?;
+        Ok(())
+    })
+    .unwrap();
+    let r = b.ok(BOB, "search", json!({"pattern": "needle", "after": "2026-10-12T00:00:00Z"}));
+    let lines: Vec<_> = r["hits"].as_array().unwrap().iter().map(|h| h["line"].as_str().unwrap()).collect();
+    assert_eq!(lines, ["needle copied recent", "needle recent"], "{r}");
+    assert!(r["partial"].is_null(), "one call, not stopped: {r}");
+    // nothing on or after a later date: no scan at all
+    let r = b.ok(BOB, "search", json!({"pattern": "needle", "after": "2027-01-01T00:00:00Z"}));
+    assert!(r["hits"].as_array().unwrap().is_empty() && r["next_cursor"].is_null(), "{r}");
+}
+
+#[test]
+fn a_time_search_starts_at_its_date_on_sqlite() {
+    a_time_search_starts_at_its_date(Board::sqlite());
+}
+
+#[test]
+fn a_time_search_starts_at_its_date_on_the_test_store() {
+    a_time_search_starts_at_its_date(Board::new());
+}

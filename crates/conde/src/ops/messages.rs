@@ -17,7 +17,7 @@ use crate::dispatch::{
 };
 use crate::protocol::{MAX_ATTACHMENT, MAX_MESSAGE_ATTACHMENTS, MAX_TEXT, PAGE, SEARCH_SCAN};
 use crate::store::{NewMessage, NewNotification, SearchScope, Tx};
-use crate::util::{After, is_ulid, ms_from_iso, new_ulid, parse_after};
+use crate::util::{After, iso_from_ms, is_ulid, ms_from_iso, new_ulid, parse_after};
 
 static MENTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"@([A-Za-z0-9_](?:[A-Za-z0-9_./\-]*[A-Za-z0-9_])?)").expect("mention regex")
@@ -321,14 +321,15 @@ pub(crate) const SEARCH_BATCH: i64 = 500;
 /// own DMs), optionally narrowed to one channel or DM partner.
 pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
-    search_in(ctx, body, |after, scope| Ok(ctx.db.search_scan(&me.id, after, scope, SEARCH_BATCH)?))
+    search_in(ctx, body, |after, scope, from_day| Ok(ctx.db.search_scan(&me.id, after, scope, from_day, SEARCH_BATCH)?))
 }
 
-/// The search loop over `scan` (a batch of what the caller may see after a cursor, in scope).
+/// The search loop over `scan` (a batch of what the caller may see after a cursor, in scope,
+/// dated on or after a day when given).
 pub(crate) fn search_in(
     ctx: &Ctx,
     body: &Value,
-    scan: impl Fn(i64, SearchScope) -> OpResult<Vec<MsgRow>>,
+    scan: impl Fn(i64, SearchScope, Option<&str>) -> OpResult<Vec<MsgRow>>,
 ) -> OpResult<Value> {
     let pattern = str_param(body, "pattern")?;
     let rx = RegexBuilder::new(pattern)
@@ -355,9 +356,20 @@ pub(crate) fn search_in(
     let mut hits = Vec::new();
     let mut next = None;
     let mut cursor = after;
+    // A time search reads only messages dated from the day before the cutoff's UTC date (which
+    // covers any offset a stored date carries), from where they begin: older history, even copied
+    // in after newer messages, is neither read nor counted against the scan budget. The
+    // per-message filter below stays exact.
+    let from_day = since.map(|t| iso_from_ms(t - 86_400_000)[..10].to_string());
+    if let Some(day) = &from_day {
+        match ctx.db.first_seq_from_day(day)? {
+            Some(first) => cursor = cursor.max(first - 1),
+            None => return Ok(json!({"hits": [], "next_cursor": null})),
+        }
+    }
     let (mut scanned, mut partial) = (0i64, false);
     'scan: loop {
-        let batch = scan(cursor, scope)?;
+        let batch = scan(cursor, scope, from_day.as_deref())?;
         for m in &batch {
             cursor = m.seq;
             scanned += 1;

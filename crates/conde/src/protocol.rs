@@ -15,6 +15,8 @@ pub const MAX_MESSAGE_ATTACHMENTS: usize = 32 << 20;
 pub const PAGE: usize = 200;
 /// Messages one search request scans at most before it answers with what it found and a
 /// cursor to continue: a pattern that never matches costs a bounded scan, not all history.
+/// The scan reads whole batches of 500, so it stops (and reports `scanned`) at the first batch
+/// boundary at or past this.
 pub const SEARCH_SCAN: i64 = 10_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

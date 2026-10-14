@@ -1370,7 +1370,20 @@ impl Tx for PgTx {
         )
     }
 
-    fn search_scan(&self, agent_id: &str, after: i64, scope: SearchScope, limit: i64) -> StoreResult<Vec<Message>> {
+    fn first_seq_from_day(&self, day: &str) -> StoreResult<Option<i64>> {
+        Ok(self
+            .query_opt("SELECT MIN(commit_seq) FROM messages WHERE substr(created_at, 1, 10) >= $1", &[&day])?
+            .and_then(|r| r.get::<_, Option<i64>>(0)))
+    }
+
+    fn search_scan(
+        &self,
+        agent_id: &str,
+        after: i64,
+        scope: SearchScope,
+        from_day: Option<&str>,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>> {
         let mine = "(m.recipient_agent_id = $1 OR (m.sender_agent_id = $1 AND m.recipient_agent_id IS NOT NULL)
             OR EXISTS (SELECT 1 FROM memberships x WHERE x.channel_id = m.channel_id AND x.agent_id = $1))";
         let (filter, arg) = match scope {
@@ -1381,8 +1394,11 @@ impl Tx for PgTx {
             }
         };
         self.msgs(
-            &format!("m.commit_seq > $2 AND {mine} AND {filter} ORDER BY m.commit_seq LIMIT $3"),
-            &[&agent_id, &after, &limit, &arg],
+            &format!(
+                "m.commit_seq > $2 AND {mine} AND {filter} AND ($5::text IS NULL OR substr(m.created_at, 1, 10) >= $5)
+                 ORDER BY m.commit_seq LIMIT $3"
+            ),
+            &[&agent_id, &after, &limit, &arg, &from_day],
         )
     }
 
@@ -1921,7 +1937,14 @@ impl Tx for PgTx {
             .map(|r| msg_row(&r)))
     }
 
-    fn owner_search_scan(&self, owner_id: i64, after: i64, scope: SearchScope, limit: i64) -> StoreResult<Vec<Message>> {
+    fn owner_search_scan(
+        &self,
+        owner_id: i64,
+        after: i64,
+        scope: SearchScope,
+        from_day: Option<&str>,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>> {
         let owned = "((m.channel_id IS NULL AND (s.owner_id = $1 OR r.owner_id = $1))
             OR (m.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM memberships x
                 JOIN agents o ON o.agent_id = x.agent_id WHERE x.channel_id = m.channel_id AND o.owner_id = $1)))";
@@ -1933,8 +1956,11 @@ impl Tx for PgTx {
             }
         };
         self.msgs(
-            &format!("m.commit_seq > $2 AND {owned} AND {filter} ORDER BY m.commit_seq LIMIT $3"),
-            &[&owner_id, &after, &limit, &arg],
+            &format!(
+                "m.commit_seq > $2 AND {owned} AND {filter} AND ($5::text IS NULL OR substr(m.created_at, 1, 10) >= $5)
+                 ORDER BY m.commit_seq LIMIT $3"
+            ),
+            &[&owner_id, &after, &limit, &arg, &from_day],
         )
     }
 

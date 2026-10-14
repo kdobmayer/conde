@@ -639,13 +639,15 @@ fn inbox_unread_sent_search(s: &dyn Store) {
         assert_eq!(ids(&tx.sent_by(&w.a, 0, 100).unwrap()), vec![mid(2), mid(3)]);
         assert_eq!(ids(&tx.sent_by(&w.a, seqs[1], 100).unwrap()), vec![mid(3)]);
 
-        assert_eq!(ids(&tx.search_scan(&w.a, 0, SearchScope::All, 100).unwrap()), vec![mid(1), mid(2), mid(3), mid(4)]);
-        assert_eq!(ids(&tx.search_scan(&w.a, seqs[1], SearchScope::All, 2).unwrap()), vec![mid(3), mid(4)]);
-        assert_eq!(ids(&tx.search_scan(&w.a, 0, SearchScope::Channel("dev"), 100).unwrap()), vec![mid(3), mid(4)]);
-        assert!(tx.search_scan(&w.a, 0, SearchScope::Channel("ops"), 100).unwrap().is_empty(), "not a member");
-        assert_eq!(ids(&tx.search_scan(&w.a, 0, SearchScope::Partner(&w.b), 100).unwrap()), vec![mid(1), mid(2)]);
-        assert_eq!(ids(&tx.search_scan(&w.b, 0, SearchScope::Partner(&w.c), 100).unwrap()), vec![mid(6)]);
-        assert_eq!(ids(&tx.search_scan(&w.c, 0, SearchScope::All, 100).unwrap()), vec![mid(5), mid(6)]);
+        assert_eq!(ids(&tx.search_scan(&w.a, 0, SearchScope::All, None, 100).unwrap()), vec![mid(1), mid(2), mid(3), mid(4)]);
+        assert_eq!(ids(&tx.search_scan(&w.a, seqs[1], SearchScope::All, None, 2).unwrap()), vec![mid(3), mid(4)]);
+        assert_eq!(ids(&tx.search_scan(&w.a, 0, SearchScope::Channel("dev"), None, 100).unwrap()), vec![mid(3), mid(4)]);
+        assert!(tx.search_scan(&w.a, 0, SearchScope::Channel("ops"), None, 100).unwrap().is_empty(), "not a member");
+        assert_eq!(ids(&tx.search_scan(&w.a, 0, SearchScope::Partner(&w.b), None, 100).unwrap()), vec![mid(1), mid(2)]);
+        assert_eq!(ids(&tx.search_scan(&w.b, 0, SearchScope::Partner(&w.c), None, 100).unwrap()), vec![mid(6)]);
+        assert_eq!(ids(&tx.search_scan(&w.c, 0, SearchScope::All, None, 100).unwrap()), vec![mid(5), mid(6)]);
+        assert!(tx.search_scan(&w.a, 0, SearchScope::All, Some("2999-01-01"), 100).unwrap().is_empty(), "dated before the day");
+        assert_eq!(tx.search_scan(&w.a, 0, SearchScope::All, Some("2000-01-01"), 100).unwrap().len(), 4, "dated on or after it");
     });
     write(s, |tx| {
         tx.mark_dm_read(&mid(1), &w.a, "t").unwrap();

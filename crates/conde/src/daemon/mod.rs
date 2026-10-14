@@ -620,6 +620,11 @@ impl Core {
             Err(_) if directory => return Ok(None),
             Err(e) => return Err(e),
         };
+        // A human's watch reads as the owner the host's credential names, published or not
+        // (the server scopes it to their agents); every other call needs a published name.
+        if me.is_human() && req.op == "message.feed" {
+            return Ok(Some(format!("human:{}@{}", conn.owner(), conn.host())));
+        }
         let alias = &conn.alias;
         let publication = board::publication_of(self, alias, &me.id);
         match publication {

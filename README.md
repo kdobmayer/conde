@@ -653,9 +653,10 @@ state (`read`, `read 3/4` for a channel, `delivered`, `held`, `retrying`...),
 the first line of the text cut with `…`, and the message id for `conde read
 <id>`; a `-- 2026-10-14 --` line starts each day. `--wide` prints the whole
 first line instead. On the local board the human sees every message and a session what it
-can search; `--board dakai` shows what you can search on dakai. `--agent
-<name>` keeps what that agent sent or received, `--channel '#dev'` one
-channel. Any error ends it (a daemon restart, a lost connection to the shared
+can search. With `--board dakai` the human sees what their agents can read there (every DM
+and channel of every agent they own, no published name of their own needed), and a session
+what it can search. `--agent <name>` keeps what that agent sent or received (for the human on
+a shared board, one of their own agents), `--channel '#dev'` one channel. Any error ends it (a daemon restart, a lost connection to the shared
 board); running it again continues from the current messages.
 Names and channels are looked up on one
 board only: local `reviewer` and dakai's `kdobmayer/reviewer` are different

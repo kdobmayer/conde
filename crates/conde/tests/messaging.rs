@@ -357,10 +357,11 @@ fn a_feed_follows_what_the_caller_can_see(b: Board) {
     assert!(feed_rows(&skipped).is_empty(), "{skipped}");
     assert!(skipped["cursor"].as_i64() > next["cursor"].as_i64(), "{skipped}");
 
-    // On a shared board the human sees what it can search: none of these.
+    // On a shared board the human reads as the owner (B24): all of these are krisz's agents'.
+    let local = b.ok(HUMAN, "message.feed", json!({"last": 20}));
     b.d.share("shared");
     let shared = b.ok(HUMAN, "message.feed", json!({"last": 20}));
-    assert!(feed_rows(&shared).iter().all(|r| r.0 == "krisz/krisz" || r.1 == "krisz/krisz"), "{shared}");
+    assert_eq!(feed_rows(&shared), feed_rows(&local), "{shared}");
     let err = b.call(HUMAN, "message.feed", json!({"agent": "nobody"})).unwrap_err();
     assert_eq!(err.0, ErrorCode::NotFound);
 }
@@ -374,4 +375,64 @@ fn a_feed_follows_what_the_caller_can_see_on_sqlite() {
 fn a_feed_follows_what_the_caller_can_see_on_the_test_store() {
     // Postgres when CONDE_TEST_PG is set, else SQLite again.
     a_feed_follows_what_the_caller_can_see(Board::new());
+}
+
+/// B24: on a shared board a human reads as the owner, published or not: every DM and channel
+/// of their agents, never another owner's DM or a channel none of their agents is in; `agent`
+/// narrows to one of theirs and refuses another owner's; an agent session keeps its own view.
+fn a_human_watches_a_shared_board_as_the_owner(b: Board) {
+    b.d.share("shared");
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    b.register(CAROL, "carol");
+    let david = b.other("david", "d-host");
+    let as_david = |actor: &str, op: &str, body: Value| b.call_as(&david, actor, op, body).unwrap_or_else(|e| panic!("{op}: {e:?}"));
+    as_david("codex:t-dave", "agent.register", json!({"name": "dave"}));
+    as_david("codex:t-dora", "agent.register", json!({"name": "dora"}));
+    b.send(ALICE, "bob", "alice to bob");
+    b.send(BOB, "carol", "bob to carol");
+    as_david("codex:t-dave", "message.send", json!({"to": {"agent": "krisz/alice"}, "text": "dave to alice"}));
+    as_david("codex:t-dave", "message.send", json!({"to": {"agent": "dora"}, "text": "between david's agents"}));
+    as_david("codex:t-dave", "channel.create", json!({"channel": "#theirs"}));
+    as_david("codex:t-dave", "message.send", json!({"to": {"channel": "#theirs"}, "text": "no agent of krisz here"}));
+    b.ok(CAROL, "channel.create", json!({"channel": "#ops"}));
+    b.send(CAROL, "#ops", "carol in ops");
+    let lines = |r: &Value| -> Vec<String> {
+        let mut t: Vec<String> = items(r, "messages").iter().map(|m| m["line"].as_str().unwrap().to_string()).collect();
+        t.sort();
+        t
+    };
+    let sorted = |v: &[&str]| -> Vec<String> {
+        let mut t: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+        t.sort();
+        t
+    };
+
+    // krisz's human address has no agent on this board: no name of its own is needed
+    let all = b.ok(HUMAN, "message.feed", json!({"last": 50}));
+    assert_eq!(lines(&all), sorted(&["alice to bob", "bob to carol", "dave to alice", "carol in ops"]), "{all}");
+    let bob = b.ok(HUMAN, "message.feed", json!({"agent": "bob"}));
+    assert_eq!(lines(&bob), sorted(&["alice to bob", "bob to carol"]), "{bob}");
+    let err = b.call(HUMAN, "message.feed", json!({"agent": "david/dave"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::Forbidden, "{err:?}");
+    let err = b.call(HUMAN, "message.feed", json!({"channel": "#theirs"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::Forbidden, "{err:?}");
+    // the cursor follows
+    b.send(CAROL, "alice", "later");
+    let next = b.ok(HUMAN, "message.feed", json!({"after": all["cursor"]}));
+    assert_eq!(lines(&next), sorted(&["later"]), "{next}");
+    // an agent session keeps what it can search
+    let alice = b.ok(ALICE, "message.feed", json!({"last": 50}));
+    assert_eq!(lines(&alice), sorted(&["alice to bob", "dave to alice", "later"]), "{alice}");
+}
+
+#[test]
+fn a_human_watches_a_shared_board_as_the_owner_on_sqlite() {
+    a_human_watches_a_shared_board_as_the_owner(Board::sqlite());
+}
+
+#[test]
+fn a_human_watches_a_shared_board_as_the_owner_on_the_test_store() {
+    // Postgres when CONDE_TEST_PG is set, else SQLite again.
+    a_human_watches_a_shared_board_as_the_owner(Board::new());
 }

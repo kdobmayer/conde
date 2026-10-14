@@ -481,3 +481,43 @@ fn enroll_takes_the_alias_and_account_from_board_info() {
     let bound = cloud.d.with_conn(|tx| tx.agents_on_host("host-a")).unwrap();
     assert!(bound.is_empty(), "enrollment binds nothing on the server: {bound:?}");
 }
+
+/// B24: the daemon forwards a human's watch of a shared board with no published name of the
+/// human's own (the server scopes it to their agents); an agent session that is not published
+/// is still refused before anything leaves the host.
+#[test]
+fn a_human_watches_a_shared_board_without_a_published_name() {
+    let cloud = Cloud::start(test_config());
+    let mut a = Host::new("ann", "host-a");
+    cloud.enroll(&a);
+    let sa = a.sock();
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    a.ok(Some("codex"), ALICE, &["register", "alice"]);
+    cloud.publish(&a, &sa, "alice");
+    a.ok(Some("codex"), ALICE, &["create", "#ops", "--board", "shared"]);
+    a.ok(Some("codex"), ALICE, &["send", "#ops", "alice posts on the shared board", "--board", "shared"]);
+    let human = a.conde(None, &[], &["register", "ann"], None);
+    if String::from_utf8_lossy(&human.stderr).contains("refusing to act as the human") {
+        eprintln!("skipped: runs as the human; launch the suite outside an agent shell");
+        return;
+    }
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+
+    // the human: never published, reads alice's post (watch runs until the timeout ends it)
+    let out = a.env(&mut std::process::Command::new("/usr/bin/timeout")).args(["4", BIN, "watch", "--board", "shared"]).output().unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("ann/alice") && stdout.contains("alice posts on the"), "{stdout}{stderr}");
+
+    // an agent session that is not published: refused at once, as before
+    let bob: &[(&str, &str)] = &[("CODEX_THREAD_ID", "t-bob")];
+    a.ok(Some("codex"), bob, &["register", "bob"]);
+    let out = a
+        .env(&mut std::process::Command::new(a.root.join("bin/codex")))
+        .envs(bob.iter().copied())
+        .args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", "/usr/bin/timeout", "4", BIN, "watch", "--board", "shared"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "refused, not watching until the timeout: {stderr}");
+    assert!(stderr.contains("bob is not published on shared"), "{stderr}");
+}

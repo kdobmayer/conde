@@ -13,6 +13,9 @@ pub const MAX_ATTACHMENT: usize = 8 << 20;
 pub const MAX_MESSAGE_ATTACHMENTS: usize = 32 << 20;
 /// Page size of inbox / search / receipt listings.
 pub const PAGE: usize = 200;
+/// Messages one search request scans at most before it answers with what it found and a
+/// cursor to continue: a pattern that never matches costs a bounded scan, not all history.
+pub const SEARCH_SCAN: i64 = 10_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {

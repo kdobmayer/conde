@@ -152,7 +152,7 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     owned_channels.sort();
     owned_channels.dedup();
     // place: DMs only, one channel an own agent is in, or both
-    let (dms, place_channel) = match opt_str(body, "place")? {
+    let (dms_wanted, place_channel) = match opt_str(body, "place")? {
         None => (true, None),
         Some("dm") => (true, Some(None)),
         Some(raw) => {
@@ -165,41 +165,44 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         }
     };
     let in_place = |c: &String| place_channel.as_ref().is_none_or(|p| p.as_ref() == Some(c));
-    let own_ids: Vec<String> = match &agent {
-        Some(a) => vec![a.id.clone()],
-        None => ctx.db.owner_agents(owner)?.into_iter().map(|a| a.id).collect(),
-    };
-    // The party at the other end of a DM, seen from a sender range and from a recipient range,
-    // and the senders a channel range keeps; None drops that part.
-    let (sent_to, received_from, posted_by) = match direction {
-        None => (Some(Party::Any), Some(Party::Any), Some(Party::Any)),
-        Some("out") => (Some(Party::Other), None, Some(Party::Own)),
-        Some("own") => (Some(Party::Own), Some(Party::Own), None),
-        _ => (None, Some(Party::Other), Some(Party::Other)),
-    };
+    let own_ids: Vec<String> = ctx.db.owner_agents(owner)?.into_iter().map(|a| a.id).collect();
+    let picked = |id: &String| agent.as_ref().is_none_or(|a| &a.id == id);
+    let owned_here: Vec<String> = owned_channels.iter().filter(|c| in_place(c)).cloned().collect();
+    // the channels the rows may be in: the agent's (it is a current member), else every own one
     let channels: Vec<String> = match &agent {
-        Some(a) => memberships.iter().filter(|m| m.agent_id == a.id).map(|m| m.channel_id.clone()).collect(),
-        None => owned_channels.clone(),
+        Some(a) => memberships.iter().filter(|m| m.agent_id == a.id && in_place(&m.channel_id)).map(|m| m.channel_id.clone()).collect(),
+        None => owned_here.clone(),
     };
-    let channels: Vec<String> = channels.into_iter().filter(|c| in_place(c)).collect();
-    // An own sender's posts come from the channel ranges, except an agent's own posts in a
-    // channel it left (still readable through another own member), and `out` without an agent,
-    // which reads the own senders' ranges instead of every channel's.
-    let sender_posts = match (&agent, direction) {
-        (Some(_), None | Some("out")) | (None, Some("out")) => {
-            Some(FeedPosts::In(owned_channels.iter().filter(|c| in_place(c)).cloned().collect()))
-        }
-        _ => None,
-    };
-    let posted_by = if agent.is_none() && direction == Some("out") { None } else { posted_by };
     let mut ranges = Vec::new();
-    for id in &own_ids {
-        ranges.push(FeedRange { by: FeedBy::Sender, id: id.clone(), dms: sent_to.filter(|_| dms), posts: sender_posts.clone() });
-        ranges.push(FeedRange { by: FeedBy::Recipient, id: id.clone(), dms: received_from.filter(|_| dms), posts: None });
-    }
-    if let Some(p) = posted_by {
-        for c in &channels {
-            ranges.push(FeedRange { by: FeedBy::Channel, id: c.clone(), dms: None, posts: Some(FeedPosts::By(p)) });
+    let mut range = |by: FeedBy, id: &String, dms: Option<Party>, posts: Option<FeedPosts>| {
+        ranges.push(FeedRange { by, id: id.clone(), dms: dms.filter(|_| dms_wanted), posts });
+    };
+    if direction == Some("out") {
+        // Every `out` row has an own sender: the own senders' ranges alone, never a channel's
+        // range filtered down to its few own posts. The named agent's own posts reach every
+        // channel an own agent is in (it may have left one); the others', the agent's channels.
+        for id in &own_ids {
+            let posts = if agent.is_some() && picked(id) { &owned_here } else { &channels };
+            range(FeedBy::Sender, id, picked(id).then_some(Party::Other), Some(FeedPosts::In(posts.clone())));
+        }
+    } else {
+        // The party at the other end of a DM, from a sender range and from a recipient range,
+        // and the senders a channel range keeps.
+        let (sent_to, received_from, posted_by) = match direction {
+            None => (Some(Party::Any), Some(Party::Any), Some(Party::Any)),
+            Some("own") => (Some(Party::Own), Some(Party::Own), None),
+            _ => (None, Some(Party::Other), Some(Party::Other)),
+        };
+        // An agent's own posts in a channel it left are still readable through another own member.
+        let left_posts = (agent.is_some() && direction.is_none()).then(|| FeedPosts::In(owned_here.clone()));
+        for id in own_ids.iter().filter(|id| picked(id)) {
+            range(FeedBy::Sender, id, sent_to, left_posts.clone());
+            range(FeedBy::Recipient, id, received_from, None);
+        }
+        if let Some(p) = posted_by {
+            for c in &channels {
+                range(FeedBy::Channel, c, None, Some(FeedPosts::By(p)));
+            }
         }
     }
     let mut rows = if after.saturating_add(1) < before {

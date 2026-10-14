@@ -512,7 +512,16 @@ async fn the_feed_is_what_the_owners_agents_can_read(d: Arc<Dispatcher>) {
     ui.op(&c.k, &c.helper, "channel.join", json!({"channel": "#team"})).await;
     ui.op(&c.k, &c.helper, "message.send", json!({"to": {"channel": "#team"}, "text": "helper was here"})).await;
     ui.op(&c.k, &c.helper, "channel.leave", json!({"channel": "#team"})).await;
+    ui.op(&c.k, &c.worker, "message.send", json!({"to": {"agent": "helper"}, "text": "handoff back"})).await;
     let feed = |body: Value| ui.ok(&b, &csrf, "owner.feed", body);
+
+    // A DM between two own agents sits in a sender and a recipient range: one row each, and
+    // `more` exact after the merge (two such DMs: a page of one has more; merged without
+    // dedupe, the newest one would fill the page twice and `more` would read false).
+    let own = feed(json!({"direction": "own", "limit": 1})).await;
+    assert_eq!((feed_texts(&own), own["more"].as_bool()), (vec!["handoff back".to_string()], Some(true)), "{own}");
+    let own = feed(json!({"direction": "own", "limit": 2})).await;
+    assert_eq!((feed_texts(&own), own["more"].as_bool()), (vec!["handoff back".to_string(), "handoff to worker".to_string()], Some(false)), "{own}");
 
     // The whole feed, page by page: the owned set exactly, each message once, newest first.
     let (all, pages) = drain(&ui, &b, &csrf, json!({}), 2).await;
@@ -537,6 +546,7 @@ async fn the_feed_is_what_the_owners_agents_can_read(d: Arc<Dispatcher>) {
         ("status?", "in", vec![worker.clone()]),
         ("green, report attached", "out", vec![worker.clone()]),
         ("handoff to worker", "own", vec![helper.clone(), worker.clone()]),
+        ("handoff back", "own", vec![worker.clone(), helper.clone()]),
         ("scout here", "in", vec![worker.clone()]),
         ("worker on team", "out", vec![worker.clone()]),
         ("helper was here", "out", vec![worker.clone()]),
@@ -546,15 +556,12 @@ async fn the_feed_is_what_the_owners_agents_can_read(d: Arc<Dispatcher>) {
         assert!(r["delivery"].is_object() && r["place"].is_string(), "the history view: {r}");
     }
 
-    // A DM between two own agents sits in two ranges: one row, and `more` exact after the merge.
-    let own = feed(json!({"direction": "own", "limit": 1})).await;
-    assert_eq!((feed_texts(&own), own["more"].as_bool()), (vec!["handoff to worker".to_string()], Some(false)), "{own}");
 
     // Each predicate alone.
     let set = |f: &Value| -> Vec<String> { let mut t = feed_texts(f); t.sort(); t };
     let sorted = |v: &[&str]| -> Vec<String> { let mut t: Vec<String> = v.iter().map(|s| s.to_string()).collect(); t.sort(); t };
     let dm = feed(json!({"place": "dm"})).await;
-    assert_eq!(set(&dm), sorted(&["status?", "green, report attached", "handoff to worker"]));
+    assert_eq!(set(&dm), sorted(&["status?", "green, report attached", "handoff to worker", "handoff back"]));
     let team = feed(json!({"place": "#team", "limit": 100})).await;
     assert!(team["messages"].as_array().unwrap().iter().all(|m| m["place"] == "#team"), "{team}");
     assert!(set(&team).contains(&"scout here".to_string()) && set(&team).contains(&"helper was here".to_string()));
@@ -572,7 +579,7 @@ async fn the_feed_is_what_the_owners_agents_can_read(d: Arc<Dispatcher>) {
     }
     // agent: sender, DM recipient or current member; helper left #team, so only its own post.
     let h = feed(json!({"agent": "helper", "limit": 100})).await;
-    assert_eq!(set(&h), sorted(&["@krisztian-dobmayer/helper joined #team.", "handoff to worker", "helper was here"]), "{h}");
+    assert_eq!(set(&h), sorted(&["@krisztian-dobmayer/helper joined #team.", "handoff to worker", "handoff back", "helper was here"]), "{h}");
     let w = feed(json!({"agent": "worker", "limit": 100})).await;
     assert_eq!(set(&w).len(), set(&feed(json!({"limit": 100})).await).len(), "worker reads all of it: {w}");
     let (_, v) = ui.rpc(&b, &csrf, "owner.feed", json!({"agent": "david/scout"})).await;
@@ -586,7 +593,7 @@ async fn the_feed_is_what_the_owners_agents_can_read(d: Arc<Dispatcher>) {
     let combined = feed(json!({"agent": "worker", "direction": "out", "place": "dm"})).await;
     assert_eq!(feed_texts(&combined), vec!["green, report attached"], "{combined}");
     let combined = feed(json!({"agent": "worker", "direction": "own", "place": "dm"})).await;
-    assert_eq!(feed_texts(&combined), vec!["handoff to worker"], "{combined}");
+    assert_eq!(feed_texts(&combined), vec!["handoff back", "handoff to worker"], "{combined}");
 
     // A teammate signed in: an owner with no agents reads nothing; with one, never a DM between
     // two other owners' agents (G9).

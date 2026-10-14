@@ -731,6 +731,15 @@ impl PgTx {
         self.guard(conn.client.query(&statement, params))
     }
 
+    /// Like [`Self::query`], but prepared for this call alone, so Postgres plans it with these
+    /// values: a cached statement switches to a generic plan after five runs (plan_cache_mode
+    /// auto), and a generic plan of a statement whose best index depends on its values (the
+    /// feed's ranges) can walk the board instead.
+    fn query_planned(&self, sql: &str, params: Params) -> StoreResult<Vec<Row>> {
+        let mut conn = self.conn.borrow_mut();
+        self.guard(conn.client.query(sql, params))
+    }
+
     fn query_opt(&self, sql: &str, params: Params) -> StoreResult<Option<Row>> {
         let mut conn = self.conn.borrow_mut();
         let statement = self.guard(conn.statement(sql))?;
@@ -2025,7 +2034,8 @@ impl Tx for PgTx {
                 FeedArg::Text(t) => t as &(dyn ToSql + Sync),
             })
             .collect();
-        self.msgs(&format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC"), &args)
+        let sql = format!("{MSG_SELECT} WHERE m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC");
+        Ok(self.query_planned(&sql, &args)?.iter().map(msg_row).collect())
     }
 
     fn owner_search_scan(

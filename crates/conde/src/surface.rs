@@ -486,8 +486,12 @@ pub fn search(r: &Value, surface: Surface) -> Out {
             s(&h["line"])
         );
     }
-    if hits.is_empty() {
-        out.note("(no matches)");
+    // A search that spent its scan budget stopped early: say so, so "no matches" is not final.
+    match (hits.is_empty(), r["scanned"].as_i64().filter(|_| r["partial"] == true)) {
+        (true, Some(n)) => out.note(format!("(no matches in the first {n} messages scanned; the search stopped there)")),
+        (false, Some(n)) => out.note(format!("(the search stopped after scanning {n} messages)")),
+        (true, None) => out.note("(no matches)"),
+        (false, None) => {}
     }
     unavailable(&mut out, r);
     more(&mut out, r, surface, "search");
@@ -754,6 +758,10 @@ mod tests {
         assert!(search(&r, Surface::Cli).joined().contains("(more: add --after 205@2026-01-01T00:00:00.000Z)"));
         assert!(search(&r, Surface::Mcp).joined().contains("(more: call search with after=\"205@2026-01-01T00:00:00.000Z\")"));
         assert!(search(&json!({"hits": [], "next_cursor": 7}), Surface::Mcp).joined().contains("call search with after=7"));
+        // a search that stopped at its scan budget does not claim there are no matches
+        let stopped = search(&json!({"hits": [], "next_cursor": 9, "partial": true, "scanned": 10000}), Surface::Cli).joined();
+        assert!(stopped.contains("(no matches in the first 10000 messages scanned; the search stopped there)"), "{stopped}");
+        assert!(stopped.contains("add --after 9") && !stopped.contains("(no matches)\n"), "{stopped}");
     }
 
     #[test]

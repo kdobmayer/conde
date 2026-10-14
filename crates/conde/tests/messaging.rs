@@ -217,3 +217,50 @@ fn review_time_filter_survives_cursor_continuation_with_copied_history() {
     assert_eq!(plain["hits"].as_array().unwrap().len(), 2, "{plain}");
     assert!(plain["next_cursor"].is_null(), "{plain}");
 }
+
+/// A pattern that matches nothing stops after the scan budget and hands back a cursor; the
+/// continuation picks up where it stopped (and keeps a time cutoff). On SQLite and, with
+/// CONDE_TEST_PG, on Postgres.
+fn search_scan_is_bounded(b: Board) {
+    use conde::protocol::SEARCH_SCAN;
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    let (sender, recipient) = (b.agent_id("alice"), b.agent_id("bob"));
+    let filler = SEARCH_SCAN + 50;
+    b.d.with_tx(|tx| {
+        for n in 0..=filler {
+            let text = if n == filler { "the needle at the end".to_string() } else { format!("filler {n}") };
+            tx.insert_message(&conde::store::NewMessage {
+                id: &conde::util::new_ulid(), sender_id: &sender, recipient_id: Some(&recipient), channel_id: None,
+                text: &text, reply_to: None, created_at: "2026-10-09T00:00:00.000Z",
+            })?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let first = b.ok(BOB, "search", json!({"pattern": "needle"}));
+    assert!(first["hits"].as_array().unwrap().is_empty(), "{first}");
+    assert_eq!((first["partial"].as_bool(), first["scanned"].as_i64()), (Some(true), Some(SEARCH_SCAN)), "{first}");
+    let cursor = first["next_cursor"].as_i64().expect("a numeric cursor");
+    let next = b.ok(BOB, "search", json!({"pattern": "needle", "after": cursor}));
+    let lines: Vec<_> = next["hits"].as_array().unwrap().iter().map(|h| h["line"].as_str().unwrap()).collect();
+    assert_eq!(lines, ["the needle at the end"], "{next}");
+    assert!(next["partial"].is_null() && next["next_cursor"].is_null(), "{next}");
+    // A time search's continuation keeps its cutoff.
+    let timed = b.ok(BOB, "search", json!({"pattern": "needle", "after": "2026-01-01T00:00:00Z"}));
+    let token = timed["next_cursor"].as_str().expect("a <seq>@<time> cursor").to_string();
+    assert!(token.starts_with(&format!("{cursor}@")), "{token}");
+    let next = b.ok(BOB, "search", json!({"pattern": "needle", "after": token}));
+    assert_eq!(next["hits"].as_array().unwrap().len(), 1, "{next}");
+}
+
+#[test]
+fn search_scan_is_bounded_on_sqlite() {
+    search_scan_is_bounded(Board::sqlite());
+}
+
+#[test]
+fn search_scan_is_bounded_on_the_test_store() {
+    // Postgres when CONDE_TEST_PG is set, else SQLite again.
+    search_scan_is_bounded(Board::new());
+}

@@ -15,7 +15,7 @@ use crate::address::normalize_channel;
 use crate::dispatch::{
     Ctx, OpResult, bad_request, forbidden, not_found, one_line, opt_i64, opt_str, str_param, too_large,
 };
-use crate::protocol::{MAX_ATTACHMENT, MAX_MESSAGE_ATTACHMENTS, MAX_TEXT, PAGE};
+use crate::protocol::{MAX_ATTACHMENT, MAX_MESSAGE_ATTACHMENTS, MAX_TEXT, PAGE, SEARCH_SCAN};
 use crate::store::{NewMessage, NewNotification, SearchScope, Tx};
 use crate::util::{After, is_ulid, ms_from_iso, new_ulid, parse_after};
 
@@ -355,10 +355,12 @@ pub(crate) fn search_in(
     let mut hits = Vec::new();
     let mut next = None;
     let mut cursor = after;
+    let (mut scanned, mut partial) = (0i64, false);
     'scan: loop {
         let batch = scan(cursor, scope)?;
         for m in &batch {
             cursor = m.seq;
+            scanned += 1;
             // a message whose date does not parse is not known to be later
             if since.is_some_and(|t| ms_from_iso(&m.created_at).is_none_or(|c| c <= t)) {
                 continue;
@@ -375,8 +377,19 @@ pub(crate) fn search_in(
         if (batch.len() as i64) < SEARCH_BATCH {
             break;
         }
+        // The scan budget: answer with what was found and continue from here on the next call.
+        if scanned >= SEARCH_SCAN {
+            next = Some(After { cursor, time: since }.wire());
+            partial = true;
+            break;
+        }
     }
-    Ok(json!({"hits": hits, "next_cursor": next}))
+    let mut out = json!({"hits": hits, "next_cursor": next});
+    if partial {
+        out["partial"] = json!(true);
+        out["scanned"] = json!(scanned);
+    }
+    Ok(out)
 }
 
 /// The caller's sent messages with read state (DM: read time; channel: how

@@ -618,6 +618,9 @@ pub trait Tx {
     /// by due time then insertion order.
     fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>>;
     fn set_notification_status(&self, id: &str, status: &str) -> StoreResult<()>;
+    /// Settles the recipient's notification of the message as read while it is still open
+    /// (pending, dispatching, notified, held); true when one was.
+    fn settle_read(&self, message_id: &str, recipient_id: &str) -> StoreResult<bool>;
     /// Sets the status and, when given, the next attempt time.
     fn settle_notification(&self, id: &str, status: &str, next_attempt_at: Option<i64>) -> StoreResult<()>;
     /// The push state of the DM `message_id` to `recipient`.

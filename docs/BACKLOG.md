@@ -36,14 +36,15 @@ Review and integration by desk, one batch at a time; one release per batch.
   one transaction). Decided: revoke by default like the other mints, with
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
-- B17. Late-outcome race family, remaining cases (from the PR 18 review): (a)
-  mailbox gone with the message unread: a held outcome that commits after the
-  endpoints frame that removed the mailbox stays held until the next endpoints
-  frame or reconnect (gone_holds ran while the attempt was dispatching); (b)
-  outcome lands just before the read: the notification stays held for a read
-  message, counts in agent_health held and is re-offered through open_attempts
-  on reconnect until the endpoint leaves. Decide the rule for each and test.
-  Area: crates/conde ops/bridge.rs, store queries, tests/recovery.rs.
+- B17. Late-outcome race, remaining case (a) (case (b), a read after a hold,
+  is fixed in its PR): mailbox gone with the message unread: a held outcome that
+  commits after the endpoints frame that removed the mailbox stays held until the
+  next endpoints frame or reconnect. "Absent from the endpoints table" is not a
+  safe test at the held outcome: endpoint additions are applied asynchronously
+  too, so a just-online mailbox can look gone (abandoning on that broke two cloud
+  tests). Needs ordered processing of endpoints frames and outcomes on one
+  connection (server.rs), or a removal record the held outcome can check. Area:
+  conde-remote server.rs frame handling, crates/conde ops/bridge.rs, tests.
 - B19. `conde setup` on Linux prints "without a desktop login session, also
   run: loginctl enable-linger $USER" on every run; check `loginctl show-user
   $USER -p Linger` first and print the line only when linger is off. Area:

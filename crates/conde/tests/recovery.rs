@@ -137,6 +137,42 @@ fn a_late_outcome_never_reopens_a_read_message() {
     }
 }
 
+/// The other order: a hold (or a provisional acceptance) lands, then the recipient reads the
+/// message. The read settles the notification as read: it is no longer held, and it is not
+/// reopened on a reconnect.
+#[test]
+fn a_read_after_a_hold_settles_the_notification() {
+    for channel in [false, true] {
+        for outcome in ["held", "accepted"] {
+            let case = format!("{outcome}{}", if channel { " (channel cursor)" } else { "" });
+            let b = setup();
+            let mid = if channel {
+                b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+                b.ok(CAROL, "channel.join", json!({"channel": "#dev"}));
+                b.send(ALICE, "#dev", "@carol look")
+            } else {
+                b.send(ALICE, "carol", "x")
+            };
+            let p = b.d.bridge_principal(&b.p);
+            bridge_call(&b, &p, "bridge.fence", json!({})).unwrap();
+            let claim = bridge_call(&b, &p, "bridge.claim", json!({})).unwrap();
+            let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
+            bridge_call(&b, &p, "bridge.report", json!({"attempt_id": attempt, "outcome": outcome, "event_seq": 1})).unwrap();
+            assert_ne!(b.status_of(&mid, "carol"), "read", "{case}: not read yet");
+            if channel {
+                b.ok(CAROL, "message.read", json!({"channel": "#dev"}));
+            } else {
+                b.ok(CAROL, "message.read", json!({"id": mid}));
+            }
+            assert_eq!(b.status_of(&mid, "carol"), "read", "{case}");
+            let again = bridge_call(&b, &p, "bridge.claim", json!({"open": true})).unwrap();
+            assert_eq!(again["jobs"], json!([]), "{case}");
+            assert_eq!(again["open"], json!([]), "{case}: not reopened on reconnect");
+            assert_eq!(again["held"], json!([]), "{case}: not held");
+        }
+    }
+}
+
 #[test]
 fn fence_makes_one_instance_active_and_open_attempts_follow_it() {
     let b = setup();

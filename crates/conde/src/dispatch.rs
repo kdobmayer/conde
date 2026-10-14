@@ -160,14 +160,24 @@ impl Ctx<'_> {
         let mut found = ops::agents::at_address(self.db, self.p.user_id, &address)?;
         match found.len() {
             1 => Ok(found.remove(0)),
-            0 => Err(unauthenticated(format!(
-                "this session ({address}) is not in the registry; run: conde register <your-name>"
-            ))),
+            0 => Err(unauthenticated(unregistered(&address))),
             _ => Err(conflict(format!(
                 "multiple registry names point at this session: {}",
                 found.iter().map(Agent::canonical).collect::<Vec<_>>().join(", ")
             ))),
         }
+    }
+}
+
+/// The refusal for a session no registry name points at. A human (a plain shell) is told the
+/// command: they register under their own name, the one the address carries.
+pub fn unregistered(address: &Address) -> String {
+    match address.kind {
+        Kind::Human => format!(
+            "this session ({address}) is not in the registry; run: conde register {} (a human registers under their own name)",
+            address.target
+        ),
+        _ => format!("this session ({address}) is not in the registry; run: conde register <your-name>"),
     }
 }
 

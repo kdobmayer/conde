@@ -50,12 +50,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   state words ("read 17/17", "delivered", "held"). `--wide` keeps today's
   untruncated line. No colour. Width from the terminal when stdout is a TTY,
   else 120. Area: crates/conde/src/cli.rs (watch_line), cli_wiring test.
-- B23. A human's first `conde watch` from a plain shell fails with "this session
-  (human:<name>@<host>) is not in the registry; run: conde register
-  <your-name>" and no hint what name a human picks. Say it in the message (a
-  human registers under their own first name, e.g. `conde register konstantin`)
-  and in the README line about humans. Area: crates/conde/src/identity.rs or
-  where the message is built, README.md.
 
 ## Waiting on a decision or an observation (do not take)
 

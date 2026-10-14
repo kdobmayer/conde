@@ -272,7 +272,7 @@ impl Core {
             1 => Ok(found.remove(0)),
             0 => Err((
                 ErrorCode::Unauthenticated,
-                format!("this session ({address}) is not in the registry; run: conde register <your-name>"),
+                crate::dispatch::unregistered(&address),
             )),
             _ => Err((ErrorCode::Conflict, "multiple registry names point at this session".to_string())),
         }

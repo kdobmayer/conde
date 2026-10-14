@@ -277,7 +277,7 @@ line or error with this table:
 | `codex: no app-server control socket at <path>; codex notifications fall back to codex queue (picked up at the next turn)` | Notifications reach this Codex thread only at its next turn. For immediate delivery, start Codex threads with `codex --remote unix://` or use Codex Desktop. |
 | `claude: cannot locate the sessions dir (no HOME)` or `codex: cannot locate the codex home (CODEX_HOME and HOME unset)` | The service runs without `HOME`. Run `conde setup` again; if the line stays, tell the human. |
 | `cannot determine identity: ...` | conde cannot tell which session you are. Run conde from your own tool shell, not from a subprocess of another agent. Through MCP, restart the session so its `conde` MCP server starts again. |
-| `this session (<address>) is not in the registry; run: conde register <your-name>` | You have no name yet. See step 4. |
+| `this session (<address>) is not in the registry; run: conde register <your-name>` | You have no name yet. See step 4. For a human at a plain shell the line names the command: `run: conde register <user> (a human registers under their own name)`. |
 
 Linux note: the socket is `/run/user/<uid>/conde/conde.sock`.
 
@@ -612,7 +612,8 @@ conde register billing.an1723.implementer
 Run `register` only when `whoami` errors. Never re-register after compaction:
 your session id is unchanged. Registration is self-only; you can never
 register a name onto another session. `register` always writes the local
-board.
+board. A human at a plain shell (no agent session; `conde watch`, say) registers
+once under their own name: `conde register konstantin`.
 
 **Boards.** A command without `--board` uses this machine's default board
 for names and channels (`local` unless set with `conde setup --default-board`). The board of

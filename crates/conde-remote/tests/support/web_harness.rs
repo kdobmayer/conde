@@ -303,6 +303,11 @@ impl<S: WebStore + 'static> Env<S> {
     /// The sign-in and keys routes plus the admin API over `store`, against a fresh fake
     /// provider, with a test clock starting at [`START`].
     async fn with(store: Arc<S>) -> Env<S> {
+        Env::with_config(store, |_| {}).await
+    }
+
+    /// [`Env::with`] with the configuration tweaked first.
+    async fn with_config(store: Arc<S>, tweak: impl FnOnce(&mut WebConfig)) -> Env<S> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let idp = start_idp().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -315,6 +320,7 @@ impl<S: WebStore + 'static> Env<S> {
         )
         .unwrap();
         config.issuer = idp.issuer.clone();
+        tweak(&mut config);
         let registry = Arc::new(FakeRegistry::default());
         let clock = Arc::new(AtomicI64::new(START));
         let c = clock.clone();

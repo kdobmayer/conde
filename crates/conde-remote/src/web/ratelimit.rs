@@ -1,5 +1,6 @@
 //! In-process token buckets for the remote MCP surface (docs/REMOTE-MCP.md §3): `tools/call`
-//! per grant, `send` and `react` per user, the OAuth endpoints per client IP. Each replica keeps
+//! per grant, `send` and `react` per user, the OAuth endpoints per client IP; and for the
+//! `conde login` redeem: per client IP, and pasted-code attempts per account. Each replica keeps
 //! its own buckets, so with N replicas a client gets at most N times the rate.
 
 use std::hash::Hash;
@@ -20,16 +21,31 @@ pub struct McpLimits {
     pub writes_per_min: u32,
     /// Requests to the OAuth endpoints per client IP per minute (burst: the same number).
     pub oauth_per_min: u32,
+    /// `POST /auth/cli/redeem` per client IP per minute (burst: the same number).
+    pub cli_redeem_per_min: u32,
+    /// Pasted-code attempts per account per hour (burst: the same number). The per-code budget
+    /// (5 tries) restarts with every newly issued code; this one does not.
+    pub cli_guesses_per_hour: u32,
 }
 
 impl Default for McpLimits {
     fn default() -> McpLimits {
-        McpLimits { tool_calls_per_min: 120, tool_calls_burst: 30, writes_per_min: 30, oauth_per_min: 60 }
+        McpLimits {
+            tool_calls_per_min: 120,
+            tool_calls_burst: 30,
+            writes_per_min: 30,
+            oauth_per_min: 60,
+            cli_redeem_per_min: 30,
+            cli_guesses_per_hour: 15,
+        }
     }
 }
 
+fn n(v: u32) -> NonZeroU32 {
+    NonZeroU32::new(v.max(1)).expect("at least one")
+}
+
 fn quota(per_min: u32, burst: u32) -> Quota {
-    let n = |v: u32| NonZeroU32::new(v.max(1)).expect("at least one");
     Quota::per_minute(n(per_min)).allow_burst(n(burst))
 }
 
@@ -60,6 +76,8 @@ pub(crate) struct Limiters {
     tools: Bucket<String>,
     writes: Bucket<i64>,
     oauth: Bucket<IpAddr>,
+    cli_redeem: Bucket<IpAddr>,
+    cli_guesses: Bucket<i64>,
 }
 
 impl Limiters {
@@ -68,6 +86,8 @@ impl Limiters {
             tools: Bucket::new(quota(l.tool_calls_per_min, l.tool_calls_burst)),
             writes: Bucket::new(quota(l.writes_per_min, l.writes_per_min)),
             oauth: Bucket::new(quota(l.oauth_per_min, l.oauth_per_min)),
+            cli_redeem: Bucket::new(quota(l.cli_redeem_per_min, l.cli_redeem_per_min)),
+            cli_guesses: Bucket::new(Quota::per_hour(n(l.cli_guesses_per_hour)).allow_burst(n(l.cli_guesses_per_hour))),
         }
     }
 
@@ -82,6 +102,14 @@ impl Limiters {
     pub(crate) fn oauth(&self, ip: IpAddr) -> Result<(), u64> {
         self.oauth.check(&ip)
     }
+
+    pub(crate) fn cli_redeem(&self, ip: IpAddr) -> Result<(), u64> {
+        self.cli_redeem.check(&ip)
+    }
+
+    pub(crate) fn cli_guess(&self, user_id: i64) -> Result<(), u64> {
+        self.cli_guesses.check(&user_id)
+    }
 }
 
 #[cfg(test)]
@@ -90,7 +118,14 @@ mod tests {
 
     #[test]
     fn a_bucket_runs_out_and_names_the_wait() {
-        let l = Limiters::new(McpLimits { tool_calls_per_min: 60, tool_calls_burst: 2, writes_per_min: 1, oauth_per_min: 1 });
+        let l = Limiters::new(McpLimits {
+            tool_calls_per_min: 60,
+            tool_calls_burst: 2,
+            writes_per_min: 1,
+            oauth_per_min: 1,
+            cli_redeem_per_min: 1,
+            cli_guesses_per_hour: 2,
+        });
         assert!(l.tool_call("g1").is_ok());
         assert!(l.tool_call("g1").is_ok());
         let wait = l.tool_call("g1").unwrap_err();
@@ -102,6 +137,11 @@ mod tests {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert!(l.oauth(ip).is_ok());
         assert!(l.oauth(ip).is_err());
+        assert!(l.cli_redeem(ip).is_ok(), "a bucket of its own");
+        assert!(l.cli_redeem(ip).is_err());
+        assert!(l.cli_guess(7).is_ok() && l.cli_guess(7).is_ok());
+        assert!((1..=3600).contains(&l.cli_guess(7).unwrap_err()), "per hour");
+        assert!(l.cli_guess(8).is_ok(), "per account");
     }
 }
 

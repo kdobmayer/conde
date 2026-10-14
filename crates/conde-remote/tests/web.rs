@@ -998,6 +998,67 @@ async fn wrong_pasted_codes_use_up_the_tries_then_the_login_dies() {
     assert!(got["message"].as_str().unwrap().contains("expired"), "{got}");
 }
 
+/// A redeem from `ip` (the ingress's X-Forwarded-For entry): (status, Retry-After, body).
+async fn redeem_from<S>(env: &Env<S>, ip: &str, body: Value) -> (StatusCode, Option<String>, Value) {
+    let r = reqwest::Client::new()
+        .post(env.url("/auth/cli/redeem"))
+        .header("x-forwarded-for", ip)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let after = r.headers().get(header::RETRY_AFTER).map(|v| v.to_str().unwrap().to_string());
+    (r.status(), after, r.json().await.unwrap())
+}
+
+#[tokio::test]
+async fn the_redeem_is_rate_limited_per_address() {
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_redeem_per_min = 3).await;
+    let run = cli_run();
+    let body = json!({"code": "c".repeat(64), "state": run.state, "code_verifier": run.verifier, "host": "box"});
+    for _ in 0..3 {
+        let (status, _, got) = redeem_from(&env, "203.0.113.1", body.clone()).await;
+        assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
+    }
+    let (status, after, got) = redeem_from(&env, "203.0.113.1", body.clone()).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{got}");
+    let wait = got["retry_after"].as_u64().unwrap();
+    assert!(wait >= 1 && after == Some(wait.to_string()), "{got} {after:?}");
+    assert!(got["message"].as_str().unwrap().contains("from this address"), "{got}");
+    // Another address has its own bucket.
+    let (status, _, _) = redeem_from(&env, "203.0.113.2", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The per-code budget (5 tries) restarts with every code the account confirms again; the
+/// per-account budget does not: once spent, even the right code waits, and the waiting login
+/// keeps its record (the refused attempt spends no try).
+#[tokio::test]
+async fn pasted_code_attempts_are_limited_per_account_across_reissued_codes() {
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_guesses_per_hour = 7).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let wrong = |shown: &str| if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    for left in [4, 3, 2, 1] {
+        let (status, got) = paste_redeem(&env, &run, wrong(&shown)).await;
+        assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
+    }
+    // Confirming again restarts the per-code tries ...
+    let shown = paste_leg(&env, &b, &run).await;
+    for left in [4, 3, 2] {
+        let (status, got) = paste_redeem(&env, &run, wrong(&shown)).await;
+        assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
+    }
+    // ... but not the account's: the eighth attempt waits, even with the right code.
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{got}");
+    assert!(got["message"].as_str().unwrap().contains("for this account"), "{got}");
+    assert!(env.store.m().creds.is_empty(), "nothing minted");
+    let tries: Vec<u32> = env.store.m().codes.values().map(|c| c.tries).collect();
+    assert_eq!(tries, [3], "the login waits with its tries unspent");
+}
+
 #[tokio::test]
 async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_that_signed_in() {
     let env = Env::with(Arc::new(MemStore::default())).await;

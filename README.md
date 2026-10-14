@@ -427,7 +427,10 @@ U) is caught before anything is sent, and you can retry. The code works once,
 only for this run of `conde login`, within 5 minutes of the sign-in. Each
 issued code allows 5 wrong tries; the fifth ends the run (start again with
 `--code`). Confirming on the page again issues a new code with a new budget
-and kills the previous one. Whoever enters the code gets a host key for your human's account,
+and kills the previous one; across codes, an account gets 15 code attempts
+an hour, and the redeem takes 30 requests a minute per address. Past either,
+the server answers `too many ... attempts; retry in N s` and the waiting login
+stays; retry after that. Whoever enters the code gets a host key for your human's account,
 so your human gives it only to the login you started together.
 
 **Last resort: a pasted key.** If no sign-in can complete, your human creates

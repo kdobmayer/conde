@@ -312,7 +312,9 @@ pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host
             let _ = std::fs::remove_file(path);
             Ok(CodeOutcome::Enrolled(enrolled))
         }
-        Err(r) if r.error == "invalid_code" || r.error == "authorization_pending" => Ok(CodeOutcome::Retry(r.message)),
+        Err(r) if ["invalid_code", "authorization_pending", "rate_limited"].contains(&r.error.as_str()) => {
+            Ok(CodeOutcome::Retry(r.message))
+        }
         Err(r) => {
             // only an answer that ended the login on the server ends it here
             if FINAL.contains(&r.error.as_str()) {

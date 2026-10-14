@@ -76,3 +76,28 @@ Review and integration by desk, one batch at a time; one release per batch.
   read-only). Design phase at desk first (audit, information architecture,
   three rendered directions, plan); implementation items appear here after
   the owner picks a direction.
+
+## Web UI v2 (owner 2026-10-14: skins A Console and B Editorial over one skeleton, per-browser switch, dark only; C not built; pick or mix after real traffic)
+
+Design: docs/web-ui-v2/ (audit.md, ia.md, options/, plan.md). Each item below
+is specified in plan.md with its gate; the lines here are the index. Server
+items (S) run one at a time; client groups C1, C2, C3 are disjoint files and
+can run in parallel with S; U6-U15 go to the branch web-v2, U16 merges it.
+
+- U1. Conversation opens at the newest message (live defect). Area: web/src/lib/Conversation.svelte, web/scripts/design/probe-scroll.mjs. Any time, ship alone.
+- U2. Browser allow-list: owner.feed, owner.thread, owner.search. Area: crates/conde-remote/src/web/app.rs, crates/conde/tests/web_ui.rs. S, first.
+- U3. owner.feed with lower and upper bounds, plus cost gate. Area: crates/conde/src/ops/{web,mod}.rs, store/{mod,sqlite,postgres}.rs, tests/web_ui.rs. S, after U2.
+- U4. owner.feed problems predicate over the recipients delivery() shows, plus cost gate. Area: same as U3. S, after U3.
+- U5. owner.thread subtree answer with the reply_to index (migration 0012), branched-path test, cost gate. Area: store/migrations/0012_messages_by_reply_to.sql, store/sqlite_schema.sql, store/{sqlite,postgres,mod}.rs, ops/{web,mod}.rs, tests/web_ui.rs. S, after U4.
+- U6. App shell, routing and the skin switch (default A). Area: web/src/routes/+layout.svelte, routes/+page.svelte, routes/{t,agents,a,channels,c,fleet}/**, lib/skins/**, lib/nav.svelte.ts, lib/UserMenu.svelte, app.css, app.html, test/skin.test.mjs. C1, after U1.
+- U7. Data layer with the window rule (floor and exhausted, empty-after-pass restart, 10-page bound, 2 s cadence). Area: web/src/lib/{feed-window.ts,feed.svelte.ts,thread-view.svelte.ts,thread-tree.ts,types.ts}, scripts/design/mock-server.mjs, test/{feed,thread}.test.mjs. C1.
+- U8. Filter menu, sheet, disclosure with interaction checks; state components. Area: web/src/lib/ui/**, routes/_design/primitives/+page.svelte, scripts/design/interact.mjs, test/ui.test.mjs. C1.
+- U9. Feed and thread pages, plus the skin-switch preservation check. Area: web/src/routes/+page.svelte, routes/t/[id]/+page.svelte, lib/Thread.svelte, lib/FeedList.svelte, scripts/design/{shoot,interact}.mjs. C2, after C1.
+- U10. Conversation, Agents and Channels pages. Area: web/src/lib/{Conversation,Delivery}.svelte, routes/{a,agents,c,channels}/**, test/conversation.test.mjs. C2.
+- U11. Fleet page. Area: web/src/routes/fleet/**. C2.
+- U12. Skin A, Console. Area: web/src/lib/skins/a/**. C3, after C2.
+- U13. Skin B, Editorial. Area: web/src/lib/skins/b/**. C3.
+- U14. Keys page restyle (outside the switch). Area: crates/conde-remote/src/web/pages.rs, web/scripts/design/mock-server.mjs. C3.
+- U15. Fonts for skin B (latin + latin-ext woff2, SIL OFL). Area: web/static/app/fonts/**, web/src/lib/skins/b/fonts.css, web/src/lib/design/fixture.ts, web/README.md. After U13.
+- U16. Remove the design routes; gate web-v2 on the real server (smoke on both stores); merge web-v2 to main. Area: web/src/routes/_design/**, routes/+layout.svelte, lib/design/model.ts, scripts/design/interact.mjs, crates/conde/tests/web_ui.rs, docs/web-ui-v2/options/README.md. Last, after U1-U5 on main and U6-U15 on web-v2.
+- W-UI. The owner's A/B pick (or mix) after real traffic, then delete the other skin and the switch. Do not take.

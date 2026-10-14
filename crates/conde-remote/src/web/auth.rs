@@ -692,19 +692,7 @@ pub(crate) async fn cli_confirm(
         tries: 0,
     };
     let key = paste_key(&cli_state);
-    let user_id = record.user_id;
-    let issued = state
-        .store(move |s| {
-            if let Some(old) = s.take_cli_code(&key)?
-                && old.user_id != user_id
-            {
-                s.insert_cli_code(&key, &old)?;
-                return Ok(false);
-            }
-            s.insert_cli_code(&key, &record)?;
-            Ok(true)
-        })
-        .await?;
+    let issued = state.store(move |s| s.issue_cli_code(&key, &record)).await?;
     if !issued {
         return Err(WebError::Forbidden(
             "Another account already signed in for this conde login. Run conde login again.".into(),
@@ -847,7 +835,7 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     if left == 0 {
         return invalid("wrong code, and that was the last try; run conde login again");
     }
-    if let Err(e) = state.store(move |s| s.insert_cli_code(&key, &code)).await {
+    if let Err(e) = state.store(move |s| s.restore_cli_code(&key, &code)).await {
         return store_failed(e);
     }
     let mut r = (

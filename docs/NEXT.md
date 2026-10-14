@@ -246,7 +246,6 @@ finds. Until then: system-default account works; injected dirs do not.
 - `conde setup` skips the skill/MCP step when an MCP server named `conde` is already registered for another instance; it should detect that and register under a second name (`conde-dakai`), pointing the skill at it.
 - LANDED d815a52, 88c8c02; review P2s fixed in the next batch (confirm page before the code, a mistyped code keeps the waiting login, CONDE_SOCK pinned in every MCP entry and the second instance's skill under skills/conde-<alias>). Follow-ups from that review:
   - A pasted-code confirm by another account is refused with 403 before the record's expiry is checked: an expired login of someone else still blocks the link (harmless, but the message should say "expired, run conde login again").
-  - The code issue takes the pending record and inserts the new one in two store transactions: a concurrent confirm or redeem in between can hit the primary key and answer 500. One store call that replaces the record in one transaction fixes it.
   - Redeem has no rate limit beyond the 5 tries per issued code; a client that re-issues (the same account confirming again) resets the budget. Add a per-IP or per-account limit on /auth/cli/redeem like the OAuth endpoints'.
   - `conde login --code` without a terminal exits 0 after printing the URL; a script cannot tell "started, waiting for the code" from "enrolled" by the exit status. Consider a distinct exit code or a machine-readable line.
 

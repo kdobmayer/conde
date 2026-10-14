@@ -489,6 +489,12 @@ pub trait WebStore: Send + Sync {
     fn insert_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()>;
     /// Returns and deletes the code.
     fn take_cli_code(&self, code_digest: &str) -> WebResult<Option<CliCode>>;
+    /// Issues a pasted-code login's record in one transaction: a pending record of another
+    /// account stays (false); otherwise `code` replaces any earlier record of the login (true).
+    fn issue_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<bool>;
+    /// Puts back a record taken for a wrong guess, in one transaction; a record issued since
+    /// (the account confirmed again) stays instead.
+    fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()>;
 
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()>;
     /// Returns and deletes the display.

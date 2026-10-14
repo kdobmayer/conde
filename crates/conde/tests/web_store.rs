@@ -131,6 +131,7 @@ on_both!(
     conde_login_codes_are_single_use_and_expire,
     a_re_enrolled_host_keeps_one_live_key,
     pasted_login_codes_count_tries_and_redeem_once,
+    a_login_record_is_issued_and_restored_in_one_transaction,
     admin_binds_existing_users_and_disables_them,
 );
 
@@ -552,4 +553,36 @@ fn a_storage_outage_never_stops_a_valid_bridge() {
         assert!(authenticates(&d, &key).await);
         server.shutdown().await.unwrap();
     });
+}
+
+/// The pasted-code record's two single-transaction writes on the real stores: an issue keeps
+/// another account's pending record and replaces the same account's; a restore yields to a
+/// record issued since and fills an empty slot.
+async fn a_login_record_is_issued_and_restored_in_one_transaction(d: Arc<Dispatcher>) {
+    let store = WebBoard::new(d.clone());
+    blocking(move || {
+        let record = |user_id: i64, tries: u32| web::CliCode {
+            user_id,
+            user_name: format!("user-{user_id}"),
+            state: "s".repeat(16),
+            challenge: "c".repeat(43),
+            created_at: 1_000,
+            paste: Some(format!("paste-{user_id}-{tries}")),
+            tries,
+        };
+        let key = "login-key";
+        let held = |s: &WebBoard| s.take_cli_code(key).unwrap().map(|c| (c.user_id, c.tries));
+        assert!(store.issue_cli_code(key, &record(1, 0)).unwrap());
+        assert!(!store.issue_cli_code(key, &record(2, 0)).unwrap(), "another account's record stays");
+        assert!(store.issue_cli_code(key, &record(1, 3)).unwrap(), "the same account's is replaced");
+        assert_eq!(held(&store), Some((1, 3)), "one record, the latest");
+        // Taken for a guess: a restore fills the empty slot; after a new issue, the new record stays.
+        store.restore_cli_code(key, &record(1, 1)).unwrap();
+        store.issue_cli_code(key, &record(1, 0)).unwrap();
+        store.restore_cli_code(key, &record(1, 2)).unwrap();
+        assert_eq!(held(&store), Some((1, 0)), "the record issued since stands");
+        store.restore_cli_code(key, &record(1, 4)).unwrap();
+        assert_eq!(held(&store), Some((1, 4)), "an empty slot is filled");
+    })
+    .await;
 }

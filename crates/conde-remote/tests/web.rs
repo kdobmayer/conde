@@ -27,7 +27,7 @@ use tokio::net::TcpListener;
 use web::{
     AdminKey, BindUser, BridgeRegistry, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits,
     LoginTxn, McpCode, McpCodeState, McpCreated, McpGrant, McpRedeemed, McpTokens, Minted, SessionRecord, WebConfig,
-    WebResult, WebState, WebStore, WebUser,
+    WebResult, WebState, WebStore, WebStoreError, WebUser,
 };
 
 include!("support/web_harness.rs");
@@ -79,6 +79,9 @@ struct Mem {
     mcp_grants: Vec<(String, McpGrant)>,
     /// Holds the next code take between the take and the grant insert.
     take_gate: Option<TakeGate>,
+    /// The same pause for a `conde login` record: in `take_cli_code` after the take (outside
+    /// the lock), in `issue_cli_code` inside its one transaction (holding the lock).
+    cli_gate: Option<TakeGate>,
 }
 
 /// A pause after a code is taken: signals `taken`, then waits for `release` (or gives up).
@@ -277,7 +280,28 @@ impl WebStore for MemStore {
         Ok(self.m().logins.remove(state_digest))
     }
     fn insert_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()> {
-        self.m().codes.insert(code_digest.into(), code.clone());
+        // A primary key, as on the real stores.
+        match self.m().codes.entry(code_digest.into()) {
+            std::collections::hash_map::Entry::Occupied(_) => Err(WebStoreError("duplicate key".into())),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(code.clone());
+                Ok(())
+            }
+        }
+    }
+    fn issue_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<bool> {
+        let mut m = self.m();
+        if let Some(gate) = m.cli_gate.take() {
+            gate.hold();
+        }
+        if m.codes.get(code_digest).is_some_and(|old| old.user_id != code.user_id) {
+            return Ok(false);
+        }
+        m.codes.insert(code_digest.into(), code.clone());
+        Ok(true)
+    }
+    fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()> {
+        self.m().codes.entry(code_digest.into()).or_insert_with(|| code.clone());
         Ok(())
     }
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()> {
@@ -290,7 +314,16 @@ impl WebStore for MemStore {
         Ok(self.m().displays.remove(token_digest))
     }
     fn take_cli_code(&self, code_digest: &str) -> WebResult<Option<CliCode>> {
-        Ok(self.m().codes.remove(code_digest))
+        let (code, gate) = {
+            let mut m = self.m();
+            let code = m.codes.remove(code_digest);
+            let gate = if code.is_some() { m.cli_gate.take() } else { None };
+            (code, gate)
+        };
+        if let Some(gate) = gate {
+            gate.hold();
+        }
+        Ok(code)
     }
     fn purge_expired(&self, now: i64, l: &Limits) -> WebResult<()> {
         let mut m = self.m();
@@ -1571,6 +1604,71 @@ async fn the_mcp_sweep_ends_at_shutdown_and_the_handle_waits_for_it() {
     // And no sweep runs after it.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(store.m().purges_started, started, "the sweep ended");
+}
+
+/// Two confirming POSTs of one pasted-code login by its account, the second arriving while the
+/// first is held between reading the pending record and writing its own: both are answered (no
+/// 500 from a duplicate key), and the code shown last is the one that redeems.
+#[tokio::test(flavor = "multi_thread")]
+async fn confirms_racing_on_one_pasted_code_login_both_succeed() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let (status, page) = paste_confirm_page(&env, &b, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let csrf = csrf_of(&page);
+    paste_leg(&env, &b, &run).await;
+    let taken = Arc::new(tokio::sync::Notify::new());
+    let (release, held) = std::sync::mpsc::channel();
+    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    let first = paste_confirm(&env, &b, &run, &csrf);
+    let second = async {
+        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the first confirm reaches the store");
+        let second = paste_confirm(&env, &b, &run, &csrf);
+        tokio::pin!(second);
+        // It completes in the gap (two transactions) or waits for the first (one).
+        let early = tokio::time::timeout(Duration::from_millis(500), &mut second).await.ok();
+        release.send(()).unwrap();
+        match early {
+            Some(done) => done,
+            None => second.await,
+        }
+    };
+    let ((s1, p1), (s2, p2)) = tokio::join!(first, second);
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK), "{p1}\n{p2}");
+    assert_eq!(env.store.m().codes.len(), 1, "one record for the login");
+    let (shown1, shown2) = (key_of(&p1), key_of(&p2));
+    let mut redeemed = 0;
+    for shown in [&shown1, &shown2] {
+        let (status, _) = paste_redeem(&env, &run, shown).await;
+        redeemed += usize::from(status == StatusCode::OK);
+    }
+    assert_eq!(redeemed, 1, "one of the two codes is live");
+}
+
+/// A wrong pasted code is put back with one more try spent; if the account confirms again while
+/// that redeem holds the taken record, the new record stands and the redeem still answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirm_during_a_wrong_guess_keeps_the_new_code() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let taken = Arc::new(tokio::sync::Notify::new());
+    let (release, held) = std::sync::mpsc::channel();
+    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    let guess = paste_redeem(&env, &run, wrong);
+    let confirm = async {
+        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the redeem takes the record");
+        let fresh = paste_leg(&env, &b, &run).await;
+        release.send(()).unwrap();
+        fresh
+    };
+    let ((status, got), fresh) = tokio::join!(guess, confirm);
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    let (status, got) = paste_redeem(&env, &run, &fresh).await;
+    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
 }
 
 /// A replay that reads and takes the code while the first redemption sits between its take of

@@ -826,10 +826,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("conde {}", crate::VERSION);
             let r = sx.call("doctor", json!({}))?;
             println!("ok      daemon: reachable at {}", paths::socket_path().display());
+            let (same_build, bridge) = surface::bridge_build(&r["build"]);
+            println!("{}{bridge}", if same_build { "ok      " } else { "ISSUE   " });
             for c in r["checks"].as_array().into_iter().flatten() {
                 println!("{}{}", if c["ok"] == true { "ok      " } else { "ISSUE   " }, s(&c["text"]));
             }
-            let issues = r["issues"].as_i64().unwrap_or(0);
+            let issues = r["issues"].as_i64().unwrap_or(0) + i64::from(!same_build);
             if issues == 0 {
                 println!("all clear");
             }

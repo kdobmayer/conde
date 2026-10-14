@@ -68,7 +68,7 @@ impl Remote {
             add(ok, text);
         }
         let issues = lines.iter().filter(|l| l["ok"] == false).count();
-        Response::ok(&resp.request_id, json!({"checks": lines, "issues": issues}))
+        Response::ok(&resp.request_id, json!({"checks": lines, "issues": issues, "build": crate::VERSION}))
     }
 }
 

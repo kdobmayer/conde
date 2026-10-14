@@ -471,7 +471,8 @@ fn publish_unpublish_boards_whoami_and_doctor() {
             "agent.register" => json!({"name": "tester/worker", "address": "claude:s1@testhost", "publications": [], "boards": ["dakai"]}),
             "doctor" => json!({"checks": [{"ok": true, "text": "local board: conde.db (integrity ok)"},
                                           {"ok": true, "text": "slots: dakai 256/256 used (queue 32/32, outcomes 0, book 0)"}], "issues": 0,
-                "origins": [{"origin": "local", "slots_used": 0, "slots": 256}, {"origin": "dakai", "slots_used": 256, "slots": 256, "queued": 32}]}),
+                "origins": [{"origin": "local", "slots_used": 0, "slots": 256}, {"origin": "dakai", "slots_used": 256, "slots": 256, "queued": 32}],
+                "build": conde::VERSION}),
             _ => json!({}),
         })
     });
@@ -527,6 +528,7 @@ fn publish_unpublish_boards_whoami_and_doctor() {
     let (ok, out, _) = r.conde(&["doctor"]);
     assert!(ok, "{out}");
     assert!(is_build_line(out.lines().next().unwrap()), "{out}");
+    assert!(out.contains(&format!("ok      bridge: running this build ({})\n", conde::VERSION)), "{out}");
     // the daemon's own checks carry the slots per origin; `origins` is data, not printed twice
     assert!(out.contains("ok      slots: dakai 256/256 used (queue 32/32, outcomes 0, book 0)\n"), "{out}");
     assert!(!out.contains("receipt slots used"), "{out}");
@@ -617,6 +619,28 @@ fn a_daemon_that_predates_boards_is_never_handed_a_board() {
     // without a board the request is the v1 one
     let (ok, out, _) = r.conde(&["send", "x", "hi"]);
     assert!(ok && out == "queued 01M to tester/x\n", "{out}");
+}
+
+/// A reinstall replaces the binary under a running bridge: `conde doctor` names both builds and
+/// how to restart, and counts it as an issue (exit 1, no "all clear"); so does a daemon too old
+/// to report its build.
+#[test]
+fn doctor_flags_a_bridge_running_another_build() {
+    let r = Root::new();
+    let checks = json!([{"ok": true, "text": "local board: conde.db (integrity ok)"}]);
+    let old = "0.1.0 (0000000 2026-01-01)";
+    let _d = r.fake(scripted(vec![("doctor", json!({"checks": checks, "issues": 0, "build": old}))]));
+    let (ok, out, _) = r.conde(&["doctor"]);
+    assert!(!ok, "{out}");
+    let line = format!("ISSUE   bridge: running {old}, but this binary is {}: it was replaced under the running bridge; restart it", conde::VERSION);
+    assert!(out.contains(&line), "{out}");
+    assert!(out.contains("systemctl --user restart conde") && !out.contains("all clear"), "{out}");
+    drop(_d);
+
+    let _d = r.fake(scripted(vec![("doctor", json!({"checks": checks, "issues": 0}))]));
+    let (ok, out, _) = r.conde(&["doctor"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("ISSUE   bridge: the running daemon does not report its build"), "{out}");
 }
 
 #[test]

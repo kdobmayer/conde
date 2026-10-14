@@ -559,7 +559,8 @@ fn g2_nothing_local_reaches_the_board() {
     // a reconnect
     board.drop_connection("homepc");
     wait_for("the reconnect", || (board.connections("homepc") >= 2).then_some(()));
-    a.ok(&a.human(), "doctor", json!({}), None);
+    let doctor = a.ok(&a.human(), "doctor", json!({}), None);
+    assert_eq!(doctor["build"], conde::VERSION, "the daemon reports the build it runs");
     no_leak("a reconnect");
 
     let capture = board.capture_all();

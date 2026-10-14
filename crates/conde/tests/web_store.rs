@@ -132,6 +132,7 @@ on_both!(
     a_re_enrolled_host_keeps_one_live_key,
     pasted_login_codes_count_tries_and_redeem_once,
     a_login_record_is_issued_and_restored_in_one_transaction,
+    a_last_try_ends_the_login_record_unless_its_account_reissued,
     a_restore_takes_the_login_back_from_another_account,
     admin_binds_existing_users_and_disables_them,
 );
@@ -610,6 +611,33 @@ async fn a_restore_takes_the_login_back_from_another_account(d: Arc<Dispatcher>)
         let held = store.take_cli_code(key).unwrap().map(|c| (c.user_id, c.tries, c.paste));
         assert_eq!(held, Some((1, 1, Some("paste-1".into()))), "the first account's record is back");
         assert_eq!(store.take_cli_code(key).unwrap().map(|c| c.user_id), None, "one record");
+    })
+    .await;
+}
+
+/// `end_cli_code` on the real stores: after a last wrong try, a record another account issued in
+/// the gap is removed; a record the same account issued since stays; an empty slot stays empty.
+async fn a_last_try_ends_the_login_record_unless_its_account_reissued(d: Arc<Dispatcher>) {
+    let store = WebBoard::new(d.clone());
+    blocking(move || {
+        let record = |user_id: i64| web::CliCode {
+            user_id,
+            user_name: format!("user-{user_id}"),
+            state: "s".repeat(16),
+            challenge: "c".repeat(43),
+            created_at: 1_000,
+            paste: Some(format!("paste-{user_id}")),
+            tries: 0,
+        };
+        let key = "ended-login";
+        store.issue_cli_code(key, &record(2)).unwrap();
+        store.end_cli_code(key, 1).unwrap();
+        assert!(store.take_cli_code(key).unwrap().is_none(), "another account's record is removed");
+        store.issue_cli_code(key, &record(1)).unwrap();
+        store.end_cli_code(key, 1).unwrap();
+        assert_eq!(store.take_cli_code(key).unwrap().map(|c| c.user_id), Some(1), "the same account's stays");
+        store.end_cli_code(key, 1).unwrap();
+        assert!(store.take_cli_code(key).unwrap().is_none(), "an empty slot stays empty");
     })
     .await;
 }

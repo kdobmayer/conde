@@ -496,6 +496,10 @@ pub trait WebStore: Send + Sync {
     /// issued since (it confirmed again) stays instead; another account's record issued in the
     /// gap is replaced, so the login stays with the account that held it.
     fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()>;
+    /// Ends a login taken for its last wrong try, in one transaction: a record the same account
+    /// (`user_id`) issued since stays; another account's record issued in the gap is removed, so
+    /// the dead login is not left to another account.
+    fn end_cli_code(&self, code_digest: &str, user_id: i64) -> WebResult<()>;
 
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()>;
     /// Returns and deletes the display.

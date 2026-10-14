@@ -851,7 +851,7 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     let right_run = same_secret(&req.state, &code.state) && pkce_matches(req.code_verifier.clone(), &code.challenge);
     if !right_run {
         tracing::info!(user = %code.user_name, "conde login code redeem without this run's verifier");
-        if let Err(e) = state.store(move |s| s.insert_cli_code(&key, &code)).await {
+        if let Err(e) = state.store(move |s| s.restore_cli_code(&key, &code)).await {
             return store_failed(e);
         }
         return invalid("this request is not from the conde login run that started this sign-in");
@@ -861,7 +861,7 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     if let Err(wait) = state.0.limits.cli_guess(code.user_id) {
         tracing::info!(user = %code.user_name, wait, "conde login code attempts rate limited");
         let left = ttl - age;
-        if let Err(e) = state.store(move |s| s.insert_cli_code(&key, &code)).await {
+        if let Err(e) = state.store(move |s| s.restore_cli_code(&key, &code)).await {
             return store_failed(e);
         }
         let message = if wait >= left as u64 {
@@ -884,6 +884,10 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     let left = PASTE_TRIES.saturating_sub(code.tries);
     tracing::info!(user = %code.user_name, tries = code.tries, "wrong conde login code");
     if left == 0 {
+        let user_id = code.user_id;
+        if let Err(e) = state.store(move |s| s.end_cli_code(&key, user_id)).await {
+            return store_failed(e);
+        }
         return invalid("wrong code, and that was the last try; run conde login again");
     }
     if let Err(e) = state.store(move |s| s.restore_cli_code(&key, &code)).await {

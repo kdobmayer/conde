@@ -16,7 +16,7 @@ bridge and stdio `conde mcp` are unchanged.
    also need the MCP URL as Application ID URI (else AADSTS9010010), an API scope and loopback
    public-client redirects (excluded in NEXT.md A); its tokens cannot be listed or revoked on the keys page.
 2. **Client registration: CIMD only** (Claude uses it given the two metadata values in §2): no DCR,
-   no client table, no secret. The `client_id` host must be in `CONDE_MCP_CLIENT_HOSTS` (default `claude.ai,claude.com`).
+   no client table, no secret. The `client_id` host must be in `CONDE_MCP_CLIENT_HOSTS` (default `claude.ai,claude.com`; a value naming no host is refused at startup).
 3. **Writes as the user's published human name; reads through the owner view.** `send`, `react` and
    the human's own read state run as the user's one agent row of kind `human` on the shared board,
    found by the server (`human:<user>@<host it was published from>`); that host is the principal

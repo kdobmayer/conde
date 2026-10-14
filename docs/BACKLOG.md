@@ -59,9 +59,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   Make install.sh print "run conde setup" when a conde was already installed,
   add an Upgrade section to the README, and consider setup --check printing the
   one command that fixes it. Area: install.sh, README, crates/conde setup.
-- B16. `CONDE_MCP_CLIENT_HOSTS=" , "` yields an empty host list with no config
-  error (crates/conde-remote/src/web/mod.rs ~188); refuse an empty list after
-  trimming, or treat it as unset, and test. Area: conde-remote web config.
 
 ## Waiting on a decision or an observation (do not take)
 

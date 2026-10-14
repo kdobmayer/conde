@@ -68,6 +68,12 @@ Review and integration by desk, one batch at a time; one release per batch.
   from setup --check with the old bridge still running); setup restarts the
   service on a mismatch, --check reports it as an issue. Area: crates/conde
   setup, tests.
+- B13. Timing gates that fail under load: setup_check_asks_the_live_daemon
+  (2 s daemon-start gate) and v2_daemon g1 (700 ms register gate) each failed
+  once on a loaded box and passed on rerun. Make each gate measure what it
+  claims (a bound relative to a baseline measured in the same run, or a
+  generous absolute bound with the tight one behind an env flag for the
+  release machine). Area: tests only.
 
 ## Waiting on a decision or an observation (do not take)
 

@@ -129,6 +129,18 @@ pub enum ConfigError {
     RedirectUri(String),
     #[error("{0} must be a whole number of at least 1")]
     NotPositive(&'static str),
+    #[error("{0} names no host; unset it for the default (claude.ai,claude.com)")]
+    NoHosts(&'static str),
+}
+
+/// `CONDE_MCP_CLIENT_HOSTS`: comma-separated hosts, trimmed and lower-cased, empty entries
+/// dropped; at least one (an empty list would refuse every client, silently).
+fn client_hosts(raw: &str) -> Result<Vec<String>, ConfigError> {
+    let hosts: Vec<String> = raw.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
+    if hosts.is_empty() {
+        return Err(ConfigError::NoHosts("CONDE_MCP_CLIENT_HOSTS"));
+    }
+    Ok(hosts)
 }
 
 /// `CONDE_MCP_GRANTS_PER_CLIENT`: a whole number of at least 1 (surrounding spaces allowed).
@@ -185,7 +197,7 @@ impl WebConfig {
             return Err(ConfigError::RedirectUri(config.redirect_uri));
         }
         if let Some(hosts) = var("CONDE_MCP_CLIENT_HOSTS") {
-            config.mcp.client_hosts = hosts.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
+            config.mcp.client_hosts = client_hosts(&hosts)?;
         }
         if let Some(cap) = var("CONDE_MCP_GRANTS_PER_CLIENT") {
             config.mcp.grants_per_client = grants_per_client(&cap)?;
@@ -862,6 +874,15 @@ pub fn router(state: WebState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_hosts_name_at_least_one_host() {
+        assert_eq!(client_hosts(" Claude.AI , ,mcp.Example.com,").unwrap(), ["claude.ai", "mcp.example.com"]);
+        for bad in [" , ", ",", ",,, ", " "] {
+            let e = client_hosts(bad).unwrap_err();
+            assert_eq!(e.to_string(), "CONDE_MCP_CLIENT_HOSTS names no host; unset it for the default (claude.ai,claude.com)", "{bad:?}");
+        }
+    }
 
     #[test]
     fn the_grant_cap_is_a_whole_number_of_at_least_one() {

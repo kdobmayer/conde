@@ -104,6 +104,9 @@ fn the_web_configuration_comes_from_the_environment() {
     // The client hosts: comma-separated, trimmed, lower-cased, empty entries dropped.
     env(&with(&[("CONDE_MCP_CLIENT_HOSTS", " Claude.AI , ,mcp.Example.com,")]));
     assert_eq!(WebConfig::from_env().unwrap().unwrap().mcp.client_hosts, ["claude.ai", "mcp.example.com"]);
+    // Only separators: refused, not an empty list that would refuse every client.
+    env(&with(&[("CONDE_MCP_CLIENT_HOSTS", " , ")]));
+    assert_eq!(error(WebConfig::from_env()), "CONDE_MCP_CLIENT_HOSTS names no host; unset it for the default (claude.ai,claude.com)");
 
     // The grant cap: a whole number of at least 1, surrounding spaces allowed.
     env(&with(&[("CONDE_MCP_GRANTS_PER_CLIENT", " 3 ")]));

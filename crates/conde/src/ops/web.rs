@@ -36,6 +36,10 @@ const HISTORY_PAGE: i64 = 100;
 /// Default and largest page of `owner.feed`.
 const FEED_PAGE: i64 = 50;
 const FEED_MAX: i64 = 100;
+/// The recipient states `owner.feed {problems}` keeps (`recipient_state`).
+const PROBLEMS: &[&str] = &["retrying", "held", "denied", "refused", "gone"];
+/// Problem candidates read per round trip.
+const PROBLEM_CHUNK: usize = 100;
 
 /// Attempt outcomes that end an attempt without reaching the recipient.
 const FAILED: &[&str] = &["expired", "dropped", "failed", "abandoned", "denied", "refused"];
@@ -122,13 +126,17 @@ pub fn history(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(head)
 }
 
-/// `owner.feed {after?, before?, limit?, agent?, direction?, place?}`: what the owner's agents can
+/// `owner.feed {after?, before?, limit?, agent?, direction?, place?, problems?}`: what the owner's agents can
 /// read with `after < seq < before` (both exclusive, both optional), newest first, at most
 /// `limit` (1 to 100, default 50); `more` when matching rows remain below the last one, inside the
 /// bounds. `agent`: the own agent is the sender, the DM recipient or a current member of the
 /// channel. `direction`: `out` (an own agent posted, or sent a DM to another owner's agent),
 /// `own` (a DM between two own agents), `in` (the rest). `place`: `dm`, or one `#channel`. Each
 /// row is the history view with `direction` and `via` (the own agents that can read it).
+/// `problems: true` keeps the messages where a recipient the delivery view shows the owner (every
+/// recipient of an own sender's message, else the own ones) is retrying, held, denied, refused or
+/// gone; it reads every candidate in the bounds (no scan budget), so an empty page with `more:
+/// false` means none.
 ///
 /// Read as index ranges, never a walk of the board: each own agent as sender and as DM recipient,
 /// each channel with an own member, every range newest first and cut at the page, merged without
@@ -144,6 +152,11 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         None => None,
     };
     let direction = opt_str(body, "direction")?;
+    let problems = match body.get("problems") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad_request("problems is a boolean")),
+    };
     if direction.is_some_and(|d| !["in", "out", "own"].contains(&d)) {
         return Err(bad_request("direction is one of in, out, own"));
     }
@@ -205,21 +218,59 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             }
         }
     }
-    let mut rows = if after.saturating_add(1) < before {
-        ctx.db.owner_feed(owner, &ranges, after, before, limit + 1)?
-    } else {
-        Vec::new()
-    };
-    let more = rows.len() as i64 > limit;
-    rows.truncate(limit as usize);
-    let mut out = Vec::with_capacity(rows.len());
-    for m in &rows {
+    let direction_of = |m: &MsgRow| {
         let (from_own, to_own) = (owned(ctx, &m.sender), m.recipient.as_deref().is_some_and(|r| owned(ctx, r)));
-        let direction = match (&m.channel_id, from_own, to_own) {
+        match (&m.channel_id, from_own, to_own) {
             (None, true, true) => "own",
             (_, true, _) => "out",
             _ => "in",
+        }
+    };
+    // (row, its delivery view when already computed)
+    let mut rows: Vec<(MsgRow, Option<Value>)> = Vec::new();
+    if after.saturating_add(1) >= before {
+    } else if problems {
+        // Candidates by notification status, then the exact state each recipient shows; the
+        // other predicates are checked here, on the candidates only.
+        let keeps = |m: &MsgRow| {
+            let in_place = match &place_channel {
+                None => true,
+                Some(None) => m.channel_id.is_none(),
+                Some(Some(c)) => m.channel_id.as_ref() == Some(c),
+            };
+            let by_agent = agent.as_ref().is_none_or(|a| {
+                m.sender_id == a.id
+                    || m.recipient_id.as_ref() == Some(&a.id)
+                    || m.channel_id.as_ref().is_some_and(|c| memberships.iter().any(|x| x.agent_id == a.id && &x.channel_id == c))
+            });
+            in_place && by_agent && direction.is_none_or(|d| d == direction_of(m))
         };
+        let seqs = ctx.db.owner_problem_seqs(owner, after, before)?;
+        'scan: for chunk in seqs.chunks(PROBLEM_CHUNK) {
+            for m in ctx.db.messages_at(chunk)? {
+                if !keeps(&m) {
+                    continue;
+                }
+                let d = delivery(ctx, &m)?;
+                let problem = d["recipients"].as_array().is_some_and(|rs| rs.iter().any(|r| PROBLEMS.contains(&r["state"].as_str().unwrap_or(""))));
+                if problem {
+                    rows.push((m, Some(d)));
+                    if rows.len() as i64 > limit {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+    } else {
+        rows = ctx.db.owner_feed(owner, &ranges, after, before, limit + 1)?.into_iter().map(|m| (m, None)).collect();
+    }
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    let mut out = Vec::with_capacity(rows.len());
+    for (m, d) in rows {
+        let m = &m;
+        let (from_own, to_own) = (owned(ctx, &m.sender), m.recipient.as_deref().is_some_and(|r| owned(ctx, r)));
+        let direction = direction_of(m);
         let via: Vec<&str> = match &m.channel_id {
             Some(c) => memberships.iter().filter(|x| &x.channel_id == c).map(|x| x.agent.as_str()).collect(),
             None => [from_own.then_some(m.sender.as_str()), m.recipient.as_deref().filter(|_| to_own)]
@@ -228,7 +279,10 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
                 .collect(),
         };
         let mut v = messages::view(ctx.db, m)?;
-        v["delivery"] = delivery(ctx, m)?;
+        v["delivery"] = match d {
+            Some(d) => d,
+            None => delivery(ctx, m)?,
+        };
         v["direction"] = json!(direction);
         v["via"] = json!(via);
         out.push(v);

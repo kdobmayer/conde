@@ -322,8 +322,9 @@ which exists but is not in the list today.
   health never makes a problem) has the state retrying, held, denied, refused or gone, as
   `recipient_state` computes it. Candidates come from `notifications` by status (the
   `notifications_due` index leads on `status`: `held`, `denied`, `refused`, `gone`, and `pending`
-  with attempts), then the exact state is computed per candidate (a read message is not a
-  problem). The op scans candidates to the end or to `limit` with no scan budget, so an empty
+  with attempts); the candidate query already leaves out what `recipient_state` would call read
+  (a read DM, a channel the recipient has read past) or unread (a human's pending one), each by
+  a primary-key probe, and the exact state is then computed per remaining candidate. The op scans candidates to the end or to `limit` with no scan budget, so an empty
   page with `more: false` means no problems in the bounds, never "not searched"; its cost grows
   with the candidate count (denied, refused and gone stay candidates for good), which U4's gate
   measures.

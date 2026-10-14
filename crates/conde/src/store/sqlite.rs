@@ -13,7 +13,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, pa
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
     Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    FeedArg, FeedRange, Membership, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
+    FeedArg, FeedRange, Membership, problem_seqs_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
     WebSessionRow, address_of, feed_seqs_sql,
 };
 use crate::address::Address;
@@ -1515,6 +1515,18 @@ impl Tx for SqliteTx<'_> {
             FeedArg::Text(t) => rusqlite::types::Value::Text(t),
         });
         self.msgs(&format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC"), params_from_iter(args))
+    }
+
+    fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>> {
+        self.rows(&problem_seqs_sql(|n| format!("?{n}")), params![owner_id, after, before], one_col)
+    }
+
+    fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>> {
+        if seqs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; seqs.len()].join(", ");
+        self.msgs(&format!("m.commit_seq IN ({marks}) ORDER BY m.commit_seq DESC"), params_from_iter(seqs))
     }
 
     fn owner_search_scan(

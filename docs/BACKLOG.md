@@ -41,6 +41,22 @@ Review and integration by desk, one batch at a time; one release per batch.
   the target are on different filesystems (not atomic); stage next to the target
   instead. Area: dist/install.sh, dist_files test.
 
+- B22. `conde watch` output is barely readable (Konstantin, first real use): each
+  line carries the whole first line of the body (300-600 chars), so lines wrap,
+  columns never align, the full date repeats. Fit one message to one terminal
+  line: fixed-width columns (HH:MM, from, to, state), the body cut to the
+  remaining width with an ellipsis, the short message id at the end so `conde
+  read <id>` gives the whole text, a date line when the day changes, short
+  state words ("read 17/17", "delivered", "held"). `--wide` keeps today's
+  untruncated line. No colour. Width from the terminal when stdout is a TTY,
+  else 120. Area: crates/conde/src/cli.rs (watch_line), cli_wiring test.
+- B23. A human's first `conde watch` from a plain shell fails with "this session
+  (human:<name>@<host>) is not in the registry; run: conde register
+  <your-name>" and no hint what name a human picks. Say it in the message (a
+  human registers under their own first name, e.g. `conde register konstantin`)
+  and in the README line about humans. Area: crates/conde/src/identity.rs or
+  where the message is built, README.md.
+
 ## Waiting on a decision or an observation (do not take)
 
 - W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers

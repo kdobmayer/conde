@@ -2014,3 +2014,74 @@ async fn a_replay_landing_between_the_code_take_and_the_grant_insert_leaves_no_l
     assert!(live.is_empty(), "the grant the first redemption made was revoked by the replay: {live:?}");
     server.shutdown().await.unwrap();
 }
+
+// --- a store without the remote MCP --------------------------------------------------------------
+
+/// A store with only the required methods (sign-in, keys, admin), none of which this test calls:
+/// the remote MCP is the trait's defaults.
+struct NoMcp;
+
+impl WebStore for NoMcp {
+    fn user_by_identity(&self, _: &str, _: &str) -> WebResult<Option<WebUser>> { unreachable!() }
+    fn create_user(&self, _: &Identity, _: &str) -> WebResult<CreateUser> { unreachable!() }
+    fn set_profile(&self, _: i64, _: &Identity) -> WebResult<()> { unreachable!() }
+    fn user_disabled(&self, _: i64) -> WebResult<bool> { unreachable!() }
+    fn insert_session(&self, _: &str, _: &SessionRecord) -> WebResult<bool> { unreachable!() }
+    fn session(&self, _: &str) -> WebResult<Option<SessionRecord>> { unreachable!() }
+    fn touch_session(&self, _: &str, _: i64) -> WebResult<()> { unreachable!() }
+    fn delete_session(&self, _: &str) -> WebResult<()> { unreachable!() }
+    fn insert_login(&self, _: &str, _: &LoginTxn) -> WebResult<()> { unreachable!() }
+    fn take_login(&self, _: &str) -> WebResult<Option<LoginTxn>> { unreachable!() }
+    fn insert_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> { unreachable!() }
+    fn take_cli_code(&self, _: &str) -> WebResult<Option<CliCode>> { unreachable!() }
+    fn issue_cli_code(&self, _: &str, _: &CliCode, _: i64) -> WebResult<CliIssued> { unreachable!() }
+    fn restore_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> { unreachable!() }
+    fn end_cli_code(&self, _: &str, _: i64) -> WebResult<()> { unreachable!() }
+    fn insert_key_display(&self, _: &str, _: &KeyDisplay) -> WebResult<()> { unreachable!() }
+    fn take_key_display(&self, _: &str) -> WebResult<Option<KeyDisplay>> { unreachable!() }
+    fn purge_expired(&self, _: i64, _: &Limits) -> WebResult<()> { unreachable!() }
+    fn host_keys(&self, _: i64) -> WebResult<Vec<HostKey>> { unreachable!() }
+    fn host_owner(&self, _: &str) -> WebResult<Option<i64>> { unreachable!() }
+    fn mint_host_key(&self, _: i64, _: &str, _: &str, _: &str, _: i64) -> WebResult<Minted> { unreachable!() }
+    fn revoke_host(&self, _: i64, _: &str, _: i64) -> WebResult<u64> { unreachable!() }
+    fn ensure_user(&self, _: &str) -> WebResult<WebUser> { unreachable!() }
+    fn bind_identity(&self, _: &str, _: &Identity) -> WebResult<BindUser> { unreachable!() }
+    fn all_keys(&self) -> WebResult<Vec<AdminKey>> { unreachable!() }
+    fn revoke_key(&self, _: &str, _: i64) -> WebResult<Option<String>> { unreachable!() }
+    fn set_disabled(&self, _: &str, _: bool) -> WebResult<Option<Vec<String>>> { unreachable!() }
+}
+
+/// Every remote MCP call on such a store is refused with one message (the endpoint answers it
+/// as a store failure), while listing a user's grants finds none and the sweep's purge is a
+/// no-op, so a server on that store runs its hourly sweep without errors.
+#[test]
+fn a_store_without_the_remote_mcp_refuses_every_mcp_call() {
+    let s = NoMcp;
+    let refused = "this store keeps no MCP grants";
+    let code = McpCode {
+        user_id: 1, client_id: "c".into(), client_name: None, redirect_uri: "r".into(), challenge: "x".into(),
+        resource: "m".into(), created_at: 0,
+    };
+    let grant = McpGrant {
+        grant_id: "g".into(), user_id: 1, client_id: "c".into(), client_host: "h".into(), client_name: None,
+        resource: "m".into(), created_at: 0, last_used_at: None, expires_at: 1, revoked_at: None,
+    };
+    let tokens = McpTokens { access_digest: "a".into(), refresh_digest: "r".into(), access_ttl: 1, refresh_ttl: 1 };
+    let errors = [
+        s.insert_mcp_code("d", &code).unwrap_err(),
+        s.take_mcp_code("d").unwrap_err(),
+        s.mcp_code_state("d").unwrap_err(),
+        s.redeem_mcp_code("d", &grant, &tokens, 10, 0).unwrap_err(),
+        s.mcp_access("d", 0).unwrap_err(),
+        s.refresh_mcp_grant("d", "c", &tokens, 0).unwrap_err(),
+        s.revoke_mcp_grant(1, "g", 0).unwrap_err(),
+        s.revoke_mcp_token("d", "c", 0).unwrap_err(),
+        s.revoke_mcp_code_grant("d", "c", 0).unwrap_err(),
+        s.mcp_human(1).unwrap_err(),
+    ];
+    for e in errors {
+        assert_eq!(e.to_string(), refused);
+    }
+    assert!(s.mcp_grants(1, 0).unwrap().is_empty(), "the keys page lists no connected apps");
+    s.purge_mcp(0, 60).unwrap();
+}

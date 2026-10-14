@@ -9,7 +9,11 @@
 	let { children } = $props();
 	let failed = $state('');
 
+	// Design-only option pages (routes/_design) render bare, on fixture data, with no session.
+	const design = $derived(page.route.id?.startsWith('/_design') ?? false);
+
 	$effect(() => {
+		if (design) return;
 		start().catch((e: Error) => (failed = e.message));
 	});
 
@@ -23,6 +27,9 @@
 	});
 </script>
 
+{#if design}
+	{@render children()}
+{:else}
 <div class="shell" class:home>
 	<header class="top">
 		<a class="brand" href="#/"><Mark />conde</a>
@@ -88,6 +95,7 @@
 		</div>
 	{/if}
 </div>
+{/if}
 
 <style>
 	.shell {

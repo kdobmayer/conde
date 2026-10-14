@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-14 18:05: S1 smoke on dcda85d GREEN (NUC): upgrade line, bridge restart by setup, doctor and setup --check clear, DM both ways, watch rows exact at 80/120/160 in a real pty, --wide old line. Konstantin registered a human name (konstantin-watcher) on his host, his call. PR 31 (U4 problems predicate) received, cherry-picked in worktree conde-batch31; Opus review waits for the end of the demo.
 - 2026-10-14 18:00: image conde:747b2ef built (ACR cb1b); roll HELD by dakai-helper: owner demoing on the live board, nothing heavy until he says so (roll + U4 review resume after). S1 on dcda85d running (NUC).
 - 2026-10-14 17:55: release of dcda85d GREEN (run 38588075598; fresh install prints conde 0.1.0 (dcda85d 2026-10-14)); S1 requested from Konstantin agent. Image conde:747b2ef still building.
 - 2026-10-14 17:40: batch 29 (Konstantin: B22 watch rows fitted to the terminal + fix; B23 human register hint) integrated 1441d9e 0ce44a4 747b2ef (no follow-up); full run 686 passed with Postgres (detached). main = squash dcda85d (U3 + B22 + B23); release 38588075598 running; image conde:747b2ef building; roll next (migration 0012). PRs 28, 29, 30 closed.

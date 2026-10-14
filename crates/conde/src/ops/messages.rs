@@ -10,8 +10,9 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
 use super::agents::{self, Agent};
+use super::web;
 use super::channels::{self, Channel};
-use crate::address::normalize_channel;
+use crate::address::{Kind, normalize_channel};
 use crate::dispatch::{
     Ctx, OpResult, bad_request, forbidden, not_found, one_line, opt_i64, opt_str, str_param, too_large,
 };
@@ -461,6 +462,12 @@ fn receipt(ctx: &Ctx, m: &MsgRow) -> OpResult<(String, Option<String>)> {
 /// next call continues; when nothing was committed after `after`, the answer is an empty page
 /// read from the end of the primary key alone.
 pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    // A human on a shared board reads as the owner: what their agents can read (the owner view
+    // rule), with or without a published name of their own.
+    if ctx.board.is_some() && ctx.actor_address()?.kind == Kind::Human {
+        let (rows, cursor) = owner_feed(ctx, body)?;
+        return feed_page(ctx, &rows, cursor);
+    }
     let me = ctx.me()?;
     let viewer = (ctx.board.is_some() || !me.is_human()).then_some(me.id.as_str());
     let agent = match opt_str(body, "agent")? {
@@ -492,8 +499,56 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             (rows, top)
         }
     };
+    feed_page(ctx, &rows, cursor)
+}
+
+/// [`feed`] for a human on a shared board: the owner's index ranges (`owner.feed`'s), `agent`
+/// one of the owner's agents, `channel` one an own agent is in. After `after`, the oldest page
+/// first; the page is cut from the newest down to the cursor.
+fn owner_feed(ctx: &Ctx, body: &Value) -> OpResult<(Vec<MsgRow>, i64)> {
+    let agent = match opt_str(body, "agent")? {
+        Some(_) => Some(web::own_agent(ctx, body)?),
+        None => None,
+    };
+    let (ranges, _, _) = web::owner_ranges(ctx, agent.as_ref(), None, opt_str(body, "channel")?)?;
+    let (owner, top) = (ctx.p.user_id, ctx.db.last_seq()?);
+    match opt_i64(body, "after")? {
+        Some(after) if after >= top => Ok((Vec::new(), after)),
+        Some(after) => {
+            let (mut rows, mut before) = (Vec::new(), top + 1);
+            loop {
+                let page = ctx.db.owner_feed(owner, &ranges, after, before, PAGE as i64)?;
+                let full = page.len() == PAGE;
+                if let Some(last) = page.last() {
+                    before = last.seq;
+                }
+                rows.extend(page);
+                if !full {
+                    break;
+                }
+            }
+            rows.reverse();
+            if rows.len() > PAGE {
+                rows.truncate(PAGE);
+                let last = rows[PAGE - 1].seq;
+                Ok((rows, last))
+            } else {
+                Ok((rows, top))
+            }
+        }
+        None => {
+            let last = opt_i64(body, "last")?.unwrap_or(PAGE as i64).clamp(0, PAGE as i64);
+            let mut rows = ctx.db.owner_feed(owner, &ranges, 0, top + 1, last)?;
+            rows.reverse();
+            Ok((rows, top))
+        }
+    }
+}
+
+/// The answer of [`feed`]: each row's first line and receipt, and where the next call continues.
+fn feed_page(ctx: &Ctx, rows: &[MsgRow], cursor: i64) -> OpResult<Value> {
     let mut out = Vec::with_capacity(rows.len());
-    for m in &rows {
+    for m in rows {
         let (status, delivery) = receipt(ctx, m)?;
         let line = m.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
         out.push(json!({"message_id": m.id, "seq": m.seq, "date": m.created_at, "from": m.sender, "to": m.to(),

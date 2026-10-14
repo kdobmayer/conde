@@ -24,7 +24,7 @@ use super::messages::{self, MsgRow};
 use crate::address::{Kind, split_qualified};
 use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, not_found, opt_i64, opt_str, str_param};
 use crate::protocol::PAGE;
-use crate::store::{Delivery, FeedBy, FeedPosts, FeedRange, Party, Tx};
+use crate::store::{Delivery, FeedBy, FeedPosts, FeedRange, Membership, Party, Tx};
 use crate::util::{iso_from_ms, is_ulid};
 
 /// A bridge is online while its last heartbeat is younger than this (three ping periods).
@@ -82,7 +82,7 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
 }
 
 /// The owner's agent a request names (`"agent": "name"` or `"owner/name"` in the owner's namespace).
-fn own_agent(ctx: &Ctx, body: &Value) -> OpResult<Agent> {
+pub(crate) fn own_agent(ctx: &Ctx, body: &Value) -> OpResult<Agent> {
     let raw = str_param(body, "agent")?;
     let (owner, name) = split_qualified(raw).ok_or_else(|| bad_request(format!("invalid name '{raw}'")))?;
     if owner.as_deref().is_some_and(|o| o != ctx.p.user) {
@@ -126,46 +126,25 @@ pub fn history(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(head)
 }
 
-/// `owner.feed {after?, before?, limit?, agent?, direction?, place?, problems?}`: what the owner's agents can
-/// read with `after < seq < before` (both exclusive, both optional), newest first, at most
-/// `limit` (1 to 100, default 50); `more` when matching rows remain below the last one, inside the
-/// bounds. `agent`: the own agent is the sender, the DM recipient or a current member of the
-/// channel. `direction`: `out` (an own agent posted, or sent a DM to another owner's agent),
-/// `own` (a DM between two own agents), `in` (the rest). `place`: `dm`, or one `#channel`. Each
-/// row is the history view with `direction` and `via` (the own agents that can read it).
-/// `problems: true` keeps the messages where a recipient the delivery view shows the owner (every
-/// recipient of an own sender's message, else the own ones) is retrying, held, denied, refused or
-/// gone; it reads every candidate in the bounds (no scan budget), so an empty page with `more:
-/// false` means none.
-///
-/// Read as index ranges, never a walk of the board: each own agent as sender and as DM recipient,
-/// each channel with an own member, every range newest first and cut at the page, merged without
-/// duplicates. Together they are exactly what the owner's agents can read.
-pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
-    browser_only(ctx)?;
+/// Where `owner.feed` rows may be: None anywhere, Some(None) DMs, Some(Some(id)) that channel.
+type Place = Option<Option<String>>;
+
+/// The index ranges that read what the owner's agents can read (see `owner.feed`), narrowed to
+/// one own agent, a direction and a place (`dm` or `#channel`), with the owner's memberships and
+/// the place resolved.
+pub(crate) fn owner_ranges(
+    ctx: &Ctx,
+    agent: Option<&Agent>,
+    direction: Option<&str>,
+    place: Option<&str>,
+) -> OpResult<(Vec<FeedRange>, Vec<Membership>, Place)> {
     let owner = ctx.p.user_id;
-    let after = opt_i64(body, "after")?.unwrap_or(0);
-    let before = opt_i64(body, "before")?.unwrap_or(i64::MAX);
-    let limit = opt_i64(body, "limit")?.unwrap_or(FEED_PAGE).clamp(1, FEED_MAX);
-    let agent = match opt_str(body, "agent")? {
-        Some(_) => Some(own_agent(ctx, body)?),
-        None => None,
-    };
-    let direction = opt_str(body, "direction")?;
-    let problems = match body.get("problems") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => return Err(bad_request("problems is a boolean")),
-    };
-    if direction.is_some_and(|d| !["in", "out", "own"].contains(&d)) {
-        return Err(bad_request("direction is one of in, out, own"));
-    }
     let memberships = ctx.db.owner_memberships(owner)?;
     let mut owned_channels: Vec<String> = memberships.iter().map(|m| m.channel_id.clone()).collect();
     owned_channels.sort();
     owned_channels.dedup();
     // place: DMs only, one channel an own agent is in, or both
-    let (dms_wanted, place_channel) = match opt_str(body, "place")? {
+    let (dms_wanted, place_channel) = match place {
         None => (true, None),
         Some("dm") => (true, Some(None)),
         Some(raw) => {
@@ -218,6 +197,44 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             }
         }
     }
+    Ok((ranges, memberships, place_channel))
+}
+
+/// `owner.feed {after?, before?, limit?, agent?, direction?, place?, problems?}`: what the owner's agents can
+/// read with `after < seq < before` (both exclusive, both optional), newest first, at most
+/// `limit` (1 to 100, default 50); `more` when matching rows remain below the last one, inside the
+/// bounds. `agent`: the own agent is the sender, the DM recipient or a current member of the
+/// channel. `direction`: `out` (an own agent posted, or sent a DM to another owner's agent),
+/// `own` (a DM between two own agents), `in` (the rest). `place`: `dm`, or one `#channel`. Each
+/// row is the history view with `direction` and `via` (the own agents that can read it).
+/// `problems: true` keeps the messages where a recipient the delivery view shows the owner (every
+/// recipient of an own sender's message, else the own ones) is retrying, held, denied, refused or
+/// gone; it reads every candidate in the bounds (no scan budget), so an empty page with `more:
+/// false` means none.
+///
+/// Read as index ranges, never a walk of the board: each own agent as sender and as DM recipient,
+/// each channel with an own member, every range newest first and cut at the page, merged without
+/// duplicates. Together they are exactly what the owner's agents can read.
+pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    browser_only(ctx)?;
+    let owner = ctx.p.user_id;
+    let after = opt_i64(body, "after")?.unwrap_or(0);
+    let before = opt_i64(body, "before")?.unwrap_or(i64::MAX);
+    let limit = opt_i64(body, "limit")?.unwrap_or(FEED_PAGE).clamp(1, FEED_MAX);
+    let agent = match opt_str(body, "agent")? {
+        Some(_) => Some(own_agent(ctx, body)?),
+        None => None,
+    };
+    let direction = opt_str(body, "direction")?;
+    let problems = match body.get("problems") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad_request("problems is a boolean")),
+    };
+    if direction.is_some_and(|d| !["in", "out", "own"].contains(&d)) {
+        return Err(bad_request("direction is one of in, out, own"));
+    }
+    let (ranges, memberships, place_channel) = owner_ranges(ctx, agent.as_ref(), direction, opt_str(body, "place")?)?;
     let direction_of = |m: &MsgRow| {
         let (from_own, to_own) = (owned(ctx, &m.sender), m.recipient.as_deref().is_some_and(|r| owned(ctx, r)));
         match (&m.channel_id, from_own, to_own) {

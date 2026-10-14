@@ -142,6 +142,9 @@ enum Cmd {
         /// Only this '#channel'.
         #[arg(long)]
         channel: Option<String>,
+        /// Print each message's whole first line, not one row cut to the terminal's width.
+        #[arg(long)]
+        wide: bool,
     },
     /// Show an agent's profile, or set a field (human only).
     Profile {
@@ -488,6 +491,24 @@ impl Session {
     }
 }
 
+/// The terminal's width in columns when stdout is a terminal.
+#[cfg(unix)]
+fn terminal_width() -> Option<usize> {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: TIOCGWINSZ fills the winsize it is handed.
+    let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
+    (ok && size.ws_col > 0).then_some(usize::from(size.ws_col))
+}
+
+#[cfg(not(unix))]
+fn terminal_width() -> Option<usize> {
+    None
+}
+
 pub fn main() -> i32 {
     let cli = Cli::parse();
     match run(cli) {
@@ -780,7 +801,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let r = sx.call("search", json!({"pattern": pattern, "target": target, "after": after}))?;
             print(surface::search(&r, Surface::Cli));
         }
-        Cmd::Watch { agent, channel } => {
+        Cmd::Watch { agent, channel, wide } => {
             // the local board unless --board names one; never the default board
             let board = flag.clone().unwrap_or_else(|| LOCAL_BOARD.to_string());
             let filter = |mut body: Value| {
@@ -789,11 +810,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 body
             };
             let mut body = filter(json!({"last": 20}));
+            let mut day = String::new();
             loop {
                 let r = sx.call_on("message.feed", Some(&board), body)?;
                 let rows = r["messages"].as_array().cloned().unwrap_or_default();
+                // the width is read each pass, so a resized terminal is followed
+                let width = terminal_width().unwrap_or(120);
                 for m in &rows {
-                    println!("{}", surface::watch_line(m));
+                    if wide {
+                        println!("{}", surface::watch_line(m));
+                        continue;
+                    }
+                    if surface::watch_day(m) != day {
+                        day = surface::watch_day(m);
+                        println!("-- {day} --");
+                    }
+                    println!("{}", surface::watch_row(m, &board, width));
                 }
                 std::io::Write::flush(&mut std::io::stdout())?;
                 // a full page continues at once; otherwise poll again in a second

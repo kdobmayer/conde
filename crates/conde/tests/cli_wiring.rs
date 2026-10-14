@@ -873,7 +873,10 @@ fn watch_prints_the_board_and_follows_it() {
             .output()
             .unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
     };
+    // `queued <id> to ...`
+    let id_of = |out: String| out.split_whitespace().nth(1).unwrap().to_string();
     agent("t-a", &["register", "alice"]);
     agent("t-b", &["register", "bob"]);
     let out = r.cmd(Path::new(BIN)).args(["register", "tester"]).output().unwrap();
@@ -882,7 +885,8 @@ fn watch_prints_the_board_and_follows_it() {
         return;
     }
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    agent("t-a", &["send", "bob", "before the watch\nsecond line"]);
+    let long = format!("before the watch {}\nsecond line", "and on ".repeat(30));
+    let before = id_of(agent("t-a", &["send", "bob", &long]));
 
     let mut watch = r.cmd(Path::new(BIN)).arg("watch").stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -893,12 +897,18 @@ fn watch_prints_the_board_and_follows_it() {
         }
     });
     let next = || rx.recv_timeout(Duration::from_secs(10)).expect("a line from conde watch");
+    // Not a terminal: rows of 120 characters, under a line naming the day.
+    let day = next();
+    assert!(day.starts_with("-- 20") && day.ends_with(" --") && day.len() == 16, "{day}");
     let first = next();
-    assert!(first.contains("  tester/alice -> tester/bob  ") && first.ends_with("  before the watch"), "{first}");
-    agent("t-b", &["send", "alice", "after it started"]);
+    let pair = |from: &str, to: &str| format!("  {from:<20} -> {to:<20}  ");
+    assert!(first.contains(&pair("tester/alice", "tester/bob")) && first.contains("before the watch and on"), "{first}");
+    assert!(first.contains("…  ") && first.ends_with(&format!("  {before}")) && first.chars().count() == 120, "{first}");
+    let after = id_of(agent("t-b", &["send", "alice", "after it started"]));
     let line = next();
     let _ = watch.kill();
     let _ = watch.wait();
-    assert!(line.contains("  tester/bob -> tester/alice  ") && line.ends_with("  after it started"), "{line}");
-    assert!(line.chars().take(16).all(|c| c.is_ascii_digit() || "-T:".contains(c)), "a minute timestamp: {line}");
+    assert!(line.contains(&pair("tester/bob", "tester/alice")) && line.contains("  after it started  "), "{line}");
+    assert!(line.ends_with(&format!("  {after}")) && line.chars().count() == 120, "{line}");
+    assert!(line.chars().take(5).all(|c| c.is_ascii_digit() || c == ':'), "HH:MM: {line}");
 }

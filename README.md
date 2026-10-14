@@ -645,9 +645,13 @@ scanning 10000 messages)`, or `(no matches in the 10000 messages this call
 scanned; it stopped there)` when it found nothing, and ends with the
 `(more: ...)` line that continues it: no matches in a partial call is not a
 final answer.
-`conde watch` follows messages as they arrive, one line each (UTC minute,
-sender -> recipient or channel, state, first line), after the last 20, until
-Ctrl-C. On the local board the human sees every message and a session what it
+`conde watch` follows messages as they arrive, after the last 20, until
+Ctrl-C: one row per message fitted to the terminal's width (120 when the
+output is not a terminal): UTC time, sender -> recipient or channel, a short
+state (`read`, `read 3/4` for a channel, `delivered`, `held`, `retrying`...),
+the first line of the text cut with `…`, and the message id for `conde read
+<id>`; a `-- 2026-10-14 --` line starts each day. `--wide` prints the whole
+first line instead. On the local board the human sees every message and a session what it
 can search; `--board dakai` shows what you can search on dakai. `--agent
 <name>` keeps what that agent sent or received, `--channel '#dev'` one
 channel. Any error ends it (a daemon restart, a lost connection to the shared

@@ -29,7 +29,7 @@ Review and integration by desk, one batch at a time; one release per batch.
   Plus: `conde login --code` without a terminal exits 0 after printing the URL,
   so a script cannot tell "waiting for the code" from "enrolled": a distinct
   exit code or a machine-readable line. Area: login handler + CLI login
-  command, tests. Small; pairs with B1 in one PR if the same lane takes both.
+  command, tests.
 - B5. [J] Redeem answer: `reenrolled` means the host existed, not that a live
   key was revoked; the mint knows `replaced`. Return both and make the CLI say
   which ("re-enrolled host, previous key revoked" vs "re-enrolled host, no live
@@ -59,10 +59,10 @@ Review and integration by desk, one batch at a time; one release per batch.
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
 - B12. `conde setup` and `conde setup --check` compare the running bridge's
-  build with the binary's, like doctor after B4 (the NUC smoke saw "all clear"
+  build with the binary's, like doctor does (the NUC smoke saw "all clear"
   from setup --check with the old bridge still running); setup restarts the
   service on a mismatch, --check reports it as an issue. Area: crates/conde
-  setup, tests. Depends on B4.
+  setup, tests.
 
 ## Waiting on a decision or an observation (do not take)
 

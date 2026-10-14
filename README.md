@@ -647,7 +647,7 @@ scanned; it stopped there)` when it found nothing, and ends with the
 final answer.
 `conde watch` follows messages as they arrive, after the last 20, until
 Ctrl-C: one row per message fitted to the terminal's width (120 when the
-output is not a terminal): UTC time, sender -> recipient or channel, a short
+output is not a terminal; a row needs 74 columns, 80 on a shared board): UTC time, sender -> recipient or channel, a short
 state (`read`, `read 3/4` for a channel, `delivered`, `held`, `retrying`...),
 the first line of the text cut with `…`, and the message id for `conde read
 <id>`; a `-- 2026-10-14 --` line starts each day. `--wide` prints the whole

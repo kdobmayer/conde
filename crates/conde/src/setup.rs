@@ -339,6 +339,11 @@ pub struct CmdOut {
 pub trait Host {
     fn which(&self, prog: &str) -> Option<PathBuf>;
     fn run(&mut self, prog: &str, args: &[&str]) -> anyhow::Result<CmdOut>;
+    /// [`Host::run`] for a probe that must not hold setup up: Err once `limit` passes (the
+    /// program is killed).
+    fn run_bounded(&mut self, prog: &str, args: &[&str], _limit: std::time::Duration) -> anyhow::Result<CmdOut> {
+        self.run(prog, args)
+    }
     /// Whether a daemon answers on `socket`: connect and one request frame,
     /// bounded by a short timeout. Err carries why not.
     fn reach(&mut self, socket: &Path) -> Result<(), String>;
@@ -409,6 +414,37 @@ impl Host for System {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
+    }
+
+    fn run_bounded(&mut self, prog: &str, args: &[&str], limit: std::time::Duration) -> anyhow::Result<CmdOut> {
+        use std::io::Read;
+        let mut child = std::process::Command::new(prog)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("running {prog}"))?;
+        let deadline = std::time::Instant::now() + limit;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("{prog} did not answer within {limit:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let (mut stdout, mut stderr) = (String::new(), String::new());
+        if let Some(mut o) = child.stdout.take() {
+            let _ = o.read_to_string(&mut stdout);
+        }
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_string(&mut stderr);
+        }
+        Ok(CmdOut { ok: status.success(), stdout, stderr })
     }
 
     #[cfg(unix)]
@@ -817,24 +853,23 @@ fn systemd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
         check(host, "systemctl", &["--user", "start", "conde.service"])?;
         writeln!(out, "service: enabled and started conde.service")?;
     }
-    if !linger_on(host) {
+    if !linger_on(env, host) {
         writeln!(out, "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"")?;
     }
     Ok(())
 }
 
 /// Whether systemd keeps this user's services running without a login session (`loginctl
-/// show-user <uid>` says `Linger=yes`); false when it says no or cannot be asked, so the hint is
-/// shown whenever it may matter. The uid is named: without it loginctl answers for the caller's
-/// session, and an agent's shell has none (it prints nothing).
-fn linger_on(host: &mut dyn Host) -> bool {
+/// show-user <uid>` says `yes`, or `Linger=yes`); false when it says no, cannot be asked or does
+/// not answer within 3 s, so the hint is shown whenever it may matter. The uid is named: without
+/// it loginctl answers for the caller's session, and an agent's shell has none.
+fn linger_on(env: &Env, host: &mut dyn Host) -> bool {
     if host.which("loginctl").is_none() {
         return false;
     }
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() }.to_string();
-    host.run("loginctl", &["show-user", &uid, "--property=Linger", "--value"])
-        .is_ok_and(|r| r.ok && r.stdout.trim() == "yes")
+    let uid = env.uid.to_string();
+    host.run_bounded("loginctl", &["show-user", &uid, "--property=Linger", "--value"], std::time::Duration::from_secs(3))
+        .is_ok_and(|r| r.ok && matches!(r.stdout.trim(), "yes" | "Linger=yes"))
 }
 
 /// What the running bridge says of its build; None when it gives no answer to tell by.

@@ -94,7 +94,7 @@ impl Host for Fake {
                 stdout = self.print_out.clone();
             }
             ("systemctl", ["--user", "show", ..]) => stdout = self.show_out.clone(),
-            ("loginctl", ["show-user", uid, "--property=Linger", "--value"]) if uid.parse::<u32>().is_ok() => match self.linger {
+            ("loginctl", ["show-user", "501", "--property=Linger", "--value"]) => match self.linger {
                 Some(v) => stdout = format!("{v}\n"),
                 None => ok = false,
             },
@@ -1359,6 +1359,7 @@ fn the_linger_hint_appears_only_when_linger_is_off() {
     let hint = "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"";
     for (on_path, linger, shown) in [
         (&["systemctl", "loginctl"][..], Some("yes"), false),
+        (&["systemctl", "loginctl"][..], Some("Linger=yes"), false),
         (&["systemctl", "loginctl"][..], Some("no"), true),
         (&["systemctl", "loginctl"][..], None, true),
         (&["systemctl"][..], Some("yes"), true),
@@ -1368,6 +1369,10 @@ fn the_linger_hint_appears_only_when_linger_is_off() {
         let (ok, out) = run(&env, &opts, &mut host);
         assert!(ok, "{out}");
         assert_eq!(out.contains(hint), shown, "{on_path:?} {linger:?}: {out}");
+        if on_path.contains(&"loginctl") {
+            // the environment's uid (501), not this process's
+            assert!(host.take_calls().contains(&"loginctl show-user 501 --property=Linger --value".to_string()));
+        }
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1408,4 +1413,19 @@ fn a_running_bridge_that_predates_boards_is_restarted() {
         }
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// The bounded run setup uses for the loginctl probe: a program that does not answer is killed
+/// at the deadline, and the call fails (setup then shows the hint).
+#[cfg(unix)]
+#[test]
+fn a_bounded_probe_that_hangs_is_cut_off() {
+    use conde::setup::Host as _;
+    let t = std::time::Instant::now();
+    let r = conde::setup::System.run_bounded("sleep", &["30"], std::time::Duration::from_millis(300));
+    let Err(e) = r else { panic!("a hanging program must not answer") };
+    assert!(e.to_string().contains("did not answer within"), "{e}");
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+    let r = conde::setup::System.run_bounded("echo", &["yes"], std::time::Duration::from_secs(5)).unwrap();
+    assert_eq!((r.ok, r.stdout.trim()), (true, "yes"));
 }

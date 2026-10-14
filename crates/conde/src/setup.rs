@@ -420,7 +420,11 @@ impl Host for System {
         // Output to a regular file, not a pipe: a descendant the program leaves running (a
         // wrapper that backgrounds something) would hold a pipe open past the deadline.
         let out_path = std::env::temp_dir().join(format!("conde-probe-{}-{}", std::process::id(), crate::util::new_ulid()));
-        let out = std::fs::File::create(&out_path).with_context(|| format!("creating {}", out_path.display()))?;
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+        let out = open.open(&out_path).with_context(|| format!("creating {}", out_path.display()))?;
         let spawned = std::process::Command::new(prog)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -435,17 +439,24 @@ impl Host for System {
             }
         };
         let deadline = std::time::Instant::now() + limit;
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
+        let waited = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    break Err(anyhow!("{prog} did not answer within {limit:?}"));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(e) => break Err(e.into()),
             }
-            if std::time::Instant::now() >= deadline {
+        };
+        let status = match waited {
+            Ok(status) => status,
+            Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = std::fs::remove_file(&out_path);
-                bail!("{prog} did not answer within {limit:?}");
+                return Err(e);
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
         };
         let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
         let _ = std::fs::remove_file(&out_path);

@@ -691,7 +691,9 @@ async fn run_bridge(
             // registered connection.
             match token.as_deref().map(|t| shared.auth.check(t)) {
                 Some(Authentication::Valid(current)) if current == admitted => {}
-                Some(Authentication::Unavailable(why)) => return Err(Some(why)),
+                Some(Authentication::Unavailable(why)) => {
+                    return Err(Some(("credential store unavailable, retry", why)))
+                }
                 _ => return Err(None),
             }
             let result = shared.source.admit(&host, &hello);
@@ -701,7 +703,9 @@ async fn run_bridge(
                 // can neither land after this one nor overwrite it.
                 match shared.source.endpoints(&host, &instance, &endpoints) {
                     Recorded::Accepted => {}
-                    Recorded::Retry(why) | Recorded::Rejected(why) => return Err(Some(why)),
+                    Recorded::Retry(why) | Recorded::Rejected(why) => {
+                        return Err(Some(("endpoints not recorded, retry", why)))
+                    }
                 }
                 let entry = ActiveBridge {
                     conn_id,
@@ -732,14 +736,9 @@ async fn run_bridge(
             return close_with_error(&mut tx, "revoked", "this host's key was revoked").await;
         }
         // Not a verdict on the key: the bridge reconnects after its backoff.
-        Ok(Err(Some(why))) => {
-            tracing::warn!(%host, %why, "hello refused for now: store unavailable");
-            return close_with_error(
-                &mut tx,
-                "unavailable",
-                "credential store unavailable, retry",
-            )
-            .await;
+        Ok(Err(Some((what, why)))) => {
+            tracing::warn!(%host, %why, "hello refused for now: {what}");
+            return close_with_error(&mut tx, "unavailable", what).await;
         }
         Ok(Ok(Admission::Fenced)) => {
             return close_with_error(
@@ -828,7 +827,7 @@ async fn record_outcomes(
                 let (shared, h, i) = (shared.clone(), host.clone(), instance.clone());
                 let written = tokio::task::spawn_blocking(move || {
                     let bridges = shared.bridges.lock().unwrap_or_else(|p| p.into_inner());
-                    if !bridges.get(&h).is_some_and(|b| b.conn_id == conn_id) {
+                    if bridges.get(&h).is_none_or(|b| b.conn_id != conn_id) {
                         return Recorded::Accepted; // replaced: the new hello's snapshot stands
                     }
                     shared.source.endpoints(&h, &i, &all)

@@ -267,3 +267,9 @@ Fixed in this batch: the build id in `conde --version`, `conde doctor` and `cond
 
 - `conde admin key create` (`ops::hosts::insert_key`) adds a key without revoking the host's live ones. It is the only way to get a second live key for a host: the login redeem, the keys page and the admin API revoke and insert in one transaction, and Postgres writes are serialized by the writer advisory lock. Decide whether it revokes too, or stays as the overlap path for a hand-over rotation.
 - Until the server runs this batch, its redeem answer has no `reenrolled` field and the CLI prints `enrolled host` for a re-enrollment too. A server that sends `reenrolled` but not `replaced` (one without the B5 redeem change) gets the short `re-enrolled host <host>` line, without saying whether a live key was revoked.
+
+## K. From the ordered-frames review 2026-10-14
+
+- The registry lock (`shared.bridges`) is now held during every endpoints write, including the store's transient retries (up to 10 s) and the 60 s Postgres statement timeout. On a slow store the async paths that take the lock (`is_active` in `push_pending`, event fan-out, revalidation, disconnect cleanup) block a worker thread. A per-host mutex holding the registered conn_id would bound it.
+- Replacement fencing works within one process. With two replicas, an instance reconnecting to the other replica can have the old replica's queued snapshot land after the new hello's, which with the hold rule causes a false "recipient offline" abandon (re-offer, not loss). A connection generation in the endpoints write would close it.
+- `daemon/mux.rs` `announce()` runs a full per-origin scan before every injection. If the scan errors it logs and injects anyway, so the hold is abandoned as offline and re-offered, which can inject a message twice. The cost is per message, fine at today's fleet size.

@@ -3,7 +3,7 @@
 - URL: https://conde.nativeai.space (managed certificate). Resource group rg-conde,
   subscription 60df47fc-ce8f-4f52-a970-43a412d78007, West Europe.
 - Server: Container App ca-conde (environment cae-conde), public HTTPS + WS
-  ingress, 1 replica, 0.5 vCPU / 1 GiB. Azure FQDN
+  ingress, 2 replicas, 0.5 vCPU / 1 GiB. Azure FQDN
   ca-conde.nicepond-1a6fc04a.westeurope.azurecontainerapps.io.
 - Postgres: psql-conde.postgres.database.azure.com (PG 18, private endpoint,
   reachable only from the app), database conde, user conde. DATABASE_URL on the
@@ -45,7 +45,7 @@ listing) at https://stconde.blob.core.windows.net/dist; the server redirects
 /install.sh and /dist/<file> there.
 
 ## Infra decisions taken by dakai-helper
-Single replica until the server is proven stateless; Postgres B1ms single zone,
+Two replicas (min = max = 2) since 2026-10-09; Postgres B1ms single zone,
 no HA; no NAT gateway; Entra client secret valid until 2028-10-08. Infra code
 lives in infra/ locally (not pushed; owner decides).
 

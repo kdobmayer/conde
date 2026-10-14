@@ -137,10 +137,11 @@ pub trait NotificationSource: Send + Sync {
     fn poll_window(&self, host_id: &str, bridge_instance: &str, _window: u32) -> Polled {
         self.poll(host_id, bridge_instance)
     }
-    /// The bridge's full set of live harness endpoints: from its hello (after a successful
-    /// fence) and again after every `endpoints` diff frame. Default: ignored.
-    /// Records the bridge's full set of live endpoints. `Retry` (not recorded now) and `Rejected`
-    /// (the instance is fenced) close the connection, so the bridge reconnects with a fresh hello.
+    /// Records the bridge's full set of live harness endpoints: from its hello (after a successful
+    /// fence) and again after every `endpoints` diff frame. `Retry` (not recorded now) and
+    /// `Rejected` (the instance is fenced) close the connection, so the bridge reconnects with a
+    /// fresh hello. Default: returns `Accepted` without recording; the board implementation
+    /// records the set.
     fn endpoints(&self, _host_id: &str, _bridge_instance: &str, _endpoints: &[Endpoint]) -> Recorded {
         Recorded::Accepted
     }

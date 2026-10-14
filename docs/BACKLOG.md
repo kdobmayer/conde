@@ -49,7 +49,12 @@ Review and integration by desk, one batch at a time; one release per batch.
   owner scope, the same owned clause the browser's owner ops use (every DM and
   channel of every agent the human owns, plus the human's own); `--agent <own
   name>` narrows to one agent as today; a name the caller does not own is
-  refused. No new flag. Agents' sessions keep the search rule. Area:
+  refused. No new flag. The human needs no published name of their own: the
+  host's credential names the owner, so the daemon forwards a human caller's
+  shared-board call without the publish check (today it answers "<name> is not
+  published on dakai ... conde publish", which steered a human into publishing
+  a second name) and the server scopes by the credential's user. Agents'
+  sessions keep the search rule. Area:
   crates/conde/src/ops/messages.rs (message.feed viewer for a forwarded human
   actor), store feed visibility (reuse the owner ranges of U3 or the owned
   clause), messaging + cli_wiring tests, README watch paragraph.

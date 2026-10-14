@@ -39,6 +39,7 @@
 	<section class="conv">
 		<header>
 			<h1>{short(agent)} <span class="amp">&amp;</span> {bare(other)}</h1>
+			<p class="mdeck">{ownerOf(other)}’s {kindName[them.kind]} on {them.host} · {them.online ? 'online' : 'offline'}</p>
 			<p class="deck">Direct messages with {ownerOf(other)}’s {kindName[them.kind]} agent on {them.host}, {them.online ? 'online now' : 'offline'}. You read what {short(agent)} reads; nothing is sent from here.</p>
 		</header>
 		<div class="script" bind:this={scroller}>
@@ -146,6 +147,9 @@
 		font-weight: 400;
 		color: var(--faint);
 	}
+	.mdeck {
+		display: none;
+	}
 	.deck {
 		margin: 10px 0 0;
 		max-width: 640px;
@@ -232,13 +236,22 @@
 			display: none;
 		}
 		.conv header {
-			padding: 18px 20px 14px;
+			padding: 12px 20px 10px;
 		}
 		h1 {
-			font-size: 26px;
+			font-size: 22px;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
 		}
 		.deck {
-			font-size: 14.5px;
+			display: none;
+		}
+		.mdeck {
+			display: block;
+			margin: 2px 0 0;
+			font-size: 13px;
+			color: var(--soft);
 		}
 		.script {
 			padding: 0 20px 26px;

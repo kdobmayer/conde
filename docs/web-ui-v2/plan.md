@@ -1,205 +1,229 @@
-# Web UI v2: implementation plan
+# Web UI v2: backlog items
 
-Written so that any of the three directions can be chosen: a shared skeleton first (data, routes,
-primitives, behaviour), then the direction's skin (shell layout, row and message components,
-tokens, fonts). Each item below is one PR, in order; items marked "server" can run in parallel
-with the client items that do not depend on them.
+Directions A (Console) and B (Editorial) are built as two skins over one skeleton with a
+per-browser switch; C is not built; dark only (owner, 2026-10-14). What the pages show and the
+server contract are in `ia.md`; each item below cites the section it implements. Items are sized
+for the backlog: one PR each, taken top first, claimed on the thread with desk.
+
+## Rules for every item
+
+The BACKLOG.md rules apply (fresh main, one PR, one-line commit messages, no attribution,
+`cargo test --workspace` green on both stores with CONDE_TEST_PG, no new clippy warning). In
+addition:
+
+- Never: a third skin or anything from C, a light theme or theme switch, a component library, a
+  server-side skin setting, counts the contract drops (ia.md "Counts").
+- Client items run `npm run check` (warnings fail), `npm test`, `npm run build`, and render the
+  pages they touch with `web/scripts/design/shoot.mjs` against the mock API at 1440×900,
+  1180×820 and 390×844, in both skin settings, the Feed with the thread closed and open. Renders
+  go in the PR description. Headless only; nothing opens a browser window.
+- Branches: U1 to U5 go to main (U1 is a live fix; U2 to U5 are additive browser-only reads).
+  U6 to U16 replace the live UI page by page, so they land on an integration branch `web-v2`
+  (from main after U1) and reach main in one merge after U16; main never ships a half-built UI.
+- Parallel groups: items in the same group have disjoint areas and can run in parallel lanes;
+  a group starts when the groups it names have landed. The server lane (S) is serial inside
+  itself (shared store and op files) and parallel with every client group.
 
 ## Decisions taken here (for the owner to overrule)
 
-- **Component library: none.** The app is about fifteen read-only components; the candidate
-  libraries either bring their own visual system (Skeleton, Flowbite, shadcn-svelte: Tailwind
-  plus their tokens, which would have to be fought to meet NEXT.md section D) or are headless
-  primitives (bits-ui, Melt UI) whose value is in focus management for menus, dialogs and
-  popovers. Cost of none: three accessible primitives written here (a filter menu with listbox
-  keyboard behaviour, the phone sheet as a modal dialog, a disclosure for collapsed fleet owners),
-  about one item of work (item 4) and the main accessibility risk of the plan. The alternative
-  that keeps the option open is bits-ui for those three only; it adds a dependency to a binary
-  that embeds its build, so it is taken only if item 4's menu fails its keyboard test.
-- **Fonts are bundled** for the chosen direction (A: IBM Plex Mono; B: Source Serif 4 and Inter;
-  C: Inter and IBM Plex Mono), self-hosted woff2, Latin subset, OFL. This is new to the app (today
-  system stacks only). The alternative is system stacks, which keep the layout and lose part of
-  the character (most for B).
-- **Dark only** (owner, 2026-10-14): one token set, `color-scheme: dark`, no theme switch. The
-  favicons keep their light and dark variants, since they live in the browser's chrome.
-- **The design routes go, the harness stays.** `web/src/routes/_design/` is removed in item 2;
-  the fixture, the mock API and the headless render script (`web/src/lib/design/fixture.ts`,
-  `web/scripts/design/`) stay as the visual check every UI item renders against.
-- **Keys stays a server page** with the new skin and nav (item 11), not a Svelte route.
-
-## Order
-
-| # | Item | Kind | Depends on |
-|---|---|---|---|
-| 1 | Conversation opens at the newest message | client fix | none |
-| S1 | `owner.feed` op and `owner.search` in the browser allow-list | server | none |
-| S2 | `owner.thread` op and the `reply_to` index | server | none |
-| 2 | Shell: routes, navigation, tokens, dark only | client skeleton | 1 |
-| 3 | Skin: the chosen direction's shell, tokens and fonts | client skin | 2 |
-| 4 | Primitives | client skeleton + skin | 3 |
-| 5 | Feed | client | 4, S1 |
-| 6 | Thread view | client | 5, S2 |
-| 7 | Conversation (DM and channel) rework | client | 4 |
-| 8 | Agents and Channels pages | client | 7 |
-| 9 | Fleet | client | 4 |
-| 10 | Search | client | 5, S1 |
-| 11 | Keys page skin and nav | server template | 3 |
-| S3 | Channel history without naming an agent | server, optional | none |
-| S4 | Owner-scoped event frames | server, optional | S1 |
+- No component library. Three accessible primitives are written here (U8): a filter menu, the
+  sheet (also the 720 to 1280 px overlay) and a disclosure. bits-ui is taken for the filter menu
+  only if U8's keyboard checks cannot be met; it would add a dependency to a binary that embeds
+  its build.
+- Fonts: B bundles Source Serif 4 and Inter (U15); A ships on the system monospace stack
+  (`ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace`) and bundles nothing.
+  A is monospace throughout, so the system face keeps its character; B without its serif loses it.
+- Search is a separate mode with the existing op; the Feed's agent filter takes one agent; the
+  one-counterpart place filter and all totals and reply counts are dropped (ia.md "Counts",
+  "Search").
+- The thread sheet's handle is a button that toggles full height; no drag gesture.
+- `/keys` keeps one look for both skins and takes the chosen accent after the pick.
+- The reviewer's premise that a delivery event names its message does not hold: `Wake::Board(u8)`
+  carries topic bits only, and reads arrive as `messages`. Invalidation is therefore a re-read of
+  the loaded window on every `messages` or `delivery` frame (ia.md "The Feed window").
 
 ## Items
 
-### 1. Conversation opens at the newest message (defect, now)
+- U1. A conversation opens at its oldest loaded message instead of the newest (audit §4, live
+  defect): `refresh(first)` in `Conversation.svelte` scrolls to the end while `loading` is true
+  and only "Loading…" is rendered. Set `loading = false`, `await tick()`, then scroll. Must not:
+  touch anything else in the component. Gate: a headless probe on the DM route (after load,
+  `scrollTop` equals `scrollHeight - clientHeight`), red on main, green on the branch, kept as
+  `web/scripts/design/probe-scroll.mjs`. Area: web/src/lib/Conversation.svelte,
+  web/scripts/design/probe-scroll.mjs. Group: any (ship on its own, now).
 
-The cause (audit §4): `refresh(first)` in `Conversation.svelte` scrolls to the end while
-`loading` is true and only "Loading…" is rendered. Set `loading = false` before the scroll and
-`await tick()` so the list is in the DOM. Test: a node test cannot see layout, so the proof is the
-headless probe used in the audit (scrollTop equals scrollHeight minus clientHeight after load),
-red on master, green on the branch, kept as `web/scripts/design/probe-scroll.mjs`.
-Files: `web/src/lib/Conversation.svelte`, `web/scripts/design/probe-scroll.mjs`.
-Independent of the overhaul; worth shipping on its own.
+- U2. Browser op allow-list: add `owner.feed`, `owner.thread` and `owner.search` to `BROWSER_OPS`
+  (the first two are registered by U3 and U5; until then they answer the dispatcher's unknown-op
+  error). Must not: add any other op. Gate: a web suite case on both stores where a browser
+  session's `owner.search` returns hits from its agents' DMs and channels and never a DM between
+  two other owners' agents. Area: crates/conde-remote/src/web/app.rs,
+  crates/conde/tests/web_ui.rs. Group: S (first).
 
-### S1. `owner.feed` (server)
+- U3. `owner.feed` with lower and upper bounds (ia.md "Server contract", without `problems`):
+  `{after?, before?, limit?, agent?, direction?, place?}` newest first, `{messages, more}`, each
+  message the history view plus `direction` and `via`, visibility by the `owned` clause on both
+  stores. Must not: a scan budget, counts, a `with` filter, owner-scoped events. Gate: web suite
+  cases on both stores: the G9 rule (a teammate's feed never holds a DM between two other owners'
+  agents); both bounds exclusive and `more` exact; a drain of more than two pages with `after`
+  fixed and `before` moving returns exactly the rows above `after`; a row committed between two
+  page calls is returned by the next pass from the same `after`; each predicate and agent +
+  direction + place combined; the three direction cases. Postgres plan (EXPLAIN ANALYZE) for the
+  unfiltered and the agent-filtered first page at the production row count, in the PR. Area:
+  crates/conde/src/ops/web.rs, crates/conde/src/ops/mod.rs, crates/conde/src/store/mod.rs,
+  crates/conde/src/store/sqlite.rs, crates/conde/src/store/postgres.rs,
+  crates/conde/tests/web_ui.rs. Group: S (after U2).
 
-`{before?|after?: seq, limit?, agents?, direction?, place?, with?, problems?}` → newest first,
-`{messages, more, newest_seq}`; each message is the history view plus `delivery`, `via` (the
-own agents that can read it) and `direction` (`in`, `out`, `own`). The visibility predicate is
-the existing `owned` clause of `owner_search_scan`, ordered by `commit_seq DESC`. Add
-`owner.feed` and `owner.search` to `BROWSER_OPS`.
-Files: `crates/conde/src/ops/web.rs`, `crates/conde/src/ops/mod.rs`, `crates/conde/src/store/mod.rs`,
-`crates/conde/src/store/sqlite.rs`, `crates/conde/src/store/postgres.rs`,
-`crates/conde-remote/src/web/app.rs`, `crates/conde/tests/web_ui.rs`.
-Tests on both stores (the suite's existing pattern): the owner sees their agents' DMs with anyone
-and their channels' posts; a teammate's feed never contains a DM between two of another owner's
-agents (the G9 rule); `after` returns exactly the newer rows; filters; paging stops at `more:
-false`. Check the Postgres plan with the production row count (18,626 imported messages plus
-later traffic); the `messages_by_sender`, `_recipient` and `_channel` indexes should serve it.
+- U4. The `problems` predicate of `owner.feed`, server-side: candidates from `notifications` by
+  status (held, denied, refused, gone, pending with attempts), exact state per candidate as
+  `recipient_state` computes it, no scan budget. Must not: filter on the client, count. Gate: web
+  suite cases on both stores: each problem state listed; a held DM that was then read is not; a
+  page with many non-problem rows between two problems returns both problems and never an empty
+  page with `more: true`; no problems answers an empty page with `more: false`. Area: same as U3.
+  Group: S (after U3).
 
-### S2. `owner.thread` and the `reply_to` index (server)
+- U5. `owner.thread` with bounds and the `reply_to` index (ia.md "Server contract",
+  "Thread view"): the visible segment, seq order, the path to the selected message first, 200 per
+  answer with `next`, `hidden_parent`, `cut_above`; the visibility predicate inside every
+  recursive step; migration 0012 adds `messages(reply_to)` on both stores. Must not: return or
+  count a message the owner cannot read, step through one. Gate: web suite cases on both stores:
+  a chain A ← B ← C ← D with B invisible gives `thread(C)` = C, D with `hidden_parent` and
+  `thread(A)` = A only; a teammate's id answers not found; a 250-message chain opened at its
+  230th message returns the path cut to 100 with `cut_above` and continuation reaches the end
+  with nothing missing after a merge by id; a branching thread comes back in seq order. Area:
+  crates/conde/src/store/migrations/0012_messages_by_reply_to.sql,
+  crates/conde/src/store/sqlite_schema.sql, crates/conde/src/store/sqlite.rs,
+  crates/conde/src/store/postgres.rs, crates/conde/src/store/mod.rs, crates/conde/src/ops/web.rs,
+  crates/conde/src/ops/mod.rs, crates/conde/tests/web_ui.rs. Group: S (after U4).
 
-`{id}` → `{root, messages, hidden_parent}` under the same predicate; descendants by a recursive
-query (both stores support `WITH RECURSIVE`). Migration 0012 adds `messages(reply_to)` on both
-stores; there is no such index today.
-Files: `crates/conde/src/store/migrations/0012_messages_by_reply_to.sql`,
-`crates/conde/src/store/sqlite.rs`, `crates/conde/src/store/sqlite_schema.sql`,
-`crates/conde/src/store/postgres.rs`, `crates/conde/src/store/mod.rs`, `crates/conde/src/ops/web.rs`,
-`crates/conde/src/ops/mod.rs`, `crates/conde-remote/src/web/app.rs`, `crates/conde/tests/web_ui.rs`.
-Tests: branch ordering, a parent visible only to the sender comes back as `hidden_parent`, a
-teammate never receives another owner's chain.
+- U6. App shell, routing and the skin switch (ia.md "Two skins, one skeleton", "Navigation"):
+  the route tree (`/`, `/t/[id]`, `/agents`, `/a/[agent]`, `/a/[agent]/dm/[owner]/[name]`,
+  `/channels`, `/c/[name]`, `/fleet`; old `/a/[agent]/ch/[name]` redirects to `/c/[name]`) with
+  placeholder pages; the skin registry (`Shell`, `FeedRow`, `Message` per skin, both pointing at
+  plain skeleton components until U12 and U13); token files per skin under
+  `:root[data-skin=...]` with the option values; `color-scheme: dark`, the light media query
+  removed; the root layout reads `conde.skin` (try/catch, default A) and sets `data-skin`; the
+  Console / Editorial control in the owner menu; the nav model (sections, own agents with state
+  from `owner.list` and `fleet.list`, channels once each). Verify whether the hash router exposes
+  query parameters after the hash; if not, filters use the path form. Must not: a server setting,
+  a light theme, touch `routes/_design` or its layout branch. Gate: a node test of the skin read
+  (missing, unknown and throwing storage give A); renders of the empty shell in both skins.
+  Area: web/src/routes/+layout.svelte, web/src/routes/+page.svelte,
+  web/src/routes/{t,agents,a,channels,c,fleet}/**, web/src/lib/skins/**,
+  web/src/lib/nav.svelte.ts, web/src/lib/UserMenu.svelte, web/src/app.css, web/src/app.html,
+  web/test/skin.test.mjs. Group: C1 (after U1; parallel with U7, U8).
 
-### 2. Shell: routes, navigation, tokens, dark only (skeleton)
+- U7. Data layer with the window rule (ia.md "The Feed window", "Search"): the pass logic as a
+  pure module driven by an injected op (`lib/feed-window.ts`), its reactive wrapper
+  (`lib/feed.svelte.ts`: passes on load, reconnect, `messages` and `delivery` frames and poll
+  ticks through the existing `onBoard`, one pass at a time with a dirty re-run, filters from the
+  URL, the per-device last-seen seq in storage inside try/catch, "N new", search mode); the
+  thread answer with continuation merged by id (`lib/thread-view.svelte.ts`); tree order and the
+  re-label rule (`lib/thread-tree.ts`, from `lib/design/model.ts`); `types.ts` for the new
+  answers and `FleetAgent.address: string | null`; the mock API answers `owner.feed`,
+  `owner.thread`, `owner.search` per the contract over the fixture. Must not: merge the Feed list
+  by id (the window replaces it), decide visibility on the client. Gate: node tests: a gap of
+  more than two pages drained, watermark unchanged until the last page; an arrival during a pass
+  caught by the re-run; a held row on the second loaded page turns read after one pass; a resolved
+  problem leaves the list; an empty `problems` answer with `more: false` reads as none and a
+  failed call reads as an error; more than 10 pages restarts the list; a thread with
+  `hidden_parent` and a continuation. Area: web/src/lib/feed-window.ts,
+  web/src/lib/feed.svelte.ts, web/src/lib/thread-view.svelte.ts, web/src/lib/thread-tree.ts,
+  web/src/lib/types.ts, web/scripts/design/mock-server.mjs, web/test/feed.test.mjs,
+  web/test/thread.test.mjs. Group: C1 (parallel with U6, U8).
 
-New route tree (hash router): `/` Feed, `/t/[id]`, `/agents`, `/a/[agent]`,
-`/a/[agent]/dm/[owner]/[name]`, `/channels`, `/c/[name]`, `/fleet`; the old
-`/a/[agent]/ch/[name]` redirects to `/c/[name]`. A `Nav` model (sections, own agents with state
-from `owner.list` and `fleet.list`, channels deduped) in `board.svelte.ts`. Tokens move out of
-`app.css` into `lib/ui/tokens.css` with neutral placeholder values; the light media query goes,
-`color-scheme: dark`. Verify whether `page.url` exposes query parameters after the hash with the
-hash router; if not, filters use a path segment (ia.md, Feed). Remove `routes/_design`; the
-root layout drops its design branch.
-Files: `web/src/routes/**`, `web/src/routes/+layout.svelte`, `web/src/lib/board.svelte.ts`,
-`web/src/app.css`, `web/src/lib/ui/tokens.css`, `web/src/app.html`, `web/test/*.test.mjs`.
+- U8. The three primitives with interaction checks, and the small state components:
+  `FilterMenu` (button and listbox: Enter, Space and ArrowDown open, arrows move, Enter selects,
+  Escape closes and returns focus to the button), `Sheet` (modal dialog: bottom sheet under
+  720 px, right overlay from 720 to 1280 px; focus moves in, Tab stays in, Escape and browser back
+  close it, focus returns to the opener, the page behind is inert; the handle button toggles full
+  height), `Disclosure` (button with `aria-expanded`); `StateWord` (state to word and tone, the
+  mapping a pure function), `EmptyState`, `ErrorLine` (Retry, "as of"), `SkeletonRows`,
+  `Announcer` (`aria-live`). A bare harness page renders the primitives on fixture data;
+  `interact.mjs` drives it headless by keyboard at 1440 and by touch at 390 and exits non-zero on
+  a failed check. Must not: a component library unless the FilterMenu checks fail (then bits-ui
+  for that menu only, named in the PR), animation without a reduced-motion guard. Gate:
+  `interact.mjs` green (output in the PR); a node test of the state-word mapping. Area:
+  web/src/lib/ui/**, web/src/routes/_design/primitives/+page.svelte,
+  web/scripts/design/interact.mjs, web/test/ui.test.mjs. Group: C1 (parallel with U6, U7).
 
-### 3. Skin: the chosen direction (skin)
+- U9. Feed and thread pages (ia.md "Feed", "Thread view"): the list with the skin's `FeedRow`,
+  day groups, the last-visit divider, the "N new" marker, the filter bar, search mode, all
+  states; the thread beside the Feed from 1280 px, in the `Sheet` below; `#/t/<id>` deep links;
+  close keeps the Feed scroll position. Adds the 1180×820 size to `shoot.mjs`. Must not: show
+  totals or reply counts. Gate: renders per the rules; `interact.mjs` extended to the Feed:
+  opening a row and pressing Escape returns focus to that row at the same scroll position, back
+  closes the sheet at 390. Area: web/src/routes/+page.svelte, web/src/routes/t/[id]/+page.svelte,
+  web/src/lib/Thread.svelte, web/src/lib/FeedList.svelte, web/scripts/design/shoot.mjs,
+  web/scripts/design/interact.mjs. Group: C2 (after C1; parallel with U10, U11).
 
-The direction's `Shell.svelte` (A: top tabs and status line; B: masthead column; C: left rail),
-its phone tab bar, its token values, and the bundled fonts with `@font-face` (measure the woff2
-sizes and record them in `web/README.md`). Each option's `Frame.svelte` under
-`routes/_design/<option>/` (in git history after item 2) is the starting point.
-Files: `web/src/lib/ui/Shell.svelte`, `web/src/lib/ui/tokens.css`, `web/static/app/fonts/*`,
-`web/README.md`.
-Check: render the empty shell at 1440 and 390 against the option's PNGs.
+- U10. Conversation, Agents and Channels pages (ia.md "DM", "Channels", "Agents"): the
+  conversation as a list of the skin's `Message`, one delivery word per message with the detail
+  (and the message id with a copy button) on expand, reply context only when the parent is not
+  the message above, opens at the newest, earlier on scroll up; the Agents index and agent page;
+  the Channels index and the channel route through the first own member agent. Must not: print
+  the message id inline, a per-message menu. Gate: renders of a DM and a channel per the rules;
+  `probe-scroll.mjs` still green. Area: web/src/lib/Conversation.svelte,
+  web/src/lib/Delivery.svelte, web/src/routes/a/**, web/src/routes/agents/**,
+  web/src/routes/c/**, web/src/routes/channels/**, web/test/conversation.test.mjs. Group: C2
+  (after C1; parallel with U9, U11).
 
-### 4. Primitives (skeleton behaviour, skin styling)
+- U11. Fleet page (ia.md "Fleet"): own hosts first, problems first, held and stuck the only
+  coloured items, teammates collapsed per owner in a `Disclosure`, column headers instead of the
+  legend paragraph. Must not: show an address or delivery health for other owners' agents. Gate:
+  renders per the rules. Area: web/src/routes/fleet/**. Group: C2 (after C1; parallel with U9,
+  U10).
 
-`StateWord` (delivery state to word and tone), `Name` (own versus other, short versus
-qualified), `RelTime`, `FilterMenu` (listbox semantics, arrow keys, Escape), `Sheet` (phone
-dialog: focus trap, back closes, drag to expand), `SidePanel`, `SkeletonRows`, `EmptyState`,
-`ErrorLine` (retry, "as of"), `LiveState`, `Announcer` (`aria-live`). C adds `Avatar` and
-`CountTiles`.
-Files: `web/src/lib/ui/*.svelte`, `web/test/ui.test.mjs` (pure logic: state mapping, names).
+- U12. Skin A, Console (options/README.md "A"): `Shell` (top tabs, status line with the live
+  state and the scope note, phone tab bar with Keys), `FeedRow` (one table line at 720 px and
+  wider, two lines below), `Message` (log line, right-aligned speaker), tokens, the system
+  monospace stack. The design renders show filter totals and reply counts; the build drops them.
+  Must not: bundle a font, touch skeleton files. Gate: renders per the rules, compared with
+  options/A; `interact.mjs` green. Area: web/src/lib/skins/a/**. Group: C3 (after C2; parallel
+  with U13, U14).
 
-### 5. Feed (needs S1)
+- U13. Skin B, Editorial (options/README.md "B"): `Shell` (masthead column, phone tab bar with
+  More), `FeedRow` (kicker: time, direction word, sender → recipient always in that order, place;
+  two lines of text), `Message` (script with the speaker margin), tokens; the phone DM header is
+  two short lines. The arrow is a small inline SVG, not a glyph (neither shipped font subset has
+  U+2192). Uses the fallback stacks (Georgia, `system-ui`) until U15. Must not: point the arrow by
+  direction, touch skeleton files. Gate: renders per the rules, compared with options/B;
+  `interact.mjs` green. Area: web/src/lib/skins/b/**. Group: C3 (parallel with U12, U14).
 
-`lib/feed.svelte.ts`: pages newest first, `after` on `messages` events, merge by `message_id`,
-refetch of the newest page on `delivery`, filters from the URL, the per-device last-seen `seq`
-(browser storage, wrapped so it works without it), the "N new" marker. `FeedRow.svelte` in the
-direction's form (A one line, B kicker plus two lines, C card). Teach the mock API `owner.feed`.
-Files: `web/src/lib/feed.svelte.ts`, `web/src/lib/FeedRow.svelte`, `web/src/routes/+page.svelte`,
-`web/src/lib/types.ts`, `web/scripts/design/mock-server.mjs`, `web/test/feed.test.mjs`.
-Tests: merge and paging logic (node), a render at both widths.
+- U14. Keys page restyle (ia.md "Keys"): the skeleton's dark neutrals and type in the `pages.rs`
+  stylesheet, the app's nav in its header (links to `/#/`, `/#/agents`, `/#/channels`,
+  `/#/fleet`), the brand links to `/`, the tables become cards under 720 px with state and Revoke
+  visible; the mock's copy of the template follows. Must not: change the CSP, form actions or
+  CSRF, follow the skin switch, add an op. Gate: the page tests in `pages.rs` (nav links present,
+  forms unchanged); renders of `/keys` at 1440 and 390 with no horizontal scroll at 390. Area:
+  crates/conde-remote/src/web/pages.rs, web/scripts/design/mock-server.mjs. Group: C3 (parallel
+  with U12, U13).
 
-### 6. Thread view (needs S2)
+- U15. Fonts for skin B: Source Serif 4 (400, 600, 400 italic) and Inter (400, 600) as woff2,
+  copied unmodified from `@fontsource/source-serif-4` 5.3.1 and `@fontsource/inter` 5.3.0 (files,
+  not an npm dependency), latin and latin-ext subsets each with its `unicode-range`, so the
+  latin-ext files (Hungarian ő and ű, Central European names) download only on a page that uses
+  them; `font-display: swap`; file names carry the version. Measured on 2026-10-14: latin 109.8 KB
+  for the five faces (20,088 + 21,532 + 20,092 + 23,664 + 24,452 bytes), latin-ext 125.9 KB
+  (17,844 + 18,332 + 18,452 + 35,000 + 36,260), at most 235.7 KB once per browser. Licence: SIL
+  Open Font License 1.1 for both; Source Serif reserves the name "Source", which is why the
+  published subsets ship unmodified instead of our own subset; the OFL text ships beside the
+  files. One fixture message carries Hungarian accents (á é í ó ö ő ú ü ű). Must not: bundle a
+  font for A, subset or modify the files. Gate: a B render of the
+  Hungarian message where `document.fonts.check` is true for every face on "őű", and the font
+  bytes the render transferred, both in the PR; sizes recorded in `web/README.md`. Area:
+  web/static/app/fonts/**, web/src/lib/skins/b/fonts.css, web/src/lib/design/fixture.ts,
+  web/README.md. Group: after U13.
 
-`Thread.svelte` (tree order and the re-label rule from `lib/design/model.ts`, moved to
-`lib/thread-tree.ts` with tests), side panel on desktop, sheet on the phone, deep link
-`#/t/<id>`, Escape and back close it, Feed scroll position kept.
-Files: `web/src/lib/Thread.svelte`, `web/src/lib/thread-tree.ts`, `web/src/routes/t/[id]/+page.svelte`,
-`web/scripts/design/mock-server.mjs`, `web/test/thread.test.mjs`.
+- U16. Remove the design routes: `web/src/routes/_design/**` (the A, B, C option pages and the
+  primitives harness), `lib/design/model.ts`, and the root layout's design branch;
+  `interact.mjs` targets the real Feed and Fleet pages instead of the harness. The fixture, the
+  mock API, `shoot.mjs`, `probe-scroll.mjs` and `interact.mjs` stay as the checks every UI change
+  runs. Must not: remove the harness scripts or the fixture. Gate: `interact.mjs` green against
+  the real pages; renders unchanged. Area: web/src/routes/_design/**,
+  web/src/routes/+layout.svelte, web/src/lib/design/model.ts, web/scripts/design/interact.mjs,
+  docs/web-ui-v2/options/README.md. Group: last (after U9 to U15); `web-v2` then merges to main.
 
-### 7. Conversation rework
+## Waiting on a decision (do not take)
 
-Split `Conversation.svelte` into a list and a `Message` component in the direction's form; one
-delivery word per message with the detail on expand; reply context only when the parent is not
-the message above (opens the thread); id in a per-message menu; opens at the newest (item 1);
-"earlier" on scroll up. C adds the details panel.
-Files: `web/src/lib/Conversation.svelte`, `web/src/lib/Message.svelte`, `web/src/lib/Delivery.svelte`,
-`web/src/routes/a/[agent]/dm/[owner]/[name]/+page.svelte`, `web/src/routes/c/[name]/+page.svelte`,
-`web/test/conversation.test.mjs`.
-
-### 8. Agents and Channels pages
-
-Agents index (phone), agent page with its conversations and status; Channels index and the
-deduped channel route (passes the first own member agent until S3).
-Files: `web/src/routes/agents/+page.svelte`, `web/src/routes/a/[agent]/+page.svelte`,
-`web/src/routes/channels/+page.svelte`, `web/src/routes/c/[name]/+page.svelte`.
-
-### 9. Fleet
-
-Own hosts first, problems first, held and stuck as the only coloured items; teammates collapsed
-per owner; legend as column headers. `types.ts`: `FleetAgent.address: string | null`.
-Files: `web/src/routes/fleet/+page.svelte`, `web/src/lib/types.ts`.
-
-### 10. Search
-
-The Feed's search field calls `owner.search` (regex, oldest first, `next_cursor` paging); results
-render as Feed rows and open their thread.
-Files: `web/src/lib/feed.svelte.ts`, `web/src/routes/+page.svelte`, `web/scripts/design/mock-server.mjs`.
-
-### 11. Keys page skin and nav (server template)
-
-The `pages.rs` stylesheet takes the chosen tokens and font stack, the header gets the app's nav
-(links to `/#/`, `/#/agents`, `/#/channels`, `/#/fleet`), the brand links to `/`, and the tables
-become cards under 720 px. Form actions and CSRF unchanged.
-Files: `crates/conde-remote/src/web/pages.rs`, its tests in the same file.
-
-### S3 (optional). Channel history without naming an agent
-
-`owner.history {channel}` resolves any own member agent. Removes the client-side choice in item 8.
-Files: `crates/conde/src/ops/web.rs`, `crates/conde/tests/web_ui.rs`.
-
-### S4 (optional). Owner-scoped event frames
-
-Send `changed` to a browser only when the change touches its owner's agents, with the newest
-`seq`. Removes refetches caused by other owners' traffic and the cross-owner timing signal
-(audit §11). Needs the store event to carry the affected owners.
-Files: `crates/conde-remote/src/web/app.rs`, the store event path in `crates/conde/src/store/`,
-`crates/conde/tests/web_ui.rs`.
-
-## What differs per direction
-
-| | A Console | B Editorial | C Workbench |
-|---|---|---|---|
-| Shell (item 3) | top tabs, status line | masthead column | left rail with expandable agents |
-| Feed row (item 5) | one-line table row | kicker + two lines of serif | card with initials and chips |
-| Message (item 7) | log line, right-aligned speaker | script: speaker margin, serif text | bubbles, details panel |
-| Extra components | none | none | Avatar, CountTiles, DetailsPanel |
-| Fonts | IBM Plex Mono | Source Serif 4, Inter | Inter, IBM Plex Mono |
-| Relative size | smallest | middle | largest (three columns, two extra panels) |
-
-## Checks on every client item
-
-`npm run check` (warnings fail), `npm test`, `npm run build`, and a headless render of the
-touched pages at 1440×900 and 390×844 against the mock API (`scripts/design/shoot.mjs`), compared
-with the chosen option's PNGs before review. Server items run the web suite on SQLite and
-Postgres (`CONDE_TEST_PG`).
+- The owner's pick between A and B, or a mix, after a day or two of real traffic. Then one item
+  deletes the other skin's directory and the switch and gives `/keys` the chosen accent.

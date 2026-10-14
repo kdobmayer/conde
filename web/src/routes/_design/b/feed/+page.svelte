@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Frame from '../Frame.svelte';
-	import { feed, thread, ids, counts, short, bare, clock, firstLine, headline, lastDate, isOwn, bytes, NOW, dayLabel } from '#lib/design/model.ts';
+	import { feed, thread, ids, short, bare, clock, firstLine, headline, lastDate, isOwn, bytes, NOW, dayLabel } from '#lib/design/model.ts';
 	import type { FeedEntry } from '#lib/design/model.ts';
 
 	const open = ids.feedThread;
@@ -16,7 +16,8 @@
 		const d = dayLabel(e.m.date);
 		return d === 'Today' ? 'Earlier today' : d;
 	}
-	const arrow = { in: '←', out: '→', own: '⇄' } as const;
+	// Names always read sender → recipient; the direction is a word of its own.
+	const dirWord = { in: 'Received', out: 'Sent', own: 'Between yours' } as const;
 	function where(e: FeedEntry): string {
 		return e.m.place === 'dm' ? 'Direct' : e.m.to;
 	}
@@ -30,8 +31,8 @@
 			<div class="filters" role="toolbar" aria-label="Filters">
 				<span class="pick">All agents <i>▾</i></span>
 				<span class="pick">Every place <i>▾</i></span>
-				<span class="seg"><span class="on">All</span><span>Received {counts.in}</span><span>Sent {counts.out}</span><span>Between yours {counts.own}</span></span>
-				<span class="attn">Needs attention {counts.problems}</span>
+				<span class="seg"><span class="on">All</span><span>Received</span><span>Sent</span><span>Between yours</span></span>
+				<span class="attn">Needs attention</span>
 			</div>
 		</header>
 		<div class="list">
@@ -42,14 +43,14 @@
 				<a href="#/" class="entry" class:sel={e.m.message_id === open} class:chain={inChain.has(e.m.message_id) && e.m.message_id !== open}>
 					<div class="kick">
 						<span>{clock(e.m.date)}</span>
-						<span class="who"><b class:own={isOwn(e.m.from)}>{short(e.m.from)}</b> {arrow[e.direction]} <b class:own={isOwn(e.m.to)}>{e.m.place === 'dm' ? short(e.m.to) : e.m.to}</b></span>
+						<span class="dir">{dirWord[e.direction]}</span>
+						<span class="who"><b class:own={isOwn(e.m.from)}>{short(e.m.from)}</b> → <b class:own={isOwn(e.m.to)}>{e.m.place === 'dm' ? short(e.m.to) : e.m.to}</b></span>
 						<span class="pl">{where(e)}</span>
 					</div>
 					<p>{e.m.text}</p>
 					<div class="meta">
 						{#if e.problem}<span class="bad">{e.state === 'retrying' ? 'Retrying, bridge offline' : 'Held for approval'}</span>{:else}<span>{e.state}</span>{/if}
 						{#if e.m.reply_to}<span>in a thread</span>{/if}
-						{#if e.replies}<span>{e.replies} {e.replies === 1 ? 'reply' : 'replies'}</span>{/if}
 						{#if e.m.attachments.length}<span>{e.m.attachments.length} file</span>{/if}
 					</div>
 				</a>
@@ -175,12 +176,19 @@
 	}
 	.kick {
 		display: flex;
+		white-space: nowrap;
 		gap: 14px;
 		font-size: 12px;
 		color: var(--faint);
 	}
 	.kick .who {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		color: var(--soft);
+	}
+	.kick .dir {
+		flex: none;
 	}
 	.kick b {
 		font-weight: 600;

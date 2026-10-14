@@ -1,5 +1,11 @@
 # Three visual directions
 
+Decision (owner, 2026-10-14): A and B are both built, as two skins over one skeleton with a
+per-browser switch; after a day or two of real traffic the owner picks one or a mix and the other
+is deleted. C is not built. Its pages and renders stay here as the record of what was compared.
+The build follows `../ia.md` where it differs from these pages: no filter totals and no reply
+counts (A's renders still show them), and B's two fixes below.
+
 Each option is a real Svelte page on the app's stack, on the design fixture
 (`web/src/lib/design/fixture.ts`, invented data): `web/src/routes/_design/<a|b|c>/feed` (the Feed
 with the `#conde-dev` thread open on astra's 11:24 reply) and `.../dm` (desk's DM with
@@ -21,8 +27,9 @@ Fonts: the renders use copies installed on the render machine. Shipping any opti
 its families as self-hosted woff2 under `static/app/` (all SIL Open Font License; the app's CSP
 already allows same-origin fonts). That is new to the app, which today uses system stacks only;
 without the bundle each option falls back to a system stack (named per option) and keeps its
-layout but loses part of its character. Sizes are not measured here; Latin-subset woff2 files of
-these families are typically tens of KB per weight (an estimate, to be measured in plan item 3).
+layout but loses part of its character. Only B's fonts are bundled in the build (plan U15, with
+measured sizes: 109.8 KB for the latin subset of its five faces, 125.9 KB more for latin-ext when
+a page uses Hungarian or other Central European letters); A ships on the system monospace stack.
 
 All three follow NEXT.md section D: flat fills, no gradients, no glow or shadows used as light, no
 hexagon or circuit motifs, no text inside graphics (the mark is the existing two-shape mark), two
@@ -54,16 +61,23 @@ Inter for labels, times and metadata (fallback `system-ui`); warm off-white on i
 terracotta accent (`#d4886b`) reserved for own agents and anything that needs attention, status
 dots in grey. A masthead column holds the wordmark, the sections in large serif, the own agents
 with their state and the scope note; the Feed is a single column grouped under italic headings
-("In the last hour", "Earlier today"), each entry a small kicker line (time, sender → recipient,
-place) above two lines of text; the thread opens as a side article with the root's first
-sentence as its headline; the DM reads like a script, speaker and time in a left margin, text in
+("In the last hour", "Earlier today"), each entry a small kicker line (time, a direction word,
+sender → recipient, place) above two lines of text; the thread opens as a side article with the
+root's first sentence as its headline; the DM reads like a script, speaker and time in a left margin, text in
 a 660 px measure. It optimizes for understanding what the agents actually said, on desktop and
 especially on the phone, and it is the most distinctive of the three. It costs density (6 Feed
 entries on the 1440×900 render against A's 25, C shows 7), two bundled font families, and its quiet status
 treatment makes problems less loud than in C: attention relies on the one accent colour and the
 "Needs attention" filter.
 
-## C. Workbench
+B's pages were corrected after the design review and its four renders redone with the same
+script: the kicker drew received messages as `sender ← recipient`, which reads as the recipient
+sending; names now always read sender → recipient, with Received, Sent or Between yours as a
+separate word. The phone DM header took about a fifth of the screen (two-line title and a
+three-line sentence); it is now the pair on one line and one short line of facts. The filter
+totals and reply counts are gone from B's Feed, as in the build.
+
+## C. Workbench (not built)
 
 A panel-based dashboard with persistent rails: navigation and agents on the left, the work in
 the middle, details on the right. Inter throughout (13.5 px, tabular figures for times and counts;

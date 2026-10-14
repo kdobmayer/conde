@@ -400,8 +400,9 @@ Signing in again on a host that is already enrolled replaces its key: the
 server revokes the previous key at once, keeps one key per host, and the
 command prints `re-enrolled host <host>, previous key revoked` (or `re-enrolled
 host <host>, no live key before`, when the host's keys had all been revoked
-earlier) in place of the `enrolled host` line. The running bridge switches to the new
-key at once (`bridge: dakai reloaded`).
+earlier) in place of the `enrolled host` line; a server older than this
+release does not say which, and the line is just `re-enrolled host <host>`.
+The running bridge switches to the new key at once (`bridge: dakai reloaded`).
 
 **A machine without a browser** (a server, a remote shell; on Linux,
 any session without `DISPLAY` or `WAYLAND_DISPLAY`): `conde login` takes a

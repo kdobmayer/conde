@@ -64,3 +64,12 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 [[test]]
 name = "store"
 harness = false
+
+# these change the process environment: their cases run on the main thread (tests/serial)
+[[test]]
+name = "harness"
+harness = false
+
+[[test]]
+name = "web_config"
+harness = false

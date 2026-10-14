@@ -1,6 +1,8 @@
 //! The server's web configuration from its environment (`ENTRA_*`, `CONDE_MCP_*`,
-//! `CONDE_ADMIN_KEY`), as the container sets it. One test in its own binary: it changes the
-//! process environment, which nothing else here reads concurrently.
+//! `CONDE_ADMIN_KEY`), as the container sets it. It changes the process environment, so the
+//! binary runs without the libtest harness (`harness = false`): its cases run on the main thread.
+
+mod serial;
 
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ const VARS: [&str; 7] = [
 fn env(vars: &[(&str, &str)]) {
     for name in VARS {
         match vars.iter().find(|(n, _)| *n == name) {
-            // SAFETY: this binary's only test; no other thread reads the environment.
+            // SAFETY: cases run on the main thread (`serial`); no other thread reads the environment.
             Some((_, v)) => unsafe { std::env::set_var(name, v) },
             None => unsafe { std::env::remove_var(name) },
         }
@@ -49,7 +51,10 @@ fn error(r: Result<Option<WebConfig>, conde_remote::web::ConfigError>) -> String
     r.expect_err("refused").to_string()
 }
 
-#[test]
+fn main() {
+    serial::run("web_config", &[("the_web_configuration_comes_from_the_environment", the_web_configuration_comes_from_the_environment)]);
+}
+
 fn the_web_configuration_comes_from_the_environment() {
     let store = Arc::new(WebBoard::new(Arc::new(Dispatcher::open_in_memory().unwrap())));
 
@@ -112,16 +117,19 @@ fn the_web_configuration_comes_from_the_environment() {
     env(&[("CONDE_ADMIN_KEY", "short")]);
     let refused = WebSetup::from_env(store.clone()).expect_err("a short key is refused").to_string();
     assert_eq!(refused, "CONDE_ADMIN_KEY must be at least 32 characters");
-    let key = "k".repeat(32);
-    env(&[("CONDE_ADMIN_KEY", key.as_str())]);
+    let key = "q7Zx2Lm9Vt4Rk8Wp3Ny6Hb1Jc5Fd0GsUe";
+    env(&[("CONDE_ADMIN_KEY", key)]);
     let setup = WebSetup::from_env(store.clone()).unwrap().unwrap();
-    assert!(setup.entra.is_none() && setup.admin_key.as_deref() == Some(key.as_str()));
-    // Printed, the setup says the admin API is on, never the key.
+    assert!(setup.entra.is_none() && setup.admin_key.as_deref() == Some(key));
+    // Printed, the setup says the admin API is on, never the key nor any piece of it.
     let shown = format!("{setup:?}");
-    assert!(shown.contains("admin: true") && !shown.contains(&key), "{shown}");
+    assert!(shown.contains("admin: true"), "{shown}");
+    for piece in key.as_bytes().windows(8).map(|w| std::str::from_utf8(w).unwrap()) {
+        assert!(!shown.contains(piece), "{piece} in {shown}");
+    }
     // Both: sign-in and the admin API; a bad Entra variable refuses the whole setup.
     let mut both = ENTRA.to_vec();
-    both.push(("CONDE_ADMIN_KEY", key.as_str()));
+    both.push(("CONDE_ADMIN_KEY", key));
     env(&both);
     let setup = WebSetup::from_env(store.clone()).unwrap().unwrap();
     assert!(setup.entra.is_some() && setup.admin_key.is_some());

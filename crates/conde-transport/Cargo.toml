@@ -27,3 +27,8 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# changes the process environment: its one case runs on the main thread
+[[test]]
+name = "codex_fallback"
+harness = false

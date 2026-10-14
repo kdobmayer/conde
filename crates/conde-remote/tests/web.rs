@@ -2051,9 +2051,8 @@ impl WebStore for NoMcp {
     fn set_disabled(&self, _: &str, _: bool) -> WebResult<Option<Vec<String>>> { unreachable!() }
 }
 
-/// Every remote MCP call on such a store is refused with one message (the endpoint answers it
-/// as a store failure), while listing a user's grants finds none and the sweep's purge is a
-/// no-op, so a server on that store runs its hourly sweep without errors.
+/// The trait's remote MCP defaults, called directly: every MCP call is refused with one message,
+/// listing a user's grants finds none and the grant purge is a no-op.
 #[test]
 fn a_store_without_the_remote_mcp_refuses_every_mcp_call() {
     let s = NoMcp;

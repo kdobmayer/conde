@@ -521,9 +521,14 @@ pub fn search(r: &Value, surface: Surface) -> Out {
     out
 }
 
-/// `watch` columns: sender and recipient, and the state word, are cut to these widths.
+/// `watch` columns from 120 characters: sender and recipient, and the state word, are cut to
+/// these widths; narrower rows take at most `WATCH_NAME_NARROW` and `WATCH_STATE_NARROW`, the
+/// names shrinking further (to 6) so the text keeps `WATCH_TEXT` characters.
 const WATCH_NAME: usize = 20;
 const WATCH_STATE: usize = 10;
+const WATCH_NAME_NARROW: usize = 12;
+const WATCH_STATE_NARROW: usize = 9;
+const WATCH_TEXT: usize = 10;
 
 /// `watch`: one message of `message.feed` on one line of at most `width` characters: the time
 /// (UTC, HH:MM), sender -> recipient or channel, a short state, the first line of the text cut to
@@ -532,14 +537,19 @@ const WATCH_STATE: usize = 10;
 pub fn watch_row(m: &Value, board: &str, width: usize) -> String {
     let time: String = s(&m["date"]).chars().skip(11).take(5).collect();
     let id = qualify(board, s(&m["message_id"]));
+    let (name_cap, state) = if width >= 120 { (WATCH_NAME, WATCH_STATE) } else { (WATCH_NAME_NARROW, WATCH_STATE_NARROW) };
+    // time, " -> ", the gaps, the state and the id; the names share what the text leaves
+    let fixed = 5 + 2 + 4 + 2 + state + 2 + 2 + id.chars().count();
+    let name = (width.saturating_sub(fixed + WATCH_TEXT) / 2).clamp(6, name_cap);
     let head = format!(
         "{time}  {} -> {}  {}  ",
-        fit_name(s(&m["from"]), WATCH_NAME),
-        fit_name(s(&m["to"]), WATCH_NAME),
-        fit(&watch_state(m), WATCH_STATE)
+        fit_name(s(&m["from"]), name),
+        fit_name(s(&m["to"]), name),
+        fit(&watch_state(m), state)
     );
-    let room = width.saturating_sub(head.chars().count() + 2 + id.chars().count()).max(10);
-    format!("{head}{}  {id}", fit(s(&m["line"]), room))
+    let room = width.saturating_sub(head.chars().count() + 2 + id.chars().count()).max(WATCH_TEXT);
+    // a tab would jump the columns
+    format!("{head}{}  {id}", fit(&s(&m["line"]).replace('\t', " "), room))
 }
 
 /// The day of a `watch` row (UTC), for the line printed when it changes.
@@ -809,10 +819,19 @@ mod tests {
             row,
             "13:05  kosztya-devops-mana… -> kdobmayer/desk        retrying    S1 smoke on 8369aa7 is gre…  01M4X88ZE6EJS7A7HV3NHQSWNN"
         );
+        assert_eq!(row.chars().count(), 120);
+        // narrower terminals: exactly the width, the names shrinking first
+        let tabbed = m("first\tsecond and a long tail of words to cut", "unread", json!("delivered"));
+        let row = watch_row(&tabbed, "local", 100);
+        assert_eq!(row, "13:05  kosztya-dev… -> kdobma…/desk  delivered  first second and a long…  01M4X88ZE6EJS7A7HV3NHQSWNN");
+        assert_eq!(row.chars().count(), 100);
+        let row = watch_row(&tabbed, "local", 80);
+        assert_eq!(row, "13:05  kosztya-… -> kdo…/desk  delivered  first sec…  01M4X88ZE6EJS7A7HV3NHQSWNN");
+        assert_eq!(row.chars().count(), 80);
+        assert_eq!(watch_row(&tabbed, "dakai", 80).chars().count(), 80, "a board-qualified id still fits");
         assert_eq!(fit_name("konstantin/conde.agent", 20), "konstan…/conde.agent");
         assert_eq!(fit_name("kdobmayer/desk", 20), "kdobmayer/desk      ");
         assert_eq!(fit_name("#a-very-long-channel-name", 20), "#a-very-long-channe…");
-        assert_eq!(row.chars().count(), 120);
         let row = watch_row(&m("ok", "read 2026-10-14T13:06:00Z", json!("delivered")), "dakai", 120);
         assert!(row.contains("  read        ok") && row.ends_with("  dakai:01M4X88ZE6EJS7A7HV3NHQSWNN"), "{row}");
         assert_eq!(row.chars().count(), 120, "a short text is padded so the ids line up");

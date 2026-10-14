@@ -41,12 +41,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   the target are on different filesystems (not atomic); stage next to the target
   instead. Area: dist/install.sh, dist_files test.
 
-- B23. A human's first `conde watch` from a plain shell fails with "this session
-  (human:<name>@<host>) is not in the registry; run: conde register
-  <your-name>" and no hint what name a human picks. Say it in the message (a
-  human registers under their own first name, e.g. `conde register konstantin`)
-  and in the README line about humans. Area: crates/conde/src/identity.rs or
-  where the message is built, README.md.
 
 ## Waiting on a decision or an observation (do not take)
 

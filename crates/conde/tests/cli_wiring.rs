@@ -879,6 +879,16 @@ fn watch_prints_the_board_and_follows_it() {
     let id_of = |out: String| out.split_whitespace().nth(1).unwrap().to_string();
     agent("t-a", &["register", "alice"]);
     agent("t-b", &["register", "bob"]);
+    // The human's first watch, before registering, says what to type.
+    let out = r.cmd(Path::new(BIN)).arg("watch").output().unwrap();
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    if !said.contains("refusing to act as the human") {
+        assert!(!out.status.success(), "{said}");
+        assert!(
+            said.contains("(human:tester@testhost) is not in the registry; run: conde register tester (a human registers under their own name)"),
+            "{said}"
+        );
+    }
     let out = r.cmd(Path::new(BIN)).args(["register", "tester"]).output().unwrap();
     if !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("refusing to act as the human") {
         eprintln!("skipped: watch_prints_the_board_and_follows_it runs as the human; launch the suite outside an agent shell");

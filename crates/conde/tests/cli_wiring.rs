@@ -621,9 +621,9 @@ fn a_daemon_that_predates_boards_is_never_handed_a_board() {
     assert!(ok && out == "queued 01M to tester/x\n", "{out}");
 }
 
-/// A reinstall replaces the binary under a running bridge: `conde doctor` names both builds and
-/// how to restart, and counts it as an issue (exit 1, no "all clear"); so does a daemon too old
-/// to report its build.
+/// A bridge running another build than this binary: `conde doctor` names both builds and how to
+/// restart, and counts it as an issue (exit 1, no "all clear"); so does a daemon too old to
+/// report its build.
 #[test]
 fn doctor_flags_a_bridge_running_another_build() {
     let r = Root::new();
@@ -632,7 +632,11 @@ fn doctor_flags_a_bridge_running_another_build() {
     let _d = r.fake(scripted(vec![("doctor", json!({"checks": checks, "issues": 0, "build": old}))]));
     let (ok, out, _) = r.conde(&["doctor"]);
     assert!(!ok, "{out}");
-    let line = format!("ISSUE   bridge: running {old}, but this binary is {}: it was replaced under the running bridge; restart it", conde::VERSION);
+    let line = format!(
+        "ISSUE   bridge: running another build ({old}) than this binary ({}); if this binary is the one the service \
+         should run, restart it (Linux: ",
+        conde::VERSION
+    );
     assert!(out.contains(&line), "{out}");
     assert!(out.contains("systemctl --user restart conde") && !out.contains("all clear"), "{out}");
     drop(_d);

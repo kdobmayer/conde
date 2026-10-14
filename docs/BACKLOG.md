@@ -20,12 +20,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 
 ## Queue, top first
 
-- B1. [H] `conde login --code` issue path in one store transaction: today the
-  code issue takes the pending record and inserts the new one in two
-  transactions, so a concurrent confirm or redeem in between hits the primary
-  key and answers 500. One store call that replaces the record atomically, with
-  a test that drives the interleaving. Area: crates/conde-remote web login
-  code, store (both backends), tests.
 - B2. [H] Rate limit on /auth/cli/redeem per IP (and per account), like the
   OAuth endpoints: today a client that re-issues (the same account confirming
   again) resets the 5-try budget. Shares the limiter module. Area:
@@ -36,10 +30,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   so a script cannot tell "waiting for the code" from "enrolled": a distinct
   exit code or a machine-readable line. Area: login handler + CLI login
   command, tests. Small; pairs with B1 in one PR if the same lane takes both.
-- B4. [J] `conde doctor` shows the running bridge's build id beside the
-  binary's and flags a mismatch (a reinstall replaces the file under a running
-  service). Needs a daemon op that reports its build id. Area:
-  crates/conde daemon ops + doctor, tests.
 - B5. [J] Redeem answer: `reenrolled` means the host existed, not that a live
   key was revoked; the mint knows `replaced`. Return both and make the CLI say
   which ("re-enrolled host, previous key revoked" vs "re-enrolled host, no live

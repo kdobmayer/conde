@@ -208,14 +208,18 @@ pub fn stale_daemon(surface: Surface) -> String {
 }
 
 /// `conde doctor`'s line on the running bridge's build beside this binary's (the daemon's
-/// `doctor` answer carries `build`): a reinstall replaces the file under a running service,
-/// which keeps running the old code until it restarts. False when they differ.
+/// `doctor` answer carries `build`). False when they differ: doctor cannot tell a reinstall
+/// under the running service from a second conde on PATH, so the line states only the builds.
 pub fn bridge_build(running: &Value) -> (bool, String) {
     match running.as_str() {
         Some(b) if b == crate::VERSION => (true, format!("bridge: running this build ({b})")),
         Some(b) => (
             false,
-            format!("bridge: running {b}, but this binary is {}: it was replaced under the running bridge; {RESTART_BRIDGE}", crate::VERSION),
+            format!(
+                "bridge: running another build ({b}) than this binary ({}); if this binary is the one the service should \
+                 run, {RESTART_BRIDGE}",
+                crate::VERSION
+            ),
         ),
         None => (
             false,

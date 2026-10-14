@@ -251,8 +251,12 @@ impl WebStore for WebBoard {
         let payload = serde_json::to_string(code).map_err(|e| WebStoreError(e.to_string()))?;
         self.write(|t| {
             match t.take_web_token(CLI_CODE, code_digest)? {
-                Some((newer, created_at)) => t.put_web_token(CLI_CODE, code_digest, &newer, created_at)?,
-                None => t.put_web_token(CLI_CODE, code_digest, &payload, code.created_at)?,
+                Some((newer, created_at))
+                    if serde_json::from_str::<CliCode>(&newer).is_ok_and(|n| n.user_id == code.user_id) =>
+                {
+                    t.put_web_token(CLI_CODE, code_digest, &newer, created_at)?
+                }
+                _ => t.put_web_token(CLI_CODE, code_digest, &payload, code.created_at)?,
             }
             Ok(())
         })

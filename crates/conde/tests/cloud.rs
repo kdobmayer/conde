@@ -377,6 +377,11 @@ fn a_v1_host_and_a_v2_host_exchange_messages() {
     let to_v1 = queued_id(&b.ok(Some("claude"), CAROL, &["send", "--board", "shared", "ann/dave", "from v2"]));
     let f = dave.wait_frames(to_v1.trim_start_matches("shared:"), 1);
     assert!(f[0].text.contains("\nconde: new message "), "the v1 bridge injects the board's text: {}", f[0].text);
+
+    // the v1 bridge's doctor answer carries the build it runs, as the v2 daemon's does
+    let req = conde::protocol::Request::new(conde::util::new_ulid(), "doctor", json!({}));
+    let doctor = conde::client::Client::connect(&sa).unwrap().call(&req).unwrap();
+    assert_eq!(doctor.result.as_ref().map(|r| &r["build"]), Some(&json!(conde::VERSION)), "{doctor:?}");
 }
 
 /// Two server replicas on one Postgres board (CONDE_TEST_PG): a message sent

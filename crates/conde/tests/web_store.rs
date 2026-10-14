@@ -132,6 +132,7 @@ on_both!(
     a_re_enrolled_host_keeps_one_live_key,
     pasted_login_codes_count_tries_and_redeem_once,
     a_login_record_is_issued_and_restored_in_one_transaction,
+    a_restore_takes_the_login_back_from_another_account,
     admin_binds_existing_users_and_disables_them,
 );
 
@@ -583,6 +584,32 @@ async fn a_login_record_is_issued_and_restored_in_one_transaction(d: Arc<Dispatc
         assert_eq!(held(&store), Some((1, 0)), "the record issued since stands");
         store.restore_cli_code(key, &record(1, 4)).unwrap();
         assert_eq!(held(&store), Some((1, 4)), "an empty slot is filled");
+    })
+    .await;
+}
+
+/// A wrong guess takes the record; another account confirms the same login in the gap and its
+/// record goes in: the restore puts the guessing run's record back and drops the other one.
+async fn a_restore_takes_the_login_back_from_another_account(d: Arc<Dispatcher>) {
+    let store = WebBoard::new(d.clone());
+    blocking(move || {
+        let record = |user_id: i64, tries: u32| web::CliCode {
+            user_id,
+            user_name: format!("user-{user_id}"),
+            state: "s".repeat(16),
+            challenge: "c".repeat(43),
+            created_at: 1_000,
+            paste: Some(format!("paste-{user_id}")),
+            tries,
+        };
+        let key = "login-key";
+        assert!(store.issue_cli_code(key, &record(1, 0)).unwrap());
+        let taken = store.take_cli_code(key).unwrap().expect("the guess takes the record");
+        assert!(store.issue_cli_code(key, &record(2, 0)).unwrap(), "the empty slot takes the other account's");
+        store.restore_cli_code(key, &web::CliCode { tries: 1, ..taken }).unwrap();
+        let held = store.take_cli_code(key).unwrap().map(|c| (c.user_id, c.tries, c.paste));
+        assert_eq!(held, Some((1, 1, Some("paste-1".into()))), "the first account's record is back");
+        assert_eq!(store.take_cli_code(key).unwrap().map(|c| c.user_id), None, "one record");
     })
     .await;
 }

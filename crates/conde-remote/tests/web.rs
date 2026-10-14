@@ -301,7 +301,10 @@ impl WebStore for MemStore {
         Ok(true)
     }
     fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()> {
-        self.m().codes.entry(code_digest.into()).or_insert_with(|| code.clone());
+        let mut m = self.m();
+        if m.codes.get(code_digest).is_none_or(|newer| newer.user_id != code.user_id) {
+            m.codes.insert(code_digest.into(), code.clone());
+        }
         Ok(())
     }
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()> {
@@ -1668,6 +1671,48 @@ async fn a_confirm_during_a_wrong_guess_keeps_the_new_code() {
     let ((status, got), fresh) = tokio::join!(guess, confirm);
     assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
     let (status, got) = paste_redeem(&env, &run, &fresh).await;
+    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+}
+
+/// A wrong guess holds the taken record while another account confirms the same login from its
+/// URL: that confirm finds the slot empty and its record goes in, but the guess's restore puts
+/// the first account's record back, so the run keeps waiting on the first account's code.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_guess_gets_the_login_back_from_another_accounts_confirm() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let run = cli_run();
+    let shown = paste_leg(&env, &Browser::new(), &run).await;
+    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.oid = "oid-bob".into();
+        p.upn = "bob@dakai.example".into();
+        p.name = "Bob".into();
+    }
+    let bob = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &bob, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let taken = Arc::new(tokio::sync::Notify::new());
+    let (release, held) = std::sync::mpsc::channel();
+    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    let guess = paste_redeem(&env, &run, wrong);
+    let confirm = async {
+        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the redeem takes the record");
+        let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
+        release.send(()).unwrap();
+        assert_eq!(status, StatusCode::OK, "the slot was empty: {body}");
+        key_of(&body)
+    };
+    let ((status, got), bobs) = tokio::join!(guess, confirm);
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    {
+        let m = env.store.m();
+        let held: Vec<_> = m.codes.values().map(|c| (c.user_name.as_str(), c.tries)).collect();
+        assert_eq!(held, [("krisztian-dobmayer", 1)], "the first account's record is back, one try spent");
+    }
+    let (status, got) = paste_redeem(&env, &run, &bobs).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
     assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
 }
 

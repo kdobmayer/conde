@@ -183,11 +183,14 @@ pub(crate) fn tls() -> anyhow::Result<rustls::ClientConfig> {
         .with_no_client_auth())
 }
 
-/// A redeem the server refused: its error code and message.
+/// A redeem the server refused: its error code and message; on a 429, how long to wait and
+/// whether the waiting login expires first.
 #[derive(Debug)]
 pub struct Refused {
     pub error: String,
     pub message: String,
+    pub retry_after: Option<u64>,
+    pub login_expires_first: bool,
 }
 
 async fn post_redeem(origin: &str, body: Value) -> anyhow::Result<Result<Enrolled, Refused>> {
@@ -204,11 +207,18 @@ async fn post_redeem(origin: &str, body: Value) -> anyhow::Result<Result<Enrolle
         .with_context(|| format!("redeeming the sign-in at {origin}"))?;
     let status = response.status();
     if !status.is_success() {
+        let header_wait = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let detail: Value = response.json().await.unwrap_or_default();
         let field = |k: &str| detail[k].as_str().map(str::to_string);
         return Ok(Err(Refused {
             error: field("error").unwrap_or_default(),
             message: field("message").unwrap_or_else(|| status.to_string()),
+            retry_after: detail["retry_after"].as_u64().or(header_wait),
+            login_expires_first: detail["login_expires_first"] == true,
         }));
     }
     let enrolled: Enrolled = response.json().await.context("the server's redeem answer is not a host key")?;
@@ -218,9 +228,26 @@ async fn post_redeem(origin: &str, body: Value) -> anyhow::Result<Result<Enrolle
     Ok(Ok(enrolled))
 }
 
+/// How long the loopback redeem waits in all on the server's rate limit before it gives up.
+pub const LIMITED_WAIT: Duration = Duration::from_secs(60);
+
+/// Redeems the loopback's code. A 429 (the per-address limit, checked before the code is taken)
+/// is waited out and retried while the waits add up to at most [`LIMITED_WAIT`].
 async fn redeem(origin: &str, run: &Run, code: &str, host: &str) -> anyhow::Result<Enrolled> {
     let body = json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": host});
-    post_redeem(origin, body).await?.map_err(|r| anyhow::anyhow!("the server refused the sign-in: {}", r.message))
+    let mut waited = 0;
+    loop {
+        match post_redeem(origin, body.clone()).await? {
+            Ok(enrolled) => return Ok(enrolled),
+            Err(r) if r.error == "rate_limited" && r.retry_after.is_some_and(|w| waited + w <= LIMITED_WAIT.as_secs()) => {
+                let wait = r.retry_after.unwrap_or_default().max(1);
+                eprintln!("{}; retrying in {wait} s", r.message);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                waited += wait;
+            }
+            Err(r) => bail!("the server refused the sign-in: {}", r.message),
+        }
+    }
 }
 
 /// A pasted-code login waiting on this host for its code.
@@ -298,8 +325,8 @@ pub enum CodeOutcome {
 }
 
 /// Redeems `typed` for the login waiting at `path`. The waiting login is removed once the
-/// server is done with it (enrolled, expired, out of tries); a wrong or mistyped code, or any
-/// other refusal, keeps it.
+/// server is done with it (enrolled, expired, out of tries, or rate-limited past its expiry); a
+/// wrong or mistyped code, or any other refusal, keeps it.
 pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host: &str) -> anyhow::Result<CodeOutcome> {
     let pending = load_pending(server, path)?;
     let code = match code_typed(typed) {
@@ -311,6 +338,11 @@ pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host
         Ok(enrolled) => {
             let _ = std::fs::remove_file(path);
             Ok(CodeOutcome::Enrolled(enrolled))
+        }
+        Err(r) if r.error == "rate_limited" && r.login_expires_first => {
+            // the next allowed attempt comes after the login's end: nothing is left to wait for
+            let _ = std::fs::remove_file(path);
+            bail!("the server refused the sign-in: {}", r.message)
         }
         Err(r) if ["invalid_code", "authorization_pending", "rate_limited"].contains(&r.error.as_str()) => {
             Ok(CodeOutcome::Retry(r.message))
@@ -396,12 +428,12 @@ fn open_browser(url: &str) {
     }
 }
 
-/// `conde login --server <url> [--host <id>] [--board <alias>] [--no-browser] [--code [<CODE>]]`.
-/// `code`: None without `--code`, empty for a bare `--code`.
 /// The exit status of a pasted-code login that is waiting for its code (the URL was printed;
 /// finish with `--code <CODE>`), so a script can tell it from an enrolled host (0).
 pub const PENDING: i32 = 3;
 
+/// `conde login --server <url> [--host <id>] [--board <alias>] [--no-browser] [--code [<CODE>]]`.
+/// `code`: None without `--code`, empty for a bare `--code`.
 pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool, code: Option<&str>) -> anyhow::Result<i32> {
     origin(server)?;
     if let Some(alias) = board {

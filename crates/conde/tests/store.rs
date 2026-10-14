@@ -30,6 +30,7 @@ const CASES: &[Case] = &[
     ("failed_statement_refuses_commit", failed_statement_refuses_commit),
     ("channels", channels),
     ("inbox_unread_sent_search", inbox_unread_sent_search),
+    ("first_seq_from_day_across_copied_history", first_seq_from_day_across_copied_history),
     ("reactions_and_read_state", reactions_and_read_state),
     ("notifications_and_attempts", notifications_and_attempts),
     ("diagnostics", diagnostics),
@@ -611,6 +612,41 @@ fn channels(s: &dyn Store) {
     });
     let tx = s.begin(Mode::Write).unwrap();
     assert!(tx.insert_channel(&chan("ch2", "dev", &w.a)).is_err(), "names are unique");
+}
+
+/// Where a time search starts when seqs do not follow dates (history copied in after newer
+/// messages): the lowest seq of any message dated on or after the day, not the first seq of the
+/// earliest such day.
+fn first_seq_from_day_across_copied_history(s: &dyn Store) {
+    let w = world(s);
+    let seqs = write(s, |tx| {
+        let at = |n: usize, created_at: &str| {
+            tx.insert_message(&NewMessage {
+                id: &mid(n),
+                sender_id: &w.a,
+                recipient_id: Some(&w.b),
+                channel_id: None,
+                text: "t",
+                reply_to: None,
+                created_at,
+            })
+            .unwrap()
+        };
+        vec![
+            at(1, "2026-10-05T10:00:00.000Z"),
+            at(2, "2026-10-08T10:00:00.000Z"),
+            at(3, "2026-10-01T10:00:00.000Z"),
+            at(4, "2026-10-07T23:00:00+02:00"),
+        ]
+    });
+    read(s, |tx| {
+        assert_eq!(tx.first_seq_from_day("2026-10-06").unwrap(), Some(seqs[1]), "a later day holds the lowest seq");
+        assert_eq!(tx.first_seq_from_day("2026-10-07").unwrap(), Some(seqs[1]));
+        assert_eq!(tx.first_seq_from_day("2026-10-08").unwrap(), Some(seqs[1]));
+        assert_eq!(tx.first_seq_from_day("2026-10-02").unwrap(), Some(seqs[0]));
+        assert_eq!(tx.first_seq_from_day("2026-01-01").unwrap(), Some(seqs[0]));
+        assert_eq!(tx.first_seq_from_day("2026-10-09").unwrap(), None);
+    });
 }
 
 fn inbox_unread_sent_search(s: &dyn Store) {

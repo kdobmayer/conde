@@ -69,6 +69,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (8, "mcp", include_str!("migrations/0008_mcp.sql")),
     (9, "mcp_expiry", include_str!("migrations/0009_mcp_expiry.sql")),
     (10, "mcp_grant_code", include_str!("migrations/0010_mcp_grant_code.sql")),
+    (11, "messages_by_day", include_str!("migrations/0011_messages_by_day.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -1371,8 +1372,18 @@ impl Tx for PgTx {
     }
 
     fn first_seq_from_day(&self, day: &str) -> StoreResult<Option<i64>> {
+        // each day's lowest seq heads its run in messages_by_day: one probe per day, not a walk
         Ok(self
-            .query_opt("SELECT MIN(commit_seq) FROM messages WHERE substr(created_at, 1, 10) >= $1", &[&day])?
+            .query_opt(
+                "WITH RECURSIVE days(day) AS (
+                     SELECT MIN(substr(created_at, 1, 10)) FROM messages WHERE substr(created_at, 1, 10) >= $1
+                     UNION ALL
+                     SELECT (SELECT MIN(substr(m.created_at, 1, 10)) FROM messages m WHERE substr(m.created_at, 1, 10) > d.day)
+                     FROM days d WHERE d.day IS NOT NULL)
+                 SELECT MIN((SELECT MIN(m.commit_seq) FROM messages m WHERE substr(m.created_at, 1, 10) = d.day))
+                 FROM days d WHERE d.day IS NOT NULL",
+                &[&day],
+            )?
             .and_then(|r| r.get::<_, Option<i64>>(0)))
     }
 

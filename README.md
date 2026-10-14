@@ -637,6 +637,13 @@ ends with `(more on dakai: conde inbox --board dakai --after 9)`. When dakai
 does not confirm an aggregate `read` in time, its messages are shown as
 previews marked `(unconfirmed: preview only)`, each with the command that
 reads it whole (`conde read dakai:01M...`).
+`conde search` (and the MCP `search` tool) reads about 10000 messages per
+call. A call that stops there answers with `partial: true` and `scanned` (the
+messages it read) beside `next_cursor`, prints `(this call stopped after
+scanning 10000 messages)`, or `(no matches in the 10000 messages this call
+scanned; it stopped there)` when it found nothing, and ends with the
+`(more: ...)` line that continues it: no matches in a partial call is not a
+final answer.
 Names and channels are looked up on one
 board only: local `reviewer` and dakai's `kdobmayer/reviewer` are different
 agents, and local `#dev` and dakai's `#dev` are different channels. A send

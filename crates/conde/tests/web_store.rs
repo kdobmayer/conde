@@ -134,6 +134,8 @@ on_both!(
     a_login_record_is_issued_and_restored_in_one_transaction,
     a_last_try_ends_the_login_record_unless_its_account_reissued,
     a_restore_takes_the_login_back_from_another_account,
+    a_logins_first_confirm_dates_it_past_its_records_purge,
+    a_late_confirm_is_told_the_login_expired_whatever_the_session,
     admin_binds_existing_users_and_disables_them,
 );
 
@@ -577,7 +579,7 @@ async fn a_login_record_is_issued_and_restored_in_one_transaction(d: Arc<Dispatc
         let issue = |c: &web::CliCode| store.issue_cli_code(key, c, 300).unwrap();
         assert_eq!(issue(&record(1, 0)), web::CliIssued::Issued);
         assert_eq!(issue(&record(2, 0)), web::CliIssued::Theirs, "another account's live record stays");
-        assert_eq!(issue(&web::CliCode { created_at: 1_301, ..record(2, 0) }), web::CliIssued::TheirsExpired, "and says when it expired");
+        assert_eq!(issue(&web::CliCode { created_at: 1_301, ..record(2, 0) }), web::CliIssued::Expired, "and says when it expired");
         assert_eq!(issue(&record(1, 3)), web::CliIssued::Issued, "the same account's is replaced");
         assert_eq!(held(&store), Some((1, 3)), "one record, the latest");
         // Taken for a guess: a restore fills the empty slot; after a new issue, the new record stays.
@@ -589,6 +591,70 @@ async fn a_login_record_is_issued_and_restored_in_one_transaction(d: Arc<Dispatc
         assert_eq!(held(&store), Some((1, 4)), "an empty slot is filled");
     })
     .await;
+}
+
+/// A login's first confirm dates it: once that is more than the TTL ago, every issue answers
+/// Expired and stores nothing, for either account, also after the purge removed the record; the
+/// date itself is purged only a day later.
+async fn a_logins_first_confirm_dates_it_past_its_records_purge(d: Arc<Dispatcher>) {
+    let store = WebBoard::new(d.clone());
+    blocking(move || {
+        let record = |user_id: i64, created_at: i64| web::CliCode {
+            user_id,
+            user_name: format!("user-{user_id}"),
+            state: "s".repeat(16),
+            challenge: "c".repeat(43),
+            created_at,
+            paste: Some(format!("paste-{user_id}")),
+            tries: 0,
+        };
+        let limits = web::Limits { session_idle: 3600, session_max: 8 * 3600, login_ttl: 600, cli_code_ttl: 300, key_display_ttl: 300 };
+        let key = "dated-login";
+        let issue = |c: &web::CliCode| store.issue_cli_code(key, c, 300).unwrap();
+        assert_eq!(issue(&record(1, 1_000)), web::CliIssued::Issued);
+        assert_eq!(issue(&record(1, 1_200)), web::CliIssued::Issued, "the same account confirms again");
+        store.purge_expired(1_301, &limits).unwrap();
+        assert_eq!(store.take_cli_code(key).unwrap().map(|c| c.created_at), Some(1_200), "the newer record is live");
+        store.purge_expired(1_600, &limits).unwrap();
+        assert_eq!(issue(&record(2, 1_600)), web::CliIssued::Expired, "another account, after the purge");
+        assert_eq!(issue(&record(1, 1_600)), web::CliIssued::Expired, "and the first account");
+        assert!(store.take_cli_code(key).unwrap().is_none(), "nothing stored");
+        store.purge_expired(1_000 + 86_401, &limits).unwrap();
+        assert_eq!(issue(&record(2, 1_000 + 86_401)), web::CliIssued::Issued, "a day later the key is new again");
+    })
+    .await;
+}
+
+/// The confirm of a login first confirmed more than the TTL ago says it expired, on the real
+/// stores: from a session that existed before (no purge), from a fresh sign-in (which purges the
+/// expired record) and from the account that confirmed it.
+async fn a_late_confirm_is_told_the_login_expired_whatever_the_session(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    let alice = Browser::new();
+    let run = cli_run();
+    paste_leg(&env, &alice, &run).await;
+    let (_, alice_page) = paste_confirm_page(&env, &alice, &run).await;
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.oid = "oid-bob".into();
+        p.upn = "bob@dakai.example".into();
+        p.name = "Bob".into();
+    }
+    let bob = Browser::new();
+    let (status, bob_page) = paste_confirm_page(&env, &bob, &run).await;
+    assert_eq!(status, StatusCode::OK, "{bob_page}");
+    env.advance(301);
+    let expired = |(status, body): (StatusCode, String), who: &str| {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{who}: {body}");
+        assert!(body.contains("This conde login expired. Run conde login again."), "{who}: {body}");
+    };
+    expired(paste_confirm(&env, &bob, &run, &csrf_of(&bob_page)).await, "existing session");
+    let fresh = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &fresh, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    expired(paste_confirm(&env, &fresh, &run, &csrf_of(&page)).await, "fresh sign-in");
+    expired(paste_confirm(&env, &alice, &run, &csrf_of(&alice_page)).await, "the confirming account");
+    assert_eq!(paste_redeem(&env, &run, "2345-6789").await.1["error"], "authorization_pending", "nothing was issued");
 }
 
 /// A wrong guess takes the record; another account confirms the same login in the gap and its
@@ -632,10 +698,10 @@ async fn a_last_try_ends_the_login_record_unless_its_account_reissued(d: Arc<Dis
             tries: 0,
         };
         let key = "ended-login";
-        store.issue_cli_code(key, &record(2)).unwrap();
+        store.issue_cli_code(key, &record(2), 300).unwrap();
         store.end_cli_code(key, 1).unwrap();
         assert!(store.take_cli_code(key).unwrap().is_none(), "another account's record is removed");
-        store.issue_cli_code(key, &record(1)).unwrap();
+        store.issue_cli_code(key, &record(1), 300).unwrap();
         store.end_cli_code(key, 1).unwrap();
         assert_eq!(store.take_cli_code(key).unwrap().map(|c| c.user_id), Some(1), "the same account's stays");
         store.end_cli_code(key, 1).unwrap();

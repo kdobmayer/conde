@@ -53,6 +53,11 @@ Review and integration by desk, one batch at a time; one release per batch.
   claims (a bound relative to a baseline measured in the same run, or a
   generous absolute bound with the tight one behind an env flag for the
   release machine). Area: tests only.
+- B14. Test harness port race: web_ui
+  history_pages_back_in_chronological_order failed once at web_ui.rs:146
+  (server start unwrap after the harness freed a probe port) and passed on 5
+  reruns; make the harness hand the server a bound listener instead of a freed
+  port number. Area: tests only.
 
 ## Waiting on a decision or an observation (do not take)
 

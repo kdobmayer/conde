@@ -105,7 +105,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS attempts_by_instance ON attempts(bridge_instance, status);
          CREATE INDEX IF NOT EXISTS credentials_by_host ON device_credentials(host_id);
          CREATE INDEX IF NOT EXISTS notifications_by_recipient ON notifications(recipient_agent_id);
-         CREATE UNIQUE INDEX IF NOT EXISTS mcp_grants_by_code ON mcp_grants(code_digest) WHERE code_digest IS NOT NULL;",
+         CREATE UNIQUE INDEX IF NOT EXISTS mcp_grants_by_code ON mcp_grants(code_digest) WHERE code_digest IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS messages_by_day ON messages(substr(created_at, 1, 10), commit_seq);",
     )?;
     rebuild_agents(conn)
 }
@@ -878,8 +879,19 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn first_seq_from_day(&self, day: &str) -> StoreResult<Option<i64>> {
+        // each day's lowest seq heads its run in messages_by_day: one probe per day, not a walk
         Ok(self
-            .opt("SELECT MIN(commit_seq) FROM messages WHERE substr(created_at, 1, 10) >= ?1", [day], |r| r.get::<_, Option<i64>>(0))?
+            .opt(
+                "WITH RECURSIVE days(day) AS (
+                     SELECT MIN(substr(created_at, 1, 10)) FROM messages WHERE substr(created_at, 1, 10) >= ?1
+                     UNION ALL
+                     SELECT (SELECT MIN(substr(m.created_at, 1, 10)) FROM messages m WHERE substr(m.created_at, 1, 10) > d.day)
+                     FROM days d WHERE d.day IS NOT NULL)
+                 SELECT MIN((SELECT MIN(m.commit_seq) FROM messages m WHERE substr(m.created_at, 1, 10) = d.day))
+                 FROM days d WHERE d.day IS NOT NULL",
+                [day],
+                |r| r.get::<_, Option<i64>>(0),
+            )?
             .flatten())
     }
 

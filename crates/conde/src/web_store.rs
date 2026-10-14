@@ -21,6 +21,11 @@ use crate::util::iso_from_ms;
 const LOGIN: &str = "login";
 const CLI_CODE: &str = "cli_code";
 const KEY_DISPLAY: &str = "key_display";
+/// When a pasted-code login was first confirmed, by the login's key (no payload).
+const CLI_LOGIN: &str = "cli_login";
+/// How long that time is kept: past the code's own purge and any CLI wait, so a late confirm is
+/// answered by the login's age whether or not its record was purged.
+const CLI_LOGIN_KEEP: i64 = 86_400;
 
 pub struct WebBoard {
     d: Arc<Dispatcher>,
@@ -236,16 +241,26 @@ impl WebStore for WebBoard {
     fn issue_cli_code(&self, code_digest: &str, code: &CliCode, ttl: i64) -> WebResult<CliIssued> {
         let payload = serde_json::to_string(code).map_err(|e| WebStoreError(e.to_string()))?;
         self.write(|t| {
-            if let Some((held, created_at)) = t.take_web_token(CLI_CODE, code_digest)?
-                && let Ok(old) = serde_json::from_str::<CliCode>(&held)
-                && old.user_id != code.user_id
-            {
+            let held = t.take_web_token(CLI_CODE, code_digest)?;
+            let old = held.as_ref().and_then(|(p, _)| serde_json::from_str::<CliCode>(p).ok());
+            let first = match t.take_web_token(CLI_LOGIN, code_digest)? {
+                Some((_, at)) => at,
+                // a record from before the first confirm's time was kept dates the login too
+                None => old.as_ref().map_or(code.created_at, |o| o.created_at.min(code.created_at)),
+            };
+            t.put_web_token(CLI_LOGIN, code_digest, "", first)?;
+            let answer = if code.created_at - first > ttl {
+                CliIssued::Expired
+            } else if old.as_ref().is_some_and(|o| o.user_id != code.user_id) {
+                CliIssued::Theirs
+            } else {
+                t.put_web_token(CLI_CODE, code_digest, &payload, code.created_at)?;
+                return Ok(CliIssued::Issued);
+            };
+            if let Some((held, created_at)) = held {
                 t.put_web_token(CLI_CODE, code_digest, &held, created_at)?;
-                let expired = code.created_at - old.created_at > ttl;
-                return Ok(if expired { CliIssued::TheirsExpired } else { CliIssued::Theirs });
             }
-            t.put_web_token(CLI_CODE, code_digest, &payload, code.created_at)?;
-            Ok(CliIssued::Issued)
+            Ok(answer)
         })
     }
 
@@ -284,7 +299,12 @@ impl WebStore for WebBoard {
     }
 
     fn purge_expired(&self, now: i64, l: &Limits) -> WebResult<()> {
-        let ttls = [(LOGIN, l.login_ttl), (CLI_CODE, l.cli_code_ttl), (KEY_DISPLAY, l.key_display_ttl)];
+        let ttls = [
+            (LOGIN, l.login_ttl),
+            (CLI_CODE, l.cli_code_ttl),
+            (CLI_LOGIN, CLI_LOGIN_KEEP.max(l.cli_code_ttl)),
+            (KEY_DISPLAY, l.key_display_ttl),
+        ];
         self.write(|t| Ok(t.purge_web(now, l.session_idle, l.session_max, &ttls)?))
     }
 

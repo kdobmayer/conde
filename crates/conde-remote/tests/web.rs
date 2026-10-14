@@ -67,6 +67,8 @@ struct Mem {
     sessions: HashMap<String, SessionRecord>,
     logins: HashMap<String, LoginTxn>,
     codes: HashMap<String, CliCode>,
+    /// When each pasted-code login was first confirmed (kept past its record, as on the stores).
+    cli_logins: HashMap<String, i64>,
     displays: HashMap<String, KeyDisplay>,
     hosts: HashMap<String, i64>,
     creds: Vec<Cred>,
@@ -294,9 +296,16 @@ impl WebStore for MemStore {
         if let Some(gate) = m.cli_gate.take() {
             gate.hold();
         }
-        if let Some(old) = m.codes.get(code_digest).filter(|old| old.user_id != code.user_id) {
-            let expired = code.created_at - old.created_at > ttl;
-            return Ok(if expired { CliIssued::TheirsExpired } else { CliIssued::Theirs });
+        let held = m.codes.get(code_digest).map(|o| (o.user_id, o.created_at));
+        let first = *m
+            .cli_logins
+            .entry(code_digest.into())
+            .or_insert(held.map_or(code.created_at, |(_, at)| at.min(code.created_at)));
+        if code.created_at - first > ttl {
+            return Ok(CliIssued::Expired);
+        }
+        if held.is_some_and(|(user_id, _)| user_id != code.user_id) {
+            return Ok(CliIssued::Theirs);
         }
         m.codes.insert(code_digest.into(), code.clone());
         Ok(CliIssued::Issued)
@@ -343,6 +352,7 @@ impl WebStore for MemStore {
         });
         m.logins.retain(|_, t| now - t.created_at <= l.login_ttl);
         m.codes.retain(|_, c| now - c.created_at <= l.cli_code_ttl);
+        m.cli_logins.retain(|_, at| now - *at <= 86_400);
         m.displays
             .retain(|_, d| now - d.created_at <= l.key_display_ttl);
         Ok(())
@@ -1035,6 +1045,7 @@ async fn the_redeem_is_rate_limited_per_address() {
     let wait = got["retry_after"].as_u64().unwrap();
     assert!(wait >= 1 && after == Some(wait.to_string()), "{got} {after:?}");
     assert!(got["message"].as_str().unwrap().contains("from this address"), "{got}");
+    assert!(got.get("login_expires_first").is_none(), "a wait to retry: {got}");
     // Another address has its own bucket.
     let (status, _, _) = redeem_from(&env, "203.0.113.2", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1148,6 +1159,7 @@ async fn a_wait_past_the_logins_expiry_says_to_start_again() {
     assert_eq!((status, got["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{got}");
     let message = got["message"].as_str().unwrap();
     assert!(message.contains("after this login expires") && message.contains("run conde login --code again"), "{message}");
+    assert_eq!(got["login_expires_first"], true, "the CLI ends the run on this answer: {got}");
 }
 
 #[tokio::test]
@@ -1203,7 +1215,8 @@ async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_th
 }
 
 /// Another account confirming a login whose record has expired is told it expired (run conde
-/// login again), not that someone else holds it; a live record of another account still is.
+/// login again), not that someone else holds it; a live record of another account still is. A
+/// fresh sign-in (which purges the expired record) and the first account get the same answer.
 #[tokio::test]
 async fn another_account_confirming_an_expired_login_is_told_it_expired() {
     let env = Env::with(Arc::new(MemStore::default())).await;
@@ -1228,6 +1241,51 @@ async fn another_account_confirming_an_expired_login_is_told_it_expired() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "expired: {body}");
     assert!(body.contains("This conde login expired. Run conde login again."), "{body}");
     assert!(!body.contains("Another account"), "{body}");
+    // a fresh sign-in purges the expired record; the login's age still decides
+    let fresh = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &fresh, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(env.store.m().codes.is_empty(), "the sign-in purged the expired record");
+    let (status, body) = paste_confirm(&env, &fresh, &run, &csrf_of(&page)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expired after the purge: {body}");
+    assert!(body.contains("This conde login expired. Run conde login again."), "{body}");
+    assert!(env.store.m().codes.is_empty(), "nothing issued");
+}
+
+/// A pasted code redeemed after it expired ends the login like a last wrong try: a record another
+/// account put in while the redeem held the taken one does not stay (reachable for a login whose
+/// first confirm's time is not stored, as one confirmed before that time was kept).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_redeem_leaves_no_other_accounts_record() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let run = cli_run();
+    let shown = paste_leg(&env, &Browser::new(), &run).await;
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.oid = "oid-bob".into();
+        p.upn = "bob@dakai.example".into();
+        p.name = "Bob".into();
+    }
+    let bob = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &bob, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    env.advance(301);
+    env.store.m().cli_logins.clear();
+    let taken = Arc::new(tokio::sync::Notify::new());
+    let (release, held) = std::sync::mpsc::channel();
+    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    let late = paste_redeem(&env, &run, &shown);
+    let confirm = async {
+        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the late redeem takes the record");
+        let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
+        release.send(()).unwrap();
+        (status, body)
+    };
+    let ((status, got), (confirmed, body)) = tokio::join!(late, confirm);
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
+    assert!(got["message"].as_str().unwrap().contains("expired"), "{got}");
+    assert_eq!(confirmed, StatusCode::OK, "bob's confirm landed in the gap: {body}");
+    assert!(env.store.m().codes.is_empty(), "the expired login is not left to bob");
 }
 
 #[tokio::test]

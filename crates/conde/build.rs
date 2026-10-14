@@ -36,9 +36,12 @@ fn git_commit(dir: &Path) -> Option<String> {
     let commit = git(dir, &["rev-parse", "--short=7", "HEAD"])?;
     // Every tracked file, the only ones that can make the checkout dirty (no build output, no
     // node_modules to walk).
-    if let (Some(top), Some(files)) = (git(dir, &["rev-parse", "--show-toplevel"]), git(dir, &["ls-files"])) {
-        for f in files.lines() {
-            println!("cargo:rerun-if-changed={}", Path::new(&top).join(f).display());
+    if let Some(top) = git(dir, &["rev-parse", "--show-toplevel"]) {
+        // listed from the top: from the crate, ls-files names only its files, relative to it
+        if let Some(files) = git(Path::new(&top), &["ls-files", "-z"]) {
+            for f in files.split('\0').filter(|f| !f.is_empty()) {
+                println!("cargo:rerun-if-changed={}", Path::new(&top).join(f).display());
+            }
         }
     }
     let dirty = git(dir, &["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"]).is_some();

@@ -81,7 +81,10 @@ One store trait, two backends: SQLite (rusqlite bundled, WAL) in local mode,
 Postgres (Flexible Server, managed) in cloud mode. The server is stateless:
 nothing durable in memory or on local disk, migrations run at startup under
 a Postgres advisory lock, cross-replica notification fan-out via Postgres
-LISTEN/NOTIFY. Attachments are bytea rows (same caps). The kond
+LISTEN/NOTIFY. A dated search finds its first message through
+`messages_by_day`, an index on the UTC day of `created_at` and `commit_seq`
+(Postgres migration `0011_messages_by_day.sql`, the same index in SQLite's
+init). Attachments are bytea rows (same caps). The kond
 maildir/RFC-822 layout is the import/export format. Records:
 users, hosts, device_credentials, agents (owner, name, address, host,
 binding_version, pin), messages (ULID id, commit_seq, sender, DM recipient or

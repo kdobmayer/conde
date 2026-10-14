@@ -34,6 +34,10 @@ struct Board {
     bad_request: Mutex<Option<String>>,
     /// Answer every redeem with a 429 `rate_limited` and this message.
     limited: Mutex<Option<String>>,
+    /// That 429 says the waiting login expires before the next allowed attempt.
+    limited_expires_first: Mutex<bool>,
+    /// Answer the next `n` redeems with the per-address 429 and this `retry_after`: (n, wait).
+    per_address: Mutex<(u32, u64)>,
     /// Hosts a key was minted for: a second mint is a re-enrollment.
     hosts: Mutex<std::collections::HashSet<String>>,
 }
@@ -60,11 +64,25 @@ async fn cli(State(b): State<Arc<Board>>, Query(q): Query<HashMap<String, String
 
 async fn redeem(State(b): State<Arc<Board>>, Json(req): Json<Value>) -> Response {
     b.redeemed.lock().unwrap().push(req.clone());
+    {
+        let mut limit = b.per_address.lock().unwrap();
+        if limit.0 > 0 {
+            limit.0 -= 1;
+            let wait = limit.1;
+            let message = format!("too many sign-in attempts from this address; retry in {wait} s");
+            let body = json!({"error": "rate_limited", "message": message, "retry_after": wait});
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", wait.to_string())], Json(body)).into_response();
+        }
+    }
     if let Some(m) = b.bad_request.lock().unwrap().clone() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_request", "message": m}))).into_response();
     }
     if let Some(m) = b.limited.lock().unwrap().clone() {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "rate_limited", "message": m, "retry_after": 30}))).into_response();
+        let mut body = json!({"error": "rate_limited", "message": m, "retry_after": 30});
+        if *b.limited_expires_first.lock().unwrap() {
+            body["login_expires_first"] = json!(true);
+        }
+        return (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
     }
     if let Some(m) = b.refuse.lock().unwrap().clone() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant", "message": m}))).into_response();
@@ -406,4 +424,40 @@ async fn a_rate_limited_redeem_keeps_the_login_waiting() {
     assert!(path.exists(), "the login still waits");
     *board.limited.lock().unwrap() = None;
     assert!(matches!(login::finish_code(&server, &path, &shown, "h").await.unwrap(), login::CodeOutcome::Enrolled(_)));
+}
+
+/// A 429 whose next allowed attempt comes after the login expires ends the run: the server's
+/// message, no "run again with the code" hint, and the waiting login removed.
+#[tokio::test]
+async fn a_rate_limit_outlasting_the_login_ends_it() {
+    let (server, board) = board().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("login/x.json");
+    let url = login::start_code(&server, &path).unwrap();
+    let shown = shown_code(&url).await;
+    let message = "too many code attempts for this account; the next is allowed in 400 s, after this login expires (in 100 s): run conde login --code again then";
+    *board.limited.lock().unwrap() = Some(message.into());
+    *board.limited_expires_first.lock().unwrap() = true;
+    let err = login::finish_code(&server, &path, &shown, "h").await.unwrap_err().to_string();
+    assert_eq!(err, format!("the server refused the sign-in: {message}"));
+    assert!(!path.exists(), "nothing waits any more");
+}
+
+/// The loopback redeem waits out the per-address 429 (Retry-After) and retries; a wait past
+/// the bound fails at once with the server's message.
+#[tokio::test]
+async fn the_loopback_redeem_waits_out_a_short_rate_limit() {
+    let (server, board) = board().await;
+    *board.per_address.lock().unwrap() = (2, 1);
+    let started = std::time::Instant::now();
+    let enrolled = login::sign_in(&server, "box-1", open_with(vec![], Default::default()), Duration::from_secs(20)).await.unwrap();
+    assert_eq!(enrolled.host_id, "box-1");
+    assert_eq!(board.redeemed.lock().unwrap().len(), 3, "two refusals, then the code redeemed");
+    assert!(started.elapsed() >= Duration::from_secs(2), "each retry waited its Retry-After");
+
+    *board.per_address.lock().unwrap() = (1, login::LIMITED_WAIT.as_secs() + 1);
+    let started = std::time::Instant::now();
+    let err = login::sign_in(&server, "box-1", open_with(vec![], Default::default()), Duration::from_secs(20)).await.unwrap_err();
+    assert!(err.to_string().contains("too many sign-in attempts from this address"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(10), "no wait past the bound");
 }

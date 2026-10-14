@@ -666,7 +666,8 @@ pub(crate) struct CliConfirmForm {
 
 /// `POST /auth/cli` (the confirm page's button): issues the pasted-code login's code and shows
 /// it, to the signed-in session whose CSRF token the form carries. A new POST by the same
-/// account issues a new code (the old one dies); a login another account confirmed stays theirs.
+/// account issues a new code (the old one dies); a login another account confirmed stays theirs;
+/// a login first confirmed more than the code TTL ago expired, for every account.
 pub(crate) async fn cli_confirm(
     State(state): State<WebState>,
     jar: CookieJar,
@@ -696,7 +697,7 @@ pub(crate) async fn cli_confirm(
     let ttl = state.limits().cli_code_ttl;
     match state.store(move |s| s.issue_cli_code(&key, &record, ttl)).await? {
         CliIssued::Issued => {}
-        CliIssued::TheirsExpired => {
+        CliIssued::Expired => {
             return Err(WebError::BadRequest("This conde login expired. Run conde login again.".into()));
         }
         CliIssued::Theirs => {
@@ -756,13 +757,14 @@ fn pkce_matches(verifier: String, challenge: &str) -> bool {
     same_secret(expected.as_str(), challenge)
 }
 
-/// The redeem's 429: `retry_after` in the body and the header.
-fn redeem_limited(wait: u64, message: String) -> Response {
-    let mut r = (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(json!({"error": "rate_limited", "message": message, "retry_after": wait})),
-    )
-        .into_response();
+/// The redeem's 429: `retry_after` in the body and the header; `login_expires_first` when the
+/// waiting login expires before the next allowed attempt (the CLI then ends the run).
+fn redeem_limited(wait: u64, message: String, login_expires_first: bool) -> Response {
+    let mut body = json!({"error": "rate_limited", "message": message, "retry_after": wait});
+    if login_expires_first {
+        body["login_expires_first"] = json!(true);
+    }
+    let mut r = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
     let h = r.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
@@ -781,7 +783,7 @@ pub(crate) async fn cli_redeem(
 ) -> Response {
     if let Err(wait) = state.0.limits.cli_redeem(ip) {
         tracing::info!(client_ip = %ip, wait, endpoint = "cli redeem", "rate limited");
-        return redeem_limited(wait, format!("too many sign-in attempts from this address; retry in {wait} s"));
+        return redeem_limited(wait, format!("too many sign-in attempts from this address; retry in {wait} s"), false);
     }
     let invalid = |m: &str| redeem_error(StatusCode::BAD_REQUEST, "invalid_grant", m);
     if req.code.len() != 64 {
@@ -849,6 +851,11 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     let age = state.now() - code.created_at;
     let ttl = state.limits().cli_code_ttl;
     if age > ttl {
+        // ended like a last try: another account's record issued since the take goes too
+        let user_id = code.user_id;
+        if let Err(e) = state.store(move |s| s.end_cli_code(&key, user_id)).await {
+            return store_failed(e);
+        }
         return invalid("the code expired; run conde login again");
     }
     // The state is in the URL anyone may hold; the verifier never leaves the CLI's host. A
@@ -870,14 +877,15 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
         if let Err(e) = state.store(move |s| s.restore_cli_code(&key, &code)).await {
             return store_failed(e);
         }
-        let message = if wait >= left as u64 {
+        let expires_first = wait >= left as u64;
+        let message = if expires_first {
             format!(
                 "too many code attempts for this account; the next is allowed in {wait} s, after this login expires (in {left} s): run conde login --code again then"
             )
         } else {
             format!("too many code attempts for this account; retry in {wait} s")
         };
-        return redeem_limited(wait, message);
+        return redeem_limited(wait, message, expires_first);
     }
     let right_code = code
         .paste

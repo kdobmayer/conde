@@ -437,8 +437,9 @@ pub enum CliIssued {
     Issued,
     /// Another account's live record holds the login.
     Theirs,
-    /// Another account's record holds the login, but it expired.
-    TheirsExpired,
+    /// The login was first confirmed more than the TTL ago: it expired, for every account, and
+    /// nothing was stored.
+    Expired,
 }
 
 /// Result of [`WebStore::refresh_mcp_grant`].
@@ -500,18 +501,19 @@ pub trait WebStore: Send + Sync {
     fn insert_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()>;
     /// Returns and deletes the code.
     fn take_cli_code(&self, code_digest: &str) -> WebResult<Option<CliCode>>;
-    /// Issues a pasted-code login's record in one transaction: a record of another account
-    /// stays, and the answer says whether it is older than `ttl` seconds at `code.created_at`
-    /// (that login expired) or still live; otherwise `code` replaces any earlier record of the
-    /// login.
+    /// Issues a pasted-code login's record in one transaction. A login first confirmed more than
+    /// `ttl` seconds before `code.created_at` expired: nothing is stored, whatever account asks
+    /// and whether or not its record was purged (the first confirm's time outlives the record).
+    /// Otherwise a record of another account stays, and `code` replaces any earlier record of
+    /// the same account.
     fn issue_cli_code(&self, code_digest: &str, code: &CliCode, ttl: i64) -> WebResult<CliIssued>;
     /// Puts back a record taken for a wrong guess, in one transaction: a record the same account
     /// issued since (it confirmed again) stays instead; another account's record issued in the
     /// gap is replaced, so the login stays with the account that held it.
     fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()>;
-    /// Ends a login taken for its last wrong try, in one transaction: a record the same account
-    /// (`user_id`) issued since stays; another account's record issued in the gap is removed, so
-    /// the dead login is not left to another account.
+    /// Ends a login taken for its last wrong try or found expired, in one transaction: a record
+    /// the same account (`user_id`) issued since stays; another account's record issued in the
+    /// gap is removed, so the dead login is not left to another account.
     fn end_cli_code(&self, code_digest: &str, user_id: i64) -> WebResult<()>;
 
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()>;

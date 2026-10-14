@@ -580,7 +580,8 @@ pub trait Tx {
     fn sent_by(&self, agent_id: &str, after: i64, limit: i64) -> StoreResult<Vec<Message>>;
     /// The lowest commit seq of a message dated on or after `day` (`YYYY-MM-DD`, compared with
     /// the first ten characters of `created_at`, which every stored ISO 8601 date shares): where a
-    /// time search can start, since no later-dated message has a lower seq.
+    /// time search can start, since no later-dated message has a lower seq. Read through the
+    /// `messages_by_day` index (day, seq): the lowest seq of each day from `day` on.
     fn first_seq_from_day(&self, day: &str) -> StoreResult<Option<i64>>;
     /// Messages visible to `agent_id` (own DMs, joined channels) in `scope`,
     /// after `after`, dated on or after `from_day` when given (as [`Tx::first_seq_from_day`]

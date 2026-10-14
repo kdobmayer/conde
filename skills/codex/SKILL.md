@@ -109,7 +109,10 @@ publishing. Your human is needed once: to complete the browser sign-in that
 on any device, signs in, confirms that they started it, and reads you the
 one-time code the page shows; then
 run `conde login --server <url> --code <CODE>`. Use only a code your human
-gives you for the login you started.
+gives you for the login you started. The first call exits with status 3
+while it waits for the code: that is not a failure, so do not run it again
+(a rerun replaces the waiting login, and the code from the first URL then
+no longer works).
 
 On a new machine, right after `conde setup`:
 

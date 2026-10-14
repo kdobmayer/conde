@@ -573,13 +573,15 @@ async fn a_login_record_is_issued_and_restored_in_one_transaction(d: Arc<Dispatc
         };
         let key = "login-key";
         let held = |s: &WebBoard| s.take_cli_code(key).unwrap().map(|c| (c.user_id, c.tries));
-        assert!(store.issue_cli_code(key, &record(1, 0)).unwrap());
-        assert!(!store.issue_cli_code(key, &record(2, 0)).unwrap(), "another account's record stays");
-        assert!(store.issue_cli_code(key, &record(1, 3)).unwrap(), "the same account's is replaced");
+        let issue = |c: &web::CliCode| store.issue_cli_code(key, c, 300).unwrap();
+        assert_eq!(issue(&record(1, 0)), web::CliIssued::Issued);
+        assert_eq!(issue(&record(2, 0)), web::CliIssued::Theirs, "another account's live record stays");
+        assert_eq!(issue(&web::CliCode { created_at: 1_301, ..record(2, 0) }), web::CliIssued::TheirsExpired, "and says when it expired");
+        assert_eq!(issue(&record(1, 3)), web::CliIssued::Issued, "the same account's is replaced");
         assert_eq!(held(&store), Some((1, 3)), "one record, the latest");
         // Taken for a guess: a restore fills the empty slot; after a new issue, the new record stays.
         store.restore_cli_code(key, &record(1, 1)).unwrap();
-        store.issue_cli_code(key, &record(1, 0)).unwrap();
+        issue(&record(1, 0));
         store.restore_cli_code(key, &record(1, 2)).unwrap();
         assert_eq!(held(&store), Some((1, 0)), "the record issued since stands");
         store.restore_cli_code(key, &record(1, 4)).unwrap();
@@ -603,9 +605,9 @@ async fn a_restore_takes_the_login_back_from_another_account(d: Arc<Dispatcher>)
             tries,
         };
         let key = "login-key";
-        assert!(store.issue_cli_code(key, &record(1, 0)).unwrap());
+        assert_eq!(store.issue_cli_code(key, &record(1, 0), 300).unwrap(), web::CliIssued::Issued);
         let taken = store.take_cli_code(key).unwrap().expect("the guess takes the record");
-        assert!(store.issue_cli_code(key, &record(2, 0)).unwrap(), "the empty slot takes the other account's");
+        assert_eq!(store.issue_cli_code(key, &record(2, 0), 300).unwrap(), web::CliIssued::Issued, "the empty slot takes the other account's");
         store.restore_cli_code(key, &web::CliCode { tries: 1, ..taken }).unwrap();
         let held = store.take_cli_code(key).unwrap().map(|c| (c.user_id, c.tries, c.paste));
         assert_eq!(held, Some((1, 1, Some("paste-1".into()))), "the first account's record is back");

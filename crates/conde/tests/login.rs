@@ -340,24 +340,26 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
                 .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap();
-            (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
         })
     };
     let start = vec!["login".into(), "--server".into(), server.clone(), "--host".into(), "box-9".into(), "--no-browser".into()];
-    let (ok, _, err) = conde(start.clone()).await.unwrap();
-    assert!(ok, "{err}");
+    // Without a terminal the run waits for its code: exit 3, not the 0 of an enrolled host.
+    let (status, out, err) = conde(start.clone()).await.unwrap();
+    assert_eq!(status, Some(3), "{err}");
+    assert!(out.is_empty(), "nothing enrolled: {out}");
     assert!(!err.contains("still waiting"), "{err}");
     // starting again replaces the waiting run, and says so
-    let (ok, _, err) = conde(start).await.unwrap();
-    assert!(ok && err.contains("was still waiting for its code; this one replaces it"), "{err}");
+    let (status, _, err) = conde(start).await.unwrap();
+    assert!(status == Some(3) && err.contains("was still waiting for its code; this one replaces it"), "{err}");
     let finish = format!("conde login --server {server} --host box-9 --code <CODE>");
     assert!(err.contains(&finish), "{err}");
     let url = err.lines().map(str::trim).find(|l| l.starts_with(&format!("{server}/auth/cli?mode=code"))).unwrap().to_string();
 
     let shown = shown_code(&url).await;
     let finish = vec!["login", "--server", &server, "--host", "box-9", "--code", &shown, "--board", "dakai"];
-    let (ok, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
-    assert!(ok, "{out}{err}");
+    let (status, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
+    assert_eq!(status, Some(0), "{out}{err}");
     assert!(out.contains("signed in as krisztian"), "{out}");
     assert!(out.contains(&format!("\nenrolled host box-9 with {server} as board dakai (account krisztian)")), "{out}");
     assert!(!out.contains("re-enrolled"), "{out}");
@@ -370,13 +372,13 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
 
     // the same host again: the server revoked its previous key, and the CLI says so
     let start = vec!["login".into(), "--server".into(), server.clone(), "--host".into(), "box-9".into(), "--no-browser".into()];
-    let (ok, _, err) = conde(start).await.unwrap();
-    assert!(ok, "{err}");
+    let (status, _, err) = conde(start).await.unwrap();
+    assert_eq!(status, Some(3), "{err}");
     let url = err.lines().map(str::trim).find(|l| l.starts_with(&format!("{server}/auth/cli?mode=code"))).unwrap().to_string();
     let shown = shown_code(&url).await;
     let finish = vec!["login", "--server", &server, "--host", "box-9", "--code", &shown, "--board", "dakai"];
-    let (ok, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
-    assert!(ok, "{out}{err}");
+    let (status, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
+    assert_eq!(status, Some(0), "{out}{err}");
     assert!(out.contains("\nre-enrolled host box-9: the previous key for this host is revoked\n"), "{out}");
     assert!(out.contains(&format!("\nboard dakai at {server} (account krisztian); credential stored at")), "{out}");
     assert!(!out.contains("\nenrolled host"), "{out}");

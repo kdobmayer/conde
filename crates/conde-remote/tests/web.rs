@@ -25,7 +25,7 @@ use sha2::Digest;
 use tokio::net::TcpListener;
 
 use web::{
-    AdminKey, BindUser, BridgeRegistry, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits,
+    AdminKey, BindUser, BridgeRegistry, CliCode, CliIssued, CreateUser, HostKey, Identity, KeyDisplay, Limits,
     LoginTxn, McpCode, McpCodeState, McpCreated, McpGrant, McpRedeemed, McpTokens, Minted, SessionRecord, WebConfig,
     WebResult, WebState, WebStore, WebStoreError, WebUser,
 };
@@ -289,16 +289,17 @@ impl WebStore for MemStore {
             }
         }
     }
-    fn issue_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<bool> {
+    fn issue_cli_code(&self, code_digest: &str, code: &CliCode, ttl: i64) -> WebResult<CliIssued> {
         let mut m = self.m();
         if let Some(gate) = m.cli_gate.take() {
             gate.hold();
         }
-        if m.codes.get(code_digest).is_some_and(|old| old.user_id != code.user_id) {
-            return Ok(false);
+        if let Some(old) = m.codes.get(code_digest).filter(|old| old.user_id != code.user_id) {
+            let expired = code.created_at - old.created_at > ttl;
+            return Ok(if expired { CliIssued::TheirsExpired } else { CliIssued::Theirs });
         }
         m.codes.insert(code_digest.into(), code.clone());
-        Ok(true)
+        Ok(CliIssued::Issued)
     }
     fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()> {
         let mut m = self.m();
@@ -1048,6 +1049,34 @@ async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_th
     assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
     let (status, got) = paste_redeem(&env, &run, &second).await;
     assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+}
+
+/// Another account confirming a login whose record has expired is told it expired (run conde
+/// login again), not that someone else holds it; a live record of another account still is.
+#[tokio::test]
+async fn another_account_confirming_an_expired_login_is_told_it_expired() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let run = cli_run();
+    paste_leg(&env, &Browser::new(), &run).await;
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.oid = "oid-bob".into();
+        p.upn = "bob@dakai.example".into();
+        p.name = "Bob".into();
+    }
+    let bob = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &bob, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "live: {body}");
+    assert!(body.contains("Another account already signed in"), "{body}");
+    env.advance(301);
+    let (status, page) = paste_confirm_page(&env, &bob, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expired: {body}");
+    assert!(body.contains("This conde login expired. Run conde login again."), "{body}");
+    assert!(!body.contains("Another account"), "{body}");
 }
 
 #[tokio::test]

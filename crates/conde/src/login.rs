@@ -396,6 +396,10 @@ fn open_browser(url: &str) {
 
 /// `conde login --server <url> [--host <id>] [--board <alias>] [--no-browser] [--code [<CODE>]]`.
 /// `code`: None without `--code`, empty for a bare `--code`.
+/// The exit status of a pasted-code login that is waiting for its code (the URL was printed;
+/// finish with `--code <CODE>`), so a script can tell it from an enrolled host (0).
+pub const PENDING: i32 = 3;
+
 pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool, code: Option<&str>) -> anyhow::Result<i32> {
     origin(server)?;
     if let Some(alias) = board {
@@ -423,7 +427,7 @@ pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool,
         hint.push_str(" --code <CODE>");
         match code_login(server, &host, &hint, code.unwrap_or_default(), &runtime)? {
             Some(e) => e,
-            None => return Ok(0),
+            None => return Ok(PENDING),
         }
     } else {
         runtime.block_on(sign_in(server, &host, open_browser, BROWSER_WAIT))?

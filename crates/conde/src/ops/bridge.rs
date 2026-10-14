@@ -378,6 +378,15 @@ fn apply(ctx: &Ctx, attempt_id: &str, outcome: &str, reason: Option<&str>, event
     ctx.db.update_attempt(attempt_id, outcome, reason, event_seq, &ctx.now_iso())?;
     ctx.db.announce(topics::DELIVERY | topics::FLEET);
     let current = ctx.db.latest_attempt(&notification_id)?.as_deref() == Some(attempt_id);
+    // An outcome can land after the recipient read the message (a resent outcome, or one the
+    // server applies after the connection's later frames): a read message stays read and is
+    // not offered again.
+    if current
+        && let Some((_, message_id, recipient_id)) = ctx.db.attempt_target(attempt_id)?
+        && settled_as_read(ctx, &notification_id, &message_id, &recipient_id)?
+    {
+        return Ok(json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": outcome, "current": current}));
+    }
     if current {
         let (status, next) = match outcome {
             "accepted" => ("notified", None),

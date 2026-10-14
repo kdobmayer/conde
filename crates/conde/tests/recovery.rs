@@ -99,6 +99,26 @@ fn event_seq_makes_a_resent_outcome_a_no_op() {
     assert_eq!(b.status_of(&mid, "bob"), "delivered");
 }
 
+/// An outcome that reaches the board after the recipient read the message (the bridge resends
+/// an unacknowledged outcome, and the server applies outcomes beside the connection's other
+/// frames, so it can land last): the notification stays read and nothing is offered again.
+#[test]
+fn a_late_outcome_never_reopens_a_read_message() {
+    for outcome in ["accepted", "held", "delivered", "expired"] {
+        let b = setup();
+        let mid = b.send(ALICE, "carol", "x");
+        let p = b.d.bridge_principal(&b.p);
+        bridge_call(&b, &p, "bridge.fence", json!({})).unwrap();
+        let claim = bridge_call(&b, &p, "bridge.claim", json!({})).unwrap();
+        let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
+        b.ok(CAROL, "message.read", json!({"id": mid}));
+        bridge_call(&b, &p, "bridge.report", json!({"attempt_id": attempt, "outcome": outcome, "event_seq": 1})).unwrap();
+        assert_eq!(b.status_of(&mid, "carol"), "read", "{outcome}");
+        let again = bridge_call(&b, &p, "bridge.claim", json!({"open": true})).unwrap();
+        assert_eq!(again["jobs"], json!([]), "{outcome}: a read message is not offered again");
+    }
+}
+
 #[test]
 fn fence_makes_one_instance_active_and_open_attempts_follow_it() {
     let b = setup();

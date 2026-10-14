@@ -1507,6 +1507,14 @@ impl Tx for PgTx {
         self.settle_notification(id, status, None)
     }
 
+    fn settle_read(&self, message_id: &str, recipient_id: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE notifications SET status = 'read'
+             WHERE message_id = $1 AND recipient_agent_id = $2 AND status IN ('pending', 'dispatching', 'notified', 'held')",
+            &[&message_id, &recipient_id],
+        )? > 0)
+    }
+
     fn settle_notification(&self, id: &str, status: &str, next_attempt_at: Option<i64>) -> StoreResult<()> {
         self.execute(
             "UPDATE notifications SET status = $2, next_attempt_at = COALESCE($3, next_attempt_at)

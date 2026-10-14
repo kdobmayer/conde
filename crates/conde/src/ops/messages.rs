@@ -16,7 +16,7 @@ use crate::dispatch::{
     Ctx, OpResult, bad_request, forbidden, not_found, one_line, opt_i64, opt_str, str_param, too_large,
 };
 use crate::protocol::{MAX_ATTACHMENT, MAX_MESSAGE_ATTACHMENTS, MAX_TEXT, PAGE, SEARCH_SCAN};
-use crate::store::{NewMessage, NewNotification, SearchScope, Tx};
+use crate::store::{NewMessage, NewNotification, SearchScope, Tx, topics};
 use crate::util::{After, iso_from_ms, is_ulid, ms_from_iso, new_ulid, parse_after};
 
 static MENTION: LazyLock<Regex> = LazyLock::new(|| {
@@ -249,15 +249,21 @@ fn page(mut rows: Vec<MsgRow>) -> (Vec<MsgRow>, Option<i64>) {
     }
 }
 
+/// Marks `m` read for `me`, and settles `me`'s notification of it as read while it is still
+/// open: a hold or an acceptance that landed before the read is not left standing (counted as
+/// held, reopened on a reconnect) for a message already read.
 fn mark_read(ctx: &Ctx, me: &Agent, m: &MsgRow) -> OpResult<()> {
     match &m.channel_id {
-        Some(c) => channels::advance_cursor(ctx.db, c, &me.id, m.seq),
+        Some(c) => channels::advance_cursor(ctx.db, c, &me.id, m.seq)?,
         None if m.recipient_id.as_deref() == Some(me.id.as_str()) => {
             ctx.db.mark_dm_read(&m.id, &me.id, &ctx.now_iso())?;
-            Ok(())
         }
-        None => Ok(()),
+        None => return Ok(()),
     }
+    if ctx.db.settle_read(&m.id, &me.id)? {
+        ctx.db.announce(topics::DELIVERY);
+    }
+    Ok(())
 }
 
 /// Return and mark read: one message by id, one channel's unread, or all.

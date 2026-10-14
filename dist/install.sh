@@ -88,10 +88,31 @@ fi
 
 "$tmp/$name" --version >/dev/null 2>&1 || die "the downloaded binary does not run on this machine ($name)"
 
-# an upgrade: what the binary being replaced says it is
-previous=
-if [ -x "$dir/conde" ]; then
-	previous=$("$dir/conde" --version 2>/dev/null || echo "an earlier conde")
+# An upgrade: a conde is already in place. What it says it is, at most 5 s: an old binary that
+# hangs must not stop the upgrade. The probe runs in the background; a watchdog (killing its own
+# sleep when it is told to stop, so none is left behind) ends it; its output counts only when it
+# exited on its own and cleanly.
+upgrade=0
+previous="unknown version"
+if [ -e "$dir/conde" ]; then
+	upgrade=1
+	if [ -x "$dir/conde" ]; then
+		"$dir/conde" --version >"$tmp/previous" 2>/dev/null </dev/null &
+		probe=$!
+		(
+			sleep 5 &
+			nap=$!
+			trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+			wait "$nap"
+			kill -KILL "$probe" 2>/dev/null
+		) &
+		watchdog=$!
+		if wait "$probe" && [ -s "$tmp/previous" ]; then
+			previous=$(head -n 1 "$tmp/previous")
+		fi
+		kill "$watchdog" 2>/dev/null || true
+		wait "$watchdog" 2>/dev/null || true
+	fi
 fi
 
 if [ "$system" = 1 ] && [ ! -w "$dir" ]; then
@@ -103,7 +124,7 @@ else
 	mv "$tmp/$name" "$dir/conde"
 fi
 installed=$("$dir/conde" --version 2>/dev/null || echo "$name")
-if [ -n "$previous" ]; then
+if [ "$upgrade" = 1 ]; then
 	say "replaced $dir/conde ($previous) with $installed"
 else
 	say "installed $dir/conde ($installed)"
@@ -130,7 +151,7 @@ if [ "$on_path" = 0 ]; then
 fi
 
 say ""
-if [ -n "$previous" ]; then
+if [ "$upgrade" = 1 ]; then
 	say "Next (an upgrade; your enrollment and names stay as they are, no sign-in):"
 	say "  conde setup        # rewrites what this release changed (skills, MCP entries, the service) and restarts the bridge onto it"
 	say "  conde doctor       # shows: ok bridge: running this build"

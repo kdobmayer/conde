@@ -65,16 +65,33 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
         std::fs::write(dist.join("SHA256SUMS"), format!("{sum}  {name}\n")).unwrap();
         std::fs::write(dist.join("latest"), "v0.1.0\n").unwrap();
     };
+    // Each run has an outer deadline: an installer that hangs fails the test instead of the suite.
     let install = || {
-        let out = std::process::Command::new("sh")
+        let mut child = std::process::Command::new("sh")
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/install.sh"))
             .env("CONDE_DIST_URL", format!("file://{}", dist.display()))
             .env("CONDE_INSTALL_DIR", &bin)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("install.sh did not finish within 20 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()
+    };
+    let old = |script: &str, mode: u32| {
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("conde"), script).unwrap();
+        std::fs::set_permissions(bin.join("conde"), std::fs::Permissions::from_mode(mode)).unwrap();
     };
 
     release("aaaaaaa");
@@ -95,4 +112,26 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
     assert!(second.contains("Next (an upgrade; your enrollment and names stay as they are, no sign-in):"), "{second}");
     assert!(second.contains("\n  conde setup ") && second.contains("\n  conde doctor "), "{second}");
     assert!(!second.contains("conde login"), "no sign-in on an upgrade: {second}");
+    // the old binary answered at once: its watchdog is gone with its sleep
+    let ps = std::process::Command::new("ps").args(["-eo", "args"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ps.stdout).lines().any(|l| l.trim() == "sleep 5"), "no watchdog sleep is left behind");
+
+    // An old binary that never answers: its probe is cut off after 5 s, the upgrade goes on,
+    // and nothing it started is left behind.
+    old("#!/bin/sh\nexec sleep 120\n", 0o755);
+    let t = std::time::Instant::now();
+    let hung = install();
+    assert!(t.elapsed() < std::time::Duration::from_secs(15), "{:?}", t.elapsed());
+    assert!(hung.contains(&format!("replaced {}/conde (unknown version) with conde 0.1.0 (bbbbbbb 2026-10-14)", bin.display())), "{hung}");
+    assert!(hung.contains("Next (an upgrade;"), "{hung}");
+    let ps = std::process::Command::new("ps").args(["-eo", "args"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ps.stdout).lines().any(|l| l.trim() == "sleep 120"), "the old binary's probe was ended");
+
+    // A silent or non-executable old conde is still an upgrade, of an unknown version.
+    for (script, mode) in [("#!/bin/sh\nexit 0\n", 0o755), ("not a program\n", 0o644)] {
+        old(script, mode);
+        let out = install();
+        assert!(out.contains(&format!("replaced {}/conde (unknown version) with", bin.display())), "{mode:o}: {out}");
+        assert!(out.contains("Next (an upgrade;") && !out.contains("conde login"), "{mode:o}: {out}");
+    }
 }

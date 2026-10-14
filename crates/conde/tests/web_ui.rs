@@ -100,6 +100,7 @@ on_both!(
     the_browser_is_read_only_and_names_nobody,
     the_owner_sees_what_their_agents_can_read_and_nothing_else,
     another_owner_sees_only_their_own_agents,
+    the_browser_searches_what_its_agents_can_read,
     delivery_state_shows_the_retry_clock_the_hold_and_the_last_error,
     a_read_message_never_shows_the_error_of_a_stale_attempt,
     history_pages_back_in_chronological_order,
@@ -440,6 +441,36 @@ async fn the_owner_sees_what_their_agents_can_read_and_nothing_else(d: Arc<Dispa
     let resp = blocking(move || d2.dispatch(&k, &req)).await;
     assert_eq!(resp.error.map(|e| e.code), Some(conde::protocol::ErrorCode::Forbidden));
     let _ = &c.ranger;
+    ui.server.shutdown().await.unwrap();
+}
+
+/// `owner.search` from the browser: hits from the owner's agents' DMs and channels, never a DM
+/// between two other owners' agents or a channel none of them is in. The other names the
+/// allow-list adds pass its gate (the dispatcher answers until they exist); an op left off the
+/// list is refused before the dispatcher.
+async fn the_browser_searches_what_its_agents_can_read(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let _ = cast(&ui).await;
+    let r = ui.ok(&b, &csrf, "owner.search", json!({"pattern": "."})).await;
+    let lines: Vec<&str> = r["hits"].as_array().unwrap().iter().map(|h| h["line"].as_str().unwrap()).collect();
+    for seen in ["status?", "green, report attached", "handoff to worker", "scout here"] {
+        assert!(lines.contains(&seen), "{seen} missing: {r}");
+    }
+    let all = r.to_string();
+    for hidden in ["private between", "members only"] {
+        assert!(!all.contains(hidden), "{hidden} leaked: {all}");
+    }
+    for op in ["owner.feed", "owner.thread"] {
+        let (status, v) = ui.rpc(&b, &csrf, op, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{op}: {v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains("unknown op"), "{op} reaches the dispatcher: {v}");
+    }
+    for op in ["message.feed", "search", "owner.attachment"] {
+        let (status, v) = ui.rpc(&b, &csrf, op, json!({"pattern": "."})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{op}: {v}");
+        assert_eq!(v["error"]["message"], format!("'{op}' is not available in the browser"), "{v}");
+    }
     ui.server.shutdown().await.unwrap();
 }
 

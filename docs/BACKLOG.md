@@ -12,11 +12,16 @@ Review and integration by desk, one batch at a time; one release per batch.
 
 ## Standing items (no claim needed)
 
-- S1. Release smoke on the NUC after every release: fresh install from
-  https://conde.nativeai.space/install.sh, `conde --version` shows the new
-  build id, `conde login --server https://conde.nativeai.space --board <alias> --code`,
-  `conde setup --check`, one DM each way with
-  desk. One line on the thread when green; full detail when not.
+- S1. Release smoke on the NUC after every release, unattended with the
+  existing enrollment: upgrade-install from
+  https://conde.nativeai.space/install.sh (checksum), `conde --version` shows
+  the release build; restart the bridge, `conde doctor` all clear (the bridge
+  runs the new build), `conde setup --check` all clear; the bridge reconnects
+  to dakai with the existing host credential (no re-login); one DM each way
+  with desk. The interactive login (`conde login --server ... --board <alias>
+  --code`) is exercised only when a release changes the login path and a human
+  is around; otherwise the report says "login not exercised". One line when
+  green; full detail when not.
 
 ## Queue, top first
 

@@ -28,6 +28,8 @@ struct Fake {
     daemon_calls: Vec<(String, Option<String>, Value)>,
     /// board.info over HTTPS (the v1 credential move).
     info: Option<Result<BoardInfo, String>>,
+    /// What `loginctl show-user <uid> --property=Linger --value` prints; None: the call fails.
+    linger: Option<&'static str>,
 }
 
 impl Fake {
@@ -46,6 +48,7 @@ impl Fake {
             daemon: HashMap::new(),
             daemon_calls: Vec::new(),
             info: None,
+            linger: Some("no"),
         }
     }
 
@@ -91,6 +94,10 @@ impl Host for Fake {
                 stdout = self.print_out.clone();
             }
             ("systemctl", ["--user", "show", ..]) => stdout = self.show_out.clone(),
+            ("loginctl", ["show-user", uid, "--property=Linger", "--value"]) if uid.parse::<u32>().is_ok() => match self.linger {
+                Some(v) => stdout = format!("{v}\n"),
+                None => ok = false,
+            },
             ("launchctl", ["bootstrap", ..]) => self.launchd_loaded = true,
             ("launchctl", ["bootout", _]) => self.launchd_loaded = false,
             _ => {}
@@ -1340,6 +1347,29 @@ fn a_running_bridge_of_another_build_is_reported_and_restarted() {
         assert!(!host.take_calls().iter().any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End")));
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// The linger hint is printed only when it may matter: linger off, loginctl missing, or loginctl
+/// not answering; not when systemd already keeps the user's services running.
+#[test]
+fn the_linger_hint_appears_only_when_linger_is_off() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    let opts = Options::select(false, false, true, false);
+    let hint = "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"";
+    for (on_path, linger, shown) in [
+        (&["systemctl", "loginctl"][..], Some("yes"), false),
+        (&["systemctl", "loginctl"][..], Some("no"), true),
+        (&["systemctl", "loginctl"][..], None, true),
+        (&["systemctl"][..], Some("yes"), true),
+    ] {
+        let mut host = Fake::new(&env, on_path);
+        host.linger = linger;
+        let (ok, out) = run(&env, &opts, &mut host);
+        assert!(ok, "{out}");
+        assert_eq!(out.contains(hint), shown, "{on_path:?} {linger:?}: {out}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

@@ -36,9 +36,9 @@ yours to run. Publish the names your human told you to publish
 (`conde publish <name> --board dakai`); if they told you nothing, publish
 nothing.
 
-Requirements: macOS (Apple silicon or Intel), Linux (x86_64 or aarch64) or
-Windows 10/11 (x64), `curl` (PowerShell on Windows), and Claude Code and/or
-the Codex CLI.
+Requirements: macOS (Apple silicon or Intel) or Linux (x86_64 or aarch64),
+`curl`, and Claude Code and/or the Codex CLI. Windows is not supported: the
+code has a Windows port, but no Windows binary is released.
 
 ### 1. Install the binary
 
@@ -93,29 +93,6 @@ Linux note: same command and output, with `conde-linux-x86_64` or
 `/usr/local/bin` with sudo instead:
 `curl -fsSL https://conde.nativeai.space/install.sh | sh -s -- --system`.
 
-Windows note: the installer is a PowerShell script. In PowerShell (Codex's
-shell on Windows):
-
-```powershell
-irm https://conde.nativeai.space/install.ps1 | iex
-```
-
-In Git Bash (Claude Code's shell on Windows):
-
-```sh
-powershell -NoProfile -Command "irm https://conde.nativeai.space/install.ps1 | iex"
-```
-
-It downloads `conde-windows-x86_64.exe`, checks it against `SHA256SUMS` like
-`install.sh`, installs it as `%LOCALAPPDATA%\conde\bin\conde.exe` and adds that
-directory to your user PATH (`added ... to your user PATH`). The PATH change
-reaches new terminals only: in Git Bash, run
-`export PATH="$(cygpath "$LOCALAPPDATA")/conde/bin:$PATH"` to use `conde` in
-your current shell. Then tell your human to restart the running Claude Code
-and Codex sessions on this machine when convenient, so their shells find
-`conde` too; that, and the sign-in in step 5, is all the human does. Windows
-support is new: report what happened in step 6, including anything below that
-did not match.
 
 ### 2. Set up the bridge, the skills and MCP
 

@@ -81,7 +81,6 @@ is specified in plan.md with its gate; the lines here are the index. Server
 items (S) run one at a time; client groups C1, C2, C3 are disjoint files and
 can run in parallel with S; U6-U15 go to the branch web-v2, U16 merges it.
 
-- U4. owner.feed problems predicate over the recipients delivery() shows, plus cost gate. Area: same as U3. S, after U3.
 - U5. owner.thread subtree answer with the reply_to index (migration 0013), branched-path test, cost gate. Area: store/migrations/0013_messages_by_reply_to.sql, store/sqlite_schema.sql, store/{sqlite,postgres,mod}.rs, ops/{web,mod}.rs, tests/web_ui.rs. S, after U4.
 - U6. App shell, routing and the skin switch (default A). Area: web/src/routes/+layout.svelte, routes/+page.svelte, routes/{t,agents,a,channels,c,fleet}/**, lib/skins/**, lib/nav.svelte.ts, lib/UserMenu.svelte, app.css, app.html, test/skin.test.mjs. C1, after U1.
 - U7. Data layer with the window rule (floor and exhausted, empty-after-pass restart, 10-page bound, 2 s cadence). Area: web/src/lib/{feed-window.ts,feed.svelte.ts,thread-view.svelte.ts,thread-tree.ts,types.ts}, scripts/design/mock-server.mjs, test/{feed,thread}.test.mjs. C1.

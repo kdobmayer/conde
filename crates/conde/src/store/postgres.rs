@@ -32,7 +32,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
     Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    FeedArg, FeedRange, Membership, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
+    FeedArg, FeedRange, Membership, problem_seqs_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
     WebSessionRow, address_of, feed_seqs_sql,
 };
 use crate::address::Address;
@@ -2036,6 +2036,19 @@ impl Tx for PgTx {
             .collect();
         let sql = format!("{MSG_SELECT} WHERE m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC");
         Ok(self.query_planned(&sql, &args)?.iter().map(msg_row).collect())
+    }
+
+    fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>> {
+        let sql = problem_seqs_sql(|n| format!("${n}"));
+        Ok(self.query_planned(&sql, &[&owner_id, &after, &before])?.iter().map(|r| r.get(0)).collect())
+    }
+
+    fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>> {
+        if seqs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let seqs = seqs.to_vec();
+        self.msgs("m.commit_seq = ANY($1) ORDER BY m.commit_seq DESC", &[&seqs])
     }
 
     fn owner_search_scan(

@@ -211,6 +211,33 @@ pub struct Membership {
     pub channel: String,
 }
 
+/// [`Tx::owner_problem_seqs`] for either store (`ph(n)` writes parameter n: 1 the owner id, 2
+/// `after`, 3 `before`).
+pub(crate) fn problem_seqs_sql(ph: impl Fn(usize) -> String) -> String {
+    let (owner, after, before) = (ph(1), ph(2), ph(3));
+    format!(
+        "SELECT DISTINCT p.commit_seq FROM notifications n
+         JOIN messages p ON p.message_id = n.message_id
+         JOIN agents ps ON ps.agent_id = p.sender_agent_id
+         LEFT JOIN agents pr ON pr.agent_id = p.recipient_agent_id
+         JOIN agents na ON na.agent_id = n.recipient_agent_id
+         WHERE (n.status IN ('held', 'denied', 'refused', 'gone')
+                OR (n.status = 'pending' AND EXISTS (SELECT 1 FROM attempts t WHERE t.notification_id = n.notification_id)))
+           AND p.commit_seq > {after} AND p.commit_seq < {before}
+           AND (ps.owner_id = {owner} OR na.owner_id = {owner})
+           -- read wins over every delivery state (recipient_state): a read DM, or a channel the
+           -- recipient has read past, is never a problem; nor is a human's pending one (unread)
+           AND NOT EXISTS (SELECT 1 FROM dm_read dr WHERE dr.message_id = n.message_id AND dr.agent_id = n.recipient_agent_id)
+           AND NOT EXISTS (SELECT 1 FROM memberships rm WHERE rm.channel_id = p.channel_id
+                           AND rm.agent_id = n.recipient_agent_id AND rm.read_seq >= p.commit_seq)
+           AND NOT (n.status = 'pending' AND na.address_kind = 'human')
+           AND ((p.channel_id IS NULL AND (ps.owner_id = {owner} OR pr.owner_id = {owner}))
+                OR (p.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM memberships x JOIN agents o ON o.agent_id = x.agent_id
+                                                         WHERE x.channel_id = p.channel_id AND o.owner_id = {owner})))
+         ORDER BY p.commit_seq DESC"
+    )
+}
+
 /// A parameter of [`feed_seqs_sql`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedArg {
@@ -880,6 +907,15 @@ pub trait Tx {
     /// what the owner's agents can read.
     fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64)
     -> StoreResult<Vec<Message>>;
+    /// The seqs of messages with `after < seq < before`, newest first, that the owner's agents can
+    /// read and that have a notification in a problem status (held, denied, refused, gone, or
+    /// pending after an attempt) for a recipient the owner may judge: any recipient of an own
+    /// sender's message, else an own recipient. Read from `notifications_due` (status first), never
+    /// a walk of the messages. Read ones are left out here, as `recipient_state` would; the exact
+    /// state of the rest is still the caller's to compute.
+    fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>>;
+    /// The messages with these seqs, newest first.
+    fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>>;
     /// Like [`Tx::search_scan`] over what the owner's agents can read (the
     /// [`Tx::owner_message`] rule), after `after`, oldest first.
     fn owner_search_scan(

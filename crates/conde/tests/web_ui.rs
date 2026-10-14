@@ -103,6 +103,7 @@ on_both!(
     the_browser_searches_what_its_agents_can_read,
     the_feed_is_what_the_owners_agents_can_read,
     the_feed_pages_between_exclusive_bounds,
+    the_feed_lists_delivery_problems,
     delivery_state_shows_the_retry_clock_the_hold_and_the_last_error,
     a_read_message_never_shows_the_error_of_a_stale_attempt,
     history_pages_back_in_chronological_order,
@@ -651,6 +652,107 @@ async fn the_feed_pages_between_exclusive_bounds(d: Arc<Dispatcher>) {
     send("m8".into()).await;
     let next = feed(json!({"after": seq[5]})).await;
     assert_eq!((feed_texts(&next), next["more"].as_bool()), (names(&[8, 7, 6]), Some(false)), "the new row is in the next pass");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// `owner.feed {problems}`: every problem state a recipient the owner may judge can be in, never a
+/// read message or another owner's recipient's problem; two problems far apart on one page each,
+/// never an empty page with `more`; no problems an empty page without `more`.
+async fn the_feed_lists_delivery_problems(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let ids = |p: &Principal| {
+        let (d, user) = (ui.d.clone(), p.user_id);
+        async move { blocking(move || d.with_conn(|t| t.owner_agents(user)).unwrap()).await }
+    };
+    let mut agent_id = std::collections::HashMap::new();
+    for a in ids(&c.k).await.into_iter().chain(ids(&c.dv).await) {
+        agent_id.insert(a.canonical(), a.id);
+    }
+    let (u, agent_id) = (&ui, &agent_id);
+    let send = |p: &Principal, actor: &str, to: Value, text: &str| {
+        let body = json!({"to": to, "text": text});
+        let (p, actor) = (p.clone(), actor.to_string());
+        async move { u.op(&p, &actor, "message.send", body).await["message_id"].as_str().unwrap().to_string() }
+    };
+    let set = |message: &str, recipient: &str, status: &str| {
+        let (d, id, status) = (u.d.clone(), format!("{message}.{}", agent_id[recipient]), status.to_string());
+        async move { blocking(move || d.with_tx(|t| Ok(t.set_notification_status(&id, &status)?)).unwrap()).await }
+    };
+    let feed = |body: Value| ui.ok(&b, &csrf, "owner.feed", body);
+    let scout = json!({"agent": "david/scout"});
+
+    // retrying: scout's bridge claims it and the hold expires
+    let retry = send(&c.k, &c.worker, scout.clone(), "retrying one").await;
+    let bridge = ui.d.bridge_principal(&c.dv);
+    let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
+    let job = claim["jobs"].as_array().unwrap().iter().find(|j| j["message_id"] == retry.as_str()).unwrap().clone();
+    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": job["attempt_id"], "outcome": "expired", "reason": "no answer"})).await;
+    let first = send(&c.k, &c.worker, scout.clone(), "held one").await;
+    set(&first, "david/scout", "held").await;
+    for n in 0..30 {
+        send(&c.k, &c.worker, scout.clone(), &format!("fine {n}")).await;
+    }
+    let denied = send(&c.k, &c.worker, scout.clone(), "denied one").await;
+    set(&denied, "david/scout", "denied").await;
+    let refused = send(&c.k, &c.helper, json!({"agent": "worker"}), "refused one").await;
+    set(&refused, &format!("{USER}/worker"), "refused").await;
+    let gone = send(&c.k, &c.worker, json!({"agent": "david/ranger"}), "gone one").await;
+    set(&gone, "david/ranger", "gone").await;
+    // not problems: a hold the recipient read; another owner's recipient of another owner's post
+    let read = send(&c.k, &c.worker, scout.clone(), "held then read").await;
+    set(&read, "david/scout", "held").await;
+    ui.op(&c.dv, &c.scout, "message.read", json!({"id": read})).await;
+    let theirs = send(&c.dv, &c.scout, json!({"channel": "#team"}), "@ranger see this").await;
+    set(&theirs, "david/ranger", "denied").await;
+
+    let all = feed(json!({"problems": true})).await;
+    let states: Vec<(String, String)> = all["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let worst = m["delivery"]["recipients"].as_array().unwrap().iter().map(|r| r["state"].as_str().unwrap()).collect::<Vec<_>>().join(",");
+            (m["text"].as_str().unwrap().to_string(), worst)
+        })
+        .collect();
+    let want: Vec<(String, String)> = [("gone one", "gone"), ("refused one", "refused"), ("denied one", "denied"), ("held one", "held"), ("retrying one", "retrying")]
+        .iter()
+        .map(|(t, s)| (t.to_string(), s.to_string()))
+        .collect();
+    assert_eq!((states, all["more"].as_bool()), (want, Some(false)), "{all}");
+
+    // Thirty fine messages between two problems: a page each, never an empty one with `more`.
+    let one = feed(json!({"problems": true, "place": "dm", "agent": "worker", "direction": "out", "after": 0, "before": i64::MAX, "limit": 1})).await;
+    assert_eq!((feed_texts(&one), one["more"].as_bool()), (vec!["gone one".to_string()], Some(true)), "{one}");
+    let mut before = one["messages"][0]["seq"].as_i64().unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let page = feed(json!({"problems": true, "direction": "out", "before": before, "limit": 1})).await;
+        let got = feed_texts(&page);
+        assert!(!got.is_empty() || page["more"] == false, "an empty page with more: {page}");
+        seen.extend(got);
+        match page["messages"].as_array().unwrap().last() {
+            Some(m) if page["more"] == true => before = m["seq"].as_i64().unwrap(),
+            _ => break,
+        }
+    }
+    assert_eq!(seen, vec!["denied one", "held one", "retrying one"], "out, page by page");
+    let helper = feed(json!({"problems": true, "agent": "helper"})).await;
+    assert_eq!(feed_texts(&helper), vec!["refused one"], "{helper}");
+    let team = feed(json!({"problems": true, "place": "#team"})).await;
+    assert_eq!(team, json!({"messages": [], "more": false}), "scout's post: only another owner's recipient has a problem");
+
+    // An owner without problems: an empty page, no `more`.
+    ui.env.idp.person.lock().unwrap().oid = "oid-dp".into();
+    ui.env.idp.person.lock().unwrap().upn = "dpacsuta@dakai.example".into();
+    let (b2, csrf2) = ui.browser().await;
+    let p = ui.principal("dpacsuta", "p-host").await;
+    ui.op(&p, "codex:thread-probe", "agent.register", json!({"name": "probe"})).await;
+    ui.op(&p, "codex:thread-probe", "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "hello"})).await;
+    let none = ui.ok(&b2, &csrf2, "owner.feed", json!({"problems": true})).await;
+    assert_eq!(none, json!({"messages": [], "more": false}));
     ui.server.shutdown().await.unwrap();
 }
 

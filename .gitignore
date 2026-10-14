@@ -10,3 +10,4 @@ crates/conde-remote/web-dist/
 
 # owner-only history manifest (agent inventory): stays local, never pushed
 docs/history-manifest-*
+*.profraw

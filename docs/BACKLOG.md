@@ -50,15 +50,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   message, counts in agent_health held and is re-offered through open_attempts
   on reconnect until the endpoint leaves. Decide the rule for each and test.
   Area: crates/conde ops/bridge.rs, store queries, tests/recovery.rs.
-- B18. Per-channel notification of every member (owner, 2026-10-14): today a
-  channel post notifies only the agents it tags (the owner's rule, kept as the
-  default). A duty channel such as #devops needs every member notified on
-  every post. Add a channel setting ("notify members on every post", off by
-  default) that the channel's creator or a human sets (`conde topic`-style
-  command plus the MCP tool), honoured in the notification path on both
-  stores, shown in `conde channels`; a per-agent opt-out can follow if noise
-  appears. Tests on both stores. Area: crates/conde ops channels and
-  notifications, store (migration if a column), CLI, MCP, skills text.
 
 ## Waiting on a decision or an observation (do not take)
 

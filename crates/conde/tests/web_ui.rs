@@ -101,6 +101,8 @@ on_both!(
     the_owner_sees_what_their_agents_can_read_and_nothing_else,
     another_owner_sees_only_their_own_agents,
     the_browser_searches_what_its_agents_can_read,
+    the_feed_is_what_the_owners_agents_can_read,
+    the_feed_pages_between_exclusive_bounds,
     delivery_state_shows_the_retry_clock_the_hold_and_the_last_error,
     a_read_message_never_shows_the_error_of_a_stale_attempt,
     history_pages_back_in_chronological_order,
@@ -446,8 +448,8 @@ async fn the_owner_sees_what_their_agents_can_read_and_nothing_else(d: Arc<Dispa
 
 /// `owner.search` from the browser: hits from the owner's agents' DMs and channels, never a DM
 /// between two other owners' agents or a channel none of them is in. The other names the
-/// allow-list adds pass its gate (the dispatcher answers until they exist); an op left off the
-/// list is refused before the dispatcher.
+/// allow-list adds pass its gate (owner.thread: the dispatcher answers until it exists); an op
+/// left off the list is refused before the dispatcher.
 async fn the_browser_searches_what_its_agents_can_read(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let (b, csrf) = ui.browser().await;
@@ -461,16 +463,187 @@ async fn the_browser_searches_what_its_agents_can_read(d: Arc<Dispatcher>) {
     for hidden in ["private between", "members only"] {
         assert!(!all.contains(hidden), "{hidden} leaked: {all}");
     }
-    for op in ["owner.feed", "owner.thread"] {
-        let (status, v) = ui.rpc(&b, &csrf, op, json!({})).await;
-        assert_eq!(status, StatusCode::OK, "{op}: {v}");
-        assert!(v["error"]["message"].as_str().unwrap().contains("unknown op"), "{op} reaches the dispatcher: {v}");
-    }
+    ui.ok(&b, &csrf, "owner.feed", json!({})).await;
+    let (status, v) = ui.rpc(&b, &csrf, "owner.thread", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("unknown op"), "owner.thread reaches the dispatcher: {v}");
     for op in ["message.feed", "search", "owner.attachment"] {
         let (status, v) = ui.rpc(&b, &csrf, op, json!({"pattern": "."})).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{op}: {v}");
         assert_eq!(v["error"]["message"], format!("'{op}' is not available in the browser"), "{v}");
     }
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The texts of a feed page, newest first.
+fn feed_texts(f: &Value) -> Vec<String> {
+    texts(f)
+}
+
+/// The feed of the signed-in owner, drained page by page (`limit` per page) with the lower bound
+/// fixed and the upper one moving down: every matching row above `after`.
+async fn drain(ui: &Ui, b: &Browser, csrf: &str, mut body: Value, limit: i64) -> (Vec<Value>, usize) {
+    body["limit"] = json!(limit);
+    let (mut rows, mut pages) = (Vec::new(), 0);
+    loop {
+        let page = ui.ok(b, csrf, "owner.feed", body.clone()).await;
+        pages += 1;
+        let got = page["messages"].as_array().unwrap().clone();
+        assert!(got.len() as i64 <= limit, "{page}");
+        if let Some(last) = got.last() {
+            body["before"] = last["seq"].clone();
+        }
+        rows.extend(got);
+        if page["more"] == false {
+            return (rows, pages);
+        }
+    }
+}
+
+/// `owner.feed` holds exactly what the owner's agents can read (`owner.search`'s rule), never a
+/// DM between two other owners' agents, each row once with its direction and the own agents it
+/// is read through; every predicate narrows it, alone and combined.
+async fn the_feed_is_what_the_owners_agents_can_read(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    ui.op(&c.k, &c.worker, "message.send", json!({"to": {"channel": "#team"}, "text": "worker on team"})).await;
+    // helper posts in #team and leaves: its post stays readable through worker
+    ui.op(&c.k, &c.helper, "channel.join", json!({"channel": "#team"})).await;
+    ui.op(&c.k, &c.helper, "message.send", json!({"to": {"channel": "#team"}, "text": "helper was here"})).await;
+    ui.op(&c.k, &c.helper, "channel.leave", json!({"channel": "#team"})).await;
+    let feed = |body: Value| ui.ok(&b, &csrf, "owner.feed", body);
+
+    // The whole feed, page by page: the owned set exactly, each message once, newest first.
+    let (all, pages) = drain(&ui, &b, &csrf, json!({}), 2).await;
+    assert!(pages > 2, "{pages} pages");
+    let ids: Vec<&str> = all.iter().map(|m| m["message_id"].as_str().unwrap()).collect();
+    let seqs: Vec<i64> = all.iter().map(|m| m["seq"].as_i64().unwrap()).collect();
+    assert!(seqs.windows(2).all(|w| w[0] > w[1]), "newest first, no repeats: {seqs:?}");
+    let search = ui.ok(&b, &csrf, "owner.search", json!({"pattern": "."})).await;
+    let mut owned: Vec<&str> = search["hits"].as_array().unwrap().iter().map(|h| h["message_id"].as_str().unwrap()).collect();
+    let mut got = ids.clone();
+    owned.sort_unstable();
+    got.sort_unstable();
+    assert_eq!(got, owned, "the feed is the owned set");
+    let text_of = |m: &Value| m["text"].as_str().unwrap().to_string();
+    let all_texts: Vec<String> = all.iter().map(text_of).collect();
+    for hidden in ["private between david's agents", "members only"] {
+        assert!(!all_texts.iter().any(|t| t == hidden), "{hidden} leaked");
+    }
+    let row = |text: &str| all.iter().find(|m| m["text"] == text).unwrap_or_else(|| panic!("{text} missing")).clone();
+    let (worker, helper) = (format!("{USER}/worker"), format!("{USER}/helper"));
+    for (text, direction, via) in [
+        ("status?", "in", vec![worker.clone()]),
+        ("green, report attached", "out", vec![worker.clone()]),
+        ("handoff to worker", "own", vec![helper.clone(), worker.clone()]),
+        ("scout here", "in", vec![worker.clone()]),
+        ("worker on team", "out", vec![worker.clone()]),
+        ("helper was here", "out", vec![worker.clone()]),
+    ] {
+        let r = row(text);
+        assert_eq!((r["direction"].as_str(), r["via"].clone()), (Some(direction), json!(via)), "{r}");
+        assert!(r["delivery"].is_object() && r["place"].is_string(), "the history view: {r}");
+    }
+
+    // A DM between two own agents sits in two ranges: one row, and `more` exact after the merge.
+    let own = feed(json!({"direction": "own", "limit": 1})).await;
+    assert_eq!((feed_texts(&own), own["more"].as_bool()), (vec!["handoff to worker".to_string()], Some(false)), "{own}");
+
+    // Each predicate alone.
+    let set = |f: &Value| -> Vec<String> { let mut t = feed_texts(f); t.sort(); t };
+    let sorted = |v: &[&str]| -> Vec<String> { let mut t: Vec<String> = v.iter().map(|s| s.to_string()).collect(); t.sort(); t };
+    let dm = feed(json!({"place": "dm"})).await;
+    assert_eq!(set(&dm), sorted(&["status?", "green, report attached", "handoff to worker"]));
+    let team = feed(json!({"place": "#team", "limit": 100})).await;
+    assert!(team["messages"].as_array().unwrap().iter().all(|m| m["place"] == "#team"), "{team}");
+    assert!(set(&team).contains(&"scout here".to_string()) && set(&team).contains(&"helper was here".to_string()));
+    let (_, v) = ui.rpc(&b, &csrf, "owner.feed", json!({"place": "#secret"})).await;
+    assert_eq!(v["error"]["code"], "forbidden", "{v}");
+    let out = feed(json!({"direction": "out", "limit": 100})).await;
+    assert!(out["messages"].as_array().unwrap().iter().all(|m| m["direction"] == "out"), "{out}");
+    for t in ["green, report attached", "worker on team", "helper was here"] {
+        assert!(set(&out).contains(&t.to_string()), "{t}: {out}");
+    }
+    let inbound = feed(json!({"direction": "in", "limit": 100})).await;
+    assert!(inbound["messages"].as_array().unwrap().iter().all(|m| m["direction"] == "in" && !m["from"].as_str().unwrap().starts_with(USER)), "{inbound}");
+    for t in ["status?", "scout here"] {
+        assert!(set(&inbound).contains(&t.to_string()), "{t}: {inbound}");
+    }
+    // agent: sender, DM recipient or current member; helper left #team, so only its own post.
+    let h = feed(json!({"agent": "helper", "limit": 100})).await;
+    assert_eq!(set(&h), sorted(&["@krisztian-dobmayer/helper joined #team.", "handoff to worker", "helper was here"]), "{h}");
+    let w = feed(json!({"agent": "worker", "limit": 100})).await;
+    assert_eq!(set(&w).len(), set(&feed(json!({"limit": 100})).await).len(), "worker reads all of it: {w}");
+    let (_, v) = ui.rpc(&b, &csrf, "owner.feed", json!({"agent": "david/scout"})).await;
+    assert_eq!(v["error"]["code"], "forbidden", "{v}");
+    // Combined: another own agent's post in worker's channel; helper's own post there; worker's DMs out.
+    let combined = feed(json!({"agent": "worker", "direction": "out", "place": "#team"})).await;
+    assert_eq!(set(&combined).iter().filter(|t| !t.starts_with('@')).cloned().collect::<Vec<_>>(),
+               sorted(&["helper was here", "worker on team"]), "{combined}");
+    let combined = feed(json!({"agent": "helper", "direction": "out", "place": "#team"})).await;
+    assert_eq!(feed_texts(&combined), vec!["helper was here", "@krisztian-dobmayer/helper joined #team."], "{combined}");
+    let combined = feed(json!({"agent": "worker", "direction": "out", "place": "dm"})).await;
+    assert_eq!(feed_texts(&combined), vec!["green, report attached"], "{combined}");
+    let combined = feed(json!({"agent": "worker", "direction": "own", "place": "dm"})).await;
+    assert_eq!(feed_texts(&combined), vec!["handoff to worker"], "{combined}");
+
+    // A teammate signed in: an owner with no agents reads nothing; with one, never a DM between
+    // two other owners' agents (G9).
+    ui.env.idp.person.lock().unwrap().oid = "oid-dp".into();
+    ui.env.idp.person.lock().unwrap().upn = "dpacsuta@dakai.example".into();
+    let (b2, csrf2) = ui.browser().await;
+    let empty = ui.ok(&b2, &csrf2, "owner.feed", json!({})).await;
+    assert_eq!(empty, json!({"messages": [], "more": false}));
+    let p = ui.principal("dpacsuta", "p-host").await;
+    ui.op(&p, "codex:thread-probe", "agent.register", json!({"name": "probe"})).await;
+    ui.op(&p, "codex:thread-probe", "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "hello worker"})).await;
+    ui.op(&p, "codex:thread-probe", "channel.join", json!({"channel": "#team"})).await;
+    let theirs = ui.ok(&b2, &csrf2, "owner.feed", json!({"limit": 100})).await;
+    let theirs_texts = feed_texts(&theirs);
+    assert!(theirs_texts.contains(&"hello worker".to_string()) && theirs_texts.contains(&"scout here".to_string()), "{theirs}");
+    for hidden in ["private between david's agents", "members only", "handoff to worker", "status?", "green, report attached"] {
+        assert!(!theirs_texts.iter().any(|t| t == hidden), "{hidden} leaked: {theirs}");
+    }
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Both bounds exclusive and `more` exact; a drain with the lower bound fixed returns exactly
+/// the rows above it; a row committed between two passes is in the next pass from the same bound.
+async fn the_feed_pages_between_exclusive_bounds(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let k = ui.principal(USER, "k-host").await;
+    let dv = ui.principal("david", "d-host").await;
+    ui.op(&k, "codex:thread-w", "agent.register", json!({"name": "w"})).await;
+    ui.op(&dv, "codex:thread-x", "agent.register", json!({"name": "x"})).await;
+    let send = |text: String| ui.op(&dv, "codex:thread-x", "message.send", json!({"to": {"agent": format!("{USER}/w")}, "text": text}));
+    let mut seq = vec![0];
+    for n in 1..=7 {
+        seq.push(send(format!("m{n}")).await["seq"].as_i64().unwrap());
+    }
+    let feed = |body: Value| ui.ok(&b, &csrf, "owner.feed", body);
+    let names = |v: &[usize]| v.iter().map(|n| format!("m{n}")).collect::<Vec<_>>();
+    let page = feed(json!({"limit": 3})).await;
+    assert_eq!((feed_texts(&page), page["more"].as_bool()), (names(&[7, 6, 5]), Some(true)));
+    let page = feed(json!({"after": seq[2], "before": seq[6]})).await;
+    assert_eq!((feed_texts(&page), page["more"].as_bool()), (names(&[5, 4, 3]), Some(false)), "both bounds exclusive");
+    let page = feed(json!({"after": seq[2], "before": seq[6], "limit": 3})).await;
+    assert_eq!(page["more"], false, "exactly the page: {page}");
+    let page = feed(json!({"after": seq[2], "before": seq[6], "limit": 2})).await;
+    assert_eq!((feed_texts(&page), page["more"].as_bool()), (names(&[5, 4]), Some(true)));
+    let page = feed(json!({"after": seq[3], "before": seq[4]})).await;
+    assert_eq!(page, json!({"messages": [], "more": false}), "nothing strictly between neighbours");
+
+    let (rows, pages) = drain(&ui, &b, &csrf, json!({"after": seq[1]}), 2).await;
+    let got: Vec<String> = rows.iter().map(|m| m["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!((got, pages), (names(&[7, 6, 5, 4, 3, 2]), 3), "the rows above the bound, in three pages");
+
+    let first = feed(json!({"after": seq[5]})).await;
+    assert_eq!(feed_texts(&first), names(&[7, 6]));
+    send("m8".into()).await;
+    let next = feed(json!({"after": seq[5]})).await;
+    assert_eq!((feed_texts(&next), next["more"].as_bool()), (names(&[8, 7, 6]), Some(false)), "the new row is in the next pass");
     ui.server.shutdown().await.unwrap();
 }
 

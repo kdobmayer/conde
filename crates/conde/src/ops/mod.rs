@@ -53,6 +53,7 @@ pub static OPS: &[OpSpec] = &[
     op!("channel.members", channels::members, query),
     op!("owner.list", web::list, query),
     op!("owner.history", web::history, query),
+    op!("owner.feed", web::feed, query),
     op!("owner.message", web::message, query),
     op!("owner.attachment", web::attachment, query),
     op!("owner.search", web::search, query),

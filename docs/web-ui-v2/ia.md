@@ -328,8 +328,9 @@ which exists but is not in the list today.
   with the candidate count (denied, refused and gone stay candidates for good), which U4's gate
   measures.
 - No scan budget anywhere in this op: every other predicate is index-served
-  (`messages_by_sender`, `messages_by_recipient`, `messages_by_channel`, all with `commit_seq`
-  second). The query plans are part of the gates.
+  (`messages_by_sender`, `messages_by_recipient`, `messages_by_channel`, and
+  `messages_dm_by_sender` for an agent's sent DMs, all with `commit_seq` second). The query
+  plans are part of the gates.
 
 ### `owner.thread`
 

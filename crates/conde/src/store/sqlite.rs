@@ -13,7 +13,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, pa
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
     Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes, WebSessionRow, address_of,
+    FeedArg, FeedRange, Membership, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
+    WebSessionRow, address_of, feed_seqs_sql,
 };
 use crate::address::Address;
 
@@ -106,7 +107,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS credentials_by_host ON device_credentials(host_id);
          CREATE INDEX IF NOT EXISTS notifications_by_recipient ON notifications(recipient_agent_id);
          CREATE UNIQUE INDEX IF NOT EXISTS mcp_grants_by_code ON mcp_grants(code_digest) WHERE code_digest IS NOT NULL;
-         CREATE INDEX IF NOT EXISTS messages_by_day ON messages(substr(created_at, 1, 10), commit_seq);",
+         CREATE INDEX IF NOT EXISTS messages_by_day ON messages(substr(created_at, 1, 10), commit_seq);
+         CREATE INDEX IF NOT EXISTS messages_dm_by_sender ON messages(sender_agent_id, commit_seq) WHERE channel_id IS NULL;",
     )?;
     rebuild_agents(conn)
 }
@@ -1490,6 +1492,29 @@ impl Tx for SqliteTx<'_> {
             params![owner_id, message_id],
             msg_row,
         )
+    }
+
+    fn owner_memberships(&self, owner_id: i64) -> StoreResult<Vec<Membership>> {
+        self.rows(
+            "SELECT a.agent_id, u.name || '/' || a.name_lower, c.channel_id, c.name_lower
+             FROM memberships x JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
+             JOIN channels c ON c.channel_id = x.channel_id
+             WHERE a.owner_id = ?1 ORDER BY a.name_lower, c.name_lower",
+            [owner_id],
+            |r| Ok(Membership { agent_id: r.get(0)?, agent: r.get(1)?, channel_id: r.get(2)?, channel: r.get(3)? }),
+        )
+    }
+
+    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64)
+    -> StoreResult<Vec<Message>> {
+        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, |n| format!("?{n}")) else {
+            return Ok(Vec::new());
+        };
+        let args = args.into_iter().map(|a| match a {
+            FeedArg::Int(n) => rusqlite::types::Value::Integer(n),
+            FeedArg::Text(t) => rusqlite::types::Value::Text(t),
+        });
+        self.msgs(&format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC"), params_from_iter(args))
     }
 
     fn owner_search_scan(

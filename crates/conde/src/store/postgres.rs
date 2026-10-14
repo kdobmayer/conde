@@ -32,7 +32,8 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
     Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes, WebSessionRow, address_of,
+    FeedArg, FeedRange, Membership, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
+    WebSessionRow, address_of, feed_seqs_sql,
 };
 use crate::address::Address;
 use crate::util::sha256_hex;
@@ -70,6 +71,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (9, "mcp_expiry", include_str!("migrations/0009_mcp_expiry.sql")),
     (10, "mcp_grant_code", include_str!("migrations/0010_mcp_grant_code.sql")),
     (11, "messages_by_day", include_str!("migrations/0011_messages_by_day.sql")),
+    (12, "messages_dm_by_sender", include_str!("migrations/0012_messages_dm_by_sender.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -1995,6 +1997,35 @@ impl Tx for PgTx {
                 &[&owner_id, &message_id],
             )?
             .map(|r| msg_row(&r)))
+    }
+
+    fn owner_memberships(&self, owner_id: i64) -> StoreResult<Vec<Membership>> {
+        Ok(self
+            .query(
+                "SELECT a.agent_id, u.name || '/' || a.name_lower, c.channel_id, c.name_lower
+                 FROM memberships x JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
+                 JOIN channels c ON c.channel_id = x.channel_id
+                 WHERE a.owner_id = $1 ORDER BY a.name_lower, c.name_lower",
+                &[&owner_id],
+            )?
+            .iter()
+            .map(|r| Membership { agent_id: r.get(0), agent: r.get(1), channel_id: r.get(2), channel: r.get(3) })
+            .collect())
+    }
+
+    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64)
+    -> StoreResult<Vec<Message>> {
+        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, |n| format!("${n}")) else {
+            return Ok(Vec::new());
+        };
+        let args: Vec<&(dyn ToSql + Sync)> = args
+            .iter()
+            .map(|a| match a {
+                FeedArg::Int(n) => n as &(dyn ToSql + Sync),
+                FeedArg::Text(t) => t as &(dyn ToSql + Sync),
+            })
+            .collect();
+        self.msgs(&format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC"), &args)
     }
 
     fn owner_search_scan(

@@ -6,6 +6,8 @@
 //!   channels it belongs to.
 //! - `owner.history`: one of those conversations in full, paged, with per-message delivery
 //!   state for messages the owner's agents sent (every recipient) or received (theirs).
+//! - `owner.feed`: everything the owner's agents can read, newest first, between two seq bounds,
+//!   by agent, direction and place.
 //! - `owner.message`, `owner.attachment`: one message or attachment under the same rule.
 //! - `owner.search`: `search` over the same rule (the remote MCP's search).
 //! - `fleet.list`: every bound agent with host bridge state; delivery health for own agents.
@@ -22,7 +24,7 @@ use super::messages::{self, MsgRow};
 use crate::address::{Kind, split_qualified};
 use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, not_found, opt_i64, opt_str, str_param};
 use crate::protocol::PAGE;
-use crate::store::{Delivery, Tx};
+use crate::store::{Delivery, FeedBy, FeedPosts, FeedRange, Party, Tx};
 use crate::util::{iso_from_ms, is_ulid};
 
 /// A bridge is online while its last heartbeat is younger than this (three ping periods).
@@ -31,6 +33,9 @@ pub const ONLINE_TTL_MS: i64 = 90_000;
 pub const STUCK_AFTER_MS: i64 = 60_000;
 /// Default page of a conversation's history.
 const HISTORY_PAGE: i64 = 100;
+/// Default and largest page of `owner.feed`.
+const FEED_PAGE: i64 = 50;
+const FEED_MAX: i64 = 100;
 
 /// Attempt outcomes that end an attempt without reaching the recipient.
 const FAILED: &[&str] = &["expired", "dropped", "failed", "abandoned", "denied", "refused"];
@@ -115,6 +120,117 @@ pub fn history(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     head["messages"] = Value::Array(out);
     head["more"] = json!(more);
     Ok(head)
+}
+
+/// `owner.feed {after?, before?, limit?, agent?, direction?, place?}`: what the owner's agents can
+/// read with `after < seq < before` (both exclusive, both optional), newest first, at most
+/// `limit` (1 to 100, default 50); `more` when matching rows remain below the last one, inside the
+/// bounds. `agent`: the own agent is the sender, the DM recipient or a current member of the
+/// channel. `direction`: `out` (an own agent posted, or sent a DM to another owner's agent),
+/// `own` (a DM between two own agents), `in` (the rest). `place`: `dm`, or one `#channel`. Each
+/// row is the history view with `direction` and `via` (the own agents that can read it).
+///
+/// Read as index ranges, never a walk of the board: each own agent as sender and as DM recipient,
+/// each channel with an own member, every range newest first and cut at the page, merged without
+/// duplicates. Together they are exactly what the owner's agents can read.
+pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    browser_only(ctx)?;
+    let owner = ctx.p.user_id;
+    let after = opt_i64(body, "after")?.unwrap_or(0);
+    let before = opt_i64(body, "before")?.unwrap_or(i64::MAX);
+    let limit = opt_i64(body, "limit")?.unwrap_or(FEED_PAGE).clamp(1, FEED_MAX);
+    let agent = match opt_str(body, "agent")? {
+        Some(_) => Some(own_agent(ctx, body)?),
+        None => None,
+    };
+    let direction = opt_str(body, "direction")?;
+    if direction.is_some_and(|d| !["in", "out", "own"].contains(&d)) {
+        return Err(bad_request("direction is one of in, out, own"));
+    }
+    let memberships = ctx.db.owner_memberships(owner)?;
+    let mut owned_channels: Vec<String> = memberships.iter().map(|m| m.channel_id.clone()).collect();
+    owned_channels.sort();
+    owned_channels.dedup();
+    // place: DMs only, one channel an own agent is in, or both
+    let (dms, place_channel) = match opt_str(body, "place")? {
+        None => (true, None),
+        Some("dm") => (true, Some(None)),
+        Some(raw) => {
+            let name = crate::address::normalize_channel(raw).ok_or_else(|| bad_request(format!("invalid place '{raw}'")))?;
+            let m = memberships
+                .iter()
+                .find(|m| m.channel == name)
+                .ok_or_else(|| forbidden(format!("none of your agents is in #{name}")))?;
+            (false, Some(Some(m.channel_id.clone())))
+        }
+    };
+    let in_place = |c: &String| place_channel.as_ref().is_none_or(|p| p.as_ref() == Some(c));
+    let own_ids: Vec<String> = match &agent {
+        Some(a) => vec![a.id.clone()],
+        None => ctx.db.owner_agents(owner)?.into_iter().map(|a| a.id).collect(),
+    };
+    // The party at the other end of a DM, seen from a sender range and from a recipient range,
+    // and the senders a channel range keeps; None drops that part.
+    let (sent_to, received_from, posted_by) = match direction {
+        None => (Some(Party::Any), Some(Party::Any), Some(Party::Any)),
+        Some("out") => (Some(Party::Other), None, Some(Party::Own)),
+        Some("own") => (Some(Party::Own), Some(Party::Own), None),
+        _ => (None, Some(Party::Other), Some(Party::Other)),
+    };
+    let channels: Vec<String> = match &agent {
+        Some(a) => memberships.iter().filter(|m| m.agent_id == a.id).map(|m| m.channel_id.clone()).collect(),
+        None => owned_channels.clone(),
+    };
+    let channels: Vec<String> = channels.into_iter().filter(|c| in_place(c)).collect();
+    // An own sender's posts come from the channel ranges, except an agent's own posts in a
+    // channel it left (still readable through another own member), and `out` without an agent,
+    // which reads the own senders' ranges instead of every channel's.
+    let sender_posts = match (&agent, direction) {
+        (Some(_), None | Some("out")) | (None, Some("out")) => {
+            Some(FeedPosts::In(owned_channels.iter().filter(|c| in_place(c)).cloned().collect()))
+        }
+        _ => None,
+    };
+    let posted_by = if agent.is_none() && direction == Some("out") { None } else { posted_by };
+    let mut ranges = Vec::new();
+    for id in &own_ids {
+        ranges.push(FeedRange { by: FeedBy::Sender, id: id.clone(), dms: sent_to.filter(|_| dms), posts: sender_posts.clone() });
+        ranges.push(FeedRange { by: FeedBy::Recipient, id: id.clone(), dms: received_from.filter(|_| dms), posts: None });
+    }
+    if let Some(p) = posted_by {
+        for c in &channels {
+            ranges.push(FeedRange { by: FeedBy::Channel, id: c.clone(), dms: None, posts: Some(FeedPosts::By(p)) });
+        }
+    }
+    let mut rows = if after.saturating_add(1) < before {
+        ctx.db.owner_feed(owner, &ranges, after, before, limit + 1)?
+    } else {
+        Vec::new()
+    };
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    let mut out = Vec::with_capacity(rows.len());
+    for m in &rows {
+        let (from_own, to_own) = (owned(ctx, &m.sender), m.recipient.as_deref().is_some_and(|r| owned(ctx, r)));
+        let direction = match (&m.channel_id, from_own, to_own) {
+            (None, true, true) => "own",
+            (_, true, _) => "out",
+            _ => "in",
+        };
+        let via: Vec<&str> = match &m.channel_id {
+            Some(c) => memberships.iter().filter(|x| &x.channel_id == c).map(|x| x.agent.as_str()).collect(),
+            None => [from_own.then_some(m.sender.as_str()), m.recipient.as_deref().filter(|_| to_own)]
+                .into_iter()
+                .flatten()
+                .collect(),
+        };
+        let mut v = messages::view(ctx.db, m)?;
+        v["delivery"] = delivery(ctx, m)?;
+        v["direction"] = json!(direction);
+        v["via"] = json!(via);
+        out.push(v);
+    }
+    Ok(json!({"messages": out, "more": more}))
 }
 
 /// `owner.message`: one message an agent of the owner can read.

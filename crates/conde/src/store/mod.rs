@@ -164,6 +164,143 @@ pub struct ChannelSummary {
     pub messages: i64,
 }
 
+/// The indexed column one range of the owner feed walks (`messages_by_sender`,
+/// `messages_by_recipient`, `messages_by_channel`, each with `commit_seq` second).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedBy {
+    Sender,
+    Recipient,
+    Channel,
+}
+
+/// Whose agent a feed row has on its other side: one of the owner's, another owner's, or anyone's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Party {
+    Any,
+    Own,
+    Other,
+}
+
+/// The channel posts one feed range keeps.
+#[derive(Clone, Debug)]
+pub enum FeedPosts {
+    /// A sender range: the sender's posts in these channels (by id).
+    In(Vec<String>),
+    /// A channel range: posts whose sender is on this side.
+    By(Party),
+}
+
+/// One index range of `owner.feed`: the messages of one sender, DM recipient or channel,
+/// narrowed to the DMs and channel posts it keeps.
+#[derive(Clone, Debug)]
+pub struct FeedRange {
+    pub by: FeedBy,
+    pub id: String,
+    /// The DMs a sender or recipient range keeps, by the party at the other end.
+    pub dms: Option<Party>,
+    pub posts: Option<FeedPosts>,
+}
+
+/// An agent of an owner in a channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Membership {
+    pub agent_id: String,
+    /// The agent's canonical name.
+    pub agent: String,
+    pub channel_id: String,
+    pub channel: String,
+}
+
+/// A parameter of [`feed_seqs_sql`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeedArg {
+    Int(i64),
+    Text(String),
+}
+
+/// The seqs of the newest messages over `ranges` with `after < seq < before`, at most `limit`, in
+/// one statement for either store (`ph(n)` writes parameter n), with its parameters in order (the
+/// owner id only when a range names a side, so every parameter is used). Each range walks its
+/// index newest first and stops at `limit`; UNION merges them without duplicates (a DM between
+/// two own agents sits in a sender and a recipient range). None when no range keeps anything.
+pub(crate) fn feed_seqs_sql(
+    owner_id: i64,
+    ranges: &[FeedRange],
+    after: i64,
+    before: i64,
+    limit: i64,
+    ph: impl Fn(usize) -> String,
+) -> Option<(String, Vec<FeedArg>)> {
+    let mut args = vec![FeedArg::Int(after), FeedArg::Int(before), FeedArg::Int(limit)];
+    let (after, before, limit) = (ph(1), ph(2), ph(3));
+    let mut arg = |a: FeedArg| {
+        if let Some(n) = args.iter().position(|x| *x == a) {
+            return ph(n + 1);
+        }
+        args.push(a);
+        ph(args.len())
+    };
+    let sided = |p: Option<Party>| matches!(p, Some(Party::Own | Party::Other));
+    let names_a_side = ranges.iter().any(|r| sided(r.dms) || matches!(r.posts, Some(FeedPosts::By(p)) if sided(Some(p))));
+    let own = if names_a_side {
+        format!("(SELECT agent_id FROM agents WHERE owner_id = {})", arg(FeedArg::Int(owner_id)))
+    } else {
+        String::new()
+    };
+    let side = |column: &str, p: Party| match p {
+        Party::Any => None,
+        Party::Own => Some(format!("{column} IN {own}")),
+        Party::Other => Some(format!("{column} NOT IN {own}")),
+    };
+    let mut terms = Vec::new();
+    for r in ranges {
+        let mut keep = Vec::new();
+        // A recipient range is DMs only (a DM recipient is never set on a channel post); naming
+        // `channel_id IS NULL` there would offer SQLite messages_by_channel, every DM on the board.
+        match (r.dms, r.by) {
+            (Some(p), FeedBy::Recipient) => keep.push(side("sender_agent_id", p).unwrap_or_else(|| "1 = 1".into())),
+            (Some(p), _) => keep.push(
+                std::iter::once("channel_id IS NULL".to_string()).chain(side("recipient_agent_id", p)).collect::<Vec<_>>().join(" AND "),
+            ),
+            (None, _) => {}
+        }
+        match &r.posts {
+            Some(FeedPosts::In(ids)) if !ids.is_empty() => {
+                let list: Vec<String> = ids.iter().map(|c| arg(FeedArg::Text(c.clone()))).collect();
+                keep.push(format!("channel_id IN ({})", list.join(", ")));
+            }
+            Some(FeedPosts::By(p)) => keep.push(side("sender_agent_id", *p).unwrap_or_else(|| "1 = 1".into())),
+            _ => {}
+        }
+        if keep.is_empty() {
+            continue;
+        }
+        let column = match r.by {
+            FeedBy::Sender => "sender_agent_id",
+            FeedBy::Recipient => "recipient_agent_id",
+            FeedBy::Channel => "channel_id",
+        };
+        let id = arg(FeedArg::Text(r.id.clone()));
+        terms.push(format!(
+            "SELECT commit_seq FROM (SELECT commit_seq FROM messages WHERE {column} = {id} AND commit_seq > {after}
+                 AND commit_seq < {before} AND ({keep}) ORDER BY commit_seq DESC LIMIT {limit}) AS r{n}",
+            keep = keep.join(" OR "),
+            n = terms.len()
+        ));
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    // SQLite caps one compound SELECT at 500 terms: union them in groups.
+    let groups: Vec<String> = terms
+        .chunks(100)
+        .enumerate()
+        .map(|(n, g)| format!("SELECT commit_seq FROM ({}) AS g{n}", g.join(" UNION ")))
+        .collect();
+    let sql = format!("SELECT commit_seq FROM ({}) AS u ORDER BY commit_seq DESC LIMIT {limit}", groups.join(" UNION "));
+    Some((sql, args))
+}
+
 /// Which messages a search scans, on top of what the caller may see.
 #[derive(Clone, Copy, Debug)]
 pub enum SearchScope<'a> {
@@ -736,6 +873,13 @@ pub trait Tx {
     fn touch_bridge(&self, instance: &str, at: &str) -> StoreResult<bool>;
     /// Announces a board change ([`topics`]) to the browsers on commit.
     fn announce(&self, topics: u8);
+    /// Every channel membership of the owner's agents, by agent then channel name.
+    fn owner_memberships(&self, owner_id: i64) -> StoreResult<Vec<Membership>>;
+    /// The newest messages over `ranges` (see [`feed_seqs_sql`]) with `after < seq < before`, at
+    /// most `limit`, newest first. The ranges decide what is read; the caller builds them from
+    /// what the owner's agents can read.
+    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64)
+    -> StoreResult<Vec<Message>>;
     /// Like [`Tx::search_scan`] over what the owner's agents can read (the
     /// [`Tx::owner_message`] rule), after `after`, oldest first.
     fn owner_search_scan(

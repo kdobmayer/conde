@@ -35,14 +35,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   one transaction). Decided: revoke by default like the other mints, with
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
-- B13. Intermittent tests: setup_check_asks_the_live_daemon (2 s daemon-start
-  gate), v2_daemon g1 (700 ms register gate) and Postgres shared_board
-  a_read_hold_is_kept_when_the_mailbox_leaves_the_endpoints ("held" vs "read",
-  ~line 1092, not a timing gate: find the ordering it depends on) each failed
-  once on a loaded box and passed on rerun. Make each gate measure what it
-  claims (a bound relative to a baseline measured in the same run, or a
-  generous absolute bound with the tight one behind an env flag for the
-  release machine). Area: tests only.
 - B14. Test harness port race: web_ui
   history_pages_back_in_chronological_order failed once at web_ui.rs:146
   (server start unwrap after the harness freed a probe port) and passed on 5

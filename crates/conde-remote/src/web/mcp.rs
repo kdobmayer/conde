@@ -82,18 +82,18 @@ fn allowed_origin(web: &WebState, origin: &str) -> bool {
 }
 
 /// The authenticated caller of a request: a live grant of an enabled user, the token unexpired
-/// and issued for this endpoint.
-async fn gate(web: &WebState, headers: &HeaderMap) -> Result<McpCaller, Response> {
+/// and issued for this endpoint; else the response refusing it (boxed: a `Response` is large).
+async fn gate(web: &WebState, headers: &HeaderMap) -> Result<McpCaller, Box<Response>> {
     let refuse = |reason: &str, grant: &str| {
         tracing::warn!(reason, grant, "mcp request unauthenticated");
     };
     let Some(token) = bearer(headers) else {
         refuse("no token", "");
-        return Err(challenge(web, false));
+        return Err(Box::new(challenge(web, false)));
     };
     if !token.starts_with(ACCESS_PREFIX) || token.len() != ACCESS_PREFIX.len() + 64 {
         refuse("not an access token", "");
-        return Err(challenge(web, true));
+        return Err(Box::new(challenge(web, true)));
     }
     let (key, now) = (digest(token), web.now());
     let access = match web.store(move |s| s.mcp_access(&key, now)).await {
@@ -102,12 +102,12 @@ async fn gate(web: &WebState, headers: &HeaderMap) -> Result<McpCaller, Response
             tracing::warn!(error = %e, "mcp token check failed: store unavailable");
             let mut r = (StatusCode::SERVICE_UNAVAILABLE, "credential store unavailable, retry\n").into_response();
             r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-            return Err(r);
+            return Err(Box::new(r));
         }
     };
     let Some(a) = access else {
         refuse("unknown token", "");
-        return Err(challenge(web, true));
+        return Err(Box::new(challenge(web, true)));
     };
     let g = &a.grant;
     let reason = if g.revoked_at.is_some() {
@@ -125,7 +125,7 @@ async fn gate(web: &WebState, headers: &HeaderMap) -> Result<McpCaller, Response
     };
     if let Some(reason) = reason {
         refuse(reason, &g.grant_id);
-        return Err(challenge(web, true));
+        return Err(Box::new(challenge(web, true)));
     }
     Ok(McpCaller {
         user_id: g.user_id,
@@ -193,7 +193,7 @@ async fn endpoint(State(st): State<McpState>, headers: HeaderMap, body: Bytes) -
     }
     let mut caller = match gate(&st.web, &headers).await {
         Ok(c) => c,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,

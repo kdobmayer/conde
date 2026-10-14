@@ -39,9 +39,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 - B7. [I] A sign-in `next` path over 2048 characters is dropped silently and
   a very long authorize request lands on /keys. Refuse it with a clear 400 (or
   carry it) and test the boundary. Area: crates/conde-remote web login.
-- B8. Clippy: the 4 pre-existing `result_large_err` warnings in unchanged code
-  (`cargo clippy --workspace --all-targets`). Box the large error or restructure;
-  no behavior change. Area: named by the warnings.
 - B9. [J] Local build id names HEAD and the date of the first build of that
   commit; a later rebuild keeps the older date and uncommitted changes are not
   marked. Make build.rs rerun on tree changes and append `-dirty`. Area:

@@ -497,20 +497,22 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then(|| token.to_owned())
 }
 
-/// The caller's principal, or the response refusing it: 401 for an invalid token, 503 (retry)
-/// when the store could not answer.
-async fn authenticate(shared: &Shared, headers: &HeaderMap) -> Result<Principal, Response> {
+/// The caller's principal, or the response refusing it (boxed: a `Response` is large): 401 for
+/// an invalid token, 503 (retry) when the store could not answer.
+async fn authenticate(shared: &Shared, headers: &HeaderMap) -> Result<Principal, Box<Response>> {
     match check(shared, bearer(headers)).await {
         Authentication::Valid(principal) => Ok(principal),
-        Authentication::Invalid => Err(unauthorized()),
+        Authentication::Invalid => Err(Box::new(unauthorized())),
         Authentication::Unavailable(why) => {
             tracing::warn!(%why, "credential check failed: store unavailable");
-            Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(header::RETRY_AFTER, "5")],
-                "credential store unavailable, retry\n",
-            )
-                .into_response())
+            Err(Box::new(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, "5")],
+                    "credential store unavailable, retry\n",
+                )
+                    .into_response(),
+            ))
         }
     }
 }
@@ -561,7 +563,7 @@ async fn rpc(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes)
     }
     let principal = match authenticate(&shared, &headers).await {
         Ok(p) => p,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     match serde_json::from_slice::<Value>(&body) {
         Ok(request @ Value::Object(_)) => {
@@ -586,7 +588,7 @@ async fn bridge(
 ) -> Response {
     let principal = match authenticate(&shared, &headers).await {
         Ok(p) => p,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     let upgrade = match upgrade {
         Ok(u) => u,

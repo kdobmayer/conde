@@ -114,12 +114,13 @@ fn store_failed(e: session::WebError) -> Response {
     )
 }
 
-/// The session named by the request's cookie.
-async fn signed_in(app: &AppState, headers: &HeaderMap) -> Result<session::Session, Response> {
+/// The session named by the request's cookie, or the response refusing it (boxed: a
+/// `Response` is large).
+async fn signed_in(app: &AppState, headers: &HeaderMap) -> Result<session::Session, Box<Response>> {
     match session::current(&app.web, &CookieJar::from_headers(headers)).await {
         Ok(Some(s)) => Ok(s),
-        Ok(None) => Err(signed_out()),
-        Err(e) => Err(store_failed(e)),
+        Ok(None) => Err(Box::new(signed_out())),
+        Err(e) => Err(Box::new(store_failed(e))),
     }
 }
 
@@ -167,7 +168,7 @@ pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Resp
     }
     let session = match signed_in(app, &headers).await {
         Ok(s) => s,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     let token = headers
         .get(CSRF_HEADER)
@@ -207,7 +208,7 @@ pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Resp
 async fn session_info(State(app): State<AppState>, headers: HeaderMap) -> Response {
     let session = match signed_in(&app, &headers).await {
         Ok(s) => s,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     let r = &session.record;
     (
@@ -228,7 +229,7 @@ async fn attachment(
 ) -> Response {
     let session = match signed_in(&app, &headers).await {
         Ok(s) => s,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     let request = json!({"v": 1, "type": "request", "request_id": "download", "op": "owner.attachment",
                          "body": {"attachment_id": id}});
@@ -410,7 +411,7 @@ async fn events(
     }
     let session = match signed_in(&app, &headers).await {
         Ok(s) => s,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     let upgrade = match upgrade {
         Ok(u) => u,

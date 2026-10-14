@@ -128,17 +128,21 @@ fn pkce_safe(s: &str) -> bool {
     (43..=128).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
 }
 
-/// The checks of an authorization request, repeated on consent (nothing pending is stored).
-async fn vet(state: &WebState, p: &HashMap<String, String>) -> Result<Vetted, Bounce> {
+/// The checks of an authorization request, repeated on consent (nothing pending is stored);
+/// the refusal is boxed (a `Bounce` carries a URL and is large).
+async fn vet(state: &WebState, p: &HashMap<String, String>) -> Result<Vetted, Box<Bounce>> {
     let clients = &state.0.clients;
-    let client = clients.client(get(p, "client_id")).await.map_err(Bounce::Page)?;
-    let redirect = clients.check_redirect(&client, get(p, "redirect_uri")).map_err(Bounce::Page)?;
+    let page = |r| Box::new(Bounce::Page(r));
+    let client = clients.client(get(p, "client_id")).await.map_err(page)?;
+    let redirect = clients.check_redirect(&client, get(p, "redirect_uri")).map_err(page)?;
     let st = p.get("state").filter(|s| !s.is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control));
-    let back = |error, description| Bounce::Back {
-        redirect: redirect.clone(),
-        state: st.cloned(),
-        error,
-        description,
+    let back = |error, description| {
+        Box::new(Bounce::Back {
+            redirect: redirect.clone(),
+            state: st.cloned(),
+            error,
+            description,
+        })
     };
     let Some(st) = st else {
         return Err(back("invalid_request", "state is required"));
@@ -237,7 +241,7 @@ pub(crate) async fn authorize(
     };
     let v = match vet(&state, &p).await {
         Ok(v) => v,
-        Err(b) => return bounce(&state, b),
+        Err(b) => return bounce(&state, *b),
     };
     let session = match session::current(&state, &jar).await {
         Ok(Some(s)) => s,
@@ -293,7 +297,7 @@ pub(crate) async fn consent(
     }
     let v = match vet(&state, &p).await {
         Ok(v) => v,
-        Err(b) => return bounce(&state, b),
+        Err(b) => return bounce(&state, *b),
     };
     let user = session.record.user_name.clone();
     match get(&p, "decision") {

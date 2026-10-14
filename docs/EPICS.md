@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-14 15:25: batch 27 (Konstantin: U2 browser allow-list) integrated 64c3723 (no follow-up); full run 680 passed with Postgres (detached). main = squash b95e815, NO release (U2 alone is not usable; release + roll with U3). PR 27 closed. Konstantin agent on U3 (per-range owner.feed, counts relayed: dakai 421 msgs). Owner artifact 7AbTWjBzBgGpVDgCkezVps no longer exists (renders stay in docs/web-ui-v2/options).
 - 2026-10-14 15:15: S1 smoke on 8369aa7 GREEN (NUC): upgrade line, bridge restarted by setup, doctor and setup --check clear, conde watch showed a new local DM within 3 s, DM both ways (DM leg against revision 0000022).
 - 2026-10-14 15:12: ROLLED conde:c88c317 = revision ca-conde--0000022 (two replicas, healthy, healthz 200, POST /mcp 401). PR 27 (U2 browser allow-list, 6949342, 3 lines + test) reviewed at source by desk: READY; cherry-picked c60bcea in worktree conde-batch27; integration lane running (web_ui + full run detached). Decision: U2 to main without a release; release + roll with U3.
 - 2026-10-14 15:10: release of 8369aa7 GREEN (run 38567232250; fresh install prints conde 0.1.0 (8369aa7 2026-10-14), conde watch present); S1 requested from Konstantin agent. Image conde:c88c317 still building.

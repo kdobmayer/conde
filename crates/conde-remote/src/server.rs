@@ -337,7 +337,18 @@ pub async fn start(
     dispatcher: Arc<dyn Dispatcher>,
     source: Arc<dyn NotificationSource>,
 ) -> std::io::Result<ServerHandle> {
-    let listener = TcpListener::bind(listen).await?;
+    start_on(TcpListener::bind(listen).await?, config, auth, dispatcher, source).await
+}
+
+/// As [`start`], serving on a listener the caller already bound (it knows the port before the
+/// server starts, with no window in which another process can take it).
+pub async fn start_on(
+    listener: TcpListener,
+    config: ServerConfig,
+    auth: Arc<dyn Authenticator>,
+    dispatcher: Arc<dyn Dispatcher>,
+    source: Arc<dyn NotificationSource>,
+) -> std::io::Result<ServerHandle> {
     let local_addr = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let body_limit = config.max_frame_bytes;

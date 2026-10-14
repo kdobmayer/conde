@@ -35,11 +35,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   one transaction). Decided: revoke by default like the other mints, with
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
-- B14. Test harness port race: web_ui
-  history_pages_back_in_chronological_order failed once at web_ui.rs:146
-  (server start unwrap after the harness freed a probe port) and passed on 5
-  reruns; make the harness hand the server a bound listener instead of a freed
-  port number. Area: tests only.
 - B15. Upgrade path says to run `conde setup`: after an upgrade-install the
   installed skills can differ from what the new release writes (the NUC smoke
   on 01eff10 saw setup --check report both skills as differing until setup ran).

@@ -870,7 +870,7 @@ async fn protocol_errors_map_to_their_statuses(d: Arc<Dispatcher>) {
 
 async fn the_buckets_run_out(d: Arc<Dispatcher>) {
     // Slow refills (one a minute, one per 30 s), so the test's own pace cannot refill them.
-    let limits = McpLimits { tool_calls_per_min: 1, tool_calls_burst: 3, writes_per_min: 2, oauth_per_min: 1000 };
+    let limits = McpLimits { tool_calls_per_min: 1, tool_calls_burst: 3, writes_per_min: 2, oauth_per_min: 1000, ..McpLimits::default() };
     let m = mcp_with(&d, |c| c.mcp.limits = limits).await;
     let b = signed_in(&m).await;
     cast(&m, true).await;

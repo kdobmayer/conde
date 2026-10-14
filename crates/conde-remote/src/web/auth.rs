@@ -29,6 +29,7 @@ use serde_json::json;
 use thiserror::Error;
 
 use super::keys::{self, host_slug};
+use super::ratelimit::ClientIp;
 use super::session::{self, WebError, digest, login_cookie, random_token, removal, same_secret};
 use super::{CliCode, CreateUser, Identity, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
 
@@ -752,10 +753,30 @@ fn pkce_matches(verifier: String, challenge: &str) -> bool {
 /// `POST /auth/cli/redeem` `{code, state, code_verifier, host}`: a 64-hex `code` is the
 /// loopback's, taken whatever the outcome, then expiry, state and PKCE are checked; any other
 /// `code` is a pasted one (see [`paste_redeem`]). Both mint the host key the same way.
+/// The redeem's 429: `retry_after` in the body and the header.
+fn redeem_limited(wait: u64, message: String) -> Response {
+    let mut r = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({"error": "rate_limited", "message": message, "retry_after": wait})),
+    )
+        .into_response();
+    let h = r.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
+        h.insert(header::RETRY_AFTER, v);
+    }
+    r
+}
+
 pub(crate) async fn cli_redeem(
     State(state): State<WebState>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<RedeemRequest>,
 ) -> Response {
+    if let Err(wait) = state.0.limits.cli_redeem(ip) {
+        tracing::info!(client_ip = %ip, wait, endpoint = "cli redeem", "rate limited");
+        return redeem_limited(wait, format!("too many sign-in attempts from this address; retry in {wait} s"));
+    }
     let invalid = |m: &str| redeem_error(StatusCode::BAD_REQUEST, "invalid_grant", m);
     if req.code.len() != 64 {
         return paste_redeem(state, req).await;
@@ -820,6 +841,14 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     };
     if state.now() - code.created_at > state.limits().cli_code_ttl {
         return invalid("the code expired; run conde login again");
+    }
+    // Per account, across re-issued codes: the record goes back untouched (no try spent).
+    if let Err(wait) = state.0.limits.cli_guess(code.user_id) {
+        tracing::info!(user = %code.user_name, wait, "conde login code attempts rate limited");
+        if let Err(e) = state.store(move |s| s.insert_cli_code(&key, &code)).await {
+            return store_failed(e);
+        }
+        return redeem_limited(wait, format!("too many code attempts for this account; retry in {wait} s"));
     }
     let right_code = code
         .paste

@@ -257,6 +257,7 @@ async fn a_re_enrolled_host_keeps_one_live_key(d: Arc<Dispatcher>) {
         let (status, got) = redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "NUC"})).await;
         assert_eq!(status, StatusCode::OK, "{got}");
         assert_eq!((got["host_id"].as_str(), got["reenrolled"].as_bool()), (Some("nuc"), Some(again)), "{got}");
+        assert_eq!(got["replaced"].as_bool(), Some(again), "a live key existed exactly when the host did: {got}");
         if again {
             assert_eq!(next_revoked(&mut events).await, "nuc");
         }
@@ -285,6 +286,20 @@ async fn a_re_enrolled_host_keeps_one_live_key(d: Arc<Dispatcher>) {
     let code = browser_leg(&env, &b, &run).await;
     let (_, got) = redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "lab"})).await;
     assert_eq!((got["host_id"].as_str(), got["reenrolled"].as_bool()), (Some("lab-2"), Some(false)), "{got}");
+    assert_eq!(got["replaced"].as_bool(), Some(false), "{got}");
+
+    // a host whose keys were all revoked earlier: re-enrolled, but no live key was replaced
+    let s = env.store.clone();
+    blocking(move || {
+        let user = s.user_by_identity(TENANT, "oid-krisztian").unwrap().unwrap();
+        assert_eq!(s.revoke_host(user.user_id, "nuc", START).unwrap(), 1);
+    })
+    .await;
+    let run = cli_run();
+    let code = browser_leg(&env, &b, &run).await;
+    let (_, got) = redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "NUC"})).await;
+    assert_eq!((got["host_id"].as_str(), got["reenrolled"].as_bool(), got["replaced"].as_bool()),
+               (Some("nuc"), Some(true), Some(false)), "{got}");
 }
 
 async fn pasted_login_codes_count_tries_and_redeem_once(d: Arc<Dispatcher>) {

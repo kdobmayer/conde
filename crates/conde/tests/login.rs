@@ -40,12 +40,19 @@ struct Board {
     per_address: Mutex<(u32, u64)>,
     /// Hosts a key was minted for: a second mint is a re-enrollment.
     hosts: Mutex<std::collections::HashSet<String>>,
+    /// How a re-enrollment answers `replaced`: Some(live keys revoked), or None as an older
+    /// server that leaves the field out.
+    replaced: Mutex<Option<bool>>,
 }
 
 impl Board {
     fn minted(&self, host: &Value) -> Response {
         let reenrolled = !self.hosts.lock().unwrap().insert(host.as_str().unwrap_or_default().to_string());
-        Json(json!({"host_id": host, "key": KEY, "user": "krisztian", "reenrolled": reenrolled})).into_response()
+        let mut answer = json!({"host_id": host, "key": KEY, "user": "krisztian", "reenrolled": reenrolled});
+        if let Some(replaced) = *self.replaced.lock().unwrap() {
+            answer["replaced"] = json!(reenrolled && replaced);
+        }
+        Json(answer).into_response()
     }
 }
 
@@ -349,7 +356,7 @@ fn a_machine_without_a_display_is_headless() {
 /// finish; the second call carries the code the human read out and stores the key.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
-    let (server, _board) = board().await;
+    let (server, board) = board().await;
     let config = tempfile::tempdir().unwrap();
     let conde = |args: Vec<String>| {
         let config = config.path().to_path_buf();
@@ -393,18 +400,26 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     assert_eq!((stored.host_id.as_str(), stored.key.as_str()), ("box-9", KEY));
     assert_eq!(std::fs::read_dir(config.path().join("conde/login")).unwrap().count(), 0, "nothing waits any more");
 
-    // the same host again: the server revoked its previous key, and the CLI says so
-    let start = vec!["login".into(), "--server".into(), server.clone(), "--host".into(), "box-9".into(), "--no-browser".into()];
-    let (status, _, err) = conde(start).await.unwrap();
-    assert_eq!(status, Some(3), "{err}");
-    let url = err.lines().map(str::trim).find(|l| l.starts_with(&format!("{server}/auth/cli?mode=code"))).unwrap().to_string();
-    let shown = shown_code(&url).await;
-    let finish = vec!["login", "--server", &server, "--host", "box-9", "--code", &shown, "--board", "dakai"];
-    let (status, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
-    assert_eq!(status, Some(0), "{out}{err}");
-    assert!(out.contains("\nre-enrolled host box-9: the previous key for this host is revoked\n"), "{out}");
-    assert!(out.contains(&format!("\nboard dakai at {server} (account krisztian); credential stored at")), "{out}");
-    assert!(!out.contains("\nenrolled host"), "{out}");
+    // the same host again: the CLI says whether the server revoked a live key, or, when an
+    // older server does not say, only that the host was re-enrolled
+    for (replaced, head) in [
+        (Some(true), "\nre-enrolled host box-9, previous key revoked\n"),
+        (Some(false), "\nre-enrolled host box-9, no live key before\n"),
+        (None, "\nre-enrolled host box-9\n"),
+    ] {
+        *board.replaced.lock().unwrap() = replaced;
+        let start = vec!["login".into(), "--server".into(), server.clone(), "--host".into(), "box-9".into(), "--no-browser".into()];
+        let (status, _, err) = conde(start).await.unwrap();
+        assert_eq!(status, Some(3), "{err}");
+        let url = err.lines().map(str::trim).find(|l| l.starts_with(&format!("{server}/auth/cli?mode=code"))).unwrap().to_string();
+        let shown = shown_code(&url).await;
+        let finish = vec!["login", "--server", &server, "--host", "box-9", "--code", &shown, "--board", "dakai"];
+        let (status, out, err) = conde(finish.into_iter().map(String::from).collect()).await.unwrap();
+        assert_eq!(status, Some(0), "{out}{err}");
+        assert!(out.contains(head), "{replaced:?}: {out}");
+        assert!(out.contains(&format!("\nboard dakai at {server} (account krisztian); credential stored at")), "{out}");
+        assert!(!out.contains("\nenrolled host") && !out.contains("previous key for this host"), "{out}");
+    }
 }
 
 /// A rate-limited redeem is a retry, like a wrong code: the CLI shows the server's wait and the

@@ -173,6 +173,48 @@ fn a_read_after_a_hold_settles_the_notification() {
     }
 }
 
+/// The reviewer's case: two channel messages, the older one held for Carol; Carol reads the newer
+/// one by id. The cursor now covers both, so the older notification settles as read too, and the
+/// change is announced. On the test store (Postgres with CONDE_TEST_PG) and on SQLite, where the
+/// announcement is delivered in process (a Postgres command board has no LISTEN connection).
+#[test]
+fn reading_a_later_channel_message_settles_the_earlier_ones() {
+    later_channel_read(setup(), false);
+    let b = Board::sqlite();
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    b.register(CAROL, "carol");
+    later_channel_read(b, true);
+}
+
+fn later_channel_read(b: Board, announce: bool) {
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    b.ok(CAROL, "channel.join", json!({"channel": "#dev"}));
+    let m1 = b.send(ALICE, "#dev", "@carol first");
+    let p = b.d.bridge_principal(&b.p);
+    bridge_call(&b, &p, "bridge.fence", json!({})).unwrap();
+    let claim = bridge_call(&b, &p, "bridge.claim", json!({})).unwrap();
+    let attempt = claim["jobs"][0]["attempt_id"].as_str().unwrap().to_string();
+    bridge_call(&b, &p, "bridge.report", json!({"attempt_id": attempt, "outcome": "held", "event_seq": 1})).unwrap();
+    let m2 = b.send(ALICE, "#dev", "a later post");
+    assert_eq!(b.status_of(&m1, "carol"), "held");
+    let mut events = b.d.store().pending().events();
+    b.ok(CAROL, "message.read", json!({"id": m2}));
+    assert_eq!(b.status_of(&m1, "carol"), "read", "the cursor covers the earlier message");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(if announce { 2000 } else { 0 });
+    let announced = loop {
+        match events.try_recv() {
+            Ok(conde::store::Wake::Board(t)) if t & conde::store::topics::DELIVERY != 0 => break true,
+            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(_) if std::time::Instant::now() > deadline => break false,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    assert!(announced || !announce, "the delivery change is announced to the web views");
+    let again = bridge_call(&b, &p, "bridge.claim", json!({"open": true})).unwrap();
+    assert_eq!((&again["jobs"], &again["open"], &again["held"]), (&json!([]), &json!([]), &json!([])), "{again}");
+}
+
 #[test]
 fn fence_makes_one_instance_active_and_open_attempts_follow_it() {
     let b = setup();

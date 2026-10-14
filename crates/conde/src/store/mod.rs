@@ -621,6 +621,9 @@ pub trait Tx {
     /// Settles the recipient's notification of the message as read while it is still open
     /// (pending, dispatching, notified, held); true when one was.
     fn settle_read(&self, message_id: &str, recipient_id: &str) -> StoreResult<bool>;
+    /// The same for every message of the channel up to `cursor` (the recipient's read cursor
+    /// there); the number settled.
+    fn settle_read_in_channel(&self, channel_id: &str, recipient_id: &str, cursor: i64) -> StoreResult<u64>;
     /// Sets the status and, when given, the next attempt time.
     fn settle_notification(&self, id: &str, status: &str, next_attempt_at: Option<i64>) -> StoreResult<()>;
     /// The push state of the DM `message_id` to `recipient`.

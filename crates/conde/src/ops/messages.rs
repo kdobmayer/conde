@@ -253,14 +253,20 @@ fn page(mut rows: Vec<MsgRow>) -> (Vec<MsgRow>, Option<i64>) {
 /// open: a hold or an acceptance that landed before the read is not left standing (counted as
 /// held, reopened on a reconnect) for a message already read.
 fn mark_read(ctx: &Ctx, me: &Agent, m: &MsgRow) -> OpResult<()> {
-    match &m.channel_id {
-        Some(c) => channels::advance_cursor(ctx.db, c, &me.id, m.seq)?,
+    let settled = match &m.channel_id {
+        // The cursor reads everything up to it: every open notification below it settles too.
+        Some(c) => {
+            channels::advance_cursor(ctx.db, c, &me.id, m.seq)?;
+            let cursor = channels::read_seq(ctx.db, c, &me.id)?.unwrap_or(m.seq);
+            ctx.db.settle_read_in_channel(c, &me.id, cursor)? > 0
+        }
         None if m.recipient_id.as_deref() == Some(me.id.as_str()) => {
             ctx.db.mark_dm_read(&m.id, &me.id, &ctx.now_iso())?;
+            ctx.db.settle_read(&m.id, &me.id)?
         }
         None => return Ok(()),
-    }
-    if ctx.db.settle_read(&m.id, &me.id)? {
+    };
+    if settled {
         ctx.db.announce(topics::DELIVERY);
     }
     Ok(())

@@ -1507,6 +1507,15 @@ impl Tx for PgTx {
         self.settle_notification(id, status, None)
     }
 
+    fn settle_read_in_channel(&self, channel_id: &str, recipient_id: &str, cursor: i64) -> StoreResult<u64> {
+        self.execute(
+            "UPDATE notifications SET status = 'read'
+             WHERE recipient_agent_id = $2 AND status IN ('pending', 'dispatching', 'notified', 'held')
+               AND message_id IN (SELECT message_id FROM messages WHERE channel_id = $1 AND commit_seq <= $3)",
+            &[&channel_id, &recipient_id, &cursor],
+        )
+    }
+
     fn settle_read(&self, message_id: &str, recipient_id: &str) -> StoreResult<bool> {
         Ok(self.execute(
             "UPDATE notifications SET status = 'read'

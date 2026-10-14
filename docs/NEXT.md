@@ -115,6 +115,8 @@ size (favicon, header, dark and light theme) before accepting one.
 
 ## E. Windows support (owner, 2026-10-09: last, only after everything else; one user)
 
+DROPPED from the release gate 2026-10-14: no Windows user; the code stays, the windows release job is gone, the unverified list below is not pursued.
+
 Scope, from what the code assumes today: x86_64-pc-windows-msvc build on a
 windows-latest runner (conde.exe + SHA256SUMS); install.ps1 (irm | iex) to
 %LOCALAPPDATA%\conde\bin with PATH update; the local CLI transport (unix

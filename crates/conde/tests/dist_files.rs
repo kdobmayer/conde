@@ -1,5 +1,5 @@
-//! The Windows installer and the release workflow agree on names, paths and the
-//! integrity contract (the scripts themselves run on Windows and the release runners).
+//! The Windows installer keeps its names, paths and integrity contract, and the release
+//! workflow publishes it; the release builds no Windows binary (dropped 2026-10-14).
 
 const INSTALL_PS1: &str = include_str!("../../../dist/install.ps1");
 const RELEASE: &str = include_str!("../../../.github/workflows/release.yml");
@@ -29,18 +29,12 @@ fn install_ps1_installs_the_released_binary_for_this_user() {
 }
 
 #[test]
-fn the_release_builds_and_publishes_the_windows_binary_and_installer() {
-    for needle in [
-        "runs-on: windows-latest",
-        "TARGET: x86_64-pc-windows-msvc",
-        "RUSTFLAGS: -C target-feature=+crt-static",
-        &format!("NAME: {WINDOWS_BINARY}"),
-        "name: conde-windows-x86_64\n",
-        "needs: [web, macos, linux, windows]",
-        "cp dist/install.ps1 out/install.ps1",
-        "-n install.ps1 -f out/install.ps1",
-    ] {
+fn the_release_publishes_the_installer_but_builds_no_windows_binary() {
+    for needle in ["needs: [web, macos, linux]", "cp dist/install.ps1 out/install.ps1", "-n install.ps1 -f out/install.ps1"] {
         assert!(RELEASE.contains(needle), "release.yml lacks {needle:?}");
+    }
+    for needle in ["windows-latest", "x86_64-pc-windows-msvc", "conde-windows-"] {
+        assert!(!RELEASE.contains(needle), "release.yml still has {needle:?}");
     }
 }
 

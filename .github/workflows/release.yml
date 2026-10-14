@@ -1,6 +1,6 @@
 name: release
 
-# Static Linux, macOS and Windows binaries with a SHA256SUMS file, published to the public
+# Static Linux and macOS binaries with a SHA256SUMS file, published to the public
 # `dist` blob container that https://conde.nativeai.space/dist/* redirects to.
 on:
   push:
@@ -189,92 +189,8 @@ jobs:
           path: out/
           if-no-files-found: error
 
-  windows:
-    runs-on: windows-latest
-    needs: build-id
-    env:
-      CONDE_BUILD_COMMIT: ${{ needs.build-id.outputs.commit }}
-      CONDE_BUILD_DATE: ${{ needs.build-id.outputs.date }}
-      TARGET: x86_64-pc-windows-msvc
-      NAME: conde-windows-x86_64.exe
-      # the VC++ runtime DLL is not on every Windows machine: link the C runtime statically
-      RUSTFLAGS: -C target-feature=+crt-static
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Toolchain
-        shell: bash
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
-          rustup default "$RUST_TOOLCHAIN"
-      - name: Build
-        shell: bash
-        run: cargo build --release --locked -p conde --target "$TARGET"
-      - name: Package
-        shell: bash
-        run: |
-          mkdir out
-          cp "target/$TARGET/release/conde.exe" "out/$NAME"
-          (cd out && sha256sum "$NAME" > "$NAME.sha256")
-      - name: Smoke test
-        shell: pwsh
-        run: |
-          $v = & "out/$env:NAME" --version
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          Write-Host $v
-          if (-not "$v".EndsWith(" ($env:CONDE_BUILD_COMMIT $env:CONDE_BUILD_DATE)")) { throw "not this build's id: $v" }
-      - name: Identity probe (named pipe, Toolhelp ancestry walk)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $bin = (Resolve-Path "out/$env:NAME").Path
-          $tmp = Join-Path $env:RUNNER_TEMP 'conde-probe'
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-          $env:CONDE_DATA = "$tmp\data"
-          $env:CONDE_SOCK = '\\.\pipe\conde-ci-probe'
-          $daemon = Start-Process -FilePath $bin -ArgumentList 'daemon' -PassThru -NoNewWindow `
-            -RedirectStandardOutput "$tmp\daemon.out" -RedirectStandardError "$tmp\daemon.log"
-          $ok = $false
-          try {
-            for ($i = 0; $i -lt 100; $i++) {
-              if ([IO.Directory]::GetFiles('\\.\pipe\') -contains $env:CONDE_SOCK) { break }
-              Start-Sleep -Milliseconds 100
-            }
-            Write-Host '--- conde doctor'
-            & $bin doctor
-            Write-Host "--- doctor exit status: $LASTEXITCODE"
-            $user = $env:USERNAME.ToLowerInvariant()
-            # a bare runner: the walk finds no harness, so this shell acts as the human
-            & $bin register ci.smoke
-            if ($LASTEXITCODE -ne 0) { throw 'register failed' }
-            $who = ((& $bin whoami) | Select-Object -First 1).Split(' ')[0]
-            if ($who -ne "$user/ci.smoke") { throw "whoami: $who" }
-            $resolved = "$(& $bin resolve ci.smoke)"
-            if (-not $resolved.StartsWith("human:$user@")) { throw "ci.smoke does not resolve to the human: $resolved" }
-            # without session markers under a process named claude it must refuse
-            Copy-Item "$env:SystemRoot\System32\cmd.exe" "$tmp\claude.exe"
-            # separate arguments: cmd /c takes the rest of its command line as is
-            $out = "$(& "$tmp\claude.exe" /d /c $bin whoami 2>&1)"
-            if ($LASTEXITCODE -eq 0) { throw "whoami succeeded under claude: $out" }
-            if (-not $out.Contains('no session markers, but this process runs under a claude agent')) { throw "unexpected output: $out" }
-            Write-Host "refused as expected: $out"
-            $ok = $true
-            # the expected refusal's exit status must not become the step's
-            $global:LASTEXITCODE = 0
-          } finally {
-            if (-not $ok) {
-              Write-Host "--- daemon log ($tmp\daemon.log)"
-              Get-Content "$tmp\daemon.log" -ErrorAction SilentlyContinue
-            }
-            Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
-          }
-      - uses: actions/upload-artifact@v7.0.2
-        with:
-          name: conde-windows-x86_64
-          path: out/
-          if-no-files-found: error
-
   publish:
-    needs: [web, macos, linux, windows]
+    needs: [web, macos, linux]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -293,11 +209,6 @@ jobs:
           pattern: conde-linux-*
           merge-multiple: true
           path: out
-      - uses: actions/download-artifact@v8.0.2
-        with:
-          pattern: conde-windows-*
-          merge-multiple: true
-          path: out
       - name: Assemble
         run: |
           version="v$(sed -n 's/^version = "\(.*\)"/\1/p' crates/conde/Cargo.toml | head -n 1)"
@@ -310,7 +221,7 @@ jobs:
           echo "$version" > out/latest
           # everything in out/ is published: refuse any file not on this list
           expected=""
-          for bin in conde-darwin-arm64 conde-darwin-x86_64 conde-linux-x86_64 conde-linux-aarch64 conde-windows-x86_64.exe; do
+          for bin in conde-darwin-arm64 conde-darwin-x86_64 conde-linux-x86_64 conde-linux-aarch64; do
             expected="$expected $bin $bin.sha256"
           done
           expected="$expected install.sh install.ps1 latest"

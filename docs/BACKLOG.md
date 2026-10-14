@@ -59,8 +59,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 - W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers
   invalid_grant without revoking) and client-metadata pinning per host: both
   wait for the owner's first remote MCP connect and its log.
-- W2. [E] Windows acceptance: the unverified list in NEXT.md section E waits
-  for a run on a real Windows machine with desk watching.
 - W3. [D] Web UI images: the brief is in NEXT.md section D; generation goes
   through the owner's design partner, not a contributor lane.
 - W4. Web UI overhaul (owner, 2026-10-14: the current layout and visuals are

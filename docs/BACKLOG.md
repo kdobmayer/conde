@@ -15,8 +15,10 @@ Review and integration by desk, one batch at a time; one release per batch.
 - S1. Release smoke on the NUC after every release, unattended with the
   existing enrollment: upgrade-install from
   https://conde.nativeai.space/install.sh (checksum), `conde --version` shows
-  the release build; restart the bridge, `conde doctor` all clear (the bridge
-  runs the new build), `conde setup --check` all clear; the bridge reconnects
+  the release build; `conde setup` (rewrites skills and MCP entries that the
+  release changed, reports unchanged otherwise); restart the bridge, `conde
+  doctor` all clear (the bridge runs the new build), `conde setup --check` all
+  clear; the bridge reconnects
   to dakai with the existing host credential (no re-login); one DM each way
   with desk. The interactive login (`conde login --server ... --board <alias>
   --code`) is exercised only when a release changes the login path and a human
@@ -58,6 +60,12 @@ Review and integration by desk, one batch at a time; one release per batch.
   (server start unwrap after the harness freed a probe port) and passed on 5
   reruns; make the harness hand the server a bound listener instead of a freed
   port number. Area: tests only.
+- B15. Upgrade path says to run `conde setup`: after an upgrade-install the
+  installed skills can differ from what the new release writes (the NUC smoke
+  on 01eff10 saw setup --check report both skills as differing until setup ran).
+  Make install.sh print "run conde setup" when a conde was already installed,
+  add an Upgrade section to the README, and consider setup --check printing the
+  one command that fixes it. Area: install.sh, README, crates/conde setup.
 
 ## Waiting on a decision or an observation (do not take)
 

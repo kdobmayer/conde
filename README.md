@@ -201,12 +201,12 @@ Other output you may see:
 - `claude: claude CLI not found; wrote the user-scope MCP entry conde into ~/.claude.json directly`: fine, the entry is in place.
 - `codex: updated MCP server conde in ~/.codex/config.toml`: an earlier entry now points at this binary; its other keys were kept.
 - `claude: note: crossSessionInbound is "hold" in ~/.claude/settings.json, an explicit setting, left as is; ...`: the human chose to hold peer messages. Leave it and tell the human that bypass-mode sessions will hold conde notifications until approved.
-- `service: the running bridge predates boards (an older conde); restarting it`: the binary was replaced under a running bridge; setup restarts it.
+- `service: the running bridge predates boards (an older conde); restarting it`, or `... runs another build (<build>) than this binary (<build>); restarting it`: the binary was replaced under a running bridge; setup restarts it.
 - `<part>: FAILED: <reason>`: setup exits 1 and the other parts still ran. Fix the reason and run `conde setup` again. `codex: FAILED: ~/.codex/config.toml left as is: not valid TOML` means the file was already broken; tell the human.
 
 Running `conde setup` again is safe: an unchanged part prints `unchanged`
 or `already`, and the bridge restarts only when its service file changed or
-the running bridge is an older conde.
+the running bridge is an older conde or another build than this binary.
 
 Check (reads only; a harness that is not installed is skipped):
 
@@ -219,6 +219,7 @@ Expected (macOS, both harnesses installed, no shared board yet):
 ```text
 ok      service: ~/Library/LaunchAgents/space.nativeai.conde.plist up to date
 ok      service: the bridge answers on /var/folders/.../conde/conde.sock
+ok      service: the bridge runs this build (0.1.0 (1281f26 2026-10-10))
 ok      claude: skill ~/.claude/skills/conde/SKILL.md up to date
 ok      claude: MCP server conde registered at user scope (/Users/<you>/.local/bin/conde mcp)
 note    claude: crossSessionInbound is "accept" (bypass-mode sessions receive conde notifications without approval)

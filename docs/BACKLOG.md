@@ -44,11 +44,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   one transaction). Decided: revoke by default like the other mints, with
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
-- B12. `conde setup` and `conde setup --check` compare the running bridge's
-  build with the binary's, like doctor does (the NUC smoke saw "all clear"
-  from setup --check with the old bridge still running); setup restarts the
-  service on a mismatch, --check reports it as an issue. Area: crates/conde
-  setup, tests.
 - B13. Timing gates that fail under load: setup_check_asks_the_live_daemon
   (2 s daemon-start gate) and v2_daemon g1 (700 ms register gate) each failed
   once on a loaded box and passed on rerun. Make each gate measure what it

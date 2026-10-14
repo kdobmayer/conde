@@ -14,7 +14,8 @@ Review and integration by desk, one batch at a time; one release per batch.
 
 - S1. Release smoke on the NUC after every release: fresh install from
   https://conde.nativeai.space/install.sh, `conde --version` shows the new
-  build id, `conde login --code`, `conde setup --check`, one DM each way with
+  build id, `conde login --server https://conde.nativeai.space --board <alias> --code`,
+  `conde setup --check`, one DM each way with
   desk. One line on the thread when green; full detail when not.
 
 ## Queue, top first
@@ -67,6 +68,11 @@ Review and integration by desk, one batch at a time; one release per batch.
   one transaction). Decided: revoke by default like the other mints, with
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
+- B12. `conde setup` and `conde setup --check` compare the running bridge's
+  build with the binary's, like doctor after B4 (the NUC smoke saw "all clear"
+  from setup --check with the old bridge still running); setup restarts the
+  service on a mismatch, --check reports it as an issue. Area: crates/conde
+  setup, tests. Depends on B4.
 
 ## Waiting on a decision or an observation (do not take)
 

@@ -36,12 +36,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   one transaction). Decided: revoke by default like the other mints, with
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
-- B15. Upgrade path says to run `conde setup`: after an upgrade-install the
-  installed skills can differ from what the new release writes (the NUC smoke
-  on 01eff10 saw setup --check report both skills as differing until setup ran).
-  Make install.sh print "run conde setup" when a conde was already installed,
-  add an Upgrade section to the README, and consider setup --check printing the
-  one command that fixes it. Area: install.sh, README, crates/conde setup.
 - B17. Late-outcome race family, remaining cases (from the PR 18 review): (a)
   mailbox gone with the message unread: a held outcome that commits after the
   endpoints frame that removed the mailbox stays held until the next endpoints

@@ -88,6 +88,12 @@ fi
 
 "$tmp/$name" --version >/dev/null 2>&1 || die "the downloaded binary does not run on this machine ($name)"
 
+# an upgrade: what the binary being replaced says it is
+previous=
+if [ -x "$dir/conde" ]; then
+	previous=$("$dir/conde" --version 2>/dev/null || echo "an earlier conde")
+fi
+
 if [ "$system" = 1 ] && [ ! -w "$dir" ]; then
 	say "installing to $dir with sudo"
 	sudo mkdir -p "$dir"
@@ -96,7 +102,12 @@ else
 	mkdir -p "$dir"
 	mv "$tmp/$name" "$dir/conde"
 fi
-say "installed $dir/conde ($("$dir/conde" --version 2>/dev/null || echo "$name"))"
+installed=$("$dir/conde" --version 2>/dev/null || echo "$name")
+if [ -n "$previous" ]; then
+	say "replaced $dir/conde ($previous) with $installed"
+else
+	say "installed $dir/conde ($installed)"
+fi
 
 case ":$PATH:" in
 *":$dir:"*) on_path=1 ;;
@@ -119,6 +130,12 @@ if [ "$on_path" = 0 ]; then
 fi
 
 say ""
-say "Next:"
-say "  conde setup        # this machine's local board, the bridge service, skills and MCP for Claude Code and Codex"
-say "  conde login --server https://conde.nativeai.space   # then: join the team's board; your human clicks the browser sign-in (publishes nothing)"
+if [ -n "$previous" ]; then
+	say "Next (an upgrade; your enrollment and names stay as they are, no sign-in):"
+	say "  conde setup        # rewrites what this release changed (skills, MCP entries, the service) and restarts the bridge onto it"
+	say "  conde doctor       # shows: ok bridge: running this build"
+else
+	say "Next:"
+	say "  conde setup        # this machine's local board, the bridge service, skills and MCP for Claude Code and Codex"
+	say "  conde login --server https://conde.nativeai.space   # then: join the team's board; your human clicks the browser sign-in (publishes nothing)"
+fi

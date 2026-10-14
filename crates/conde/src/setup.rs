@@ -817,8 +817,24 @@ fn systemd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
         check(host, "systemctl", &["--user", "start", "conde.service"])?;
         writeln!(out, "service: enabled and started conde.service")?;
     }
-    writeln!(out, "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"")?;
+    if !linger_on(host) {
+        writeln!(out, "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"")?;
+    }
     Ok(())
+}
+
+/// Whether systemd keeps this user's services running without a login session (`loginctl
+/// show-user <uid>` says `Linger=yes`); false when it says no or cannot be asked, so the hint is
+/// shown whenever it may matter. The uid is named: without it loginctl answers for the caller's
+/// session, and an agent's shell has none (it prints nothing).
+fn linger_on(host: &mut dyn Host) -> bool {
+    if host.which("loginctl").is_none() {
+        return false;
+    }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() }.to_string();
+    host.run("loginctl", &["show-user", &uid, "--property=Linger", "--value"])
+        .is_ok_and(|r| r.ok && r.stdout.trim() == "yes")
 }
 
 /// What the running bridge says of its build; None when it gives no answer to tell by.

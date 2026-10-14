@@ -247,7 +247,8 @@ Linux note: the service is a systemd user unit,
 `service: enabled and started conde.service`. The check is
 `systemctl --user is-active conde` (expected: `active`). On a machine without
 a desktop login, also run `loginctl enable-linger "$USER"` so the bridge keeps
-running after logout.
+running after logout; setup prints that line only while linger is off (or
+`loginctl` cannot say).
 
 ### 3. Check the installation
 

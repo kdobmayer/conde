@@ -262,6 +262,17 @@ impl WebStore for WebBoard {
         })
     }
 
+    fn end_cli_code(&self, code_digest: &str, user_id: i64) -> WebResult<()> {
+        self.write(|t| {
+            if let Some((held, created_at)) = t.take_web_token(CLI_CODE, code_digest)?
+                && serde_json::from_str::<CliCode>(&held).is_ok_and(|h| h.user_id == user_id)
+            {
+                t.put_web_token(CLI_CODE, code_digest, &held, created_at)?;
+            }
+            Ok(())
+        })
+    }
+
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()> {
         self.put(KEY_DISPLAY, token_digest, display, display.created_at)
     }

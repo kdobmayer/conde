@@ -307,6 +307,13 @@ impl WebStore for MemStore {
         }
         Ok(())
     }
+    fn end_cli_code(&self, code_digest: &str, user_id: i64) -> WebResult<()> {
+        let mut m = self.m();
+        if m.codes.get(code_digest).is_some_and(|held| held.user_id != user_id) {
+            m.codes.remove(code_digest);
+        }
+        Ok(())
+    }
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()> {
         self.m()
             .displays
@@ -1084,6 +1091,45 @@ async fn holding_only_the_login_url_spends_no_attempt_budget() {
     let shown = paste_leg(&env, &b, &run).await;
     let (status, got) = paste_redeem(&env, &run, &shown).await;
     assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+}
+
+/// The last wrong try ends the login: if another account confirmed this login's URL while that
+/// guess held the record, its record does not stay in the slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_wrong_try_leaves_no_other_accounts_record() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    for _ in 0..4 {
+        assert_eq!(paste_redeem(&env, &run, wrong).await.0, StatusCode::BAD_REQUEST);
+    }
+    // bob signs in and opens the confirm page of the same login
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.oid = "oid-bob".into();
+        p.upn = "bob@dakai.example".into();
+        p.name = "Bob".into();
+    }
+    let bob = Browser::new();
+    let (status, page) = paste_confirm_page(&env, &bob, &run).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let taken = Arc::new(tokio::sync::Notify::new());
+    let (release, held) = std::sync::mpsc::channel();
+    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    let last = paste_redeem(&env, &run, wrong);
+    let confirm = async {
+        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the last guess takes the record");
+        let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
+        release.send(()).unwrap();
+        (status, body)
+    };
+    let ((status, got), (confirmed, _)) = tokio::join!(last, confirm);
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
+    assert!(got["message"].as_str().unwrap().contains("last try"), "{got}");
+    assert_eq!(confirmed, StatusCode::OK, "bob's confirm landed in the gap");
+    assert!(env.store.m().codes.is_empty(), "the dead login is not left to bob");
 }
 
 /// When the account's next attempt is allowed only after the waiting login expires, the 429 says

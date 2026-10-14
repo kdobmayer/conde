@@ -15,7 +15,26 @@ const BIN: &str = env!("CARGO_BIN_EXE_conde");
 
 /// `conde 0.1.0 (1281f26 2026-10-10)`, or `(unknown)` for a build without git.
 fn is_build_line(line: &str) -> bool {
-    regex::Regex::new(r"^conde \d+\.\d+\.\d+ \(([0-9a-f]{7} \d{4}-\d{2}-\d{2}|unknown)\)$").unwrap().is_match(line)
+    regex::Regex::new(r"^conde \d+\.\d+\.\d+ \(([0-9a-f]{7}(-dirty)? \d{4}-\d{2}-\d{2}|unknown)\)$").unwrap().is_match(line)
+}
+
+/// A local build names the checkout it was built from: HEAD, with `-dirty` when tracked files
+/// differ from it. Skipped for a release build (CONDE_BUILD_COMMIT) and without git.
+#[test]
+fn a_local_build_marks_uncommitted_changes() {
+    if option_env!("CONDE_BUILD_COMMIT").is_some_and(|c| !c.is_empty()) {
+        return;
+    }
+    let git = |args: &[&str]| {
+        Command::new("git").arg("-C").arg(env!("CARGO_MANIFEST_DIR")).args(args).output().ok().filter(|o| o.status.success())
+    };
+    let Some(head) = git(&["rev-parse", "--short=7", "HEAD"]) else { return };
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    let status = git(&["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"]).unwrap();
+    let dirty = !status.stdout.is_empty();
+    let id = env!("CONDE_BUILD_ID");
+    let want = if dirty { format!("{head}-dirty ") } else { format!("{head} ") };
+    assert!(id.starts_with(&want), "build id {id:?} for HEAD {head} (dirty: {dirty})");
 }
 
 #[test]

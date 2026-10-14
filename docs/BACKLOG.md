@@ -33,10 +33,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 - B7. [I] A sign-in `next` path over 2048 characters is dropped silently and
   a very long authorize request lands on /keys. Refuse it with a clear 400 (or
   carry it) and test the boundary. Area: crates/conde-remote web login.
-- B9. [J] Local build id names HEAD and the date of the first build of that
-  commit; a later rebuild keeps the older date and uncommitted changes are not
-  marked. Make build.rs rerun on tree changes and append `-dirty`. Area:
-  build.rs, release.yml build-id job unchanged.
 - B10. Test coverage push: pick the three least-covered modules of
   crates/conde and crates/conde-remote (measure with cargo-llvm-cov in your
   checkout; do not add it to the repo) and add tests that assert real claims,

@@ -72,7 +72,9 @@ conde --version
 ```
 
 Expected: `conde 0.1.0 (1281f26 2026-10-10)`: the version, then the release's
-commit and build date (a newer release shows its own commit and date).
+commit and build date (a newer release shows its own commit and date). A
+binary built from a checkout with uncommitted changes shows the commit as
+`1281f26-dirty`.
 
 The installer checks the binary against the published `SHA256SUMS` and
 installs nothing on a mismatch or when the checksum is missing

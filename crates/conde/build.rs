@@ -1,6 +1,7 @@
 //! The build id `conde --version` prints: the commit and the build date, from
 //! CONDE_BUILD_COMMIT and CONDE_BUILD_DATE (the release workflow sets them) or the git
-//! checkout; `unknown` when neither names a commit.
+//! checkout, where uncommitted changes to tracked files add `-dirty` to the commit; `unknown`
+//! when neither names a commit.
 
 use std::path::Path;
 use std::process::Command;
@@ -10,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CONDE_BUILD_DATE");
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     let commit = var("CONDE_BUILD_COMMIT").or_else(|| git_commit(Path::new(&dir)));
+    // `today` is evaluated on every run, so a rerun after a change also renews the date.
     let id = match commit {
         Some(c) => format!("{c} {}", var("CONDE_BUILD_DATE").unwrap_or_else(today)),
         None => "unknown".to_string(),
@@ -27,10 +29,21 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     (out.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// The short HEAD commit; reruns the build script when HEAD or its branch moves.
+/// The short HEAD commit, `-dirty` when tracked files differ from it; reruns the build script
+/// when HEAD or its branch moves, the index changes (add, commit) or a file of the workspace
+/// changes (an edit makes the build dirty).
 fn git_commit(dir: &Path) -> Option<String> {
     let commit = git(dir, &["rev-parse", "--short=7", "HEAD"])?;
-    let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string()];
+    // Every tracked file, the only ones that can make the checkout dirty (no build output, no
+    // node_modules to walk).
+    if let (Some(top), Some(files)) = (git(dir, &["rev-parse", "--show-toplevel"]), git(dir, &["ls-files"])) {
+        for f in files.lines() {
+            println!("cargo:rerun-if-changed={}", Path::new(&top).join(f).display());
+        }
+    }
+    let dirty = git(dir, &["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"]).is_some();
+    let commit = if dirty { format!("{commit}-dirty") } else { commit };
+    let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string(), "index".to_string()];
     if let Some(r) = git(dir, &["symbolic-ref", "-q", "HEAD"]) {
         watched.push(r);
     }

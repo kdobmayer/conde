@@ -243,6 +243,7 @@ fn setup_check_asks_the_live_daemon() {
     let out = r.cmd(Path::new(BIN)).args(["setup", "--check", "--service"]).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(text.contains("ok      service: the bridge answers on"), "{text}");
+    assert!(text.contains(&format!("ok      service: the bridge runs this build ({})\n", conde::VERSION)), "{text}");
 }
 
 #[test]

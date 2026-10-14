@@ -591,7 +591,29 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         }
         let socket = env.show(&env.socket);
         match host.reach(&env.socket) {
-            Ok(()) => line("ok", format!("service: the bridge answers on {socket}"), out)?,
+            Ok(()) => {
+                line("ok", format!("service: the bridge answers on {socket}"), out)?;
+                match bridge_build(env, host) {
+                    BridgeBuild::Same => line("ok", format!("service: the bridge runs this build ({})", crate::VERSION), out)?,
+                    BridgeBuild::Other(b) => line(
+                        "ISSUE",
+                        format!(
+                            "service: the bridge runs another build ({b}) than this binary ({}); run: conde setup (it restarts the bridge)",
+                            crate::VERSION
+                        ),
+                        out,
+                    )?,
+                    BridgeBuild::Unreported => line(
+                        "ISSUE",
+                        format!(
+                            "service: the bridge does not report its build (older than {}); run: conde setup (it restarts the bridge)",
+                            crate::VERSION
+                        ),
+                        out,
+                    )?,
+                    BridgeBuild::Unknown => {}
+                }
+            }
             Err(why) => {
                 let state = service_state(env, host)?;
                 line(
@@ -798,14 +820,37 @@ fn systemd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
     Ok(())
 }
 
+/// What the running bridge says of its build (the `build` of its `doctor` answer).
+enum BridgeBuild {
+    /// This binary's.
+    Same,
+    /// Another build: the binary was replaced under the running service.
+    Other(String),
+    /// A daemon too old to report one.
+    Unreported,
+    /// No answer to tell by.
+    Unknown,
+}
+
+fn bridge_build(env: &Env, host: &mut dyn Host) -> BridgeBuild {
+    match host.daemon(&env.socket, "doctor", None, json!({})) {
+        Err(_) => BridgeBuild::Unknown,
+        Ok(r) => match r["build"].as_str() {
+            Some(b) if b == crate::VERSION => BridgeBuild::Same,
+            Some(b) => BridgeBuild::Other(b.to_string()),
+            None => BridgeBuild::Unreported,
+        },
+    }
+}
+
 /// Whether the running bridge must restart to serve this machine's boards: it is an older
-/// conde that does not know boards (the binary was replaced under it), or it started before
-/// a board was enrolled.
+/// conde that does not know boards or runs another build (the binary was replaced under it),
+/// or it started before a board was enrolled.
 fn predates_boards(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<bool> {
     if host.reach(&env.socket).is_err() {
         return Ok(false);
     }
-    let why = match host.daemon(&env.socket, crate::surface::BOARD_LIST, None, json!({})) {
+    let mut why = match host.daemon(&env.socket, crate::surface::BOARD_LIST, None, json!({})) {
         Err(e) if crate::surface::predates_boards(&e) => Some("predates boards (an older conde)".to_string()),
         Err(_) => None,
         Ok(r) => {
@@ -815,6 +860,13 @@ fn predates_boards(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyho
             (!missing.is_empty()).then(|| format!("started before {} was enrolled", missing.join(", ")))
         }
     };
+    if why.is_none() {
+        why = match bridge_build(env, host) {
+            BridgeBuild::Other(b) => Some(format!("runs another build ({b}) than this binary ({})", crate::VERSION)),
+            BridgeBuild::Unreported => Some(format!("does not report its build (older than {})", crate::VERSION)),
+            BridgeBuild::Same | BridgeBuild::Unknown => None,
+        };
+    }
     if let Some(why) = &why {
         writeln!(out, "service: the running bridge {why}; restarting it")?;
     }

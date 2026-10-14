@@ -1276,6 +1276,61 @@ fn check_reports_the_boards() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The binary was replaced under a running bridge that knows boards: `setup --check` names the
+/// running build as an issue, and `setup` restarts the service; the same build, or a bridge
+/// that cannot be asked, is left alone.
+#[test]
+fn a_running_bridge_of_another_build_is_reported_and_restarted() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    let opts = Options::select(false, false, true, false);
+    let mut host = Fake::new(&env, &["systemctl"]);
+    run(&env, &opts, &mut host);
+    host.take_calls();
+    host.alive = true;
+    host.daemon.insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
+    let restarted = |host: &mut Fake| host.take_calls().contains(&"systemctl --user restart conde.service".to_string());
+
+    host.daemon.insert("doctor", Ok(json!({"checks": [], "issues": 0, "build": "0.1.0 (0000000 2026-01-01)"})));
+    let (ok, out) = verify(&env, &opts, &mut host);
+    assert!(!ok, "{out}");
+    assert!(out.contains(&format!(
+        "ISSUE   service: the bridge runs another build (0.1.0 (0000000 2026-01-01)) than this binary ({}); run: conde setup (it restarts the bridge)\n",
+        conde::VERSION
+    )), "{out}");
+    let (ok, out) = run(&env, &opts, &mut host);
+    assert!(ok, "{out}");
+    assert!(out.contains(&format!(
+        "service: the running bridge runs another build (0.1.0 (0000000 2026-01-01)) than this binary ({}); restarting it",
+        conde::VERSION
+    )), "{out}");
+    assert!(restarted(&mut host));
+
+    // too old to report a build: the same
+    host.daemon.insert("doctor", Ok(json!({"checks": [], "issues": 0})));
+    let (ok, out) = verify(&env, &opts, &mut host);
+    assert!(!ok && out.contains("ISSUE   service: the bridge does not report its build (older than "), "{out}");
+    let (_, out) = run(&env, &opts, &mut host);
+    assert!(out.contains("service: the running bridge does not report its build"), "{out}");
+    assert!(restarted(&mut host));
+
+    // this build: reported as fine, not restarted
+    host.daemon.insert("doctor", Ok(json!({"checks": [], "issues": 0, "build": conde::VERSION})));
+    let (_, out) = verify(&env, &opts, &mut host);
+    assert!(out.contains(&format!("ok      service: the bridge runs this build ({})\n", conde::VERSION)), "{out}");
+    let (_, out) = run(&env, &opts, &mut host);
+    assert!(!out.contains("restarting"), "{out}");
+    assert!(!restarted(&mut host));
+
+    // a bridge that does not answer doctor: no claim either way
+    host.daemon.remove("doctor");
+    let (_, out) = verify(&env, &opts, &mut host);
+    assert!(!out.contains("the bridge runs") && !out.contains("report its build"), "{out}");
+    let (_, out) = run(&env, &opts, &mut host);
+    assert!(!out.contains("restarting"), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn a_running_bridge_that_predates_boards_is_restarted() {
     for os in [Os::Linux, Os::MacOs, Os::Windows] {

@@ -233,6 +233,31 @@ impl WebStore for WebBoard {
         self.take(CLI_CODE, code_digest)
     }
 
+    fn issue_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<bool> {
+        let payload = serde_json::to_string(code).map_err(|e| WebStoreError(e.to_string()))?;
+        self.write(|t| {
+            if let Some((held, created_at)) = t.take_web_token(CLI_CODE, code_digest)?
+                && serde_json::from_str::<CliCode>(&held).is_ok_and(|old| old.user_id != code.user_id)
+            {
+                t.put_web_token(CLI_CODE, code_digest, &held, created_at)?;
+                return Ok(false);
+            }
+            t.put_web_token(CLI_CODE, code_digest, &payload, code.created_at)?;
+            Ok(true)
+        })
+    }
+
+    fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()> {
+        let payload = serde_json::to_string(code).map_err(|e| WebStoreError(e.to_string()))?;
+        self.write(|t| {
+            match t.take_web_token(CLI_CODE, code_digest)? {
+                Some((newer, created_at)) => t.put_web_token(CLI_CODE, code_digest, &newer, created_at)?,
+                None => t.put_web_token(CLI_CODE, code_digest, &payload, code.created_at)?,
+            }
+            Ok(())
+        })
+    }
+
     fn insert_key_display(&self, token_digest: &str, display: &KeyDisplay) -> WebResult<()> {
         self.put(KEY_DISPLAY, token_digest, display, display.created_at)
     }

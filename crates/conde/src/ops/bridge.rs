@@ -348,7 +348,19 @@ pub fn report(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if ctx.db.attempt_route(attempt_id)?.is_some_and(|(target, current)| target != current) {
         return abandon(ctx, attempt_id, "recipient rebound", event_seq);
     }
-    apply(ctx, attempt_id, outcome, opt_str(body, "reason")?, event_seq)
+    let applied = apply(ctx, attempt_id, outcome, opt_str(body, "reason")?, event_seq)?;
+    // A hold for a mailbox that already left the endpoints (the removal committed while the
+    // attempt was dispatching) is abandoned now, as the endpoints frame would have: on a v2 host
+    // the server records endpoints and outcomes in the order the bridge sent them, so absent
+    // means gone.
+    if outcome == "held"
+        && applied["status"] == "held"
+        && ctx.mailbox_only
+        && ctx.db.gone_holds(me, &ctx.p.host)?.iter().any(|a| a == attempt_id)
+    {
+        return abandon(ctx, attempt_id, "recipient offline", None);
+    }
+    Ok(applied)
 }
 
 /// The one ownership rule for outcomes, local and remote: the reporting

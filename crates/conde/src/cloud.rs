@@ -372,7 +372,7 @@ impl NotificationSource for Board {
         }
     }
 
-    fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) {
+    fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) -> Recorded {
         let list: Vec<Value> = endpoints
             .iter()
             .map(|e| match e {
@@ -383,11 +383,20 @@ impl NotificationSource for Board {
             })
             .collect();
         match self.bridge_op(host_id, bridge_instance, "bridge.endpoints", json!({"endpoints": list})) {
-            Ok(r) if r["abandoned"].as_array().is_some_and(|a| !a.is_empty()) => {
-                tracing::info!(host = host_id, abandoned = %r["abandoned"], "holds on stopped sessions abandoned");
+            Ok(r) => {
+                if r["abandoned"].as_array().is_some_and(|a| !a.is_empty()) {
+                    tracing::info!(host = host_id, abandoned = %r["abandoned"], "holds on stopped sessions abandoned");
+                }
+                Recorded::Accepted
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(host = host_id, instance = bridge_instance, "endpoints not recorded: {e:?}"),
+            Err(OpFailure::Refused(why)) => {
+                tracing::warn!(host = host_id, instance = bridge_instance, "endpoints refused: {why}");
+                Recorded::Rejected(why)
+            }
+            Err(OpFailure::Transient(why)) => {
+                tracing::warn!(host = host_id, instance = bridge_instance, "endpoints not recorded: {why}");
+                Recorded::Retry(why)
+            }
         }
     }
 }

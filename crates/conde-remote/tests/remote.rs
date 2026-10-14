@@ -65,6 +65,16 @@ struct State {
     retry_next: usize,
     /// A Retry answer still records the outcome first (the ack was lost, not the write).
     retry_after_record: bool,
+    /// Outcome and endpoint writes in the order they reached the store.
+    writes: Vec<String>,
+    /// How long an outcome for a "slow-" attempt takes to record.
+    slow_outcome: Duration,
+    /// The next this-many endpoints writes answer Retry.
+    endpoints_fail_next: usize,
+    /// A snapshot holding a session "slow" waits until this is cleared.
+    hold_slow_endpoints: bool,
+    /// Set while such a snapshot is being written.
+    slow_endpoints_writing: bool,
 }
 
 #[derive(Default)]
@@ -99,7 +109,12 @@ impl NotificationSource for FakeSource {
     }
 
     fn record_outcome(&self, host_id: &str, instance: &str, outcome: &Outcome) -> Recorded {
+        if outcome.attempt_id.starts_with("slow-") {
+            let pause = self.state().slow_outcome;
+            std::thread::sleep(pause);
+        }
         let mut s = self.state();
+        s.writes.push(format!("outcome {}", outcome.attempt_id));
         s.outcome_conns.push((host_id.into(), instance.into()));
         if outcome.attempt_id.starts_with("foreign-") {
             return Recorded::Rejected("attempt belongs to another bridge".into());
@@ -137,18 +152,41 @@ impl NotificationSource for FakeSource {
         FenceResult::Active
     }
 
-    fn endpoints(&self, _host_id: &str, _bridge_instance: &str, endpoints: &[Endpoint]) {
+    fn endpoints(&self, _host_id: &str, _bridge_instance: &str, endpoints: &[Endpoint]) -> Recorded {
         let mut sorted = endpoints.to_vec();
         sorted.sort_by_key(|e| format!("{e:?}"));
+        if sorted.contains(&claude("slow")) {
+            self.state().slow_endpoints_writing = true;
+            while self.state().hold_slow_endpoints {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         let mut s = self.state();
+        if s.endpoints_fail_next > 0 {
+            s.endpoints_fail_next -= 1;
+            return Recorded::Retry("store busy".into());
+        }
+        let names: Vec<String> = sorted
+            .iter()
+            .map(|e| match e {
+                Endpoint::Claude { session_id } => session_id.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        s.writes.push(format!("endpoints [{}]", names.join(",")));
         s.endpoint_updates.push(sorted.clone());
         s.endpoints = sorted;
+        Recorded::Accepted
     }
 
     fn heartbeat(&self, _host_id: &str, _bridge_instance: &str) {
         std::thread::sleep(Duration::from_millis(50));
         self.state().heartbeats += 1;
     }
+}
+
+fn claude(session: &str) -> Endpoint {
+    Endpoint::Claude { session_id: session.into() }
 }
 
 fn notify(attempt: &str) -> Notify {
@@ -282,6 +320,29 @@ async fn raw_ws(addr: SocketAddr, token: &str) -> Result<RawWs, tungstenite::Err
 
 async fn send_json(ws: &mut RawWs, v: Value) {
     ws.send(Message::text(v.to_string())).await.unwrap();
+}
+
+/// The close frame's (code, reason), skipping text frames; None when the stream ends without one.
+async fn recv_close(ws: &mut RawWs) -> Option<(u16, String)> {
+    loop {
+        match tokio::time::timeout(WAIT, ws.next())
+            .await
+            .expect("close within timeout")
+        {
+            Some(Ok(Message::Close(Some(f)))) => return Some((f.code.into(), f.reason.to_string())),
+            Some(Ok(Message::Close(None))) | None | Some(Err(_)) => return None,
+            Some(Ok(_)) => continue,
+        }
+    }
+}
+
+fn outcome_frame(attempt: &str) -> Value {
+    json!({"v":1,"type":"outcome","attempt_id":attempt,"event_seq":1,"status":"held","reason":null})
+}
+
+fn endpoints_frame(added: &[&str], removed: &[&str]) -> Value {
+    let list = |s: &[&str]| s.iter().map(|id| json!({"kind":"claude","session_id":id})).collect::<Vec<_>>();
+    json!({"v":1,"type":"endpoints","added":list(added),"removed":list(removed)})
 }
 
 /// Next text frame as JSON; None when the connection ends first.
@@ -1463,4 +1524,179 @@ async fn oversized_outcomes_never_block_admission() {
     }
     client.shutdown();
     server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoints_are_recorded_behind_the_outcomes_sent_before_them() {
+    let source = Arc::new(FakeSource::default());
+    source.state().slow_outcome = Duration::from_millis(300);
+    let server = start_server(local(), test_config(), source.clone()).await;
+    let mut ws = raw_ws(server.local_addr(), "tok-a").await.unwrap();
+    send_json(&mut ws, hello("host-a", "i-1")).await;
+    wait_until("hello snapshot", || !source.state().writes.is_empty()).await;
+
+    // A hold, then the session's removal: the store sees them in that order even though the
+    // hold takes a while to record (a removal written first would miss the hold).
+    send_json(&mut ws, endpoints_frame(&["s1"], &[])).await;
+    send_json(&mut ws, outcome_frame("slow-a")).await;
+    send_json(&mut ws, endpoints_frame(&[], &["s1"])).await;
+    send_json(&mut ws, outcome_frame("b")).await;
+    wait_until("all written", || source.state().writes.len() == 5).await;
+    assert_eq!(
+        source.state().writes,
+        vec!["endpoints []", "endpoints [s1]", "outcome slow-a", "endpoints []", "outcome b"]
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endpoints_write_that_fails_closes_the_connection_before_later_outcomes() {
+    let source = Arc::new(FakeSource::default());
+    let server = start_server(local(), test_config(), source.clone()).await;
+    let mut ws = raw_ws(server.local_addr(), "tok-a").await.unwrap();
+    send_json(&mut ws, hello("host-a", "i-1")).await;
+    wait_until("hello snapshot", || !source.state().writes.is_empty()).await;
+
+    source.state().endpoints_fail_next = 1;
+    send_json(&mut ws, endpoints_frame(&[], &["s1"])).await;
+    send_json(&mut ws, outcome_frame("after")).await;
+    assert_eq!(recv_close(&mut ws).await, Some((1011, "endpoints not recorded".into())));
+    // The outcome read after the unrecorded snapshot is left for the bridge to resend.
+    assert_eq!(source.state().writes, vec!["endpoints []"]);
+    assert_eq!(source.record_calls_for("after"), 0);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_connections_snapshot_does_not_overwrite_the_new_hello() {
+    let source = Arc::new(FakeSource::default());
+    let server = start_server(local(), test_config(), source.clone()).await;
+    let addr = server.local_addr();
+    let mut old = raw_ws(addr, "tok-a").await.unwrap();
+    send_json(&mut old, hello("host-a", "i-1")).await;
+    wait_until("hello snapshot", || !source.state().writes.is_empty()).await;
+
+    // The old connection's snapshot is mid-write when the bridge reconnects with a fresh hello.
+    source.state().hold_slow_endpoints = true;
+    send_json(&mut old, endpoints_frame(&["slow"], &[])).await;
+    wait_until("old snapshot writing", || source.state().slow_endpoints_writing).await;
+    let mut new = raw_ws(addr, "tok-a").await.unwrap();
+    let mut fresh = hello("host-a", "i-2");
+    fresh["endpoints"] = json!([{"kind":"claude","session_id":"s2"}]);
+    send_json(&mut new, fresh).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    source.state().hold_slow_endpoints = false;
+
+    wait_until("new hello snapshot", || source.state().writes.contains(&"endpoints [s2]".to_string())).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(source.state().endpoints, vec![claude("s2")]);
+    assert_eq!(source.state().writes.last().map(String::as_str), Some("endpoints [s2]"));
+    drop(old);
+    drop(new);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_work_queue_closes_the_connection_instead_of_pausing_it() {
+    let source = Arc::new(FakeSource::default());
+    source.state().slow_outcome = Duration::from_secs(2);
+    let server = start_server(local(), test_config(), source.clone()).await;
+    let mut ws = raw_ws(server.local_addr(), "tok-a").await.unwrap();
+    send_json(&mut ws, hello("host-a", "i-1")).await;
+    wait_until("hello snapshot", || !source.state().writes.is_empty()).await;
+
+    // One outcome records slowly; the 64 behind it fill the queue and the next one is refused.
+    for i in 0..70 {
+        send_json(&mut ws, outcome_frame(&format!("slow-{i}"))).await;
+    }
+    let t = tokio::time::Instant::now();
+    assert_eq!(recv_close(&mut ws).await, Some((1011, "work queue full".into())));
+    assert!(t.elapsed() < Duration::from_secs(1), "closed after {:?}", t.elapsed());
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_closed_right_after_connecting_keep_the_backoff_growing() {
+    // A server that accepts each connection and closes it at once (as for a full queue).
+    let listener = tokio::net::TcpListener::bind(local()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await {
+                    let _ = ws.next().await;
+                    let _ = ws.close(None).await;
+                }
+            });
+        }
+    });
+    let mut config = client_config(addr, "tok-a", "host-a", "i-1");
+    config.backoff_min = Duration::from_millis(40);
+    config.backoff_max = Duration::from_secs(2);
+    let (client, _rx) = start_client(config);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Doubling from 40 ms (jittered to 20..40, 40..80, ...) allows about 6 sessions in 1.5 s;
+    // a backoff reset on every connect would allow some 50.
+    let connects = client.connects();
+    client.shutdown();
+    assert!((2..=10).contains(&connects), "{connects} connects in 1.5 s");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endpoint_change_goes_out_before_an_outcome_reported_after_it() {
+    // A server that reads the hello, then reads nothing until `resume`, then reports the
+    // endpoints and outcome frames in the order they arrived.
+    let listener = tokio::net::TcpListener::bind(local()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let (stuck_tx, stuck_rx) = tokio::sync::oneshot::channel::<()>();
+    let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let gate = resume.clone();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let unbounded = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(None)
+            .max_frame_size(None);
+        let mut ws = tokio_tungstenite::accept_async_with_config(tcp, Some(unbounded)).await.unwrap();
+        let _hello = ws.next().await;
+        // The big request has started to arrive: its sender is stuck until this side reads.
+        let mut buf = vec![0u8; 1 << 16];
+        while ws.get_ref().peek(&mut buf).await.unwrap() < buf.len() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let _ = stuck_tx.send(());
+        gate.notified().await;
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Text(t) = msg {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["type"] == "endpoints" || v["type"] == "outcome" {
+                    let _ = seen_tx.send(v["type"].as_str().unwrap().to_string());
+                }
+            }
+        }
+    });
+    let (client, _rx) = start_client(client_config(addr, "tok-a", "host-a", "i-1"));
+    wait_connected(&client).await;
+
+    // The writer is stuck on a request larger than the socket buffers while the daemon adds a
+    // session and reports a hold for it.
+    let big = client.clone();
+    tokio::spawn(async move {
+        let _ = big.call(json!({"op": "big", "pad": "x".repeat(32 << 20)})).await;
+    });
+    tokio::time::timeout(WAIT, stuck_rx).await.expect("big request on the wire").unwrap();
+    client.set_endpoints(vec![
+        Endpoint::Codex { thread_id: "th-1".into() },
+        Endpoint::Codex { thread_id: "th-2".into() },
+    ]);
+    client.report("att-th-2", "held", None).unwrap();
+    resume.notify_one();
+
+    let mut order = Vec::new();
+    while order.len() < 2 {
+        let kind = tokio::time::timeout(WAIT, seen_rx.recv()).await.expect("frames arrive").unwrap();
+        order.push(kind);
+    }
+    assert_eq!(order, ["endpoints", "outcome"]);
+    client.shutdown();
 }

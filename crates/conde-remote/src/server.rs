@@ -696,6 +696,13 @@ async fn run_bridge(
             }
             let result = shared.source.admit(&host, &hello);
             if result == Admission::Active {
+                // Written under the registry lock, before this connection is registered: an older
+                // connection's queued snapshot checks its registration under the same lock, so it
+                // can neither land after this one nor overwrite it.
+                match shared.source.endpoints(&host, &instance, &endpoints) {
+                    Recorded::Accepted => {}
+                    Recorded::Retry(why) | Recorded::Rejected(why) => return Err(Some(why)),
+                }
                 let entry = ActiveBridge {
                     conn_id,
                     instance: instance.clone(),
@@ -711,7 +718,6 @@ async fn run_bridge(
                     let _ = prev.control.send(kick);
                 }
                 drop(bridges);
-                shared.source.endpoints(&host, &instance, &endpoints);
             }
             Ok(result)
         })
@@ -783,8 +789,8 @@ fn speaks(proto: u32, e: &Endpoint) -> bool {
     matches!(e, Endpoint::Mailbox { .. }) == (proto == PROTO_V2)
 }
 
-/// Outcomes queued per connection before reading pauses; a well-behaved bridge keeps at most
-/// its `max_outcomes_in_flight` (4) outstanding.
+/// Outcomes and endpoint snapshots queued per connection before it is closed; a well-behaved
+/// bridge keeps at most its `max_outcomes_in_flight` (4) outstanding.
 const OUTCOME_QUEUE: usize = 64;
 
 struct AbortOnDrop(JoinHandle<()>);
@@ -795,15 +801,48 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Records one connection's outcomes in arrival order and answers each with an ack.
+/// What a connection's ordered worker records: outcomes and endpoint snapshots, in the order the
+/// bridge sent them (a hold for a mailbox the bridge reported just before stays after it).
+enum Work {
+    Outcome(Outcome),
+    /// The connection's full endpoint set after an `endpoints` frame.
+    Endpoints(Vec<Endpoint>),
+}
+
+/// Records one connection's outcomes and endpoint snapshots in arrival order, one transaction at
+/// a time; answers each outcome with an ack. A snapshot is written only while this connection is
+/// the host's registered bridge; one that is not recorded stops the connection (`stop`).
 async fn record_outcomes(
     shared: Arc<Shared>,
     host: String,
     instance: String,
-    mut outcomes: mpsc::Receiver<Outcome>,
+    conn_id: u64,
+    mut work: mpsc::Receiver<Work>,
     acks: mpsc::UnboundedSender<String>,
+    stop: mpsc::UnboundedSender<&'static str>,
 ) {
-    while let Some(outcome) = outcomes.recv().await {
+    while let Some(item) = work.recv().await {
+        let outcome = match item {
+            Work::Outcome(o) => o,
+            Work::Endpoints(all) => {
+                let (shared, h, i) = (shared.clone(), host.clone(), instance.clone());
+                let written = tokio::task::spawn_blocking(move || {
+                    let bridges = shared.bridges.lock().unwrap_or_else(|p| p.into_inner());
+                    if !bridges.get(&h).is_some_and(|b| b.conn_id == conn_id) {
+                        return Recorded::Accepted; // replaced: the new hello's snapshot stands
+                    }
+                    shared.source.endpoints(&h, &i, &all)
+                })
+                .await
+                .unwrap_or_else(|e| Recorded::Retry(format!("endpoints write failed: {e}")));
+                if let Recorded::Retry(why) | Recorded::Rejected(why) = written {
+                    tracing::warn!(%host, %instance, %why, "endpoints not recorded; closing for a fresh hello");
+                    let _ = stop.send("endpoints not recorded");
+                    break;
+                }
+                continue;
+            }
+        };
         let (source, h, i, o) = (
             shared.source.clone(),
             host.clone(),
@@ -882,13 +921,16 @@ impl Conn {
         let cfg = self.shared.config.clone();
         let mut shutdown = self.shared.shutdown.clone();
         let (resp_tx, mut resp_rx) = mpsc::unbounded_channel::<String>();
-        let (outcome_tx, outcome_rx) = mpsc::channel::<Outcome>(OUTCOME_QUEUE);
+        let (outcome_tx, outcome_rx) = mpsc::channel::<Work>(OUTCOME_QUEUE);
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<&'static str>();
         let _worker = AbortOnDrop(tokio::spawn(record_outcomes(
             self.shared.clone(),
             self.host.clone(),
             self.instance.clone(),
+            self.conn_id,
             outcome_rx,
             resp_tx.clone(),
+            stop_tx.clone(),
         )));
         let mut ping = interval_at(
             tokio::time::Instant::now() + cfg.ping_interval,
@@ -929,6 +971,10 @@ impl Conn {
                         }
                     }
                 }
+                Some(why) = stop_rx.recv() => {
+                    let _ = tx.send(Message::Close(Some(CloseFrame { code: 1011, reason: why.into() }))).await;
+                    return why;
+                }
                 // Initial replay: once, after a pending control message, before any bridge frame.
                 _ = std::future::ready(()), if !replayed => {
                     replayed = true;
@@ -953,7 +999,7 @@ impl Conn {
                         }
                         Some(Ok(Message::Text(text))) => text,
                     };
-                    if let Some(reply) = self.handle(&text, &resp_tx, &outcome_tx).await
+                    if let Some(reply) = self.handle(&text, &resp_tx, &outcome_tx, &stop_tx).await
                         && tx.send(Message::text(reply)).await.is_err()
                     {
                         return "connection lost";
@@ -1058,13 +1104,25 @@ impl Conn {
         frames
     }
 
+    /// Queues work for the ordered worker without waiting: a full queue closes the connection
+    /// (the bridge keeps unacknowledged outcomes and resends them, and its hello carries the
+    /// endpoints), so control and shutdown never wait on capacity and nothing is dropped.
+    fn enqueue(&self, queue: &mpsc::Sender<Work>, stop: &mpsc::UnboundedSender<&'static str>, work: Work) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = queue.try_send(work) {
+            tracing::warn!(host = %self.host, instance = %self.instance, depth = OUTCOME_QUEUE,
+                "bridge work queue full; closing the connection");
+            let _ = stop.send("work queue full");
+        }
+    }
+
     /// Handles one inbound text frame; returns an immediate reply frame, if any. Requests are
     /// dispatched in the background and answered through `resp_tx`.
     async fn handle(
         &mut self,
         text: &str,
         resp_tx: &mpsc::UnboundedSender<String>,
-        outcome_tx: &mpsc::Sender<Outcome>,
+        outcome_tx: &mpsc::Sender<Work>,
+        stop_tx: &mpsc::UnboundedSender<&'static str>,
     ) -> Option<String> {
         let (kind, value) = match protocol::parse(text) {
             Ok(parsed) => parsed,
@@ -1090,9 +1148,9 @@ impl Conn {
                                      "rejected": true, "retry": false, "reason": why});
                     return Some(protocol::frame("outcome_ack", &ack));
                 }
-                // Recorded in order by the connection's outcome worker, so a slow store
-                // never holds up the request frames read after it.
-                let _ = outcome_tx.send(outcome).await;
+                // Recorded in order by the connection's worker, so a slow store never holds up the
+                // request frames read after it.
+                self.enqueue(outcome_tx, stop_tx, Work::Outcome(outcome));
                 None
             }
             "endpoints" => {
@@ -1110,18 +1168,9 @@ impl Conn {
                 }
                 let proto = self.proto;
                 self.endpoints.extend(diff.added.into_iter().filter(|e| speaks(proto, e)));
-                let (source, host, instance) = (
-                    self.shared.source.clone(),
-                    self.host.clone(),
-                    self.instance.clone(),
-                );
+                // Behind the outcomes read before it, in the same ordered worker.
                 let all: Vec<Endpoint> = self.endpoints.iter().cloned().collect();
-                if let Err(e) =
-                    tokio::task::spawn_blocking(move || source.endpoints(&host, &instance, &all))
-                        .await
-                {
-                    tracing::error!(error = %e, "endpoints update failed");
-                }
+                self.enqueue(outcome_tx, stop_tx, Work::Endpoints(all));
                 None
             }
             "request" => {

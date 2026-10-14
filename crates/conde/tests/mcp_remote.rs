@@ -175,11 +175,10 @@ async fn mcp(d: &Arc<Dispatcher>) -> Mcp {
 async fn mcp_with(d: &Arc<Dispatcher>, tweak: impl FnOnce(&mut WebConfig)) -> Mcp {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let idp = start_idp().await;
-    let port = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        probe.local_addr().unwrap().port()
-    };
-    let base = format!("http://127.0.0.1:{port}");
+    // Bound here and handed over: the port is known before the server starts, and no other
+    // test can take it in between.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
     let mut entra = WebConfig::entra(TENANT, CLIENT_ID, CLIENT_SECRET, &format!("{base}/auth/callback")).unwrap();
     entra.issuer = idp.issuer.clone();
     let docs = Arc::new(Docs::default());
@@ -188,13 +187,9 @@ async fn mcp_with(d: &Arc<Dispatcher>, tweak: impl FnOnce(&mut WebConfig)) -> Mc
     tweak(&mut entra);
     let store = Arc::new(WebBoard::new(d.clone()));
     let web = WebSetup { entra: Some(entra), admin_key: None, store: store.clone() };
-    let server = conde::cloud::start(
-        d.clone(),
-        format!("127.0.0.1:{port}").parse().unwrap(),
-        ServerConfig { web: Some(web), ..ServerConfig::default() },
-    )
-    .await
-    .unwrap();
+    let server = conde::cloud::start_on(d.clone(), listener, ServerConfig { web: Some(web), ..ServerConfig::default() })
+        .await
+        .unwrap();
     let env = Env { base, idp, store, registry: Arc::new(FakeRegistry::default()), clock: Arc::new(AtomicI64::new(START)) };
     let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     Mcp { env, server, d: d.clone(), docs, http }

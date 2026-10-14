@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 pub use client::{
     BridgeClient, BridgeConfig, BridgeState, CallError, Inbound, MAX_REASON_BYTES, StopReason, rpc,
 };
-pub use server::{MAX_FRAME_BYTES, ServerConfig, ServerHandle, serve, start};
+pub use server::{MAX_FRAME_BYTES, ServerConfig, ServerHandle, serve, start, start_on};
 
 /// The authenticated caller of a remote connection, derived from its bearer token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -415,9 +415,18 @@ pub fn min_proto() -> anyhow::Result<u32> {
 /// Start the remote listener over `d` (tests and `conde server`); `d` serves as the shared
 /// board named by [`board_name`].
 pub async fn start(d: Arc<Dispatcher>, listen: SocketAddr, config: ServerConfig) -> std::io::Result<ServerHandle> {
+    start_on(d, tokio::net::TcpListener::bind(listen).await?, config).await
+}
+
+/// As [`start`], on a listener the caller already bound.
+pub async fn start_on(
+    d: Arc<Dispatcher>,
+    listener: tokio::net::TcpListener,
+    config: ServerConfig,
+) -> std::io::Result<ServerHandle> {
     d.share(&board_name().map_err(std::io::Error::other)?);
     let board = Arc::new(Board::new(d));
-    conde_remote::start(listen, config, board.clone(), board.clone(), board).await
+    conde_remote::start_on(listener, config, board.clone(), board.clone(), board).await
 }
 
 /// `conde server`: serve until SIGTERM / SIGINT, then close within the grace.

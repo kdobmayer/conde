@@ -197,15 +197,31 @@ pub fn unknown_board(alias: &str, enrolled: &[String]) -> String {
     format!("no board '{alias}' on this host ({known}; conde boards lists them)")
 }
 
+/// How to restart the bridge service on each OS.
+pub const RESTART_BRIDGE: &str = "restart it (Linux: systemctl --user restart conde; macOS: launchctl kickstart -k \
+     gui/$(id -u)/space.nativeai.conde; Windows: schtasks /End /TN conde, then schtasks /Run /TN conde)";
+
 /// A daemon started before the upgrade ignores `board` in the envelope: refuse rather than
 /// act on the wrong board.
 pub fn stale_daemon(surface: Surface) -> String {
-    format!(
-        "the running conde daemon predates boards and would ignore {}; restart it (Linux: systemctl --user restart \
-         conde; macOS: launchctl kickstart -k gui/$(id -u)/space.nativeai.conde; Windows: schtasks /End /TN conde, then \
-         schtasks /Run /TN conde), then run this again",
-        surface.flag()
-    )
+    format!("the running conde daemon predates boards and would ignore {}; {RESTART_BRIDGE}, then run this again", surface.flag())
+}
+
+/// `conde doctor`'s line on the running bridge's build beside this binary's (the daemon's
+/// `doctor` answer carries `build`): a reinstall replaces the file under a running service,
+/// which keeps running the old code until it restarts. False when they differ.
+pub fn bridge_build(running: &Value) -> (bool, String) {
+    match running.as_str() {
+        Some(b) if b == crate::VERSION => (true, format!("bridge: running this build ({b})")),
+        Some(b) => (
+            false,
+            format!("bridge: running {b}, but this binary is {}: it was replaced under the running bridge; {RESTART_BRIDGE}", crate::VERSION),
+        ),
+        None => (
+            false,
+            format!("bridge: the running daemon does not report its build (older than {}); {RESTART_BRIDGE}", crate::VERSION),
+        ),
+    }
 }
 
 /// Whether a daemon's answer to `board.list` says it predates boards.

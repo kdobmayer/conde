@@ -947,7 +947,7 @@ impl Core {
             .filter(|s| only.as_deref().is_none_or(|o| o == s.origin))
             .map(|s| json!({"origin": s.origin, "slots_used": s.used, "slots": s.budget, "queued": s.queued}))
             .collect();
-        Response::ok(&id, json!({"checks": lines, "issues": issues, "origins": origins}))
+        Response::ok(&id, json!({"checks": lines, "issues": issues, "origins": origins, "build": crate::VERSION}))
     }
 }
 

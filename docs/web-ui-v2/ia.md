@@ -15,11 +15,14 @@ the tokens: `Shell` (navigation chrome: A top tabs and a status line, B a masthe
 with a right-aligned speaker, B a script with the speaker in a left margin), plus its colour and
 type tokens under `:root[data-skin="a"|"b"]`. Every other page (Agents, Channels, Fleet) is
 skeleton markup styled only by the tokens. The skin is a per-browser setting: the root layout
-reads `conde.skin` from `localStorage` (inside try/catch; missing or unreadable means A), sets
-`data-skin` on `<html>` and renders that skin's three components; a two-way "Console / Editorial"
-control in the owner menu writes it. There is no server setting and the server never learns the
-choice. After a day or two of real traffic the owner picks one or a mix, and the other skin's
-directory and the switch are deleted.
+reads `conde.skin` from `localStorage` (inside try/catch; a missing, unknown or unreadable value,
+or storage that throws, means A), sets `data-skin` on `<html>` and renders that skin's three
+components; a two-way "Console / Editorial" control in the owner menu writes it. Switching swaps
+only those components and the tokens: the data layer lives outside them and is not remounted, so
+the route, the loaded rows, the filters, the open thread and the reading position (the first
+visible row stays at its offset) are kept, and no data is fetched for the switch. There is no
+server setting and the server never learns the choice. After a day or two of real traffic the
+owner picks one or a mix, and the other skin's directory and the switch are deleted.
 
 ## The scope rule, on every page
 
@@ -93,9 +96,9 @@ The reply chain the selected message belongs to, as far as the owner's agents ca
   could see (`send` checks the parent against the sender's visibility, not the recipient's), so
   this is a real case: a teammate's agent replying to your agent while quoting its own team's DM.
 - Bounded: at most 200 messages per answer, with a continuation (contract below); the selected
-  message and its path from the top are always in the first answer. When the path itself is
-  longer than 100, its newest 100 are shown and the top says "earlier messages: open from the
-  start", which opens the segment's top message.
+  message and its path from the top are always in the first answer. When the path is longer
+  than 100, the thread starts at the selected message's 99th ancestor instead, and its top says
+  "earlier messages: open from the start", which opens the segment's real top.
 - Order: depth first, siblings by date. A linear chain stays flat; when a message has several
   replies, they indent one level. A reply whose parent is not the message just above it carries
   "re <sender> <time>: <first line>".
@@ -216,12 +219,19 @@ problems would need a different scan; it is not offered.
 ## Live update model
 
 Today (web/src/lib/board.svelte.ts, crates/conde-remote/src/web/app.rs): `GET /v1/events` is a
-WebSocket that sends `{"type":"changed","topics":[...]}` with topics `messages` (messages, read
-positions, reactions, memberships), `delivery` (notifications and attempts), `fleet`, coalesced
-250 ms on the server and 150 ms in the browser. The store event behind it is `Wake::Board(u8)`,
-which carries topic bits and no content: an event never names a message. A read changes a row's
-delivery word but arrives as `messages`, not `delivery`. The socket is not owner-scoped. Without
-the socket the app polls every 15 s.
+WebSocket that sends `{"type":"changed","topics":[...]}`, coalesced 250 ms on the server and
+150 ms in the browser. The store event behind it is `Wake::Board(u8)`: topic bits and no message
+id, so a frame never says which rows changed. Who announces what (`dispatch.rs`, `ops/bridge.rs`):
+
+- every committed mutation that is not a bridge op announces by its name (`board_topics`):
+  `agent.*`, `profile.*`, `mailbox.*`, `host.*` announce `fleet` and `messages`; every other one
+  (sending, reading, reacting, channel changes) announces `messages` and `delivery`;
+- the bridge's delivery steps announce `delivery`: due notifications handed out, a notification
+  settled as read, and attempt outcomes (those with `fleet` too).
+
+So any change that can alter a Feed row's text, reply state or delivery word arrives as
+`messages` or `delivery`, and the client treats both alike. The socket is not owner-scoped.
+Without the socket the app polls every 15 s.
 
 Two facts make a simple client rule correct. `commit_seq` order equals commit order on both
 stores (Postgres serializes writes board-wide with `pg_advisory_xact_lock`, `store/postgres.rs`
@@ -231,40 +241,58 @@ exactly the range it shows.
 
 ### The Feed window
 
-The Feed list is a window over the op's result: every matching row with `seq > floor`, where
-`floor` is the oldest loaded seq minus one, or 0 once a page has come back `more: false` (the
-bottom is reached). One pass reads the window:
+The Feed list is a window over the op's result, described by two values kept apart from the rows
+on screen: `floor`, an exclusive lower seq bound, and `exhausted`, whether nothing matches below
+`floor`. The window is every matching row with `seq > floor`.
 
-1. `owner.feed {after: floor, ...filters}` (no `before`): the newest rows, newest first.
-2. While `more` is true: `owner.feed {after: floor, before: <oldest seq of the last page>,
-   ...filters}`.
-3. When a page comes back `more: false`, the pass is complete: the new window **replaces** the
-   list (rows not returned are removed), and only then does the shown watermark (the top seq,
-   which feeds the "N new" marker and the per-device last-visit seq) advance to the first page's
-   newest seq.
+- **Fresh window** (on load, on a filter change, on a restart): one unbounded call
+  `owner.feed {...filters}`. Its rows are the window; `floor` is its oldest seq minus one; when it
+  answers `more: false`, `exhausted` is true and `floor` is 0.
+- **Older page** (scrolling down, offered while not `exhausted`): `owner.feed {before: floor + 1,
+  ...filters}`, unbounded downward; its rows are appended and lower `floor` the same way, and
+  `more: false` sets `exhausted`. Only these two unbounded-downward calls can set `exhausted`.
+- **Refresh pass**: `owner.feed {after: floor, ...filters}`, then while `more` is true
+  `{after: floor, before: <oldest seq of the last page>, ...filters}`. Here `more: false` means
+  only that nothing more matches above `floor`; the pass changes neither `floor` nor `exhausted`.
+  When it ends, its rows **replace** the window (rows not returned are removed), and only then
+  does the shown watermark (the top seq, which feeds the "N new" marker and the per-device
+  last-visit seq) advance to the first page's newest seq.
+- **Empty after a pass**: when a pass leaves the window empty and `exhausted` is false (say every
+  loaded problem was resolved while an older one exists below `floor`), the client starts a fresh
+  window. The "No delivery problems" and "Nothing yet" states show only for an empty window with
+  `exhausted` true.
+- **Bound**: a pass reads at most 10 pages. If the tenth still answers `more: true`, the window
+  restarts from the pass's own first page: with more rows above `floor` than one page holds, that
+  page is exactly the newest unrestricted page, so the restart needs no further call (`floor`
+  from its oldest row, `exhausted` false, and the line "list restarted; older messages load on
+  scroll"). The retained window is therefore at most 10 pages after any pass.
 
-A pass runs on load, on reconnect, on every `changed` frame that names `messages` or `delivery`,
-and on each poll tick while the socket is down. One pass at a time: a frame during a pass marks
-it dirty, and one more pass runs when it ends. Scrolling down loads older rows with `{before:
-<oldest loaded seq>}` and lowers `floor`.
+**Cadence.** A pass runs on reconnect, on every `changed` frame that names `messages` or
+`delivery`, and on each poll tick while the socket is down; at most one pass starts per 2 s per
+browser. A trigger during a pass, or within 2 s of the last start, sets a dirty flag, and one more
+pass runs when allowed.
 
-What this guarantees: a reconnect gap of any size is drained page by page down to `floor`, and
-nothing is skipped (seq order is commit order). A row that commits during a pass has a seq above
-the first page's newest, so it was not in this pass and its own `changed` frame triggers the
-next. A loaded row whose delivery changes (a held row on an older page becomes read) is re-read
-because every loaded row is inside the window. A row that stops matching the filter (a problem
-resolved under "needs attention") disappears because the window is replaced, not merged by id.
-An older message that becomes held appears under "needs attention" if it is inside the window;
-below it, it appears when the owner scrolls there, and once the bottom was reached the window
-covers everything. If a pass would need more than 10 pages, it stops and the list restarts from
-the newest page ("list restarted; older messages load on scroll"), so a long absence costs at
-most 10 calls.
+**What this guarantees.** A reconnect gap of any size is drained page by page down to `floor`
+(up to the bound), and nothing is skipped, since seq order is commit order. A row that commits
+during a pass has a seq above the first page's newest; its own frame sets the dirty flag. A loaded
+row whose delivery changes (a held row on an older page becomes read) is re-read because every
+loaded row is inside the window. A row that stops matching the filter (a problem resolved under
+"needs attention") disappears because the window is replaced, not merged by id. An older message
+that becomes held appears under "needs attention" if it is inside the window, and otherwise when
+the owner scrolls there or the window restarts.
 
-The cost, and why the page is 50: each pass re-reads every loaded row with its delivery view (a
-few small indexed queries per row), on each coalesced change, per open browser. 50 rows fill two
-desktop screens of A and several of B, and keep the common pass to one call of 50 rows.
-Owner-scoped events (sending `changed` only for the owner's own agents) would remove passes caused
-by other owners' traffic; it is not planned unless the cost shows up in the server's logs.
+**Cost.** Each pass re-reads every loaded row with its delivery view (a few small indexed queries
+per row), so the worst case per open browser is 10 calls of 50 rows every 2 s under a sustained
+burst; the common case is one call. The page is 50 because 50 rows fill two desktop screens of A
+and several of B. Owner-scoped events (sending `changed` only for the owner's own agents) would
+remove passes caused by other owners' traffic; it is not planned unless the cost shows up in the
+server's logs.
+
+**Failure.** No new server deadline: what exists applies, Postgres's `statement_timeout` of 60 s
+per statement (`SESSION_DEFAULTS`, unless DATABASE_URL sets it) and SQLite's 5 s busy timeout for
+a locked database (SQLite has no statement deadline; the cost gates of U3 to U5 are what bound
+it). A failed or timed-out call leaves the window as it was, shows the error line with "as of
+hh:mm", and never renders as an empty list.
 
 ## Server contract
 
@@ -289,34 +317,42 @@ which exists but is not in the list today.
   another owner's agent; `own` when it is a DM between two own agents; `in` otherwise.
 - `agent`: the named own agent is the sender, the DM recipient, or a current member of the
   channel. `place`: DMs only, or that one channel.
-- `problems`: at least one recipient state of the message, as `recipient_state` computes it, is
-  retrying, held, denied, refused or gone. Candidates come from `notifications` by status (the
+- `problems`: at least one recipient that `delivery()` shows for this owner (every recipient when
+  the sender is an own agent, only the own recipients otherwise, so another owner's recipient
+  health never makes a problem) has the state retrying, held, denied, refused or gone, as
+  `recipient_state` computes it. Candidates come from `notifications` by status (the
   `notifications_due` index leads on `status`: `held`, `denied`, `refused`, `gone`, and `pending`
   with attempts), then the exact state is computed per candidate (a read message is not a
-  problem). The candidate set is small, so the op scans it to the end or to `limit` with no scan
-  budget: an empty page with `more: false` means no problems in the bounds, never "not searched".
-- No scan budget anywhere in this op: every predicate is index-served (`messages_by_sender`,
-  `messages_by_recipient`, `messages_by_channel`, all with `commit_seq` second). The item's gate
-  includes the Postgres plan at the production row count.
+  problem). The op scans candidates to the end or to `limit` with no scan budget, so an empty
+  page with `more: false` means no problems in the bounds, never "not searched"; its cost grows
+  with the candidate count (denied, refused and gone stay candidates for good), which U4's gate
+  measures.
+- No scan budget anywhere in this op: every other predicate is index-served
+  (`messages_by_sender`, `messages_by_recipient`, `messages_by_channel`, all with `commit_seq`
+  second). The query plans are part of the gates.
 
 ### `owner.thread`
 
-`{id, after?: seq}` → `{top: id, hidden_parent: bool, cut_above: bool, messages: [...], next:
+`{id, after?: seq}` → `{top: id, start: id | null, hidden_parent: bool, messages: [...], next:
 seq | null}`.
 
-- `messages` are the segment's (see Thread view) in seq order, which puts every parent before its
-  replies (a reply commits after its parent); each is the `owner.history` view. The client builds
-  the tree order.
-- Without `after`: the path from `top` to `id` (its newest 100 when longer, with `cut_above:
-  true`), then the segment's other messages in seq order up to 200 in all. `next` is the seq of
-  the last non-path message returned when the segment has more, else null.
-- With `after`: the segment's messages with seq above `after`, up to 200, same `next` rule. The
-  client merges by id (path messages may come again).
-- The recursive query (both stores support `WITH RECURSIVE`) applies the visibility predicate
-  inside every step, upward by `message_id` and downward by `reply_to`, so it never steps through
-  an invisible message. `hidden_parent` is true when `top` has a `reply_to`; the parent's id is
-  already in every message view, so this reveals nothing new. An `id` the owner cannot read
-  answers not found, as `owner.message` does.
+- The answer covers the subtree under `top`: `top` is the segment's top (see Thread view), or,
+  when the path from there to `id` is longer than 100, `id`'s 99th ancestor, with `start` naming
+  the segment's real top for the "open from the start" link (else null). `hidden_parent` is true
+  when the segment's real top has a `reply_to`; the parent's id is already in every message view,
+  so this reveals nothing new.
+- First answer (no `after`): the server selects the path from `top` to `id` and the subtree's
+  first messages by seq, up to 200 in all, and returns the union sorted by seq. Sorting by seq
+  puts every parent before its replies (a reply commits after its parent). `next` is the seq of
+  the last non-path message selected when the subtree has more, else null.
+- Continuation (`after`): the subtree's messages with seq above `after`, up to 200, sorted by
+  seq, same `next` rule. The client merges by id (path messages may come again); after a merge
+  every subtree message with seq up to the last `next` is present and each message's parent is
+  present or is `top`, so the tree has no holes. The client builds the tree order.
+- Each message is the `owner.history` view. The recursive query (both stores support `WITH
+  RECURSIVE`) applies the visibility predicate inside every step, upward by `message_id` and
+  downward by `reply_to`, so it never steps through an invisible message. An `id` the owner
+  cannot read answers not found, as `owner.message` does.
 - Needs an index on `messages(reply_to)` (none today): migration 0012 on both stores.
 
 Not planned (each removes a cost, none is needed for correctness): owner-scoped event frames;

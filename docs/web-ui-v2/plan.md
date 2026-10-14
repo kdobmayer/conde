@@ -20,6 +20,8 @@ addition:
 - Branches: U1 to U5 go to main (U1 is a live fix; U2 to U5 are additive browser-only reads).
   U6 to U16 replace the live UI page by page, so they land on an integration branch `web-v2`
   (from main after U1) and reach main in one merge after U16; main never ships a half-built UI.
+  `web-v2` merges only after it has been rebased on a main that holds U1 to U5 and its gate
+  (U16) has passed against the real ops on both stores, not only the mock.
 - Parallel groups: items in the same group have disjoint areas and can run in parallel lanes;
   a group starts when the groups it names have landed. The server lane (S) is serial inside
   itself (shared store and op files) and parallel with every client group.
@@ -38,9 +40,10 @@ addition:
   "Search").
 - The thread sheet's handle is a button that toggles full height; no drag gesture.
 - `/keys` keeps one look for both skins and takes the chosen accent after the pick.
-- The reviewer's premise that a delivery event names its message does not hold: `Wake::Board(u8)`
-  carries topic bits only, and reads arrive as `messages`. Invalidation is therefore a re-read of
-  the loaded window on every `messages` or `delivery` frame (ia.md "The Feed window").
+- Invalidation without message ids: a `changed` frame carries topic bits only, and every change
+  that can alter a Feed row arrives as `messages` or `delivery` (ia.md "Live update model"), so
+  the client re-reads its loaded window on either topic, at most once per 2 s (ia.md "The Feed
+  window").
 
 ## Items
 
@@ -62,74 +65,93 @@ addition:
 - U3. `owner.feed` with lower and upper bounds (ia.md "Server contract", without `problems`):
   `{after?, before?, limit?, agent?, direction?, place?}` newest first, `{messages, more}`, each
   message the history view plus `direction` and `via`, visibility by the `owned` clause on both
-  stores. Must not: a scan budget, counts, a `with` filter, owner-scoped events. Gate: web suite
-  cases on both stores: the G9 rule (a teammate's feed never holds a DM between two other owners'
-  agents); both bounds exclusive and `more` exact; a drain of more than two pages with `after`
-  fixed and `before` moving returns exactly the rows above `after`; a row committed between two
-  page calls is returned by the next pass from the same `after`; each predicate and agent +
-  direction + place combined; the three direction cases. Postgres plan (EXPLAIN ANALYZE) for the
-  unfiltered and the agent-filtered first page at the production row count, in the PR. Area:
-  crates/conde/src/ops/web.rs, crates/conde/src/ops/mod.rs, crates/conde/src/store/mod.rs,
-  crates/conde/src/store/sqlite.rs, crates/conde/src/store/postgres.rs,
-  crates/conde/tests/web_ui.rs. Group: S (after U2).
+  stores. Must not: a scan budget, a new deadline, counts, a `with` filter, owner-scoped events.
+  Gate: web suite cases on both stores: the G9 rule (a teammate's feed never holds a DM between
+  two other owners' agents); both bounds exclusive and `more` exact; a drain of more than two
+  pages with `after` fixed and `before` moving returns exactly the rows above `after`; a row
+  committed between two page calls is returned by the next pass from the same `after`; each
+  predicate and agent + direction + place combined; the three direction cases. Cost gate, with
+  the query plan on both stores (EXPLAIN QUERY PLAN on SQLite, EXPLAIN ANALYZE on Postgres) in the
+  PR: the unfiltered and agent-filtered first page at the production row count; a sparse owner
+  (a few dozen messages) on a dense board (the production count) reads by index, not the board;
+  a sustained burst at the maximum window (10 pages of 50 re-read every 2 s for a minute) with
+  the server time per pass recorded. Area: crates/conde/src/ops/web.rs,
+  crates/conde/src/ops/mod.rs, crates/conde/src/store/mod.rs, crates/conde/src/store/sqlite.rs,
+  crates/conde/src/store/postgres.rs, crates/conde/tests/web_ui.rs. Group: S (after U2).
 
 - U4. The `problems` predicate of `owner.feed`, server-side: candidates from `notifications` by
   status (held, denied, refused, gone, pending with attempts), exact state per candidate as
-  `recipient_state` computes it, no scan budget. Must not: filter on the client, count. Gate: web
-  suite cases on both stores: each problem state listed; a held DM that was then read is not; a
-  page with many non-problem rows between two problems returns both problems and never an empty
-  page with `more: true`; no problems answers an empty page with `more: false`. Area: same as U3.
-  Group: S (after U3).
+  `recipient_state` computes it, over the same recipients `delivery()` shows the owner (all of
+  them when the sender is own, only own recipients otherwise), no scan budget. Must not: filter
+  on the client, count, judge another owner's recipient. Gate: web suite cases on both stores:
+  each problem state listed; a held DM that was then read is not; a message from another owner's
+  agent whose only problem is at another owner's recipient is not; a page with many non-problem
+  rows between two problems returns both and never an empty page with `more: true`; no problems
+  answers an empty page with `more: false`. Cost gate, plans on both stores in the PR: thousands
+  of candidates (denied, refused, gone, and held then read) with zero exact hits, answered empty
+  with `more: false`, time recorded. Area: same as U3. Group: S (after U3).
 
 - U5. `owner.thread` with bounds and the `reply_to` index (ia.md "Server contract",
-  "Thread view"): the visible segment, seq order, the path to the selected message first, 200 per
-  answer with `next`, `hidden_parent`, `cut_above`; the visibility predicate inside every
-  recursive step; migration 0012 adds `messages(reply_to)` on both stores. Must not: return or
-  count a message the owner cannot read, step through one. Gate: web suite cases on both stores:
-  a chain A ← B ← C ← D with B invisible gives `thread(C)` = C, D with `hidden_parent` and
-  `thread(A)` = A only; a teammate's id answers not found; a 250-message chain opened at its
-  230th message returns the path cut to 100 with `cut_above` and continuation reaches the end
-  with nothing missing after a merge by id; a branching thread comes back in seq order. Area:
+  "Thread view"): the subtree under `top` (the segment's top, or the selected message's 99th
+  ancestor when the path is longer than 100, with `start`); the first answer selects the path
+  plus the subtree's first messages by seq, 200 in all, and returns the union sorted by seq;
+  `next` continuation; `hidden_parent`; the visibility predicate inside every recursive step;
+  migration 0012 adds `messages(reply_to)` on both stores. Must not: return or count a message
+  the owner cannot read, step through one. Gate: web suite cases on both stores: a chain
+  A ← B ← C ← D with B invisible gives `thread(C)` = C, D with `hidden_parent` and `thread(A)` =
+  A only; a teammate's id answers not found; a 250-message chain opened at its 230th message
+  starts at its 131st with `start` naming the first; a long branched thread (a path of 150 with
+  300 replies on a side branch) opened deep in the path: the selected id is in the first answer,
+  and after continuation and a merge by id every subtree message is present once and every
+  parent is present or is `top`. Cost gate, plans on both stores in the PR: that branched thread
+  on the production row count, time per answer recorded. Area:
   crates/conde/src/store/migrations/0012_messages_by_reply_to.sql,
   crates/conde/src/store/sqlite_schema.sql, crates/conde/src/store/sqlite.rs,
   crates/conde/src/store/postgres.rs, crates/conde/src/store/mod.rs, crates/conde/src/ops/web.rs,
   crates/conde/src/ops/mod.rs, crates/conde/tests/web_ui.rs. Group: S (after U4).
 
-- U6. App shell, routing and the skin switch (ia.md "Two skins, one skeleton", "Navigation"):
-  the route tree (`/`, `/t/[id]`, `/agents`, `/a/[agent]`, `/a/[agent]/dm/[owner]/[name]`,
+- U6. App shell, routing and the skin switch (ia.md "Two skins, one skeleton", "Navigation"): the
+  route tree (`/`, `/t/[id]`, `/agents`, `/a/[agent]`, `/a/[agent]/dm/[owner]/[name]`,
   `/channels`, `/c/[name]`, `/fleet`; old `/a/[agent]/ch/[name]` redirects to `/c/[name]`) with
   placeholder pages; the skin registry (`Shell`, `FeedRow`, `Message` per skin, both pointing at
-  plain skeleton components until U12 and U13); token files per skin under
-  `:root[data-skin=...]` with the option values; `color-scheme: dark`, the light media query
-  removed; the root layout reads `conde.skin` (try/catch, default A) and sets `data-skin`; the
-  Console / Editorial control in the owner menu; the nav model (sections, own agents with state
-  from `owner.list` and `fleet.list`, channels once each). Verify whether the hash router exposes
-  query parameters after the hash; if not, filters use the path form. Must not: a server setting,
-  a light theme, touch `routes/_design` or its layout branch. Gate: a node test of the skin read
-  (missing, unknown and throwing storage give A); renders of the empty shell in both skins.
-  Area: web/src/routes/+layout.svelte, web/src/routes/+page.svelte,
+  plain skeleton components until U12 and U13); token files per skin under `:root[data-skin=...]`
+  with the option values; `color-scheme: dark`, the light media query removed; the root layout
+  reads `conde.skin` (try/catch, default A) and sets `data-skin`; the Console / Editorial control
+  in the owner menu, which swaps only the skin components (the data layer is not remounted; the
+  first visible row keeps its offset); the nav model (sections, own agents with state from
+  `owner.list` and `fleet.list`, channels once each). Verify whether the hash router exposes query
+  parameters after the hash; if not, filters use the path form. Must not: a server setting, a
+  light theme, touch `routes/_design` or its layout branch. Gate: a node test of the skin read
+  (missing, unknown, invalid and throwing storage give A); renders of the empty shell in both
+  skins. Area: web/src/routes/+layout.svelte, web/src/routes/+page.svelte,
   web/src/routes/{t,agents,a,channels,c,fleet}/**, web/src/lib/skins/**,
   web/src/lib/nav.svelte.ts, web/src/lib/UserMenu.svelte, web/src/app.css, web/src/app.html,
   web/test/skin.test.mjs. Group: C1 (after U1; parallel with U7, U8).
 
-- U7. Data layer with the window rule (ia.md "The Feed window", "Search"): the pass logic as a
-  pure module driven by an injected op (`lib/feed-window.ts`), its reactive wrapper
-  (`lib/feed.svelte.ts`: passes on load, reconnect, `messages` and `delivery` frames and poll
-  ticks through the existing `onBoard`, one pass at a time with a dirty re-run, filters from the
-  URL, the per-device last-seen seq in storage inside try/catch, "N new", search mode); the
-  thread answer with continuation merged by id (`lib/thread-view.svelte.ts`); tree order and the
-  re-label rule (`lib/thread-tree.ts`, from `lib/design/model.ts`); `types.ts` for the new
-  answers and `FleetAgent.address: string | null`; the mock API answers `owner.feed`,
-  `owner.thread`, `owner.search` per the contract over the fixture. Must not: merge the Feed list
-  by id (the window replaces it), decide visibility on the client. Gate: node tests: a gap of
-  more than two pages drained, watermark unchanged until the last page; an arrival during a pass
-  caught by the re-run; a held row on the second loaded page turns read after one pass; a resolved
-  problem leaves the list; an empty `problems` answer with `more: false` reads as none and a
-  failed call reads as an error; more than 10 pages restarts the list; a thread with
-  `hidden_parent` and a continuation. Area: web/src/lib/feed-window.ts,
-  web/src/lib/feed.svelte.ts, web/src/lib/thread-view.svelte.ts, web/src/lib/thread-tree.ts,
-  web/src/lib/types.ts, web/scripts/design/mock-server.mjs, web/test/feed.test.mjs,
-  web/test/thread.test.mjs. Group: C1 (parallel with U6, U8).
+- U7. Data layer with the window rule (ia.md "The Feed window", "Search"): the window logic as a
+  pure module driven by an injected op and clock (`lib/feed-window.ts`: `floor` and `exhausted`
+  kept apart from rendered rows, fresh window, older page, refresh pass, empty-after-pass
+  restart, the 10-page bound reusing the pass's first page, one pass per 2 s with a dirty
+  re-run); its reactive wrapper (`lib/feed.svelte.ts`: passes on reconnect, `messages` and
+  `delivery` frames and poll ticks through the existing `onBoard`, a filter change starts a
+  fresh window, filters from the URL, the per-device last-seen seq in storage inside try/catch,
+  "N new", search mode); the thread answer with continuation merged by id
+  (`lib/thread-view.svelte.ts`); tree order and the re-label rule (`lib/thread-tree.ts`, from
+  `lib/design/model.ts`); `types.ts` for the new answers and `FleetAgent.address: string | null`;
+  the mock API answers `owner.feed`, `owner.thread`, `owner.search` per the contract over the
+  fixture. Must not: merge the Feed list by id (the window replaces it), let a bounded call set
+  `exhausted`, decide visibility on the client. Gate: node tests: a gap of more than two pages
+  drained, watermark unchanged until the last page; an arrival during a pass caught by the
+  re-run; triggers inside 2 s give one pass and one re-run; a held row on the second loaded page
+  turns read after one pass; a resolved problem leaves the list; every loaded problem resolved
+  while an older one exists below `floor` gives a fresh window that shows it, never "No delivery
+  problems"; an empty answer to a fresh window with `more: false` reads as none and a failed call
+  reads as an error with the window kept; a pass at the tenth page with `more: true` restarts
+  from its first page with exactly 10 calls; a thread with `hidden_parent` and a continuation
+  with no holes. Area: web/src/lib/feed-window.ts, web/src/lib/feed.svelte.ts,
+  web/src/lib/thread-view.svelte.ts, web/src/lib/thread-tree.ts, web/src/lib/types.ts,
+  web/scripts/design/mock-server.mjs, web/test/feed.test.mjs, web/test/thread.test.mjs. Group:
+  C1 (parallel with U6, U8).
 
 - U8. The three primitives with interaction checks, and the small state components:
   `FilterMenu` (button and listbox: Enter, Space and ArrowDown open, arrows move, Enter selects,
@@ -152,7 +174,9 @@ addition:
   close keeps the Feed scroll position. Adds the 1180×820 size to `shoot.mjs`. Must not: show
   totals or reply counts. Gate: renders per the rules; `interact.mjs` extended to the Feed:
   opening a row and pressing Escape returns focus to that row at the same scroll position, back
-  closes the sheet at 390. Area: web/src/routes/+page.svelte, web/src/routes/t/[id]/+page.svelte,
+  closes the sheet at 390; switching the skin on a filtered, scrolled Feed with a thread open
+  keeps the URL, the filters, the open thread and the first visible row, and makes no
+  `owner.feed` call. Area: web/src/routes/+page.svelte, web/src/routes/t/[id]/+page.svelte,
   web/src/lib/Thread.svelte, web/src/lib/FeedList.svelte, web/scripts/design/shoot.mjs,
   web/scripts/design/interact.mjs. Group: C2 (after C1; parallel with U10, U11).
 
@@ -214,14 +238,20 @@ addition:
   web/static/app/fonts/**, web/src/lib/skins/b/fonts.css, web/src/lib/design/fixture.ts,
   web/README.md. Group: after U13.
 
-- U16. Remove the design routes: `web/src/routes/_design/**` (the A, B, C option pages and the
-  primitives harness), `lib/design/model.ts`, and the root layout's design branch;
-  `interact.mjs` targets the real Feed and Fleet pages instead of the harness. The fixture, the
-  mock API, `shoot.mjs`, `probe-scroll.mjs` and `interact.mjs` stay as the checks every UI change
-  runs. Must not: remove the harness scripts or the fixture. Gate: `interact.mjs` green against
-  the real pages; renders unchanged. Area: web/src/routes/_design/**,
+- U16. Remove the design routes and gate `web-v2` on the real server:
+  `web/src/routes/_design/**` (the A, B, C option pages and the primitives harness),
+  `lib/design/model.ts`, and the root layout's design branch go; `interact.mjs` targets the real
+  Feed and Fleet pages instead of the harness. The fixture, the mock API, `shoot.mjs`,
+  `probe-scroll.mjs` and `interact.mjs` stay as the checks every UI change runs. A web suite
+  smoke case on both stores serves the built app and runs the client's own calls against the
+  real ops: load the shell and the Feed's first page (`owner.feed`), open a thread on one of its
+  rows (`owner.thread`), filter problems (`owner.feed {problems: true}`), search
+  (`owner.search`), asserting the fields the client reads. Must not: remove the harness scripts
+  or the fixture. Gate: the smoke case green on both stores; `interact.mjs` green against the
+  real pages; renders unchanged. Area: web/src/routes/_design/**,
   web/src/routes/+layout.svelte, web/src/lib/design/model.ts, web/scripts/design/interact.mjs,
-  docs/web-ui-v2/options/README.md. Group: last (after U9 to U15); `web-v2` then merges to main.
+  crates/conde/tests/web_ui.rs, docs/web-ui-v2/options/README.md. Group: last, after U1 to U5
+  are on main and U6 to U15 on `web-v2` (rebased on that main); then `web-v2` merges to main.
 
 ## Waiting on a decision (do not take)
 

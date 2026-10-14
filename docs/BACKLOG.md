@@ -72,3 +72,10 @@ Review and integration by desk, one batch at a time; one release per batch.
   for a run on a real Windows machine with desk watching.
 - W3. [D] Web UI images: the brief is in NEXT.md section D; generation goes
   through the owner's design partner, not a contributor lane.
+- W4. Web UI overhaul (owner, 2026-10-14: the current layout and visuals are
+  not good enough; the new UI must be well thought out, visually striking,
+  well organized) with Konstantin's live Feed folded in (every message across
+  the owner's agents, thread view, filters, live push, owner-scoped,
+  read-only). Design phase at desk first (audit, information architecture,
+  three rendered directions, plan); implementation items appear here after
+  the owner picks a direction.

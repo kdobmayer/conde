@@ -398,8 +398,9 @@ again with another server or account is refused
 (`dakai is pinned to ... as ...; to point the alias elsewhere, first run: conde boards --forget dakai`).
 Signing in again on a host that is already enrolled replaces its key: the
 server revokes the previous key at once, keeps one key per host, and the
-command prints `re-enrolled host <host>: the previous key for this host is revoked`
-in place of the `enrolled host` line. The running bridge switches to the new
+command prints `re-enrolled host <host>, previous key revoked` (or `re-enrolled
+host <host>, no live key before`, when the host's keys had all been revoked
+earlier) in place of the `enrolled host` line. The running bridge switches to the new
 key at once (`bridge: dakai reloaded`).
 
 **A machine without a browser** (a server, a remote shell; on Linux,

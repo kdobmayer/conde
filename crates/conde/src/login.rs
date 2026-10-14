@@ -38,10 +38,12 @@ pub struct Enrolled {
     pub host_id: String,
     pub key: String,
     pub user: String,
-    /// The host existed on the server, which revoked its previous key (absent from an older
-    /// server: false).
+    /// The host existed on the server (absent from an older server: false).
     #[serde(default)]
     pub reenrolled: bool,
+    /// Whether the mint revoked live keys of the host; None from a server that does not say.
+    #[serde(default)]
+    pub replaced: Option<bool>,
 }
 
 impl std::fmt::Debug for Enrolled {
@@ -50,6 +52,7 @@ impl std::fmt::Debug for Enrolled {
             .field("host_id", &self.host_id)
             .field("user", &self.user)
             .field("reenrolled", &self.reenrolled)
+            .field("replaced", &self.replaced)
             .finish_non_exhaustive()
     }
 }
@@ -476,7 +479,7 @@ pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool,
     let cfg = save(&path, &alias, server, &enrolled)?;
     println!("signed in as {}", enrolled.user);
     let bridge = crate::admin::reload_bridge(&crate::paths::socket_path(), &alias);
-    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path, enrolled.reenrolled, &bridge));
+    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path, enrolled.reenrolled, enrolled.replaced, &bridge));
     Ok(0)
 }
 

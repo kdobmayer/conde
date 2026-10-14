@@ -27,11 +27,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 
 ## Queue, top first
 
-- B5. [J] Redeem answer: `reenrolled` means the host existed, not that a live
-  key was revoked; the mint knows `replaced`. Return both and make the CLI say
-  which ("re-enrolled host, previous key revoked" vs "re-enrolled host, no live
-  key before"). Area: crates/conde-remote redeem + crates/conde login CLI,
-  tests.
 - B7. [I] A sign-in `next` path over 2048 characters is dropped silently and
   a very long authorize request lands on /keys. Refuse it with a clear 400 (or
   carry it) and test the boundary. Area: crates/conde-remote web login.

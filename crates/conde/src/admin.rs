@@ -133,7 +133,7 @@ pub fn enroll(server: &str, host: Option<&str>, board: Option<&str>, key_stdin: 
     let cfg = BoardConfig { server: server.to_string(), host_id: info.host.clone(), owner: info.owner.clone(), key };
     boards::store(&path, &alias, &cfg)?;
     let bridge = reload_bridge(&paths::socket_path(), &alias);
-    print!("{}", enrolled_text(&alias, &cfg, &path, false, &bridge));
+    print!("{}", enrolled_text(&alias, &cfg, &path, false, None, &bridge));
     Ok(0)
 }
 
@@ -160,13 +160,25 @@ pub fn reload_bridge(socket: &std::path::Path, alias: &str) -> String {
 }
 
 /// What `conde enroll` and `conde login` print once the board file is stored; `reenrolled`:
-/// the server said the host existed and revoked its previous key; `bridge`: the
-/// [`reload_bridge`] line.
-pub fn enrolled_text(alias: &str, cfg: &BoardConfig, path: &std::path::Path, reenrolled: bool, bridge: &str) -> String {
+/// the server said the host existed; `replaced`: whether that mint revoked a live key of it
+/// (None: the server did not say); `bridge`: the [`reload_bridge`] line.
+pub fn enrolled_text(
+    alias: &str,
+    cfg: &BoardConfig,
+    path: &std::path::Path,
+    reenrolled: bool,
+    replaced: Option<bool>,
+    bridge: &str,
+) -> String {
     let (host, server, owner, path) = (&cfg.host_id, &cfg.server, &cfg.owner, path.display());
     let head = if reenrolled {
+        let what = match replaced {
+            Some(true) => ", previous key revoked",
+            Some(false) => ", no live key before",
+            None => "",
+        };
         format!(
-            "re-enrolled host {host}: the previous key for this host is revoked\n\
+            "re-enrolled host {host}{what}\n\
              board {alias} at {server} (account {owner}); credential stored at {path} (mode 0600)\n"
         )
     } else {

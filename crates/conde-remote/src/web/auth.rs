@@ -732,9 +732,12 @@ pub struct RedeemResponse {
     pub host_id: String,
     pub key: String,
     pub user: String,
-    /// The host existed before: its previous keys are revoked.
+    /// The host existed before (its earlier keys, if any were live, are revoked).
     #[serde(default)]
     pub reenrolled: bool,
+    /// Live keys of the host were revoked by this mint (absent from an older server).
+    #[serde(default)]
+    pub replaced: bool,
 }
 
 fn redeem_error(status: StatusCode, code: &str, message: &str) -> Response {
@@ -934,6 +937,7 @@ async fn mint_for(state: &WebState, code: CliCode, host: &str) -> Response {
                 key: minted.key,
                 user: code.user_name,
                 reenrolled: !minted.new_host,
+                replaced: minted.replaced > 0,
             })
             .into_response();
             r.headers_mut()

@@ -40,10 +40,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   which ("re-enrolled host, previous key revoked" vs "re-enrolled host, no live
   key before"). Area: crates/conde-remote redeem + crates/conde login CLI,
   tests.
-- B6. [I] `search` with a never-matching pattern scans all visible history,
-  bounded only by the 120/min bucket. Bound the scan (a row budget per request
-  with a cursor to continue, or a time budget) on both stores, CLI and MCP.
-  Area: store search (both backends), dispatcher, CLI/MCP search, tests.
 - B7. [I] A sign-in `next` path over 2048 characters is dropped silently and
   a very long authorize request lands on /keys. Refuse it with a clear 400 (or
   carry it) and test the boundary. Area: crates/conde-remote web login.

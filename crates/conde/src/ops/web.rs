@@ -132,8 +132,8 @@ pub fn message(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     browser_only(ctx)?;
     let owner = ctx.p.user_id;
-    messages::search_in(ctx, body, |after, scope| {
-        Ok(ctx.db.owner_search_scan(owner, after, scope, messages::SEARCH_BATCH)?)
+    messages::search_in(ctx, body, |after, scope, from_day| {
+        Ok(ctx.db.owner_search_scan(owner, after, scope, from_day, messages::SEARCH_BATCH)?)
     })
 }
 

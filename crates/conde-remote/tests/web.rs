@@ -971,11 +971,13 @@ async fn wrong_pasted_codes_use_up_the_tries_then_the_login_dies() {
     let shown = paste_leg(&env, &b, &run).await;
     let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
 
-    // the right code from another run (another verifier) counts as a miss too
+    // the right code from another run (the state from the URL, another verifier) is refused and
+    // spends no try: only the run that holds the verifier can use the tries up
     let thief = CliRun { state: run.state.clone(), ..cli_run() };
     let (status, got) = paste_redeem(&env, &thief, &shown).await;
-    assert_eq!((status, got["error"].as_str(), got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some("invalid_code"), Some(4)));
-    for left in [3, 2, 1] {
+    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
+    assert!(got["message"].as_str().unwrap().contains("not from the conde login run"), "{got}");
+    for left in [4, 3, 2, 1] {
         let (status, got) = paste_redeem(&env, &run, wrong).await;
         assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
     }
@@ -1057,6 +1059,48 @@ async fn pasted_code_attempts_are_limited_per_account_across_reissued_codes() {
     assert!(env.store.m().creds.is_empty(), "nothing minted");
     let tries: Vec<u32> = env.store.m().codes.values().map(|c| c.tries).collect();
     assert_eq!(tries, [3], "the login waits with its tries unspent");
+}
+
+/// The reviewer's probe: a stranger holding only the login URL (its state) sends many redeems
+/// with a made-up verifier, across several confirmed runs. None of them spends the account's
+/// budget or a per-code try, so the account's next real run still signs in with its code.
+#[tokio::test]
+async fn holding_only_the_login_url_spends_no_attempt_budget() {
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_guesses_per_hour = 3).await;
+    let b = Browser::new();
+    for round in 0..3 {
+        let run = cli_run();
+        let shown = paste_leg(&env, &b, &run).await;
+        let stranger = CliRun { state: run.state.clone(), ..cli_run() };
+        for _ in 0..5 {
+            let (status, got) = paste_redeem(&env, &stranger, &shown).await;
+            assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "round {round}: {got}");
+        }
+        let tries: Vec<u32> = env.store.m().codes.values().map(|c| c.tries).collect();
+        assert_eq!(tries, [0], "round {round}: no try spent");
+        env.store.m().codes.clear();
+    }
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+}
+
+/// When the account's next attempt is allowed only after the waiting login expires, the 429 says
+/// so instead of a retry that cannot succeed.
+#[tokio::test]
+async fn a_wait_past_the_logins_expiry_says_to_start_again() {
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_guesses_per_hour = 1).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let shown = paste_leg(&env, &b, &run).await;
+    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let (status, _) = paste_redeem(&env, &run, wrong).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, got) = paste_redeem(&env, &run, &shown).await;
+    assert_eq!((status, got["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{got}");
+    let message = got["message"].as_str().unwrap();
+    assert!(message.contains("after this login expires") && message.contains("run conde login --code again"), "{message}");
 }
 
 #[tokio::test]

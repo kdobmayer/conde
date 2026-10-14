@@ -62,16 +62,18 @@ Review and integration by desk, one batch at a time; one release per batch.
   crates/conde and crates/conde-remote (measure with cargo-llvm-cov in your
   checkout; do not add it to the repo) and add tests that assert real claims,
   not line coverage. One PR per module. Area: tests only.
+- B11. [J] `conde admin key create` adds a key without revoking the host's
+  live ones (the only overlap path; every other mint revokes and inserts in
+  one transaction). Decided: revoke by default like the other mints, with
+  `--keep-live` for a hand-over rotation; the command prints which it did.
+  Area: crates/conde admin CLI + ops::hosts, tests.
 
 ## Waiting on a decision or an observation (do not take)
 
-- W1. [J] `conde admin key create` adds a key without revoking the host's live
-  ones (the only overlap path). Decision pending at desk: revoke by default
-  with `--keep-live` for a hand-over rotation.
-- W2. [I] Refresh reuse grace (a token consumed less than 10 s ago answers
+- W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers
   invalid_grant without revoking) and client-metadata pinning per host: both
   wait for the owner's first remote MCP connect and its log.
-- W3. [E] Windows acceptance: the unverified list in NEXT.md section E waits
+- W2. [E] Windows acceptance: the unverified list in NEXT.md section E waits
   for a run on a real Windows machine with desk watching.
-- W4. [D] Web UI images: the brief is in NEXT.md section D; generation goes
+- W3. [D] Web UI images: the brief is in NEXT.md section D; generation goes
   through the owner's design partner, not a contributor lane.

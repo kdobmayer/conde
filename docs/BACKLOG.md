@@ -71,7 +71,6 @@ is specified in plan.md with its gate; the lines here are the index. Server
 items (S) run one at a time; client groups C1, C2, C3 are disjoint files and
 can run in parallel with S; U6-U15 go to the branch web-v2, U16 merges it.
 
-- U1. Conversation opens at the newest message (live defect). Area: web/src/lib/Conversation.svelte, web/scripts/design/probe-scroll.mjs. Any time, ship alone.
 - U2. Browser allow-list: owner.feed, owner.thread, owner.search. Area: crates/conde-remote/src/web/app.rs, crates/conde/tests/web_ui.rs. S, first.
 - U3. owner.feed with lower and upper bounds, plus cost gate. Area: crates/conde/src/ops/{web,mod}.rs, store/{mod,sqlite,postgres}.rs, tests/web_ui.rs. S, after U2.
 - U4. owner.feed problems predicate over the recipients delivery() shows, plus cost gate. Area: same as U3. S, after U3.

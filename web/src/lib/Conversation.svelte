@@ -55,6 +55,7 @@
 			head = h;
 			error = '';
 			notMember = false;
+			loading = false; // render the messages before scrolling to them
 			if (stick) await scrollToEnd();
 		} catch (e) {
 			if (mine !== generation) return;

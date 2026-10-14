@@ -415,6 +415,8 @@ pub fn min_proto() -> anyhow::Result<u32> {
 /// Start the remote listener over `d` (tests and `conde server`); `d` serves as the shared
 /// board named by [`board_name`].
 pub async fn start(d: Arc<Dispatcher>, listen: SocketAddr, config: ServerConfig) -> std::io::Result<ServerHandle> {
+    // A bad board name is refused before the address is bound.
+    board_name().map_err(std::io::Error::other)?;
     start_on(d, tokio::net::TcpListener::bind(listen).await?, config).await
 }
 

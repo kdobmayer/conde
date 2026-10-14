@@ -135,8 +135,14 @@ the first execution of every Windows code path.
 Verified here, without a Windows machine:
 - `cargo check --workspace --tests --target x86_64-pc-windows-msvc` passes
   (official rust 1.95.0 with its Windows std; the C parts of ring and SQLite
-  are not compiled by a check, the release runner compiles them). Tests that
+  are compiled for real only by the release runner). Tests that
   drive the daemon over a unix socket or check unix modes are `cfg(unix)`.
+  On Linux the check needs the cached official toolchain first on PATH (and
+  as RUSTC) plus two check-only shims, since the ring and libsqlite3-sys build
+  scripts still invoke a C compiler and archiver for the target:
+  CC_x86_64_pc_windows_msvc=cc-shim.sh (clang-cl, falling back to an empty
+  COFF object at the -Fo path) and AR_x86_64_pc_windows_msvc=lib-shim.sh
+  (lib.exe's `-out:X objs` mapped onto `ar crS`); a check never links.
 - Unit tests on Linux behind the injection points: the pipe-name parser and
   the key-file hash (ported from Claude Code's), the FILETIME/.NET-ticks start
   rule, receipts gated on the auth line, the owner-only SDDL, the SID peer

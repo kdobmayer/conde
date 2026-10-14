@@ -7,7 +7,8 @@ can run in parallel when their areas do not overlap. Details and history live
 in docs/NEXT.md (section letters in brackets). Rules for every item: branch
 from the fresh main, one PR, one commit when the parts share files, one-line
 commit messages, no attribution, `cargo test --workspace` green on both stores
-(CONDE_TEST_PG), no new clippy warning, docs updated where behavior changes.
+(CONDE_TEST_PG; on the release machine also CONDE_STRICT_TIMING=1 for the tight
+timing bounds), no new clippy warning, docs updated where behavior changes.
 Review and integration by desk, one batch at a time; one release per batch.
 
 ## Standing items (no claim needed)
@@ -41,6 +42,14 @@ Review and integration by desk, one batch at a time; one release per batch.
   Make install.sh print "run conde setup" when a conde was already installed,
   add an Upgrade section to the README, and consider setup --check printing the
   one command that fixes it. Area: install.sh, README, crates/conde setup.
+- B17. Late-outcome race family, remaining cases (from the PR 18 review): (a)
+  mailbox gone with the message unread: a held outcome that commits after the
+  endpoints frame that removed the mailbox stays held until the next endpoints
+  frame or reconnect (gone_holds ran while the attempt was dispatching); (b)
+  outcome lands just before the read: the notification stays held for a read
+  message, counts in agent_health held and is re-offered through open_attempts
+  on reconnect until the endpoint leaves. Decide the rule for each and test.
+  Area: crates/conde ops/bridge.rs, store queries, tests/recovery.rs.
 
 ## Waiting on a decision or an observation (do not take)
 

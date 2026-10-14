@@ -475,9 +475,10 @@ fn g1_offline_local_work_never_waits_on_a_board() {
             boards::store(&boards::path_in(&a.config(), "dakai"), "dakai", &cfg).unwrap();
             a.start();
         }
-        // Waiting on the board would cost at least its 2 s answer wait: "never waits" is a bound
-        // safely under that, which a loaded box still meets (CONDE_STRICT_TIMING=1: the tight
-        // bound, for a quiet machine).
+        // Waiting on the board would cost at least the 2 s aggregate_wait of an aggregate view, or
+        // call_timeout (5 s under fast()) of a single-board op: "never waits" is a bound safely
+        // under both, which a loaded box still meets (CONDE_STRICT_TIMING=1: the tight bound,
+        // for a quiet machine).
         let strict = std::env::var("CONDE_STRICT_TIMING").is_ok_and(|v| v == "1");
         let local_bound = Duration::from_millis(if strict { 700 } else { 1500 });
         let quick = |what: &str, t: Instant| assert!(t.elapsed() < local_bound, "{what} took {:?} ({case})", t.elapsed());

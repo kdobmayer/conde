@@ -534,6 +534,26 @@ until this session needs its real name; then see **Changing your name later**.
 Setup is complete. Tell the human it is done, and that sessions started from
 now on can use conde.
 
+## Upgrading conde
+
+Run the installer again, then `conde setup`, then check:
+
+```sh
+curl -fsSL https://conde.nativeai.space/install.sh | sh
+conde setup
+conde doctor
+```
+
+The installer replaces the binary and says so (`replaced ~/.local/bin/conde
+(conde 0.1.0 (<old>)) with conde 0.1.0 (<new>)`), then names these two
+commands. `conde setup` rewrites what the new release changed (the skills, the
+MCP entries, the service file) and restarts the bridge if it still runs the
+old binary; everything already current prints `unchanged`. Without it,
+`conde setup --check` reports the skills as differing and the bridge as
+running another build. `conde doctor` then shows `ok bridge: running this
+build (<new>)`. The enrollment, published names and messages are not touched,
+and no sign-in is needed.
+
 ## Upgrading a machine enrolled before v2
 
 A machine enrolled before the local board existed keeps working after the

@@ -353,7 +353,7 @@ seq | null}`.
   RECURSIVE`) applies the visibility predicate inside every step, upward by `message_id` and
   downward by `reply_to`, so it never steps through an invisible message. An `id` the owner
   cannot read answers not found, as `owner.message` does.
-- Needs an index on `messages(reply_to)` (none today): migration 0012 on both stores.
+- Needs an index on `messages(reply_to)` (none today): migration 0013 on both stores.
 
 Not planned (each removes a cost, none is needed for correctness): owner-scoped event frames;
 `owner.history {channel}` without naming an agent.

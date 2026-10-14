@@ -623,6 +623,29 @@ async fn a_callback_from_another_browser_is_refused() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// A return path of 2048 characters survives the sign-in; a longer one is refused with a reason,
+/// never dropped for /keys.
+#[tokio::test]
+async fn a_return_path_up_to_2048_characters_is_carried_and_a_longer_one_refused() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let next = |len: usize| format!("/keys?pad={}", "a".repeat(len - 10));
+    let login = |path: &str| {
+        let next: String = openidconnect::url::form_urlencoded::byte_serialize(path.as_bytes()).collect();
+        env.url(&format!("/auth/login?next={next}"))
+    };
+    let b = Browser::new();
+    let longest = next(2048);
+    let (status, authorize) = b.peek(&login(&longest)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{authorize}");
+    let (_, callback) = b.peek(&authorize).await;
+    let (status, back) = b.peek(&callback).await;
+    assert_eq!((status, back.as_str()), (StatusCode::SEE_OTHER, longest.as_str()), "carried back whole");
+
+    let (status, _, body) = Browser::new().get(&login(&next(2049))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("longer than 2048 characters"), "{body}");
+}
+
 #[tokio::test]
 async fn provider_errors_are_shown() {
     let env = Env::with(Arc::new(MemStore::default())).await;

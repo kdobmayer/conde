@@ -311,6 +311,9 @@ impl Oidc {
     }
 }
 
+/// The longest path a sign-in carries back (it is stored with the login until the callback).
+const MAX_NEXT: usize = 2048;
+
 /// A local path to return to after sign-in; anything else becomes `/keys`.
 fn local_path(next: Option<&str>) -> String {
     match next {
@@ -318,7 +321,7 @@ fn local_path(next: Option<&str>) -> String {
             if p.starts_with('/')
                 && !p.starts_with("//")
                 && !p.contains('\\')
-                && p.len() <= 2048
+                && p.len() <= MAX_NEXT
                 && !p.chars().any(char::is_control) =>
         {
             p.to_string()
@@ -338,6 +341,13 @@ pub(crate) async fn login(
     jar: CookieJar,
     Query(q): Query<LoginQuery>,
 ) -> Result<Response, WebError> {
+    // Refused, not dropped: a page that sent here (an app's authorization request) would
+    // otherwise end on /keys with no word of why.
+    if q.next.as_deref().is_some_and(|n| n.len() > MAX_NEXT) {
+        return Err(WebError::BadRequest(format!(
+            "The page to return to after sign-in is longer than {MAX_NEXT} characters, so sign-in cannot carry it back. If an app sent you here, its request is too long."
+        )));
+    }
     let begin = state
         .0
         .oidc
@@ -998,5 +1008,7 @@ mod tests {
             assert_eq!(local_path(Some(bad)), "/keys", "{bad}");
         }
         assert_eq!(local_path(None), "/keys");
+        let longest = format!("/keys?{}", "a".repeat(MAX_NEXT - 6));
+        assert_eq!(local_path(Some(&longest)), longest);
     }
 }

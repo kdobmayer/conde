@@ -28,9 +28,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 
 ## Queue, top first
 
-- B7. [I] A sign-in `next` path over 2048 characters is dropped silently and
-  a very long authorize request lands on /keys. Refuse it with a clear 400 (or
-  carry it) and test the boundary. Area: crates/conde-remote web login.
 - B11. [J] `conde admin key create` adds a key without revoking the host's
   live ones (the only overlap path; every other mint revokes and inserts in
   one transaction). Decided: revoke by default like the other mints, with

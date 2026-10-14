@@ -1,0 +1,158 @@
+// Design-only mock of the conde web API over the design fixture, serving a built app.
+// Usage: node scripts/design/mock-server.mjs <build-dir> <port>
+// Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, fleet.list),
+// /v1/events (a WebSocket that sends the hello frame) and /keys (the server's keys page
+// template from crates/conde-remote/src/web/pages.rs, filled with fixture rows).
+
+import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
+import { readFileSync, existsSync, statSync } from 'node:fs';
+import { join, extname, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as fx from '../../src/lib/design/fixture.ts';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = resolve(process.argv[2] ?? join(here, '../../../crates/conde-remote/web-dist'));
+const port = Number(process.argv[3] ?? 5799);
+
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json' };
+
+function json(res, status, body) {
+	res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+	res.end(JSON.stringify(body));
+}
+
+function history(body) {
+	const agent = body.agent.includes('/') ? body.agent : `${fx.OWNER}/${body.agent}`;
+	let rows;
+	let head;
+	if (body.channel) {
+		rows = fx.messages.filter((x) => x.to === body.channel && fx.visibleTo(agent, x));
+		head = { channel: body.channel, topic: fx.channels[body.channel]?.topic ?? null };
+	} else {
+		const w = body.with;
+		rows = fx.messages.filter((x) => x.place === 'dm' && ((x.from === agent && x.to === w) || (x.from === w && x.to === agent)));
+		head = { with: w, kind: fx.fleet.agents.find((a) => a.name === w)?.kind ?? null };
+	}
+	if (body.before) rows = rows.filter((x) => x.seq < body.before);
+	const limit = body.limit ?? 100;
+	const more = rows.length > limit;
+	return { ...head, agent, messages: rows.slice(-limit), more };
+}
+
+function rpc(req, res) {
+	let raw = '';
+	req.on('data', (c) => (raw += c));
+	req.on('end', () => {
+		const r = JSON.parse(raw);
+		const b = r.body ?? {};
+		let result;
+		switch (r.op) {
+			case 'owner.list':
+				result = fx.rail();
+				break;
+			case 'owner.history':
+				result = history(b);
+				break;
+			case 'owner.message': {
+				const m = fx.messages.find((x) => x.message_id === b.id);
+				if (!m) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no such message' } });
+				result = { message: m };
+				break;
+			}
+			case 'fleet.list':
+				result = fx.fleet;
+				break;
+			default:
+				return json(res, 200, { ok: false, error: { code: 'forbidden', message: `op ${r.op} not mocked` } });
+		}
+		json(res, 200, { v: 1, type: 'response', request_id: r.request_id, ok: true, result });
+	});
+}
+
+// The keys page: the server's own template and stylesheet, filled with fixture rows.
+const pagesRs = readFileSync(join(here, '../../../crates/conde-remote/src/web/pages.rs'), 'utf8');
+const css = pagesRs.match(/const CSS: &str = r#"([\s\S]*?)"#;/)[1];
+const mark = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" class="mark" aria-hidden="true" focusable="false"><path style="fill:var(--muted)" d="M8 3h6v6H8Z"/><path fill="currentColor" d="M2 2h3v9h9v3H2Z"/></svg>';
+const server = 'https://conde.nativeai.space';
+function keysPage() {
+	const rows = fx.keys
+		.map(
+			(k) =>
+				`<tr>\n<td><code>${k.host_id}</code></td><td>${k.label}</td><td>${k.created}</td><td>${k.last_seen}</td>\n` +
+				(k.revoked
+					? `<td class="muted">revoked ${k.revoked}</td><td></td>\n`
+					: `<td>live</td><td><form method="post" action="/keys/${k.host_id}/revoke" class="inline"><button class="danger">Revoke</button></form></td>`) +
+				`</tr>`
+		)
+		.join('\n');
+	const apps = fx.apps
+		.map(
+			(a) =>
+				`<tr>\n<td><code>${a.host}</code> <span class="muted">&#8220;${a.name}&#8221;</span></td><td>${a.created}</td><td>${a.last_used}</td><td>${a.expires}</td>\n<td><form class="inline"><button class="danger">Revoke</button></form></td>\n</tr>`
+		)
+		.join('\n');
+	const body = `<h1>Host keys</h1>
+<p class="muted">One key per machine. The bridge on that machine holds it, and every Claude and Codex session it finds acts as you. Revoking a key cuts that machine off at once.</p>
+<form method="post" action="/keys" class="row">
+<input type="text" name="label" required maxlength="64" placeholder="Machine name, e.g. work-laptop" aria-label="Machine name">
+<button>Create key</button>
+</form>
+<div class="wrap"><table>
+<thead><tr><th>Host</th><th>Label</th><th>Created</th><th>Last seen</th><th>State</th><th></th></tr></thead>
+<tbody>
+${rows}</tbody>
+</table></div>
+<h1>Connected apps</h1>
+<p class="muted">Apps such as Claude that act on this board as you, through its MCP endpoint <code>${server}/mcp</code>. Revoking one ends its access at once.</p>
+<div class="wrap"><table>
+<thead><tr><th>App</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
+<tbody>
+${apps}</tbody>
+</table></div>`;
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Host keys · conde</title>
+<style>${css}</style>
+</head>
+<body>
+<header>
+<a class="brand" href="/keys">${mark}conde</a>
+<span class="who">${fx.session.display}</span>
+<form method="post" action="/auth/logout"><button class="quiet">Sign out</button></form>
+</header>
+<main>
+${body}
+</main>
+</body>
+</html>`;
+}
+
+const http = createServer((req, res) => {
+	const url = new URL(req.url, 'http://x');
+	if (url.pathname === '/v1/session') return json(res, 200, fx.session);
+	if (url.pathname === '/v1/rpc' && req.method === 'POST') return rpc(req, res);
+	if (url.pathname === '/keys') {
+		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+		return res.end(keysPage());
+	}
+	let file = join(root, url.pathname === '/' ? 'index.html' : url.pathname);
+	if (!file.startsWith(root) || !existsSync(file) || statSync(file).isDirectory()) file = join(root, 'index.html');
+	res.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' });
+	res.end(readFileSync(file));
+});
+
+// The event socket: handshake, then the hello frame; the app shows itself live.
+http.on('upgrade', (req, socket) => {
+	if (!req.url.startsWith('/v1/events')) return socket.destroy();
+	const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+	socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+	const payload = Buffer.from(JSON.stringify({ v: 1, type: 'hello', ping_s: 30 }));
+	socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+	socket.on('error', () => {});
+});
+
+http.listen(port, '127.0.0.1', () => console.log(`mock on http://127.0.0.1:${port} serving ${root}`));

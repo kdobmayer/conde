@@ -340,7 +340,7 @@ pub trait Host {
     fn which(&self, prog: &str) -> Option<PathBuf>;
     fn run(&mut self, prog: &str, args: &[&str]) -> anyhow::Result<CmdOut>;
     /// [`Host::run`] for a probe that must not hold setup up: Err once `limit` passes (the
-    /// program is killed).
+    /// program is killed). This default delegates to `run` and enforces no deadline.
     fn run_bounded(&mut self, prog: &str, args: &[&str], _limit: std::time::Duration) -> anyhow::Result<CmdOut> {
         self.run(prog, args)
     }
@@ -417,14 +417,23 @@ impl Host for System {
     }
 
     fn run_bounded(&mut self, prog: &str, args: &[&str], limit: std::time::Duration) -> anyhow::Result<CmdOut> {
-        use std::io::Read;
-        let mut child = std::process::Command::new(prog)
+        // Output to a regular file, not a pipe: a descendant the program leaves running (a
+        // wrapper that backgrounds something) would hold a pipe open past the deadline.
+        let out_path = std::env::temp_dir().join(format!("conde-probe-{}-{}", std::process::id(), crate::util::new_ulid()));
+        let out = std::fs::File::create(&out_path).with_context(|| format!("creating {}", out_path.display()))?;
+        let spawned = std::process::Command::new(prog)
             .args(args)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| format!("running {prog}"))?;
+            .stdout(out)
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_file(&out_path);
+                return Err(e).with_context(|| format!("running {prog}"));
+            }
+        };
         let deadline = std::time::Instant::now() + limit;
         let status = loop {
             if let Some(status) = child.try_wait()? {
@@ -433,18 +442,14 @@ impl Host for System {
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = std::fs::remove_file(&out_path);
                 bail!("{prog} did not answer within {limit:?}");
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
-        let (mut stdout, mut stderr) = (String::new(), String::new());
-        if let Some(mut o) = child.stdout.take() {
-            let _ = o.read_to_string(&mut stdout);
-        }
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_string(&mut stderr);
-        }
-        Ok(CmdOut { ok: status.success(), stdout, stderr })
+        let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&out_path);
+        Ok(CmdOut { ok: status.success(), stdout, stderr: String::new() })
     }
 
     #[cfg(unix)]

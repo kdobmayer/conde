@@ -1428,4 +1428,15 @@ fn a_bounded_probe_that_hangs_is_cut_off() {
     assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
     let r = conde::setup::System.run_bounded("echo", &["yes"], std::time::Duration::from_secs(5)).unwrap();
     assert_eq!((r.ok, r.stdout.trim()), (true, "yes"));
+
+    // A program that exits but leaves a descendant holding its output: answered within the
+    // limit all the same (the sleep's pid comes back as the output, and is cleaned up by it).
+    let t = std::time::Instant::now();
+    let r = conde::setup::System.run_bounded("sh", &["-c", "sleep 30 & echo $!"], std::time::Duration::from_millis(300));
+    let elapsed = t.elapsed();
+    let r = r.expect("the program itself exited at once");
+    let pid = r.stdout.trim().to_string();
+    let _ = std::process::Command::new("kill").arg(&pid).status();
+    assert!(elapsed < std::time::Duration::from_millis(1000), "took {elapsed:?}");
+    assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
 }

@@ -430,6 +430,17 @@ pub enum McpRedeemed {
     Disabled,
 }
 
+/// Result of [`WebStore::issue_cli_code`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliIssued {
+    /// The record was stored.
+    Issued,
+    /// Another account's live record holds the login.
+    Theirs,
+    /// Another account's record holds the login, but it expired.
+    TheirsExpired,
+}
+
 /// Result of [`WebStore::refresh_mcp_grant`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpRefreshed {
@@ -489,9 +500,11 @@ pub trait WebStore: Send + Sync {
     fn insert_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()>;
     /// Returns and deletes the code.
     fn take_cli_code(&self, code_digest: &str) -> WebResult<Option<CliCode>>;
-    /// Issues a pasted-code login's record in one transaction: a pending record of another
-    /// account stays (false); otherwise `code` replaces any earlier record of the login (true).
-    fn issue_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<bool>;
+    /// Issues a pasted-code login's record in one transaction: a record of another account
+    /// stays, and the answer says whether it is older than `ttl` seconds at `code.created_at`
+    /// (that login expired) or still live; otherwise `code` replaces any earlier record of the
+    /// login.
+    fn issue_cli_code(&self, code_digest: &str, code: &CliCode, ttl: i64) -> WebResult<CliIssued>;
     /// Puts back a record taken for a wrong guess, in one transaction: a record the same account
     /// issued since (it confirmed again) stays instead; another account's record issued in the
     /// gap is replaced, so the login stays with the account that held it.

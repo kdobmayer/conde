@@ -31,7 +31,7 @@ use thiserror::Error;
 use super::keys::{self, host_slug};
 use super::ratelimit::ClientIp;
 use super::session::{self, WebError, digest, login_cookie, random_token, removal, same_secret};
-use super::{CliCode, CreateUser, Identity, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
+use super::{CliCode, CliIssued, CreateUser, Identity, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
 
 /// Discovery and JWKS are re-read after this long (and at once when a token's key is unknown).
 const METADATA_MAX_AGE: Duration = Duration::from_secs(3600);
@@ -693,11 +693,17 @@ pub(crate) async fn cli_confirm(
         tries: 0,
     };
     let key = paste_key(&cli_state);
-    let issued = state.store(move |s| s.issue_cli_code(&key, &record)).await?;
-    if !issued {
-        return Err(WebError::Forbidden(
-            "Another account already signed in for this conde login. Run conde login again.".into(),
-        ));
+    let ttl = state.limits().cli_code_ttl;
+    match state.store(move |s| s.issue_cli_code(&key, &record, ttl)).await? {
+        CliIssued::Issued => {}
+        CliIssued::TheirsExpired => {
+            return Err(WebError::BadRequest("This conde login expired. Run conde login again.".into()));
+        }
+        CliIssued::Theirs => {
+            return Err(WebError::Forbidden(
+                "Another account already signed in for this conde login. Run conde login again.".into(),
+            ));
+        }
     }
     let minutes = state.config().cli_code_ttl.as_secs().div_ceil(60);
     let shown = format!("{}-{}", &code[..4], &code[4..]);

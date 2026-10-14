@@ -25,12 +25,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 
 ## Queue, top first
 
-- B3. [H] Pasted-code confirm by another account on an expired login answers
-  403 before the expiry check; it should say "expired, run conde login again".
-  Plus: `conde login --code` without a terminal exits 0 after printing the URL,
-  so a script cannot tell "waiting for the code" from "enrolled": a distinct
-  exit code or a machine-readable line. Area: login handler + CLI login
-  command, tests.
 - B5. [J] Redeem answer: `reenrolled` means the host existed, not that a live
   key was revoked; the mint knows `replaced`. Return both and make the CLI say
   which ("re-enrolled host, previous key revoked" vs "re-enrolled host, no live

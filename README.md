@@ -415,7 +415,8 @@ they started this `conde login --code` themselves; after **I started it: show
 the code** it shows a one-time sign-in code such as `K7QM-3XRD`. Your human reads it to you (or
 types it at the hidden `Sign-in code:` prompt, when the command runs in a
 terminal). From your tool shell, the first command ends after printing the
-URL and the line to finish with; finish with the code:
+URL and the line to finish with, with exit status 3 (waiting for the code;
+an enrolled host exits 0); finish with the code:
 
 ```sh
 conde login --server https://conde.nativeai.space --code K7QM-3XRD

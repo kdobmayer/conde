@@ -226,7 +226,8 @@ enum Cmd {
         #[arg(long)]
         no_browser: bool,
         /// Sign in with a pasted code: bare, it prints the URL (and prompts for the code on a
-        /// terminal); with the code the page showed, it finishes that login.
+        /// terminal) and exits 3 while the login waits for its code; with the code the page
+        /// showed, it finishes that login.
         #[arg(long, value_name = "CODE", num_args = 0..=1, default_missing_value = "")]
         code: Option<String>,
     },

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use conde_remote::web::{
-    AdminKey, BindUser, CliCode, CreateUser, HostKey, Identity, KeyDisplay, Limits, LoginTxn, McpAccess, McpCode,
+    AdminKey, BindUser, CliCode, CliIssued, CreateUser, HostKey, Identity, KeyDisplay, Limits, LoginTxn, McpAccess, McpCode,
     McpCodeState, McpCreated, McpGrant, McpHuman, McpRedeemed, McpRefreshed, McpTokens, Minted, SessionRecord, WebResult, WebStore,
     WebStoreError, WebUser,
 };
@@ -233,17 +233,19 @@ impl WebStore for WebBoard {
         self.take(CLI_CODE, code_digest)
     }
 
-    fn issue_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<bool> {
+    fn issue_cli_code(&self, code_digest: &str, code: &CliCode, ttl: i64) -> WebResult<CliIssued> {
         let payload = serde_json::to_string(code).map_err(|e| WebStoreError(e.to_string()))?;
         self.write(|t| {
             if let Some((held, created_at)) = t.take_web_token(CLI_CODE, code_digest)?
-                && serde_json::from_str::<CliCode>(&held).is_ok_and(|old| old.user_id != code.user_id)
+                && let Ok(old) = serde_json::from_str::<CliCode>(&held)
+                && old.user_id != code.user_id
             {
                 t.put_web_token(CLI_CODE, code_digest, &held, created_at)?;
-                return Ok(false);
+                let expired = code.created_at - old.created_at > ttl;
+                return Ok(if expired { CliIssued::TheirsExpired } else { CliIssued::Theirs });
             }
             t.put_web_token(CLI_CODE, code_digest, &payload, code.created_at)?;
-            Ok(true)
+            Ok(CliIssued::Issued)
         })
     }
 

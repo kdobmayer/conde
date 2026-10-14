@@ -132,6 +132,17 @@ enum Cmd {
         #[arg(long, value_name = "CURSOR|TIME", value_parser = crate::util::parse_after)]
         after: Option<crate::util::After>,
     },
+    /// Follow messages as they arrive, one line each, until Ctrl-C: the local board (every
+    /// message for the human, what a session can search for a session), or the shared board
+    /// named by --board (what you can search there). Starts with the last 20.
+    Watch {
+        /// Only what this agent sent or received.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only this '#channel'.
+        #[arg(long)]
+        channel: Option<String>,
+    },
     /// Show an agent's profile, or set a field (human only).
     Profile {
         name: String,
@@ -768,6 +779,29 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let after = after.map(crate::util::After::wire);
             let r = sx.call("search", json!({"pattern": pattern, "target": target, "after": after}))?;
             print(surface::search(&r, Surface::Cli));
+        }
+        Cmd::Watch { agent, channel } => {
+            // the local board unless --board names one; never the default board
+            let board = flag.clone().unwrap_or_else(|| LOCAL_BOARD.to_string());
+            let filter = |mut body: Value| {
+                body["agent"] = json!(agent);
+                body["channel"] = json!(channel);
+                body
+            };
+            let mut body = filter(json!({"last": 20}));
+            loop {
+                let r = sx.call_on("message.feed", Some(&board), body)?;
+                let rows = r["messages"].as_array().cloned().unwrap_or_default();
+                for m in &rows {
+                    println!("{}", surface::watch_line(m));
+                }
+                std::io::Write::flush(&mut std::io::stdout())?;
+                // a full page continues at once; otherwise poll again in a second
+                if rows.len() < crate::protocol::PAGE {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                body = filter(json!({"after": r["cursor"]}));
+            }
         }
         Cmd::Profile { name, set: Some(kv) } => {
             let r = sx.call("profile.set", json!({"name": name, "key": kv[0], "value": kv[1]}))?;

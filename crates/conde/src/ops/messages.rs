@@ -431,24 +431,75 @@ pub fn receipts(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let (rows, next) = page(rows);
     let mut out = Vec::with_capacity(rows.len());
     for m in &rows {
-        let status = match (&m.channel_id, &m.recipient_id) {
-            (Some(c), _) => {
-                let (read, total) = ctx.db.channel_read_count(c, &me.id, m.seq)?;
-                format!("read by {read}/{total}")
-            }
-            (None, Some(r)) => ctx
-                .db
-                .dm_read_at(&m.id, r)?
-                .map_or_else(|| "unread".to_string(), |at| format!("read {at}")),
-            (None, None) => String::new(),
-        };
-        let delivery = match (&m.channel_id, &m.recipient_id) {
-            (None, Some(r)) => dm_delivery(ctx, &m.id, r)?,
-            _ => None,
-        };
+        let (status, delivery) = receipt(ctx, m)?;
         out.push(json!({"message_id": m.id, "seq": m.seq, "to": m.to(), "status": status, "delivery": delivery}));
     }
     Ok(json!({"receipts": out, "next_cursor": next}))
+}
+
+/// A message's read state (DM: read time; channel: how many members other than the sender
+/// have read past it) and, for a DM, its push state.
+fn receipt(ctx: &Ctx, m: &MsgRow) -> OpResult<(String, Option<String>)> {
+    Ok(match (&m.channel_id, &m.recipient_id) {
+        (Some(c), _) => {
+            let (read, total) = ctx.db.channel_read_count(c, &m.sender_id, m.seq)?;
+            (format!("read by {read}/{total}"), None)
+        }
+        (None, Some(r)) => {
+            let read = ctx.db.dm_read_at(&m.id, r)?;
+            (read.map_or_else(|| "unread".to_string(), |at| format!("read {at}")), dm_delivery(ctx, &m.id, r)?)
+        }
+        (None, None) => (String::new(), None),
+    })
+}
+
+/// `message.feed {after?, last?, agent?, channel?}` for `conde watch`: messages after the seq
+/// cursor `after`, oldest first, a page at most, with each one's first line and receipt; without
+/// `after`, the newest `last` (default a page). What the caller can search (own DMs, joined
+/// channels); a human on the local board sees every message, all of this host's agents.
+/// `agent` keeps what that agent sent or received, `channel` one channel. `cursor` is where the
+/// next call continues; when nothing was committed after `after`, the answer is an empty page
+/// read from the end of the primary key alone.
+pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    let me = ctx.me()?;
+    let viewer = (ctx.board.is_some() || !me.is_human()).then_some(me.id.as_str());
+    let agent = match opt_str(body, "agent")? {
+        Some(name) => Some(agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent named '{name}'")))?.id),
+        None => None,
+    };
+    let channel = match opt_str(body, "channel")? {
+        Some(raw) => Some(normalize_channel(raw).ok_or_else(|| bad_request(format!("invalid channel '{raw}'")))?),
+        None => None,
+    };
+    let (agent, channel) = (agent.as_deref(), channel.as_deref());
+    let top = ctx.db.last_seq()?;
+    let (rows, cursor) = match opt_i64(body, "after")? {
+        Some(after) if after >= top => (Vec::new(), after),
+        Some(after) => {
+            let mut rows = ctx.db.feed_scan(viewer, after, top, agent, channel, false, PAGE as i64 + 1)?;
+            if rows.len() > PAGE {
+                rows.truncate(PAGE);
+                let last = rows[PAGE - 1].seq;
+                (rows, last)
+            } else {
+                (rows, top)
+            }
+        }
+        None => {
+            let last = opt_i64(body, "last")?.unwrap_or(PAGE as i64).clamp(0, PAGE as i64);
+            let mut rows = ctx.db.feed_scan(viewer, 0, top, agent, channel, true, last)?;
+            rows.reverse();
+            (rows, top)
+        }
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for m in &rows {
+        let (status, delivery) = receipt(ctx, m)?;
+        let line = m.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+        out.push(json!({"message_id": m.id, "seq": m.seq, "date": m.created_at, "from": m.sender, "to": m.to(),
+                        "line": line, "status": status, "delivery": delivery}));
+    }
+    Ok(json!({"messages": out, "cursor": cursor}))
 }
 
 /// The push state of a DM to its recipient: the notification's status, with

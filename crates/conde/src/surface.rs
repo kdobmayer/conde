@@ -521,6 +521,20 @@ pub fn search(r: &Value, surface: Surface) -> Out {
     out
 }
 
+/// `watch`: one message of `message.feed` as one line: time (UTC, to the minute), sender ->
+/// recipient or channel, state (a DM: read, else its push state; a channel: read by n/m), first
+/// line.
+pub fn watch_line(m: &Value) -> String {
+    let date: String = s(&m["date"]).chars().take(16).collect();
+    let status = s(&m["status"]);
+    let state = match m["delivery"].as_str() {
+        _ if status.starts_with("read ") && !status.starts_with("read by") => "read",
+        Some(d) => d,
+        None => status,
+    };
+    format!("{date}  {} -> {}  {state}  {}", s(&m["from"]), s(&m["to"]), s(&m["line"]))
+}
+
 /// `sent`: one line per message with its board's receipt.
 pub fn sent(r: &Value, surface: Surface) -> Out {
     let requested = result_board(r);

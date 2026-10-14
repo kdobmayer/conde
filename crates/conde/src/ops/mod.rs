@@ -43,6 +43,7 @@ pub static OPS: &[OpSpec] = &[
     op!("reaction.set", messages::reaction_set, mutation),
     op!("search", messages::search, query),
     op!("receipt.list", messages::receipts, query),
+    op!("message.feed", messages::feed, query),
     op!("channel.create", channels::create, mutation),
     op!("channel.join", channels::join, mutation),
     op!("channel.leave", channels::leave, mutation),

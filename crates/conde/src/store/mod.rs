@@ -594,6 +594,23 @@ pub trait Tx {
         from_day: Option<&str>,
         limit: i64,
     ) -> StoreResult<Vec<Message>>;
+    /// The highest commit seq on the board (0 when empty): the end of the primary key, no row
+    /// read.
+    fn last_seq(&self) -> StoreResult<i64>;
+    /// Messages with `after < seq <= upto` in commit order (`newest`: the newest first), visible
+    /// to `viewer` (own DMs, joined channels; None: every message), sent or received by `agent`
+    /// and in `channel` (a normalized name) when given. Walks the primary key from `after`.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_scan(
+        &self,
+        viewer: Option<&str>,
+        after: i64,
+        upto: i64,
+        agent: Option<&str>,
+        channel: Option<&str>,
+        newest: bool,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>>;
     fn attachment_list(&self, message_id: &str) -> StoreResult<Vec<AttachmentMeta>>;
     fn attachment(&self, id: &str) -> StoreResult<Option<Attachment>>;
     /// (recorded size, stored byte length) of a message's attachment by filename.

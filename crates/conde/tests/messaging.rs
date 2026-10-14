@@ -308,3 +308,70 @@ fn a_time_search_starts_at_its_date_on_sqlite() {
 fn a_time_search_starts_at_its_date_on_the_test_store() {
     a_time_search_starts_at_its_date(Board::new());
 }
+
+/// (from, to, line, status) of a `message.feed` page.
+fn feed_rows(r: &Value) -> Vec<(String, String, String, String)> {
+    let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    items(r, "messages").iter().map(|m| (s(&m["from"]), s(&m["to"]), s(&m["line"]), s(&m["status"]))).collect()
+}
+
+/// `conde watch`'s op: a human on the local board follows every message, an agent what it can
+/// search, either one narrowed to an agent or a channel; a shared board applies the search rule
+/// to the human too. The cursor continues after the page, and an unchanged board answers empty.
+fn a_feed_follows_what_the_caller_can_see(b: Board) {
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    b.register(CAROL, "carol");
+    b.register(HUMAN, "krisz");
+    let row = |from: &str, to: &str, line: &str, status: &str| (from.to_string(), to.to_string(), line.to_string(), status.to_string());
+    b.send(ALICE, "bob", "\n  hello bob  \nsecond line");
+    b.ok(CAROL, "channel.create", json!({"channel": "#ops"}));
+    b.send(CAROL, "#ops", "deploy at noon");
+
+    let all = b.ok(HUMAN, "message.feed", json!({"last": 20}));
+    let rows = feed_rows(&all);
+    assert!(rows.contains(&row("krisz/alice", "krisz/bob", "hello bob", "unread")), "{all}");
+    assert!(rows.contains(&row("krisz/carol", "#ops", "deploy at noon", "read by 0/0")), "{all}");
+    let bob = b.ok(BOB, "message.feed", json!({"last": 20}));
+    assert_eq!(feed_rows(&bob), [row("krisz/alice", "krisz/bob", "hello bob", "unread")], "bob is not in #ops");
+    let by_carol = b.ok(HUMAN, "message.feed", json!({"agent": "carol"}));
+    assert_eq!(feed_rows(&by_carol), [row("krisz/carol", "#ops", "deploy at noon", "read by 0/0")]);
+    let in_ops = b.ok(HUMAN, "message.feed", json!({"channel": "#ops"}));
+    assert_eq!(feed_rows(&in_ops), feed_rows(&by_carol));
+    let last_one = b.ok(HUMAN, "message.feed", json!({"last": 1}));
+    assert_eq!(feed_rows(&last_one), feed_rows(&by_carol), "the newest one");
+
+    // Nothing new: an empty page at the same cursor.
+    let cursor = all["cursor"].as_i64().unwrap();
+    let idle = b.ok(HUMAN, "message.feed", json!({"after": cursor}));
+    assert_eq!((feed_rows(&idle).len(), idle["cursor"].as_i64()), (0, Some(cursor)), "{idle}");
+    // A new message follows, read state and push state with it.
+    b.send(BOB, "alice", "reply");
+    let next = b.ok(HUMAN, "message.feed", json!({"after": cursor}));
+    assert_eq!(feed_rows(&next), [row("krisz/bob", "krisz/alice", "reply", "unread")]);
+    assert!(next["messages"][0]["delivery"].is_string(), "{next}");
+    assert!(next["cursor"].as_i64().unwrap() > cursor);
+    // A message the caller cannot see moves the cursor without a row.
+    b.send(CAROL, "#ops", "still not for bob");
+    let skipped = b.ok(BOB, "message.feed", json!({"after": next["cursor"]}));
+    assert!(feed_rows(&skipped).is_empty(), "{skipped}");
+    assert!(skipped["cursor"].as_i64() > next["cursor"].as_i64(), "{skipped}");
+
+    // On a shared board the human sees what it can search: none of these.
+    b.d.share("shared");
+    let shared = b.ok(HUMAN, "message.feed", json!({"last": 20}));
+    assert!(feed_rows(&shared).iter().all(|r| r.0 == "krisz/krisz" || r.1 == "krisz/krisz"), "{shared}");
+    let err = b.call(HUMAN, "message.feed", json!({"agent": "nobody"})).unwrap_err();
+    assert_eq!(err.0, ErrorCode::NotFound);
+}
+
+#[test]
+fn a_feed_follows_what_the_caller_can_see_on_sqlite() {
+    a_feed_follows_what_the_caller_can_see(Board::sqlite());
+}
+
+#[test]
+fn a_feed_follows_what_the_caller_can_see_on_the_test_store() {
+    // Postgres when CONDE_TEST_PG is set, else SQLite again.
+    a_feed_follows_what_the_caller_can_see(Board::new());
+}

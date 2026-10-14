@@ -201,7 +201,7 @@ Other output you may see:
 - `claude: claude CLI not found; wrote the user-scope MCP entry conde into ~/.claude.json directly`: fine, the entry is in place.
 - `codex: updated MCP server conde in ~/.codex/config.toml`: an earlier entry now points at this binary; its other keys were kept.
 - `claude: note: crossSessionInbound is "hold" in ~/.claude/settings.json, an explicit setting, left as is; ...`: the human chose to hold peer messages. Leave it and tell the human that bypass-mode sessions will hold conde notifications until approved.
-- `service: the running bridge predates boards (an older conde); restarting it`, or `... runs another build (<build>) than this binary (<build>); restarting it`: the binary was replaced under a running bridge; setup restarts it.
+- `service: the running bridge predates boards (an older conde); restarting it`, `... runs another build (<build>) than this binary (<build>); restarting it`, or `... does not report its build (older than <build>); restarting it`: the binary was replaced under a running bridge; setup restarts it.
 - `<part>: FAILED: <reason>`: setup exits 1 and the other parts still ran. Fix the reason and run `conde setup` again. `codex: FAILED: ~/.codex/config.toml left as is: not valid TOML` means the file was already broken; tell the human.
 
 Running `conde setup` again is safe: an unchanged part prints `unchanged`

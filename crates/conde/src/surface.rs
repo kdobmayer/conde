@@ -207,13 +207,36 @@ pub fn stale_daemon(surface: Surface) -> String {
     format!("the running conde daemon predates boards and would ignore {}; {RESTART_BRIDGE}, then run this again", surface.flag())
 }
 
-/// `conde doctor`'s line on the running bridge's build beside this binary's (the daemon's
-/// `doctor` answer carries `build`). False when they differ: doctor cannot tell a reinstall
-/// under the running service from a second conde on PATH, so the line states only the builds.
+/// What the running bridge says of its build (the `build` of its `doctor` answer) beside this
+/// binary's; doctor and setup each word it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BridgeBuild {
+    /// This binary's.
+    Same,
+    /// Another build: the binary was replaced under the running service, or another conde.
+    Other(String),
+    /// A daemon too old to report one.
+    Unreported,
+}
+
+impl BridgeBuild {
+    /// Classify the `build` field of a daemon's `doctor` answer.
+    pub fn of(running: &Value) -> Self {
+        match running.as_str() {
+            Some(b) if b == crate::VERSION => Self::Same,
+            Some(b) => Self::Other(b.to_string()),
+            None => Self::Unreported,
+        }
+    }
+}
+
+/// `conde doctor`'s line on the running bridge's build beside this binary's. False when they
+/// differ: doctor cannot tell a reinstall under the running service from a second conde on
+/// PATH, so the line states only the builds.
 pub fn bridge_build(running: &Value) -> (bool, String) {
-    match running.as_str() {
-        Some(b) if b == crate::VERSION => (true, format!("bridge: running this build ({b})")),
-        Some(b) => (
+    match BridgeBuild::of(running) {
+        BridgeBuild::Same => (true, format!("bridge: running this build ({})", crate::VERSION)),
+        BridgeBuild::Other(b) => (
             false,
             format!(
                 "bridge: running another build ({b}) than this binary ({}); if this binary is the one the service should \
@@ -221,7 +244,7 @@ pub fn bridge_build(running: &Value) -> (bool, String) {
                 crate::VERSION
             ),
         ),
-        None => (
+        BridgeBuild::Unreported => (
             false,
             format!("bridge: the running daemon does not report its build (older than {}); {RESTART_BRIDGE}", crate::VERSION),
         ),

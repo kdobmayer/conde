@@ -68,11 +68,14 @@ pub struct WebConfig {
     pub mcp: McpConfig,
 }
 
+/// The `client_id` hosts accepted when `CONDE_MCP_CLIENT_HOSTS` is unset or empty.
+pub const DEFAULT_CLIENT_HOSTS: [&str; 2] = ["claude.ai", "claude.com"];
+
 /// The remote MCP's OAuth settings (docs/REMOTE-MCP.md §2, §3).
 #[derive(Clone)]
 pub struct McpConfig {
     /// Hosts a client's metadata URL (its client_id) may be on, matched exactly
-    /// (`CONDE_MCP_CLIENT_HOSTS`, default `claude.ai,claude.com`).
+    /// (`CONDE_MCP_CLIENT_HOSTS`, default [`DEFAULT_CLIENT_HOSTS`]).
     pub client_hosts: Vec<String>,
     /// Reads client metadata documents.
     pub fetcher: Arc<dyn cimd::ClientMetadataFetcher>,
@@ -95,7 +98,7 @@ pub struct McpConfig {
 impl Default for McpConfig {
     fn default() -> McpConfig {
         McpConfig {
-            client_hosts: vec!["claude.ai".into(), "claude.com".into()],
+            client_hosts: DEFAULT_CLIENT_HOSTS.map(String::from).to_vec(),
             fetcher: Arc::new(cimd::HttpFetcher::default()),
             client_cache: cimd::CACHE_FOR,
             code_ttl: Duration::from_secs(60),
@@ -129,7 +132,7 @@ pub enum ConfigError {
     RedirectUri(String),
     #[error("{0} must be a whole number of at least 1")]
     NotPositive(&'static str),
-    #[error("{0} names no host; unset it for the default (claude.ai,claude.com)")]
+    #[error("{0} names no host; unset it for the default ({default})", default = DEFAULT_CLIENT_HOSTS.join(","))]
     NoHosts(&'static str),
 }
 

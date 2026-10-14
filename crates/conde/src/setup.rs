@@ -21,6 +21,7 @@ use serde_json::{Map, Value, json};
 
 use crate::boards::{self, BoardConfig};
 use crate::protocol::v2::{BoardInfo, LOCAL_BOARD, Manifest, MigratePreview, PreviewRow, op};
+use crate::surface::BridgeBuild;
 
 pub const CLAUDE_SKILL: &str = include_str!("../../../skills/claude/SKILL.md");
 pub const CODEX_SKILL: &str = include_str!("../../../skills/codex/SKILL.md");
@@ -594,8 +595,8 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
             Ok(()) => {
                 line("ok", format!("service: the bridge answers on {socket}"), out)?;
                 match bridge_build(env, host) {
-                    BridgeBuild::Same => line("ok", format!("service: the bridge runs this build ({})", crate::VERSION), out)?,
-                    BridgeBuild::Other(b) => line(
+                    Some(BridgeBuild::Same) => line("ok", format!("service: the bridge runs this build ({})", crate::VERSION), out)?,
+                    Some(BridgeBuild::Other(b)) => line(
                         "ISSUE",
                         format!(
                             "service: the bridge runs another build ({b}) than this binary ({}); run: conde setup (it restarts the bridge)",
@@ -603,7 +604,7 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
                         ),
                         out,
                     )?,
-                    BridgeBuild::Unreported => line(
+                    Some(BridgeBuild::Unreported) => line(
                         "ISSUE",
                         format!(
                             "service: the bridge does not report its build (older than {}); run: conde setup (it restarts the bridge)",
@@ -611,7 +612,7 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
                         ),
                         out,
                     )?,
-                    BridgeBuild::Unknown => {}
+                    None => {}
                 }
             }
             Err(why) => {
@@ -820,27 +821,9 @@ fn systemd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
     Ok(())
 }
 
-/// What the running bridge says of its build (the `build` of its `doctor` answer).
-enum BridgeBuild {
-    /// This binary's.
-    Same,
-    /// Another build: the binary was replaced under the running service.
-    Other(String),
-    /// A daemon too old to report one.
-    Unreported,
-    /// No answer to tell by.
-    Unknown,
-}
-
-fn bridge_build(env: &Env, host: &mut dyn Host) -> BridgeBuild {
-    match host.daemon(&env.socket, "doctor", None, json!({})) {
-        Err(_) => BridgeBuild::Unknown,
-        Ok(r) => match r["build"].as_str() {
-            Some(b) if b == crate::VERSION => BridgeBuild::Same,
-            Some(b) => BridgeBuild::Other(b.to_string()),
-            None => BridgeBuild::Unreported,
-        },
-    }
+/// What the running bridge says of its build; None when it gives no answer to tell by.
+fn bridge_build(env: &Env, host: &mut dyn Host) -> Option<BridgeBuild> {
+    host.daemon(&env.socket, "doctor", None, json!({})).ok().map(|r| BridgeBuild::of(&r["build"]))
 }
 
 /// Whether the running bridge must restart to serve this machine's boards: it is an older
@@ -862,9 +845,9 @@ fn predates_boards(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyho
     };
     if why.is_none() {
         why = match bridge_build(env, host) {
-            BridgeBuild::Other(b) => Some(format!("runs another build ({b}) than this binary ({})", crate::VERSION)),
-            BridgeBuild::Unreported => Some(format!("does not report its build (older than {})", crate::VERSION)),
-            BridgeBuild::Same | BridgeBuild::Unknown => None,
+            Some(BridgeBuild::Other(b)) => Some(format!("runs another build ({b}) than this binary ({})", crate::VERSION)),
+            Some(BridgeBuild::Unreported) => Some(format!("does not report its build (older than {})", crate::VERSION)),
+            Some(BridgeBuild::Same) | None => None,
         };
     }
     if let Some(why) = &why {

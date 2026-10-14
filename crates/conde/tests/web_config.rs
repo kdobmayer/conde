@@ -107,6 +107,9 @@ fn the_web_configuration_comes_from_the_environment() {
     // Only separators: refused, not an empty list that would refuse every client.
     env(&with(&[("CONDE_MCP_CLIENT_HOSTS", " , ")]));
     assert_eq!(error(WebConfig::from_env()), "CONDE_MCP_CLIENT_HOSTS names no host; unset it for the default (claude.ai,claude.com)");
+    // Empty: the default, like unset.
+    env(&with(&[("CONDE_MCP_CLIENT_HOSTS", "")]));
+    assert_eq!(WebConfig::from_env().unwrap().unwrap().mcp.client_hosts, ["claude.ai", "claude.com"]);
 
     // The grant cap: a whole number of at least 1, surrounding spaces allowed.
     env(&with(&[("CONDE_MCP_GRANTS_PER_CLIENT", " 3 ")]));

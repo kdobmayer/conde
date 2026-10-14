@@ -96,7 +96,7 @@ addition:
   ancestor when the path is longer than 100, with `start`); the first answer selects the path
   plus the subtree's first messages by seq, 200 in all, and returns the union sorted by seq;
   `next` continuation; `hidden_parent`; the visibility predicate inside every recursive step;
-  migration 0012 adds `messages(reply_to)` on both stores. Must not: return or count a message
+  migration 0013 adds `messages(reply_to)` on both stores. Must not: return or count a message
   the owner cannot read, step through one. Gate: web suite cases on both stores: a chain
   A ← B ← C ← D with B invisible gives `thread(C)` = C, D with `hidden_parent` and `thread(A)` =
   A only; a teammate's id answers not found; a 250-message chain opened at its 230th message
@@ -105,7 +105,7 @@ addition:
   and after continuation and a merge by id every subtree message is present once and every
   parent is present or is `top`. Cost gate, plans on both stores in the PR: that branched thread
   on the production row count, time per answer recorded. Area:
-  crates/conde/src/store/migrations/0012_messages_by_reply_to.sql,
+  crates/conde/src/store/migrations/0013_messages_by_reply_to.sql,
   crates/conde/src/store/sqlite_schema.sql, crates/conde/src/store/sqlite.rs,
   crates/conde/src/store/postgres.rs, crates/conde/src/store/mod.rs, crates/conde/src/ops/web.rs,
   crates/conde/src/ops/mod.rs, crates/conde/tests/web_ui.rs. Group: S (after U4).

@@ -36,15 +36,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   one transaction). Decided: revoke by default like the other mints, with
   `--keep-live` for a hand-over rotation; the command prints which it did.
   Area: crates/conde admin CLI + ops::hosts, tests.
-- B17. Late-outcome race, remaining case (a) (case (b), a read after a hold,
-  is fixed in its PR): mailbox gone with the message unread: a held outcome that
-  commits after the endpoints frame that removed the mailbox stays held until the
-  next endpoints frame or reconnect. "Absent from the endpoints table" is not a
-  safe test at the held outcome: endpoint additions are applied asynchronously
-  too, so a just-online mailbox can look gone (abandoning on that broke two cloud
-  tests). Needs ordered processing of endpoints frames and outcomes on one
-  connection (server.rs), or a removal record the held outcome can check. Area:
-  conde-remote server.rs frame handling, crates/conde ops/bridge.rs, tests.
 - B20. install.sh staging dir: the new binary is staged under the default temp
   directory and moved over the target, so the final mv is a copy when temp and
   the target are on different filesystems (not atomic); stage next to the target

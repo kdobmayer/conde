@@ -645,7 +645,7 @@ async fn supervise(
         };
         match connected {
             Ok(ws) => {
-                backoff = cfg.backoff_min;
+                let started = tokio::time::Instant::now();
                 inner.connects.fetch_add(1, Ordering::Relaxed);
                 inner.state.send_replace(BridgeState::Connected);
                 tracing::info!(url = %cfg.url, instance = %inner.instance, "bridge connected");
@@ -661,6 +661,11 @@ async fn supervise(
                 {
                     SessionEnd::Stop(reason) => break reason,
                     SessionEnd::Lost(why) => tracing::warn!(%why, "bridge connection lost"),
+                }
+                // A session that lasted starts the backoff over; one closed soon after its hello
+                // (a server closing it again and again, say for a full queue) keeps doubling it.
+                if started.elapsed() >= cfg.backoff_max {
+                    backoff = cfg.backoff_min;
                 }
             }
             Err(ConnectError::Unauthorized) => break StopReason::Unauthorized,
@@ -764,6 +769,13 @@ async fn run_session(
     let idle = tokio::time::sleep(cfg.idle_timeout);
     tokio::pin!(idle);
     loop {
+        // Endpoint changes before outcomes: a hold for a mailbox must not reach the board ahead
+        // of the mailbox's addition the daemon already made.
+        if let Some(frame) = endpoints_diff(inner, &mut announced)
+            && let Err(e) = tx.send(Message::text(frame)).await
+        {
+            return lost(e);
+        }
         let (frames, wake) = due_outcomes(inner, tokio::time::Instant::now());
         for frame in frames {
             if let Err(e) = tx.send(Message::text(frame)).await {
@@ -780,15 +792,8 @@ async fn run_session(
             cmd = cmd_rx.recv() => {
                 let frame = match cmd {
                     None => return SessionEnd::Stop(StopReason::Shutdown),
-                    Some(Cmd::Endpoints) => {
-                        let current: HashSet<Endpoint> = inner.endpoints.lock().unwrap_or_else(|p| p.into_inner()).iter().cloned().collect();
-                        let added: Vec<&Endpoint> = current.difference(&announced).collect();
-                        let removed: Vec<&Endpoint> = announced.difference(&current).collect();
-                        if added.is_empty() && removed.is_empty() { continue }
-                        let frame = protocol::frame("endpoints", &json!({"added": added, "removed": removed}));
-                        announced = current;
-                        frame
-                    }
+                    // sent at the top of the loop, before any due outcome
+                    Some(Cmd::Endpoints) => continue,
                     Some(Cmd::Request { request_id, frame }) => {
                         // Skip calls that already timed out while queued.
                         if !inner.book().calls.contains_key(&request_id) { continue }
@@ -821,6 +826,19 @@ async fn run_session(
             _ = tokio::time::sleep_until(wake.unwrap_or_else(tokio::time::Instant::now)), if wake.is_some() => {}
         }
     }
+}
+
+/// The `endpoints` frame for what changed since `announced`, if anything did.
+fn endpoints_diff(inner: &Inner, announced: &mut HashSet<Endpoint>) -> Option<String> {
+    let current: HashSet<Endpoint> = inner.endpoints.lock().unwrap_or_else(|p| p.into_inner()).iter().cloned().collect();
+    let added: Vec<&Endpoint> = current.difference(announced).collect();
+    let removed: Vec<&Endpoint> = announced.difference(&current).collect();
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+    let frame = protocol::frame("endpoints", &json!({"added": added, "removed": removed}));
+    *announced = current;
+    Some(frame)
 }
 
 /// The outcome scheduler: marks lost submissions, picks the due outcomes to submit within

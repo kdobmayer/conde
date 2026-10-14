@@ -26,6 +26,7 @@ use crate::protocol::Request;
 use crate::protocol::v2::LOCAL_BOARD;
 use crate::store::Tx;
 use crate::store::local::{BoardOpKind, LocalTx, PublicationState};
+use crate::store::sqlite::SqliteStore;
 use crate::util::new_ulid;
 
 /// Jobs injected per turn at most, before receipts are polled again.
@@ -713,6 +714,12 @@ impl Delivery {
                     self.mux.record(origin, &token, &n.attempt_id, status, Some(reason), true);
                 }
                 Admission::Inject { agent_id, incarnation, address, text } => {
+                    // The mailbox goes out as an endpoint before any outcome for it: the board
+                    // takes a hold for a mailbox it does not list as one whose session ended.
+                    let client = self.mux.lock().origins.get(origin).and_then(|o| o.client.clone());
+                    if let (Some(sqlite), Some(client)) = (self.local.sqlite(), client) {
+                        self.announce(sqlite, origin, &client, notifier);
+                    }
                     let token = self.reserve(origin, &n.attempt_id, AgentRef::Id(agent_id), incarnation, &address);
                     let result = notifier.notify(&address, &text, &token);
                     let (status, reason, last) = match (&result, address.kind) {
@@ -777,6 +784,35 @@ impl Delivery {
         n
     }
 
+    /// Reports `alias`'s published mailboxes whose sessions are live as the bridge's endpoints.
+    fn announce<N: Notifier>(&self, sqlite: &SqliteStore, alias: &str, client: &BridgeClient, notifier: &mut N) {
+        let rows = (|| {
+            let tx = sqlite.begin_local()?;
+            let mut out = Vec::new();
+            for p in tx.publications(Some(alias))? {
+                if p.state != PublicationState::Published {
+                    continue;
+                }
+                let address = tx.agent_by_id(&p.agent_id)?.and_then(|a| a.address);
+                if let (Some(mailbox_id), Some(address)) = (p.mailbox_id, address) {
+                    out.push((mailbox_id, address));
+                }
+            }
+            Ok::<_, crate::store::StoreError>(out)
+        })();
+        match rows {
+            Ok(rows) => {
+                let live: Vec<Endpoint> = rows
+                    .into_iter()
+                    .filter(|(_, a)| a.kind == Kind::Human || notifier.is_live(a))
+                    .map(|(mailbox_id, _)| Endpoint::Mailbox { mailbox_id })
+                    .collect();
+                client.set_endpoints(live);
+            }
+            Err(e) => tracing::warn!(board = alias, "endpoint scan failed: {e}"),
+        }
+    }
+
     /// Endpoint reporting, then session replacement and liveness of every unresolved attempt.
     fn rescan<N: Notifier>(&self, notifier: &mut N) {
         let Some(sqlite) = self.local.sqlite() else { return };
@@ -789,31 +825,7 @@ impl Delivery {
                 .collect()
         };
         for (alias, client) in clients {
-            let rows = (|| {
-                let tx = sqlite.begin_local()?;
-                let mut out = Vec::new();
-                for p in tx.publications(Some(&alias))? {
-                    if p.state != PublicationState::Published {
-                        continue;
-                    }
-                    let address = tx.agent_by_id(&p.agent_id)?.and_then(|a| a.address);
-                    if let (Some(mailbox_id), Some(address)) = (p.mailbox_id, address) {
-                        out.push((mailbox_id, address));
-                    }
-                }
-                Ok::<_, crate::store::StoreError>(out)
-            })();
-            match rows {
-                Ok(rows) => {
-                    let live: Vec<Endpoint> = rows
-                        .into_iter()
-                        .filter(|(_, a)| a.kind == Kind::Human || notifier.is_live(a))
-                        .map(|(mailbox_id, _)| Endpoint::Mailbox { mailbox_id })
-                        .collect();
-                    client.set_endpoints(live);
-                }
-                Err(e) => tracing::warn!(board = alias, "endpoint scan failed: {e}"),
-            }
+            self.announce(sqlite, &alias, &client, notifier);
         }
 
         let open: Vec<(String, String, AgentRef, i64, Address, OutcomeStatus, String)> = {

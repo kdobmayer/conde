@@ -1631,7 +1631,7 @@ impl NotificationSource for Stall {
     fn poll_window(&self, host_id: &str, bridge_instance: &str, window: u32) -> Polled {
         self.board.poll_window(host_id, bridge_instance, window)
     }
-    fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) {
+    fn endpoints(&self, host_id: &str, bridge_instance: &str, endpoints: &[Endpoint]) -> conde_remote::Recorded {
         self.board.endpoints(host_id, bridge_instance, endpoints)
     }
     fn events(&self) -> Option<tokio::sync::broadcast::Receiver<SourceEvent>> {

@@ -89,6 +89,8 @@ on_both!(
     a_mailbox_row_is_reached_only_when_delivered,
     board_info_names_the_board_account_and_host,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
+    a_hold_reported_after_its_mailbox_left_is_abandoned,
+    a_hold_reported_after_its_mailbox_came_back_is_kept,
     the_route_revision_orders_snapshots_and_answers,
     a_takeover_abandons_only_open_attempts,
     a_read_hold_is_kept_when_the_mailbox_leaves_the_endpoints,
@@ -1004,6 +1006,49 @@ async fn a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoin
     assert_eq!((old.status.as_str(), old.reason.as_deref()), ("abandoned", Some("recipient offline")));
 }
 
+/// Whether the board lists `mailbox` among the host's live endpoints.
+async fn endpoint_live(d: &Arc<Dispatcher>, mailbox: &str) -> bool {
+    let (d, m) = (d.clone(), mailbox.to_string());
+    blocking(move || d.with_conn(|t| t.endpoint_rows()).unwrap()).await.iter().any(|e| e.target == m)
+}
+
+/// A hold that reaches the board after its mailbox left the endpoints (the removal was recorded
+/// while the attempt was dispatching) is abandoned as the removal would have abandoned it.
+async fn a_hold_reported_after_its_mailbox_left_is_abandoned(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let (mut home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    home.next("routes").await;
+    let n = home.next("notify").await;
+    let attempt = n["attempt_id"].as_str().unwrap().to_string();
+    home.send(json!({"v": 1, "type": "endpoints", "added": [], "removed": [{"kind": "mailbox", "mailbox_id": desk}]}))
+        .await;
+    eventually("the removal recorded", || async { !endpoint_live(&d, &desk).await }).await;
+    let a = fx.s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
+    assert_eq!(a.status, "dispatching", "the removal leaves a dispatching attempt alone");
+    home.outcome(&attempt, 1, "held", None).await;
+    let a = fx.s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
+    assert_eq!((a.status.as_str(), a.reason.as_deref()), ("abandoned", Some("recipient offline")));
+}
+
+/// A mailbox that leaves and comes back, then a hold, all sent back to back: the board records
+/// them in that order, so the hold finds its mailbox live and is kept.
+async fn a_hold_reported_after_its_mailbox_came_back_is_kept(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let (mut home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    home.next("routes").await;
+    let n = home.next("notify").await;
+    let attempt = n["attempt_id"].as_str().unwrap().to_string();
+    let mb = json!([{"kind": "mailbox", "mailbox_id": desk}]);
+    home.send(json!({"v": 1, "type": "endpoints", "added": [], "removed": mb})).await;
+    home.send(json!({"v": 1, "type": "endpoints", "added": mb, "removed": []})).await;
+    home.outcome(&attempt, 1, "held", None).await;
+    let a = fx.s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
+    assert_eq!((a.status.as_str(), a.reason.as_deref()), ("held", None));
+    assert!(endpoint_live(&d, &desk).await);
+}
+
 /// A new bridge instance of the host (a daemon restart) abandons and re-offers only the old
 /// instance's attempts whose notification is still open. A delivered notification keeps its
 /// delivered attempt; one the recipient already read keeps its accepted or held attempt and
@@ -1086,6 +1131,7 @@ async fn a_read_hold_is_kept_when_the_mailbox_leaves_the_endpoints(d: Arc<Dispat
     s.ok(&fx.kd, Some(mailbox(&desk).as_str()), "message.read", json!({"id": n["message_id"]})).await;
     home.send(json!({"v": 1, "type": "endpoints", "added": [], "removed": [{"kind": "mailbox", "mailbox_id": desk}]}))
         .await;
+    eventually("the removal recorded", || async { !endpoint_live(&d, &desk).await }).await;
     home.none("notify", Duration::from_millis(300)).await;
     let a = s.attempts().await.into_iter().find(|a| a.id == attempt).unwrap();
     assert_eq!((a.status.as_str(), a.reason.as_deref()), ("held", None), "the attempt is left as it is");

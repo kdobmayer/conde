@@ -40,14 +40,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   directory and moved over the target, so the final mv is a copy when temp and
   the target are on different filesystems (not atomic); stage next to the target
   instead. Area: dist/install.sh, dist_files test.
-- B21. `conde watch`: a live feed of the local board in the terminal (every
-  message this host's agents send or receive: time, direction, sender,
-  recipient or channel, first line of text, delivery state), newest at the
-  bottom, following until Ctrl-C; `--board <alias>` for a shared board the
-  host is enrolled in, same visibility as `conde search`; filters by agent and
-  channel. Plain text, one line per message, no TUI library. Area:
-  crates/conde CLI + daemon (subscribe to the event stream the bridge already
-  has), tests. Asked by Konstantin (headless server).
 
 ## Waiting on a decision or an observation (do not take)
 

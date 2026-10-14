@@ -857,3 +857,44 @@ fn search_after_takes_a_cursor_or_a_time() {
     let (_, help) = agent("t-b", &["search", "--help"]);
     assert!(help.contains("RFC 3339") && help.contains("2026-10-09T14:30:00Z"), "{help}");
 }
+
+/// `conde watch` run by the human: the last messages of the local board, then each new one as it
+/// is sent, one line each, until it is stopped.
+#[test]
+fn watch_prints_the_board_and_follows_it() {
+    let mut r = Root::new();
+    r.start_daemon();
+    let agent = |thread: &str, args: &[&str]| {
+        let out = r
+            .cmd(&r.root.join("bin/codex"))
+            .env("CODEX_THREAD_ID", thread)
+            .args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", BIN])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    agent("t-a", &["register", "alice"]);
+    agent("t-b", &["register", "bob"]);
+    let out = r.cmd(Path::new(BIN)).args(["register", "tester"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    agent("t-a", &["send", "bob", "before the watch\nsecond line"]);
+
+    let mut watch = r.cmd(Path::new(BIN)).arg("watch").stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = BufReader::new(watch.stdout.take().unwrap());
+    std::thread::spawn(move || {
+        for line in stdout.lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let next = || rx.recv_timeout(Duration::from_secs(10)).expect("a line from conde watch");
+    let first = next();
+    assert!(first.contains("  tester/alice -> tester/bob  ") && first.ends_with("  before the watch"), "{first}");
+    agent("t-b", &["send", "alice", "after it started"]);
+    let line = next();
+    let _ = watch.kill();
+    let _ = watch.wait();
+    assert!(line.contains("  tester/bob -> tester/alice  ") && line.ends_with("  after it started"), "{line}");
+    assert!(line.chars().take(16).all(|c| c.is_ascii_digit() || "-T:".contains(c)), "a minute timestamp: {line}");
+}

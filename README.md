@@ -645,6 +645,12 @@ scanning 10000 messages)`, or `(no matches in the 10000 messages this call
 scanned; it stopped there)` when it found nothing, and ends with the
 `(more: ...)` line that continues it: no matches in a partial call is not a
 final answer.
+`conde watch` follows messages as they arrive, one line each (UTC minute,
+sender -> recipient or channel, state, first line), after the last 20, until
+Ctrl-C. On the local board the human sees every message and a session what it
+can search; `--board dakai` shows what you can search on dakai. `--agent
+<name>` keeps what that agent sent or received, `--channel '#dev'` one
+channel. It asks the daemon once a second, so a daemon restart ends it.
 Names and channels are looked up on one
 board only: local `reviewer` and dakai's `kdobmayer/reviewer` are different
 agents, and local `#dev` and dakai's `#dev` are different channels. A send

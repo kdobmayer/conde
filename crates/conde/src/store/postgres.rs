@@ -1413,6 +1413,38 @@ impl Tx for PgTx {
         )
     }
 
+    fn last_seq(&self) -> StoreResult<i64> {
+        Ok(self.query_one("SELECT COALESCE(MAX(commit_seq), 0) FROM messages", &[])?.get(0))
+    }
+
+    fn feed_scan(
+        &self,
+        viewer: Option<&str>,
+        after: i64,
+        upto: i64,
+        agent: Option<&str>,
+        channel: Option<&str>,
+        newest: bool,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>> {
+        // The page is picked from messages alone, so the walk is the primary key's; the joins
+        // only dress the rows it picked.
+        let order = if newest { "DESC" } else { "ASC" };
+        self.msgs(
+            &format!(
+                "m.commit_seq IN (SELECT p.commit_seq FROM messages p
+                     WHERE p.commit_seq > $2 AND p.commit_seq <= $3
+                       AND ($1::text IS NULL OR p.recipient_agent_id = $1 OR (p.sender_agent_id = $1 AND p.recipient_agent_id IS NOT NULL)
+                            OR EXISTS (SELECT 1 FROM memberships x WHERE x.channel_id = p.channel_id AND x.agent_id = $1))
+                       AND ($4::text IS NULL OR p.sender_agent_id = $4 OR p.recipient_agent_id = $4)
+                       AND ($5::text IS NULL OR p.channel_id = (SELECT channel_id FROM channels WHERE name_lower = $5))
+                     ORDER BY p.commit_seq {order} LIMIT $6)
+                 ORDER BY m.commit_seq {order}"
+            ),
+            &[&viewer, &after, &upto, &agent, &channel, &limit],
+        )
+    }
+
     fn attachment_list(&self, message_id: &str) -> StoreResult<Vec<AttachmentMeta>> {
         Ok(self
             .query(

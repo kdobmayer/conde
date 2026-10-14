@@ -750,9 +750,6 @@ fn pkce_matches(verifier: String, challenge: &str) -> bool {
     same_secret(expected.as_str(), challenge)
 }
 
-/// `POST /auth/cli/redeem` `{code, state, code_verifier, host}`: a 64-hex `code` is the
-/// loopback's, taken whatever the outcome, then expiry, state and PKCE are checked; any other
-/// `code` is a pasted one (see [`paste_redeem`]). Both mint the host key the same way.
 /// The redeem's 429: `retry_after` in the body and the header.
 fn redeem_limited(wait: u64, message: String) -> Response {
     let mut r = (
@@ -768,6 +765,9 @@ fn redeem_limited(wait: u64, message: String) -> Response {
     r
 }
 
+/// `POST /auth/cli/redeem` `{code, state, code_verifier, host}`: a 64-hex `code` is the
+/// loopback's, taken whatever the outcome, then expiry, state and PKCE are checked; any other
+/// `code` is a pasted one (see [`paste_redeem`]). Both mint the host key the same way.
 pub(crate) async fn cli_redeem(
     State(state): State<WebState>,
     ClientIp(ip): ClientIp,
@@ -808,9 +808,10 @@ pub(crate) async fn cli_redeem(
 }
 
 /// The pasted-code redeem: the login is found by the CLI run's state and must be signed in
-/// (else `authorization_pending`) and live; the typed code and the PKCE verifier must both
-/// match. A miss counts as a try and
-/// puts the login back; the [`PASTE_TRIES`]th ends it.
+/// (else `authorization_pending`) and live. A request without the run's PKCE verifier (the state
+/// alone is in the URL) is refused and spends nothing. With it, the account's attempt budget is
+/// spent, then the typed code must match: a miss counts as a try and puts the login back; the
+/// [`PASTE_TRIES`]th ends it.
 async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     let invalid = |m: &str| redeem_error(StatusCode::BAD_REQUEST, "invalid_grant", m);
     let Some(typed) = paste_normalized(&req.code) else {
@@ -839,23 +840,44 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
             "no signed-in login waits for this run: open its URL, sign in, then enter the code that page shows",
         );
     };
-    if state.now() - code.created_at > state.limits().cli_code_ttl {
+    let age = state.now() - code.created_at;
+    let ttl = state.limits().cli_code_ttl;
+    if age > ttl {
         return invalid("the code expired; run conde login again");
     }
-    // Per account, across re-issued codes: the record goes back untouched (no try spent).
-    if let Err(wait) = state.0.limits.cli_guess(code.user_id) {
-        tracing::info!(user = %code.user_name, wait, "conde login code attempts rate limited");
+    // The state is in the URL anyone may hold; the verifier never leaves the CLI's host. A
+    // request without it is not this run's: the record goes back untouched, and neither the
+    // per-code tries nor the account's budget is spent.
+    let right_run = same_secret(&req.state, &code.state) && pkce_matches(req.code_verifier.clone(), &code.challenge);
+    if !right_run {
+        tracing::info!(user = %code.user_name, "conde login code redeem without this run's verifier");
         if let Err(e) = state.store(move |s| s.insert_cli_code(&key, &code)).await {
             return store_failed(e);
         }
-        return redeem_limited(wait, format!("too many code attempts for this account; retry in {wait} s"));
+        return invalid("this request is not from the conde login run that started this sign-in");
+    }
+    // Per account, across re-issued codes, for attempts that hold the run's verifier: the record
+    // goes back untouched (no try spent).
+    if let Err(wait) = state.0.limits.cli_guess(code.user_id) {
+        tracing::info!(user = %code.user_name, wait, "conde login code attempts rate limited");
+        let left = ttl - age;
+        if let Err(e) = state.store(move |s| s.insert_cli_code(&key, &code)).await {
+            return store_failed(e);
+        }
+        let message = if wait >= left as u64 {
+            format!(
+                "too many code attempts for this account; the next is allowed in {wait} s, after this login expires (in {left} s): run conde login --code again then"
+            )
+        } else {
+            format!("too many code attempts for this account; retry in {wait} s")
+        };
+        return redeem_limited(wait, message);
     }
     let right_code = code
         .paste
         .as_deref()
         .is_some_and(|d| same_secret(&paste_digest(&req.state, &typed), d));
-    let right_run = same_secret(&req.state, &code.state) && pkce_matches(req.code_verifier.clone(), &code.challenge);
-    if right_code && right_run {
+    if right_code {
         return mint_for(&state, code, &req.host).await;
     }
     code.tries += 1;

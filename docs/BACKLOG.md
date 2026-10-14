@@ -25,10 +25,6 @@ Review and integration by desk, one batch at a time; one release per batch.
 
 ## Queue, top first
 
-- B2. [H] Rate limit on /auth/cli/redeem per IP (and per account), like the
-  OAuth endpoints: today a client that re-issues (the same account confirming
-  again) resets the 5-try budget. Shares the limiter module. Area:
-  crates/conde-remote web ratelimit + redeem handler, tests.
 - B3. [H] Pasted-code confirm by another account on an expired login answers
   403 before the expiry check; it should say "expired, run conde login again".
   Plus: `conde login --code` without a terminal exits 0 after printing the URL,

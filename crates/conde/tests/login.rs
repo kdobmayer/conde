@@ -32,6 +32,8 @@ struct Board {
     refuse: Mutex<Option<String>>,
     /// Answer every redeem with this `invalid_request` message.
     bad_request: Mutex<Option<String>>,
+    /// Answer every redeem with a 429 `rate_limited` and this message.
+    limited: Mutex<Option<String>>,
     /// Hosts a key was minted for: a second mint is a re-enrollment.
     hosts: Mutex<std::collections::HashSet<String>>,
 }
@@ -60,6 +62,9 @@ async fn redeem(State(b): State<Arc<Board>>, Json(req): Json<Value>) -> Response
     b.redeemed.lock().unwrap().push(req.clone());
     if let Some(m) = b.bad_request.lock().unwrap().clone() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_request", "message": m}))).into_response();
+    }
+    if let Some(m) = b.limited.lock().unwrap().clone() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "rate_limited", "message": m, "retry_after": 30}))).into_response();
     }
     if let Some(m) = b.refuse.lock().unwrap().clone() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant", "message": m}))).into_response();
@@ -380,4 +385,23 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     assert!(out.contains("\nre-enrolled host box-9: the previous key for this host is revoked\n"), "{out}");
     assert!(out.contains(&format!("\nboard dakai at {server} (account krisztian); credential stored at")), "{out}");
     assert!(!out.contains("\nenrolled host"), "{out}");
+}
+
+/// A rate-limited redeem is a retry, like a wrong code: the CLI shows the server's wait and the
+/// login keeps waiting (on a terminal the prompt comes back).
+#[tokio::test]
+async fn a_rate_limited_redeem_keeps_the_login_waiting() {
+    let (server, board) = board().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("login/x.json");
+    let url = login::start_code(&server, &path).unwrap();
+    let shown = shown_code(&url).await;
+    *board.limited.lock().unwrap() = Some("too many code attempts for this account; retry in 30 s".into());
+    match login::finish_code(&server, &path, &shown, "h").await.unwrap() {
+        login::CodeOutcome::Retry(why) => assert!(why.contains("retry in 30 s"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(path.exists(), "the login still waits");
+    *board.limited.lock().unwrap() = None;
+    assert!(matches!(login::finish_code(&server, &path, &shown, "h").await.unwrap(), login::CodeOutcome::Enrolled(_)));
 }

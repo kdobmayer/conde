@@ -90,8 +90,10 @@ ignored (Claude Code's `http://localhost/callback`), else https on an allowed ho
 - Limits: in-process token buckets (`governor` 0.10.4), per replica (with two replicas a client
   gets at most twice the rate; the per-IP key is the address the ingress appends to
   `X-Forwarded-For` when the peer is private): `tools/call` 120/min per grant (burst 30), `send` +
-  `react` 30/min per user, OAuth endpoints 60/min per IP. Over limit: tool error `rate limited;
-  retry in N s`; OAuth 429 + `Retry-After`.
+  `react` 30/min per user, OAuth endpoints 60/min per IP; for `conde login`, `/auth/cli/redeem`
+  30/min per IP and pasted-code attempts 15/h per account (only attempts with the run's PKCE
+  verifier count). Over limit: tool error `rate limited; retry in N s`; OAuth and the redeem 429 +
+  `Retry-After`.
 
 ## 4. Tools (human subset; no `board` argument; ids print plain `01M...`)
 

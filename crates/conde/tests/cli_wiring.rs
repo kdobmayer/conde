@@ -921,4 +921,12 @@ fn watch_prints_the_board_and_follows_it() {
     assert!(line.contains(&pair("tester/bob", "tester/alice")) && line.contains("  after it started  "), "{line}");
     assert!(line.ends_with(&format!("  {after}")) && line.chars().count() == 120, "{line}");
     assert!(line.chars().take(5).all(|c| c.is_ascii_digit() || c == ':'), "HH:MM: {line}");
+    // The state cell (10 columns after the names): the first rows show it; a row printed while
+    // following has none, since its delivery is not settled and a printed line never updates.
+    let state = |row: &str, from: &str, to: &str| {
+        let at = row.find(&pair(from, to)).unwrap() + pair(from, to).len();
+        row.chars().skip(row[..at].chars().count()).take(10).collect::<String>()
+    };
+    assert!(!state(&first, "tester/alice", "tester/bob").trim().is_empty(), "{first}");
+    assert_eq!(state(&line, "tester/bob", "tester/alice"), " ".repeat(10), "{line}");
 }

@@ -534,7 +534,7 @@ const WATCH_TEXT: usize = 10;
 /// (UTC, HH:MM), sender -> recipient or channel, a short state, the first line of the text cut to
 /// the room left with an ellipsis, and the message id (with its board on a shared board), so
 /// `conde read <id>` shows the whole text. Only fixed columns wider than `width` overflow it.
-pub fn watch_row(m: &Value, board: &str, width: usize) -> String {
+pub fn watch_row(m: &Value, board: &str, width: usize, with_state: bool) -> String {
     let time: String = s(&m["date"]).chars().skip(11).take(5).collect();
     let id = qualify(board, s(&m["message_id"]));
     let (name_cap, state) = if width >= 120 { (WATCH_NAME, WATCH_STATE) } else { (WATCH_NAME_NARROW, WATCH_STATE_NARROW) };
@@ -545,7 +545,7 @@ pub fn watch_row(m: &Value, board: &str, width: usize) -> String {
         "{time}  {} -> {}  {}  ",
         fit_name(s(&m["from"]), name),
         fit_name(s(&m["to"]), name),
-        fit(&watch_state(m), state)
+        fit(&if with_state { watch_state(m) } else { String::new() }, state)
     );
     let room = width.saturating_sub(head.chars().count() + 2 + id.chars().count()).max(WATCH_TEXT);
     // a tab would jump the columns
@@ -814,7 +814,7 @@ mod tests {
                    "message_id": "01M4X88ZE6EJS7A7HV3NHQSWNN", "line": line, "status": status, "delivery": delivery})
         };
         let long = "S1 smoke on 8369aa7 is green on the NUC: install.sh identical, setup restarted the bridge itself";
-        let row = watch_row(&m(long, "unread", json!("retrying after 2026-10-14T13:06:00Z (recipient offline)")), "local", 120);
+        let row = watch_row(&m(long, "unread", json!("retrying after 2026-10-14T13:06:00Z (recipient offline)")), "local", 120, true);
         assert_eq!(
             row,
             "13:05  kosztya-devops-mana… -> kdobmayer/desk        retrying    S1 smoke on 8369aa7 is gre…  01M4X88ZE6EJS7A7HV3NHQSWNN"
@@ -822,20 +822,20 @@ mod tests {
         assert_eq!(row.chars().count(), 120);
         // narrower terminals: exactly the width, the names shrinking first
         let tabbed = m("first\tsecond and a long tail of words to cut", "unread", json!("delivered"));
-        let row = watch_row(&tabbed, "local", 100);
+        let row = watch_row(&tabbed, "local", 100, true);
         assert_eq!(row, "13:05  kosztya-dev… -> kdobma…/desk  delivered  first second and a long…  01M4X88ZE6EJS7A7HV3NHQSWNN");
         assert_eq!(row.chars().count(), 100);
-        let row = watch_row(&tabbed, "local", 80);
+        let row = watch_row(&tabbed, "local", 80, true);
         assert_eq!(row, "13:05  kosztya-… -> kdo…/desk  delivered  first sec…  01M4X88ZE6EJS7A7HV3NHQSWNN");
         assert_eq!(row.chars().count(), 80);
-        assert_eq!(watch_row(&tabbed, "dakai", 80).chars().count(), 80, "a board-qualified id still fits");
+        assert_eq!(watch_row(&tabbed, "dakai", 80, true).chars().count(), 80, "a board-qualified id still fits");
         assert_eq!(fit_name("konstantin/conde.agent", 20), "konstan…/conde.agent");
         assert_eq!(fit_name("kdobmayer/desk", 20), "kdobmayer/desk      ");
         assert_eq!(fit_name("#a-very-long-channel-name", 20), "#a-very-long-channe…");
-        let row = watch_row(&m("ok", "read 2026-10-14T13:06:00Z", json!("delivered")), "dakai", 120);
+        let row = watch_row(&m("ok", "read 2026-10-14T13:06:00Z", json!("delivered")), "dakai", 120, true);
         assert!(row.contains("  read        ok") && row.ends_with("  dakai:01M4X88ZE6EJS7A7HV3NHQSWNN"), "{row}");
         assert_eq!(row.chars().count(), 120, "a short text is padded so the ids line up");
-        let row = watch_row(&m("post", "read by 3/4", Value::Null), "local", 120);
+        let row = watch_row(&m("post", "read by 3/4", Value::Null), "local", 120, true);
         assert!(row.contains("  read 3/4    post"), "{row}");
         assert_eq!(watch_day(&m("x", "unread", Value::Null)), "2026-10-14");
     }

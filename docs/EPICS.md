@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 07:04: ROLLED conde:2058fad = revision ca-conde--0000024 (two replicas, no migration; dakai-helper: healthz 200, /mcp 401; desk: healthz 200, /mcp 401). Konstantin's agent told; S1 on 6f10b95 open.
 - 2026-10-15 07:03: ACR build conde:2058fad done (run cb1c, 9m17s); roll requested from dakai-helper.
 - 2026-10-15 07:01: release 6f10b95 green (run 38683754816), fresh install prints conde 0.1.0 (6f10b95 2026-10-15); S1 requested from Konstantin's agent.
 - 2026-10-15 06:53: batch 31 landed (U4 b608f87, B7 PR 32, B24 1c992cc + fix 00a9bea, fix verified at source by desk): master 2058fad, main 6f10b95 pushed, release run 38683754816 started, ACR build conde:2058fad started; full run 631 passed 0 failed on Postgres, watch test ran; PRs 31/32/33 commented.

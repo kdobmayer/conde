@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 07:34: ACR build conde:a39930e done; roll with migration 0013 requested from dakai-helper. S1 ping on 6acf5db answered. U7 PR 36 (7f2f205 on web-v2) received: Astra inline + web gate lane with three rule mutations.
 - 2026-10-15 07:32: release 6acf5db green (run 38686578649), fresh install prints conde 0.1.0 (6acf5db 2026-10-15); S1 requested; PR 34 commented. ACR build conde:a39930e still running.
 - 2026-10-15 07:31: Konstantin's agent took B25 as a second lane beside U7 (Konstantin wants it sooner); branch from main 6acf5db, PR against main.
 - 2026-10-15 07:30: Konstantin: watch follow rows keep their arrival state forever (sending/notified) while the initial rows show read. Desk decision: B25, follow rows print an empty state cell (initial load and --wide keep it); re-reading printed rows (his option b) and delayed rows (c) declined as overbuilding. Offered to Konstantin's agent after U7.

@@ -69,6 +69,8 @@ pub struct Agent {
     pub address: Option<Address>,
     pub binding_version: i64,
     pub pinned: Option<String>,
+    /// Its owner retired it (`conde retire`): unbound, out of the lists, its history kept.
+    pub retired: bool,
 }
 
 impl Agent {
@@ -730,6 +732,8 @@ pub trait Tx {
     fn agents_at_address(&self, owner_id: i64, address: &Address) -> StoreResult<Vec<Agent>>;
     /// Every bound agent, by owner then name.
     fn bound_agents(&self) -> StoreResult<Vec<Agent>>;
+    /// Marks an unbound agent retired at `at`; false when it is bound (nothing changes).
+    fn retire_agent(&self, agent_id: &str, at: &str) -> StoreResult<bool>;
     /// Every agent bound on `host`, by owner then name.
     fn agents_on_host(&self, host: &str) -> StoreResult<Vec<Agent>>;
     fn insert_agent(&self, id: &str, owner_id: i64, name: &str) -> StoreResult<()>;

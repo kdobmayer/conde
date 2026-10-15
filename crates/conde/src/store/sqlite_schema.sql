@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS agents(
     host_id TEXT,
     binding_version INTEGER NOT NULL DEFAULT 0,
     pinned_address TEXT,
+    retired_at TEXT,
     UNIQUE (owner_id, name_lower)
 );
 CREATE INDEX IF NOT EXISTS agents_by_address ON agents(address_kind, address_target, host_id);

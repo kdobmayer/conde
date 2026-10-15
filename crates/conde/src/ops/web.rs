@@ -62,7 +62,7 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     browser_only(ctx)?;
     let owner = ctx.p.user_id;
     let mut agents: BTreeMap<String, Value> = BTreeMap::new();
-    for a in ctx.db.owner_agents(owner)? {
+    for a in ctx.db.owner_agents(owner)?.into_iter().filter(|a| !a.retired) {
         agents.insert(
             a.id.clone(),
             json!({"name": a.canonical(), "kind": a.address.as_ref().map(|x| x.kind.as_str()),

@@ -102,6 +102,9 @@ enum Cmd {
         #[arg(long)]
         if_address: Option<String>,
     },
+    /// Retire a name nothing holds any more (human only): it leaves the lists and the directory,
+    /// its messages stay readable, and registering it again brings it back.
+    Retire { name: String },
     /// Rename this session's name in place, keeping its messages: `rename <new>`
     /// (the human owner may also run `rename <old> <new>`).
     Rename {
@@ -795,6 +798,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             }
         }
         Cmd::Agents => print(surface::agents(&sx.call("agent.list", json!({}))?)),
+        Cmd::Retire { name } => {
+            let r = sx.call("agent.retire", json!({"name": name}))?;
+            println!("retired {}; its messages stay readable, and registering it again brings it back", s(&r["name"]));
+        }
         Cmd::Whoami => println!("{}", surface::whoami(&sx.call("agent.whoami", json!({}))?)),
         Cmd::Search { pattern, target, after } => {
             let after = after.map(crate::util::After::wire);

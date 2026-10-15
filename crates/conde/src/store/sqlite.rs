@@ -36,6 +36,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("users", "disabled", "INTEGER NOT NULL DEFAULT 0"),
     ("attempts", "settled_at", "TEXT"),
     ("hosts", "route_revision", "INTEGER NOT NULL DEFAULT 0"),
+    ("agents", "retired_at", "TEXT"),
     ("hosts", "mailbox_only", "INTEGER NOT NULL DEFAULT 0"),
     ("mcp_grants", "code_digest", "TEXT"),
 ];
@@ -212,7 +213,7 @@ impl Drop for SqliteTx<'_> {
 }
 
 const AGENT_SELECT: &str = "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
-    a.address_target, a.host_id, a.binding_version, a.pinned_address
+    a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL
     FROM agents a JOIN users u ON u.user_id = a.owner_id";
 
 fn agent_row(r: &Row) -> rusqlite::Result<Agent> {
@@ -225,6 +226,7 @@ fn agent_row(r: &Row) -> rusqlite::Result<Agent> {
         address: address_of(r.get(5)?, r.get(6)?, r.get(7)?),
         binding_version: r.get(8)?,
         pinned: r.get(9)?,
+        retired: r.get(10)?,
     })
 }
 
@@ -658,6 +660,14 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
+    fn retire_agent(&self, agent_id: &str, at: &str) -> StoreResult<bool> {
+        let n = self.exec(
+            "UPDATE agents SET retired_at = ?2 WHERE agent_id = ?1 AND address_kind IS NULL",
+            params![agent_id, at],
+        )?;
+        Ok(n == 1)
+    }
+
     fn bound_agents(&self) -> StoreResult<Vec<Agent>> {
         self.rows(&format!("{AGENT_SELECT} WHERE a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"), [], agent_row)
     }
@@ -681,7 +691,8 @@ impl Tx for SqliteTx<'_> {
         self.wakes.borrow_mut().hosts.extend(old.clone());
         self.exec(
             "UPDATE agents SET address_kind = ?2, address_target = ?3, host_id = ?4,
-             binding_version = binding_version + 1 WHERE agent_id = ?1",
+             binding_version = binding_version + 1,
+             retired_at = CASE WHEN ?2 IS NULL THEN retired_at END WHERE agent_id = ?1",
             params![
                 agent_id,
                 address.map(|a| a.kind.as_str()),

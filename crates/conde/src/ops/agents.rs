@@ -159,6 +159,27 @@ pub fn unregister(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({"name": canonical, "was_registered": true, "address": current.to_string()}))
 }
 
+/// Retire one of the owner's names that nothing holds any more (the human owner only): it leaves
+/// the owner's lists and the directory, its history stays readable, and binding it again (a
+/// register, or a publish on a shared board) revives it.
+pub fn retire(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    if ctx.actor_address()?.kind != Kind::Human {
+        return Err(forbidden("retiring a name is the human owner's; ask your human"));
+    }
+    let name = ctx.own_name(str_param(body, "name")?)?;
+    let canonical = format!("{}/{name}", ctx.p.user);
+    let agent = by_name(ctx.db, ctx.p.user_id, &name)?.ok_or_else(|| not_found(format!("no agent named '{canonical}'")))?;
+    if let Some(address) = &agent.address {
+        return Err(forbidden(format!(
+            "{canonical} is bound to {address}; unbind it first (conde unregister {name}, or conde unpublish on a shared board)"
+        )));
+    }
+    if !ctx.db.retire_agent(&agent.id, &ctx.now_iso())? {
+        return Err(conflict(format!("{canonical} was bound meanwhile; not retired")));
+    }
+    Ok(json!({"name": canonical, "retired": true}))
+}
+
 /// Give a name a new one in place: the row keeps its id, binding, inbox, history and
 /// memberships, and the old name is free. Self-only for agents (`old` omitted means the
 /// caller's own name); the human owner may rename any unpinned name in the namespace.

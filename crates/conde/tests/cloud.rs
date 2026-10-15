@@ -521,3 +521,27 @@ fn a_human_watches_a_shared_board_without_a_published_name() {
     assert_eq!(out.status.code(), Some(1), "refused, not watching until the timeout: {stderr}");
     assert!(stderr.contains("bob is not published on shared"), "{stderr}");
 }
+
+/// B26: a human with no published name retires an unpublished name on a shared board through
+/// the daemon; the board's directory no longer lists it.
+#[test]
+fn a_human_retires_a_name_on_a_shared_board() {
+    let cloud = Cloud::start(test_config());
+    let mut a = Host::new("ann", "host-a");
+    cloud.enroll(&a);
+    let sa = a.sock();
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    a.ok(Some("codex"), ALICE, &["register", "alice"]);
+    cloud.publish(&a, &sa, "alice");
+    let human = a.conde(None, &[], &["register", "ann"], None);
+    if String::from_utf8_lossy(&human.stderr).contains("refusing to act as the human") {
+        eprintln!("skipped: runs as the human; launch the suite outside an agent shell");
+        return;
+    }
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    a.ok(None, &[], &["unpublish", "alice", "--board", "shared"]);
+    let out = a.ok(None, &[], &["retire", "alice", "--board", "shared"]);
+    assert!(out.contains("retired ann/alice"), "{out}");
+    let dir = a.ok(None, &[], &["agents", "--board", "shared"]);
+    assert!(!dir.contains("ann/alice"), "{dir}");
+}

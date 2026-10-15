@@ -100,6 +100,7 @@ on_both!(
     the_browser_is_read_only_and_names_nobody,
     the_owner_sees_what_their_agents_can_read_and_nothing_else,
     another_owner_sees_only_their_own_agents,
+    a_retired_name_leaves_the_lists_and_keeps_its_history,
     the_browser_searches_what_its_agents_can_read,
     the_feed_is_what_the_owners_agents_can_read,
     the_feed_pages_between_exclusive_bounds,
@@ -887,6 +888,57 @@ async fn a_long_thread_starts_near_the_message_and_continues_without_holes(d: Ar
         let parent = m["reply_to"].as_str().unwrap_or_default();
         assert!(*id == top || seen.contains_key(parent), "{id}'s parent {parent} is missing");
     }
+    ui.server.shutdown().await.unwrap();
+}
+
+/// B26: the human owner retires a name nothing holds: it leaves owner.list, fleet.list and the
+/// directory, its history stays in the feed, search and thread, and registering it revives it.
+/// A bound name, another owner's name and an agent's request are refused.
+async fn a_retired_name_leaves_the_lists_and_keeps_its_history(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let human = "human:kd";
+    let call = |actor: &str, op: &str, body: Value| {
+        let (d, k, actor, op) = (ui.d.clone(), c.k.clone(), actor.to_string(), op.to_string());
+        async move {
+            let mut req = Request::new(conde::util::new_ulid(), &op, body);
+            req.actor = Some(actor);
+            req.idempotency_key = Some(conde::util::new_ulid());
+            blocking(move || d.dispatch(&k, &req)).await
+        }
+    };
+    let code = |r: conde::protocol::Response| r.error.map(|e| e.code);
+    use conde::protocol::ErrorCode::Forbidden;
+    assert_eq!(code(call(human, "agent.retire", json!({"name": "helper"})).await), Some(Forbidden), "bound");
+    assert_eq!(code(call(human, "agent.retire", json!({"name": "david/scout"})).await), Some(Forbidden), "not yours");
+    ui.op(&c.k, human, "agent.unregister", json!({"name": "helper"})).await;
+    assert_eq!(code(call(&c.worker, "agent.retire", json!({"name": "helper"})).await), Some(Forbidden), "an agent");
+    ui.op(&c.k, human, "agent.retire", json!({"name": "helper"})).await;
+
+    let helper = format!("{USER}/helper");
+    let names = |v: &Value, key: &str| -> Vec<String> {
+        v[key].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap().to_string()).collect()
+    };
+    let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    assert!(!names(&rail, "agents").contains(&helper), "{rail}");
+    let fleet = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
+    assert!(!names(&fleet, "agents").contains(&helper), "{fleet}");
+    let dir = ui.op(&c.k, &c.worker, "agent.list", json!({})).await;
+    assert!(!names(&dir, "agents").contains(&helper), "{dir}");
+    // its history stays readable
+    let feed = ui.ok(&b, &csrf, "owner.feed", json!({"agent": "helper"})).await;
+    let handoff = feed["messages"].as_array().unwrap().iter().find(|m| m["text"] == "handoff to worker").cloned();
+    assert!(handoff.is_some(), "{feed}");
+    let found = ui.ok(&b, &csrf, "owner.search", json!({"pattern": "handoff to worker"})).await;
+    assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
+    let t = ui.ok(&b, &csrf, "owner.thread", json!({"id": handoff.unwrap()["message_id"]})).await;
+    assert_eq!(texts(&t), vec!["handoff to worker"]);
+
+    // registering it again brings it back
+    ui.op(&c.k, &c.helper, "agent.register", json!({"name": "helper"})).await;
+    let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    assert!(names(&rail, "agents").contains(&helper), "{rail}");
     ui.server.shutdown().await.unwrap();
 }
 

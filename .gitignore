@@ -1,0 +1,13 @@
+infra/terraform/*.tfstate*
+infra/terraform/.terraform/
+infra/terraform/*.bin
+target/
+dist/out/
+core.*
+web/node_modules/
+web/.svelte-kit/
+crates/conde-remote/web-dist/
+
+# owner-only history manifest (agent inventory): stays local, never pushed
+docs/history-manifest-*
+*.profraw

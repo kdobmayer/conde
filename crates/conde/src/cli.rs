@@ -146,7 +146,8 @@ enum Cmd {
         /// Only this '#channel'.
         #[arg(long)]
         channel: Option<String>,
-        /// Print each message's whole first line, not one row cut to the terminal's width.
+        /// Print each message's whole first line and its id, not one row cut to the terminal's
+        /// width (what a pipe gets too).
         #[arg(long)]
         wide: bool,
     },
@@ -822,24 +823,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             };
             let mut body = filter(json!({"last": 20}));
             let mut day = String::new();
-            // A row printed while following arrived just now: its delivery state is not settled
-            // and a printed line never updates, so it shows none (`--wide` and the first rows do).
-            let mut following = false;
             loop {
                 let r = sx.call_on("message.feed", Some(&board), body)?;
                 let rows = r["messages"].as_array().cloned().unwrap_or_default();
-                // the width is read each pass, so a resized terminal is followed
-                let width = terminal_width().unwrap_or(120);
+                // the width is read each pass, so a resized terminal is followed; a pipe gets the
+                // whole line with the id, for tools
+                let width = if wide { None } else { terminal_width() };
                 for m in &rows {
-                    if wide {
-                        println!("{}", surface::watch_line(m));
+                    let Some(width) = width else {
+                        println!("{}", surface::watch_line(m, &board));
                         continue;
-                    }
+                    };
                     if surface::watch_day(m) != day {
                         day = surface::watch_day(m);
                         println!("-- {day} --");
                     }
-                    println!("{}", surface::watch_row(m, &board, width, !following));
+                    println!("{}", surface::watch_row(m, width));
                 }
                 std::io::Write::flush(&mut std::io::stdout())?;
                 // a full page continues at once; otherwise poll again in a second
@@ -847,7 +846,6 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     std::thread::sleep(Duration::from_secs(1));
                 }
                 body = filter(json!({"after": r["cursor"]}));
-                following = true;
             }
         }
         Cmd::Profile { name, set: Some(kv) } => {

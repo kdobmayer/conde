@@ -51,6 +51,14 @@ Review and integration by desk, one batch at a time; one release per batch.
   human only. Web control comes with the v2 Agents page (U10), not here.
   Area: ops/agents.rs, store/{mod,sqlite,postgres}.rs + migration 0014,
   cli.rs, surface.rs, README, tests/messaging.rs or web_ui.rs.
+- B27. `conde watch` drops the state column (Konstantin 2026-10-15, after
+  using B25: not useful, the text needs the room). Row: HH:MM, from -> to,
+  text, id; the column's width and its gap go to the text (12 more characters
+  at 120+ columns, more below); the minimum row width shrinks by the same;
+  `--wide` keeps the full line; `conde sent` / `conde read` have the state.
+  Replaces B25's empty cell and README sentence. Area: crates/conde/src/
+  surface.rs watch_row + its unit test, cli.rs (the with_state flag goes),
+  README watch paragraph, tests/cli_wiring.rs.
 
 ## Waiting on a decision or an observation (do not take)
 

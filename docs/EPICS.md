@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 07:30: Konstantin: watch follow rows keep their arrival state forever (sending/notified) while the initial rows show read. Desk decision: B25, follow rows print an empty state cell (initial load and --wide keep it); re-reading printed rows (his option b) and delayed rows (c) declined as overbuilding. Offered to Konstantin's agent after U7.
 - 2026-10-15 07:27: Konstantin's agent took U7 (data layer with the window rule), branch u7-data-layer from web-v2 e493dc2, PR against web-v2.
 - 2026-10-15 07:26: U6 fix e493dc2 verified at source (owner-scoped agent and host match, two-owner test); web-v2 fast-forwarded to e493dc2 (768f019 + e493dc2, authored by Konstantin); PR 35 commented; U7 free on web-v2.
 - 2026-10-15 07:24: batch 32 (U5) on master a39930e: full run 635 passed 0 failed on Postgres, watch test ran; main 6acf5db pushed, release run 38686578649 started, ACR build conde:a39930e started. U6 PR 35 (768f019 on web-v2): web gate green here (check 0/0, 8/8 tests, build); Astra NOT READY, one P2 verified (navAgents matches host and agent by name only, fleet.list spans owners) sent to the author; hash-query note recorded for U7/U9 (filters in path form).

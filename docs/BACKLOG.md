@@ -38,6 +38,15 @@ Review and integration by desk, one batch at a time; one release per batch.
   the target are on different filesystems (not atomic); stage next to the target
   instead. Area: dist/install.sh, dist_files test.
 
+- B25. `conde watch` follow rows freeze their state: a row printed while
+  following shows the state it had at arrival (sending, notified) and never
+  changes, although the initial last-N rows show the settled state (read).
+  Reported by Konstantin 2026-10-15. Decided (desk): a row printed while
+  following leaves the state cell empty (the state is not known yet; the
+  initial load and `--wide` keep it); README's watch paragraph says so. No
+  re-reading of printed rows, no delayed rows. Area: crates/conde/src/surface.rs
+  watch_row, the watch loop in cli.rs, README, tests/cli_wiring.rs.
+
 ## Waiting on a decision or an observation (do not take)
 
 - W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers

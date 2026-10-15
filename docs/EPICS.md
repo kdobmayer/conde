@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 08:43: Astra on B27 (PR 39): NOT READY, one P2 verified (mode picked from terminal_width()==None, which also covers a TTY with unknown width; fix: mode from is_terminal, width fallback 120) sent to the author; batch 35 gates continue on ccffe1a.
 - 2026-10-15 08:42: S1 green on c396f4c (NUC; the local SQLite board opens on the retired_at build). Batch 34 closed. B27 PR 39 (ccffe1a on main c396f4c) received: no state anywhere (call settled); Astra inline; batch 35 lane (red-before + full run with Postgres).
 - 2026-10-15 08:40: ROLLED conde:2520846 = revision ca-conde--0000026 (migration 14 agents_retired_at applied 06:39:49 UTC per startup log; dakai-helper and desk: healthz 200, /mcp 401). Konstantin's agent told; Konstantin retires native.nuc and konstantin-watcher himself.
 - 2026-10-15 08:39: ACR build conde:2520846 done; roll with migration 0014 requested from dakai-helper.

@@ -1,6 +1,7 @@
 // Design-only mock of the conde web API over the design fixture, serving a built app.
 // Usage: node scripts/design/mock-server.mjs <build-dir> <port>
-// Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, fleet.list),
+// Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
+// owner.search, fleet.list; the last three per docs/web-ui-v2/ia.md "Server contract"),
 // /v1/events (a WebSocket that sends the hello frame) and /keys (the server's keys page
 // template from crates/conde-remote/src/web/pages.rs, filled with fixture rows).
 
@@ -40,6 +41,89 @@ function history(body) {
 	return { ...head, agent, messages: rows.slice(-limit), more };
 }
 
+// What the owner's agents can read, and through which of them (the fixture's visibility).
+const via = (m) => fx.ownAgents.filter((a) => fx.visibleTo(a, m));
+const own = new Set(fx.ownAgents);
+const PROBLEMS = ['retrying', 'held', 'denied', 'refused', 'gone'];
+
+function direction(m) {
+	const fromOwn = own.has(m.from);
+	if (m.place === 'dm' && fromOwn && own.has(m.to)) return 'own';
+	return fromOwn ? 'out' : 'in';
+}
+
+/** owner.feed {after?, before?, limit?, agent?, direction?, place?, problems?}: newest first. */
+function feed(b) {
+	const agent = b.agent ? (b.agent.includes('/') ? b.agent : `${fx.OWNER}/${b.agent}`) : null;
+	const after = b.after ?? 0;
+	const before = b.before ?? Number.MAX_SAFE_INTEGER;
+	const limit = Math.min(Math.max(b.limit ?? 50, 1), 100);
+	const rows = fx.messages
+		.filter((m) => m.seq > after && m.seq < before && via(m).length > 0)
+		.filter((m) => !agent || fx.visibleTo(agent, m))
+		.filter((m) => !b.direction || direction(m) === b.direction)
+		.filter((m) => !b.place || (b.place === 'dm' ? m.place === 'dm' : m.place === b.place))
+		.filter((m) => !b.problems || (m.delivery?.recipients ?? []).some((r) => PROBLEMS.includes(r.state)))
+		.sort((x, y) => y.seq - x.seq);
+	return {
+		messages: rows.slice(0, limit).map((m) => ({ ...m, direction: direction(m), via: via(m) })),
+		more: rows.length > limit
+	};
+}
+
+/** owner.thread {id, after?}: the segment's subtree under `top`, sorted by seq. */
+function thread(b) {
+	const byId = new Map(fx.messages.map((m) => [m.message_id, m]));
+	const seen = (m) => m && via(m).length > 0;
+	const asked = byId.get(b.id);
+	if (!seen(asked)) return null;
+	const up = [asked];
+	while (up.at(-1).reply_to && seen(byId.get(up.at(-1).reply_to))) up.push(byId.get(up.at(-1).reply_to));
+	const real = up.at(-1);
+	const cut = up.length > 100;
+	const top = cut ? up[99] : real;
+	const subtree = [];
+	const walk = (m) => {
+		subtree.push(m);
+		for (const c of fx.messages.filter((x) => x.reply_to === m.message_id && seen(x))) walk(c);
+	};
+	walk(top);
+	subtree.sort((x, y) => x.seq - y.seq);
+	let picked;
+	let next = null;
+	if (b.after === undefined) {
+		const path = up.slice(0, up.indexOf(top) + 1);
+		const others = subtree.filter((m) => !path.includes(m));
+		const room = 200 - path.length;
+		picked = [...path, ...others.slice(0, room)];
+		if (others.length > room) next = others[room - 1].seq;
+	} else {
+		const rest = subtree.filter((m) => m.seq > b.after);
+		picked = rest.slice(0, 200);
+		if (rest.length > 200) next = picked.at(-1).seq;
+	}
+	return {
+		top: top.message_id,
+		start: cut ? real.message_id : null,
+		hidden_parent: real.reply_to !== null,
+		messages: picked.sort((x, y) => x.seq - y.seq),
+		next
+	};
+}
+
+/** owner.search {pattern, after?}: a case-insensitive regex over what the owner can read. */
+function search(b) {
+	const rx = new RegExp(b.pattern, 'i');
+	const hits = fx.messages
+		.filter((m) => m.seq > (Number(b.after) || 0) && via(m).length > 0)
+		.sort((x, y) => x.seq - y.seq)
+		.flatMap((m) => {
+			const line = m.text.split('\n').find((l) => rx.test(l));
+			return line === undefined ? [] : [{ place: m.place, message_id: m.message_id, seq: m.seq, from: m.from, date: m.date, line: line.trim() }];
+		});
+	return { hits, next_cursor: null };
+}
+
 function rpc(req, res) {
 	let raw = '';
 	req.on('data', (c) => (raw += c));
@@ -62,6 +146,16 @@ function rpc(req, res) {
 			}
 			case 'fleet.list':
 				result = fx.fleet;
+				break;
+			case 'owner.feed':
+				result = feed(b);
+				break;
+			case 'owner.thread':
+				result = thread(b);
+				if (!result) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no such message visible to your agents' } });
+				break;
+			case 'owner.search':
+				result = search(b);
 				break;
 			default:
 				return json(res, 200, { ok: false, error: { code: 'forbidden', message: `op ${r.op} not mocked` } });

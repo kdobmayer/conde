@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 09:07: release 9119b48 green (run 38695749446), fresh install prints conde 0.1.0 (9119b48 2026-10-15); S1 requested.
 - 2026-10-15 09:06: U8 PR 40 (b5a3fec on web-v2 205bbf0, components + interact.mjs, 12 renders) received: Astra inline; web gate lane with an interact.mjs run and two mutations; desk looked at four renders (menu and sheet in both skins, desktop and phone): consistent with the options.
 - 2026-10-15 08:59: batch 35 (B27 + fix d74a30d) landed: re-gate 638 passed 0 failed on Postgres, watch test ran; master 6150706 (code identical to PR 39), main 9119b48 pushed, release run 38695749446 started; PR 39 commented. No server roll: CLI-only.
 - 2026-10-15 08:54: B27 fix d74a30d (mode from is_terminal, width fallback 120; author's pty check at 0 columns) read at source; batch 35 re-gate running. Konstantin's agent took U8 on web-v2 from 205bbf0.

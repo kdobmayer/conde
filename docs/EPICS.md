@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 07:14: S1 green on 6f10b95 against 0000024 (NUC); B24 human half green (Konstantin's own shell, watch --board dakai --agent, no published human name). Batch 31 closed. U5 PR 34 (e24380d, owner.thread + migration 0013) received, sent to Astra for inline review.
 - 2026-10-15 07:04: ROLLED conde:2058fad = revision ca-conde--0000024 (two replicas, no migration; dakai-helper: healthz 200, /mcp 401; desk: healthz 200, /mcp 401). Konstantin's agent told; S1 on 6f10b95 open.
 - 2026-10-15 07:03: ACR build conde:2058fad done (run cb1c, 9m17s); roll requested from dakai-helper.
 - 2026-10-15 07:01: release 6f10b95 green (run 38683754816), fresh install prints conde 0.1.0 (6f10b95 2026-10-15); S1 requested from Konstantin's agent.

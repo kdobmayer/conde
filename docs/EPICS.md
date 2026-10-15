@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 08:09: Astra on B26 (PR 38): READY with two P3s, verified (revival text wrong for a shared-board name: publish, not register; history test uses helper->worker so a same-owner live agent masks the retired name). Both asked from the author as one commit; batch 34 gates continue on 44f7809.
 - 2026-10-15 08:08: S1 green on 5d18c1e (NUC). B26 PR 38 (44f7809 on main 5d18c1e, agent.retire + migration 0014) received: Astra inline; batch 34 lane in worktree conde-batch34 (full run with Postgres, SQLite upgrade check).
 - 2026-10-15 07:58: release 5d18c1e green (run 38689011441), fresh install prints conde 0.1.0 (5d18c1e 2026-10-15); S1 requested.
 - 2026-10-15 07:51: batch 33 (B25) landed: full run 635 passed 0 failed on Postgres, watch test ran, red-before confirmed (follow cell 'retrying' vs blank); master 8381029, main 5d18c1e pushed, release run 38689011441 started; PR 37 commented. No server roll: CLI-only change.

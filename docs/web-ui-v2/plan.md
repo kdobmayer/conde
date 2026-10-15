@@ -119,8 +119,8 @@ addition:
   reads `conde.skin` (try/catch, default A) and sets `data-skin`; the Console / Editorial control
   in the owner menu, which swaps only the skin components (the data layer is not remounted; the
   first visible row keeps its offset); the nav model (sections, own agents with state from
-  `owner.list` and `fleet.list`, channels once each). Verify whether the hash router exposes query
-  parameters after the hash; if not, filters use the path form. Must not: a server setting, a
+  `owner.list` and `fleet.list`, channels once each). Verified at U6: the hash router keeps a
+  query after the hash out of `page.url.searchParams`, so filters use the path form (U7, U9). Must not: a server setting, a
   light theme, touch `routes/_design` or its layout branch. Gate: a node test of the skin read
   (missing, unknown, invalid and throwing storage give A); renders of the empty shell in both
   skins. Area: web/src/routes/+layout.svelte, web/src/routes/+page.svelte,

@@ -238,6 +238,46 @@ pub(crate) fn problem_seqs_sql(ph: impl Fn(usize) -> String) -> String {
     )
 }
 
+/// Whether the owner (`owner`, a placeholder) can read message `m` (an alias of `messages`): a DM
+/// with an own party, or a post in a channel with an own member (the `owned` clause).
+fn owner_reads(m: &str, owner: &str) -> String {
+    format!(
+        "(({m}.channel_id IS NULL AND EXISTS (SELECT 1 FROM agents oa WHERE oa.owner_id = {owner}
+              AND (oa.agent_id = {m}.sender_agent_id OR oa.agent_id = {m}.recipient_agent_id)))
+          OR ({m}.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM memberships ox JOIN agents oo ON oo.agent_id = ox.agent_id
+              WHERE ox.channel_id = {m}.channel_id AND oo.owner_id = {owner})))"
+    )
+}
+
+/// [`Tx::owner_thread_up`] for either store (1 the owner id, 2 the message id).
+pub(crate) fn thread_up_sql(ph: impl Fn(usize) -> String) -> String {
+    let (owner, id) = (ph(1), ph(2));
+    let reads = owner_reads("p", &owner);
+    format!(
+        "WITH RECURSIVE up(seq, id, parent, depth) AS (
+             SELECT commit_seq, message_id, reply_to, 0 FROM messages WHERE message_id = {id}
+             UNION ALL
+             SELECT p.commit_seq, p.message_id, p.reply_to, up.depth + 1 FROM messages p JOIN up ON p.message_id = up.parent
+             WHERE {reads})
+         SELECT seq, id, parent FROM up ORDER BY depth"
+    )
+}
+
+/// [`Tx::owner_thread_down`] for either store (1 the owner id, 2 the top's id, 3 `after`, 4 the
+/// limit). The visibility test is inside the recursive step, so the walk never passes through a
+/// message the owner cannot read.
+pub(crate) fn thread_down_sql(ph: impl Fn(usize) -> String) -> String {
+    let (owner, top, after, limit) = (ph(1), ph(2), ph(3), ph(4));
+    let reads = owner_reads("c", &owner);
+    format!(
+        "WITH RECURSIVE sub(seq, id) AS (
+             SELECT commit_seq, message_id FROM messages WHERE message_id = {top}
+             UNION ALL
+             SELECT c.commit_seq, c.message_id FROM messages c JOIN sub ON c.reply_to = sub.id WHERE {reads})
+         SELECT seq FROM sub WHERE seq > {after} ORDER BY seq LIMIT {limit}"
+    )
+}
+
 /// A parameter of [`feed_seqs_sql`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedArg {
@@ -918,6 +958,12 @@ pub trait Tx {
     fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>>;
     /// The messages with these seqs, newest first.
     fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>>;
+    /// `id` and its ancestors through `reply_to` while the owner can read each, nearest first:
+    /// (seq, id, reply_to). `id` itself is not checked (the caller has).
+    fn owner_thread_up(&self, owner_id: i64, id: &str) -> StoreResult<Vec<(i64, String, Option<String>)>>;
+    /// The seqs of `top` and every message under it reached through messages the owner can read,
+    /// above `after`, in seq order, at most `limit`.
+    fn owner_thread_down(&self, owner_id: i64, top: &str, after: i64, limit: i64) -> StoreResult<Vec<i64>>;
     /// Like [`Tx::search_scan`] over what the owner's agents can read (the
     /// [`Tx::owner_message`] rule), after `after`, oldest first.
     fn owner_search_scan(

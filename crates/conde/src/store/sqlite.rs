@@ -13,7 +13,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, pa
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
     Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    FeedArg, FeedRange, Membership, problem_seqs_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
+    FeedArg, FeedRange, Membership, problem_seqs_sql, thread_down_sql, thread_up_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
     WebSessionRow, address_of, feed_seqs_sql,
 };
 use crate::address::Address;
@@ -108,7 +108,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS notifications_by_recipient ON notifications(recipient_agent_id);
          CREATE UNIQUE INDEX IF NOT EXISTS mcp_grants_by_code ON mcp_grants(code_digest) WHERE code_digest IS NOT NULL;
          CREATE INDEX IF NOT EXISTS messages_by_day ON messages(substr(created_at, 1, 10), commit_seq);
-         CREATE INDEX IF NOT EXISTS messages_dm_by_sender ON messages(sender_agent_id, commit_seq) WHERE channel_id IS NULL;",
+         CREATE INDEX IF NOT EXISTS messages_dm_by_sender ON messages(sender_agent_id, commit_seq) WHERE channel_id IS NULL;
+         CREATE INDEX IF NOT EXISTS messages_by_reply_to ON messages(reply_to, commit_seq);",
     )?;
     rebuild_agents(conn)
 }
@@ -1520,6 +1521,14 @@ impl Tx for SqliteTx<'_> {
 
     fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>> {
         self.rows(&problem_seqs_sql(|n| format!("?{n}")), params![owner_id, after, before], one_col)
+    }
+
+    fn owner_thread_up(&self, owner_id: i64, id: &str) -> StoreResult<Vec<(i64, String, Option<String>)>> {
+        self.rows(&thread_up_sql(|n| format!("?{n}")), params![owner_id, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    }
+
+    fn owner_thread_down(&self, owner_id: i64, top: &str, after: i64, limit: i64) -> StoreResult<Vec<i64>> {
+        self.rows(&thread_down_sql(|n| format!("?{n}")), params![owner_id, top, after, limit], one_col)
     }
 
     fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>> {

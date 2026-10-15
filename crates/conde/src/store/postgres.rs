@@ -32,7 +32,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
     Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    FeedArg, FeedRange, Membership, problem_seqs_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
+    FeedArg, FeedRange, Membership, problem_seqs_sql, thread_down_sql, thread_up_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
     WebSessionRow, address_of, feed_seqs_sql,
 };
 use crate::address::Address;
@@ -72,6 +72,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (10, "mcp_grant_code", include_str!("migrations/0010_mcp_grant_code.sql")),
     (11, "messages_by_day", include_str!("migrations/0011_messages_by_day.sql")),
     (12, "messages_dm_by_sender", include_str!("migrations/0012_messages_dm_by_sender.sql")),
+    (13, "messages_by_reply_to", include_str!("migrations/0013_messages_by_reply_to.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -2042,6 +2043,16 @@ impl Tx for PgTx {
     fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>> {
         let sql = problem_seqs_sql(|n| format!("${n}"));
         Ok(self.query_planned(&sql, &[&owner_id, &after, &before])?.iter().map(|r| r.get(0)).collect())
+    }
+
+    fn owner_thread_up(&self, owner_id: i64, id: &str) -> StoreResult<Vec<(i64, String, Option<String>)>> {
+        let sql = thread_up_sql(|n| format!("${n}"));
+        Ok(self.query_planned(&sql, &[&owner_id, &id])?.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+    }
+
+    fn owner_thread_down(&self, owner_id: i64, top: &str, after: i64, limit: i64) -> StoreResult<Vec<i64>> {
+        let sql = thread_down_sql(|n| format!("${n}"));
+        Ok(self.query_planned(&sql, &[&owner_id, &top, &after, &limit])?.iter().map(|r| r.get(0)).collect())
     }
 
     fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>> {

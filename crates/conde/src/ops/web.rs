@@ -8,6 +8,7 @@
 //!   state for messages the owner's agents sent (every recipient) or received (theirs).
 //! - `owner.feed`: everything the owner's agents can read, newest first, between two seq bounds,
 //!   by agent, direction and place.
+//! - `owner.thread`: the reply chain a message belongs to, as far as the owner's agents can read it.
 //! - `owner.message`, `owner.attachment`: one message or attachment under the same rule.
 //! - `owner.search`: `search` over the same rule (the remote MCP's search).
 //! - `fleet.list`: every bound agent with host bridge state; delivery health for own agents.
@@ -40,6 +41,9 @@ const FEED_MAX: i64 = 100;
 const PROBLEMS: &[&str] = &["retrying", "held", "denied", "refused", "gone"];
 /// Problem candidates read per round trip.
 const PROBLEM_CHUNK: usize = 100;
+/// Messages per `owner.thread` answer, and the longest path from its top to the message asked for.
+const THREAD_PAGE: usize = 200;
+const THREAD_PATH: usize = 100;
 
 /// Attempt outcomes that end an attempt without reaching the recipient.
 const FAILED: &[&str] = &["expired", "dropped", "failed", "abandoned", "denied", "refused"];
@@ -305,6 +309,62 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         out.push(v);
     }
     Ok(json!({"messages": out, "more": more}))
+}
+
+/// `owner.thread {id, after?}`: the segment `id` belongs to (its ancestors while the owner can read
+/// each, and every message under them reached through readable messages only), as the subtree
+/// under `top`: the segment's top, or `id`'s 99th ancestor when the path is longer than 100, with
+/// `start` naming the real top. `hidden_parent` when the real top replies to something. The first
+/// answer is the path from `top` to `id` and the subtree's first messages by seq, 200 in all;
+/// `after` continues with the subtree above that seq; `next` is where to continue, or null.
+pub fn thread(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    browser_only(ctx)?;
+    let owner = ctx.p.user_id;
+    let id = str_param(body, "id")?;
+    visible(ctx, id)?;
+    let up = ctx.db.owner_thread_up(owner, id)?;
+    let Some(real_top) = up.last() else { return Err(not_found(format!("no message '{id}' visible to your agents"))) };
+    let hidden_parent = real_top.2.is_some();
+    let (top_at, start) =
+        if up.len() > THREAD_PATH { (THREAD_PATH - 1, Some(real_top.1.clone())) } else { (up.len() - 1, None) };
+    let top = up[top_at].1.clone();
+    let (mut seqs, next) = match opt_i64(body, "after")? {
+        None => {
+            // the path always, then the subtree's first other messages by seq
+            let path: Vec<i64> = up[..=top_at].iter().map(|p| p.0).collect();
+            let room = THREAD_PAGE - path.len();
+            let (mut picked, mut more) = (Vec::new(), false);
+            for s in ctx.db.owner_thread_down(owner, &top, 0, THREAD_PAGE as i64 + 1)? {
+                if path.contains(&s) {
+                    continue;
+                }
+                if picked.len() == room {
+                    more = true;
+                    break;
+                }
+                picked.push(s);
+            }
+            let next = if more { picked.last().copied() } else { None };
+            (path.into_iter().chain(picked).collect::<Vec<_>>(), next)
+        }
+        Some(after) => {
+            let mut sub = ctx.db.owner_thread_down(owner, &top, after, THREAD_PAGE as i64 + 1)?;
+            let more = sub.len() > THREAD_PAGE;
+            sub.truncate(THREAD_PAGE);
+            let next = if more { sub.last().copied() } else { None };
+            (sub, next)
+        }
+    };
+    seqs.sort_unstable();
+    let mut rows = ctx.db.messages_at(&seqs)?;
+    rows.reverse();
+    let mut out = Vec::with_capacity(rows.len());
+    for m in &rows {
+        let mut v = messages::view(ctx.db, m)?;
+        v["delivery"] = delivery(ctx, m)?;
+        out.push(v);
+    }
+    Ok(json!({"top": top, "start": start, "hidden_parent": hidden_parent, "messages": out, "next": next}))
 }
 
 /// `owner.message`: one message an agent of the owner can read.

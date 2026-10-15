@@ -105,6 +105,8 @@ on_both!(
     the_feed_pages_between_exclusive_bounds,
     the_feed_lists_delivery_problems,
     a_retry_to_an_unbound_recipient_is_a_problem,
+    a_thread_never_steps_through_a_message_the_owner_cannot_read,
+    a_long_thread_starts_near_the_message_and_continues_without_holes,
     delivery_state_shows_the_retry_clock_the_hold_and_the_last_error,
     a_read_message_never_shows_the_error_of_a_stale_attempt,
     history_pages_back_in_chronological_order,
@@ -450,8 +452,7 @@ async fn the_owner_sees_what_their_agents_can_read_and_nothing_else(d: Arc<Dispa
 
 /// `owner.search` from the browser: hits from the owner's agents' DMs and channels, never a DM
 /// between two other owners' agents or a channel none of them is in. The other names the
-/// allow-list adds pass its gate (owner.thread: the dispatcher answers until it exists); an op
-/// left off the list is refused before the dispatcher.
+/// allow-list adds pass its gate; an op left off the list is refused before the dispatcher.
 async fn the_browser_searches_what_its_agents_can_read(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let (b, csrf) = ui.browser().await;
@@ -467,8 +468,7 @@ async fn the_browser_searches_what_its_agents_can_read(d: Arc<Dispatcher>) {
     }
     ui.ok(&b, &csrf, "owner.feed", json!({})).await;
     let (status, v) = ui.rpc(&b, &csrf, "owner.thread", json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{v}");
-    assert!(v["error"]["message"].as_str().unwrap().contains("unknown op"), "owner.thread reaches the dispatcher: {v}");
+    assert_eq!((status, v["error"]["code"].as_str()), (StatusCode::OK, Some("bad_request")), "owner.thread answers: {v}");
     for op in ["message.feed", "search", "owner.attachment"] {
         let (status, v) = ui.rpc(&b, &csrf, op, json!({"pattern": "."})).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{op}: {v}");
@@ -782,6 +782,111 @@ async fn a_retry_to_an_unbound_recipient_is_a_problem(d: Arc<Dispatcher>) {
     let f = ui.ok(&b, &csrf, "owner.feed", json!({"problems": true})).await;
     let row = f["messages"].as_array().unwrap().iter().find(|m| m["message_id"] == sent["message_id"]);
     assert!(row.is_some_and(|m| m["delivery"]["recipients"][0]["state"] == shown), "the feed agrees with the delivery view: {f}");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The ids of an `owner.thread` answer, in order.
+fn thread_ids(t: &Value) -> Vec<String> {
+    t["messages"].as_array().unwrap().iter().map(|m| m["message_id"].as_str().unwrap().to_string()).collect()
+}
+
+/// A ← B ← C ← D with B a DM between david's agents: the thread of C is C and D under a hidden
+/// parent, the thread of A is A alone (B cuts it), and B itself is not found.
+async fn a_thread_never_steps_through_a_message_the_owner_cannot_read(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let send = |p: &Principal, actor: &str, to: &str, text: &str, reply: Option<&str>| {
+        let body = json!({"to": {"agent": to}, "text": text, "reply_to": reply});
+        let (p, actor) = (p.clone(), actor.to_string());
+        let u = &ui;
+        async move { u.op(&p, &actor, "message.send", body).await["message_id"].as_str().unwrap().to_string() }
+    };
+    let a = send(&c.k, &c.worker, "david/scout", "A", None).await;
+    let bb = send(&c.dv, &c.scout, "ranger", "B", Some(&a)).await;
+    let cc = send(&c.dv, &c.scout, &format!("{USER}/worker"), "C", Some(&bb)).await;
+    let dd = send(&c.k, &c.worker, "david/scout", "D", Some(&cc)).await;
+    let thread = |id: &str| ui.ok(&b, &csrf, "owner.thread", json!({"id": id}));
+    for id in [&cc, &dd] {
+        let t = thread(id).await;
+        assert_eq!((thread_ids(&t), t["top"].as_str(), t["hidden_parent"].as_bool()), (vec![cc.clone(), dd.clone()], Some(cc.as_str()), Some(true)), "{t}");
+        assert!(t["start"].is_null() && t["next"].is_null(), "{t}");
+    }
+    let t = thread(&a).await;
+    assert_eq!((thread_ids(&t), t["hidden_parent"].as_bool()), (vec![a.clone()], Some(false)), "B cuts the chain: {t}");
+    assert!(!t.to_string().contains("\"B\""), "{t}");
+    let (_, v) = ui.rpc(&b, &csrf, "owner.thread", json!({"id": bb})).await;
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A chain of 250 opened at its 230th message starts at its 131st with `start` naming the first;
+/// a path of 150 with 300 replies on a side branch, opened deep in the path, has the message in
+/// the first answer, and after continuing and merging by id every subtree message is there once
+/// with its parent present or being the top.
+async fn a_long_thread_starts_near_the_message_and_continues_without_holes(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let mut n = 0;
+    let mut send = |reply: Option<String>| {
+        n += 1;
+        let (actor, to) = if n % 2 == 0 { (c.worker.clone(), "helper") } else { (c.helper.clone(), "worker") };
+        let body = json!({"to": {"agent": to}, "text": format!("t{n}"), "reply_to": reply});
+        let (k, u) = (c.k.clone(), &ui);
+        async move { u.op(&k, &actor, "message.send", body).await["message_id"].as_str().unwrap().to_string() }
+    };
+    let thread = |body: Value| ui.ok(&b, &csrf, "owner.thread", body);
+
+    let mut chain: Vec<String> = Vec::new();
+    for _ in 0..250 {
+        let id = send(chain.last().cloned()).await;
+        chain.push(id);
+    }
+    let t = thread(json!({"id": chain[229]})).await;
+    assert_eq!((t["top"].as_str(), t["start"].as_str()), (Some(chain[130].as_str()), Some(chain[0].as_str())), "{}", t["top"]);
+    assert_eq!(thread_ids(&t), chain[130..].to_vec());
+    assert!(t["next"].is_null() && t["hidden_parent"] == false);
+
+    // P1..P60, then S1..S300 replying down from P60, then P61..P150
+    let mut path: Vec<String> = Vec::new();
+    for _ in 0..60 {
+        let id = send(path.last().cloned()).await;
+        path.push(id);
+    }
+    let mut side = vec![path[59].clone()];
+    for _ in 0..300 {
+        let id = send(side.last().cloned()).await;
+        side.push(id);
+    }
+    for _ in 60..150 {
+        let id = send(path.last().cloned()).await;
+        path.push(id);
+    }
+    let first = thread(json!({"id": path[139]})).await;
+    let top = first["top"].as_str().unwrap().to_string();
+    assert_eq!((top.as_str(), first["start"].as_str()), (path[40].as_str(), Some(path[0].as_str())));
+    let ids = thread_ids(&first);
+    assert_eq!(ids.len(), 200);
+    assert!(path[40..140].iter().all(|p| ids.contains(p)), "the whole path from the top to the message");
+    let mut seen: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut page = first;
+    loop {
+        for m in page["messages"].as_array().unwrap() {
+            seen.insert(m["message_id"].as_str().unwrap().to_string(), m.clone());
+        }
+        match page["next"].as_i64() {
+            Some(next) => page = thread(json!({"id": path[139], "after": next})).await,
+            None => break,
+        }
+    }
+    let subtree: std::collections::HashSet<&String> = path[40..].iter().chain(side[1..].iter()).collect();
+    assert_eq!(seen.len(), subtree.len(), "every subtree message once");
+    assert!(seen.keys().all(|id| subtree.contains(id)));
+    for (id, m) in &seen {
+        let parent = m["reply_to"].as_str().unwrap_or_default();
+        assert!(*id == top || seen.contains_key(parent), "{id}'s parent {parent} is missing");
+    }
     ui.server.shutdown().await.unwrap();
 }
 

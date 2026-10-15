@@ -826,14 +826,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             loop {
                 let r = sx.call_on("message.feed", Some(&board), body)?;
                 let rows = r["messages"].as_array().cloned().unwrap_or_default();
-                // the width is read each pass, so a resized terminal is followed; a pipe gets the
-                // whole line with the id, for tools
-                let width = if wide { None } else { terminal_width() };
+                // a pipe gets the whole line with the id, for tools; a terminal the row, its width
+                // read each pass so a resize is followed (120 when the terminal does not say)
+                let row = !wide && std::io::IsTerminal::is_terminal(&std::io::stdout());
+                let width = terminal_width().unwrap_or(120);
                 for m in &rows {
-                    let Some(width) = width else {
+                    if !row {
                         println!("{}", surface::watch_line(m, &board));
                         continue;
-                    };
+                    }
                     if surface::watch_day(m) != day {
                         day = surface::watch_day(m);
                         println!("-- {day} --");

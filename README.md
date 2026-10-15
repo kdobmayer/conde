@@ -651,13 +651,12 @@ scanned; it stopped there)` when it found nothing, and ends with the
 `(more: ...)` line that continues it: no matches in a partial call is not a
 final answer.
 `conde watch` follows messages as they arrive, after the last 20, until
-Ctrl-C: one row per message fitted to the terminal's width (120 when the
-output is not a terminal; a row needs 74 columns, 80 on a shared board): UTC time, sender -> recipient or channel, a short
-state (`read`, `read 3/4` for a channel, `delivered`, `held`, `retrying`...),
-the first line of the text cut with `…`, and the message id for `conde read
-<id>`; a `-- 2026-10-14 --` line starts each day. `--wide` prints the whole
-first line instead. A row printed while watching shows no state: it arrived just now and its
-delivery is not settled yet (the first rows and `--wide` show it; `conde sent` has the latest). On the local board the human sees every message and a session what it
+Ctrl-C. On a terminal it prints one row per message, fitted to the terminal's width (a row
+needs 35 columns): the UTC time, sender -> recipient or channel, and the first line of the text
+cut with `…`. A `-- 2026-10-14 --` line starts each day. A row has no state (a printed line never
+updates; `conde sent` and `conde read` have it) and no id. `--wide`, and output into a pipe,
+print the whole line instead: the date and time, sender -> recipient, the whole first line, and the
+message id, with its board on a shared board, for `conde read <id>`. On the local board the human sees every message and a session what it
 can search. With `--board dakai` the human sees what their agents can read there (every DM
 and channel of every agent they own, no published name of their own needed), and a session
 what it can search. `--agent <name>` keeps what that agent sent or received (for the human on

@@ -521,57 +521,33 @@ pub fn search(r: &Value, surface: Surface) -> Out {
     out
 }
 
-/// `watch` columns from 120 characters: sender and recipient, and the state word, are cut to
-/// these widths; narrower rows take at most `WATCH_NAME_NARROW` and `WATCH_STATE_NARROW`, the
-/// names shrinking further (to 6) so the text keeps `WATCH_TEXT` characters.
+/// `watch` columns from 120 characters: sender and recipient are cut to `WATCH_NAME`; narrower
+/// rows take at most `WATCH_NAME_NARROW`, the names shrinking further (to 6) so the text keeps
+/// `WATCH_TEXT` characters.
 const WATCH_NAME: usize = 20;
-const WATCH_STATE: usize = 10;
 const WATCH_NAME_NARROW: usize = 12;
-const WATCH_STATE_NARROW: usize = 9;
 const WATCH_TEXT: usize = 10;
 
-/// `watch`: one message of `message.feed` on one line of at most `width` characters: the time
-/// (UTC, HH:MM), sender -> recipient or channel, a short state, the first line of the text cut to
-/// the room left with an ellipsis, and the message id (with its board on a shared board), so
-/// `conde read <id>` shows the whole text. Only fixed columns wider than `width` overflow it.
-pub fn watch_row(m: &Value, board: &str, width: usize, with_state: bool) -> String {
+/// `watch` on a terminal: one message of `message.feed` on one line of at most `width`
+/// characters: the time (UTC, HH:MM), sender -> recipient or channel, and the first line of the
+/// text cut to the rest of the width with an ellipsis. No state (a printed line never updates;
+/// `conde sent` and `conde read` have it) and no id (`watch_line` has it). Only fixed columns
+/// wider than `width` overflow it.
+pub fn watch_row(m: &Value, width: usize) -> String {
     let time: String = s(&m["date"]).chars().skip(11).take(5).collect();
-    let id = qualify(board, s(&m["message_id"]));
-    let (name_cap, state) = if width >= 120 { (WATCH_NAME, WATCH_STATE) } else { (WATCH_NAME_NARROW, WATCH_STATE_NARROW) };
-    // time, " -> ", the gaps, the state and the id; the names share what the text leaves
-    let fixed = 5 + 2 + 4 + 2 + state + 2 + 2 + id.chars().count();
+    let name_cap = if width >= 120 { WATCH_NAME } else { WATCH_NAME_NARROW };
+    // time, " -> " and the gaps; the names share what the text leaves
+    let fixed = 5 + 2 + 4 + 2;
     let name = (width.saturating_sub(fixed + WATCH_TEXT) / 2).clamp(6, name_cap);
-    let head = format!(
-        "{time}  {} -> {}  {}  ",
-        fit_name(s(&m["from"]), name),
-        fit_name(s(&m["to"]), name),
-        fit(&if with_state { watch_state(m) } else { String::new() }, state)
-    );
-    let room = width.saturating_sub(head.chars().count() + 2 + id.chars().count()).max(WATCH_TEXT);
+    let head = format!("{time}  {} -> {}  ", fit_name(s(&m["from"]), name), fit_name(s(&m["to"]), name));
+    let room = width.saturating_sub(head.chars().count()).max(WATCH_TEXT);
     // a tab would jump the columns
-    format!("{head}{}  {id}", fit(&s(&m["line"]).replace('\t', " "), room))
+    format!("{head}{}", cut(&s(&m["line"]).replace('\t', " "), room))
 }
 
 /// The day of a `watch` row (UTC), for the line printed when it changes.
 pub fn watch_day(m: &Value) -> String {
     s(&m["date"]).chars().take(10).collect()
-}
-
-/// The state word of a `watch` row: a read DM `read`, a channel post `read n/m`, else the push
-/// state with its retry details left to `conde sent`.
-fn watch_state(m: &Value) -> String {
-    let status = s(&m["status"]);
-    if let Some(counts) = status.strip_prefix("read by ") {
-        return format!("read {counts}");
-    }
-    if status.starts_with("read ") {
-        return "read".into();
-    }
-    match m["delivery"].as_str() {
-        Some(d) if d.starts_with("retrying") => "retrying".into(),
-        Some(d) => d.into(),
-        None => status.into(),
-    }
 }
 
 /// `owner/name` (or `#channel`) in exactly `width` characters, the owner cut before the name:
@@ -587,25 +563,25 @@ fn fit_name(text: &str, width: usize) -> String {
 
 /// `text` in exactly `width` characters: padded, or cut with an ellipsis.
 fn fit(text: &str, width: usize) -> String {
+    format!("{:<width$}", cut(text, width))
+}
+
+/// `text` in at most `width` characters, cut with an ellipsis.
+fn cut(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
-        format!("{text:<width$}")
+        text.to_string()
     } else {
         text.chars().take(width.saturating_sub(1)).chain(['…']).collect()
     }
 }
 
-/// `watch --wide`: one message of `message.feed` as one line: time (UTC, to the minute), sender
-/// -> recipient or channel, state (a DM: read, else its push state; a channel: read by n/m), the
-/// whole first line.
-pub fn watch_line(m: &Value) -> String {
+/// `watch --wide`, and `watch` into a pipe: one message of `message.feed` as one line, for tools:
+/// time (UTC, to the minute), sender -> recipient or channel, the whole first line, and the
+/// message id (with its board on a shared board) for `conde read <id>`.
+pub fn watch_line(m: &Value, board: &str) -> String {
     let date: String = s(&m["date"]).chars().take(16).collect();
-    let status = s(&m["status"]);
-    let state = match m["delivery"].as_str() {
-        _ if status.starts_with("read ") && !status.starts_with("read by") => "read",
-        Some(d) => d,
-        None => status,
-    };
-    format!("{date}  {} -> {}  {state}  {}", s(&m["from"]), s(&m["to"]), s(&m["line"]))
+    let id = qualify(board, s(&m["message_id"]));
+    format!("{date}  {} -> {}  {}  {id}", s(&m["from"]), s(&m["to"]), s(&m["line"]))
 }
 
 /// `sent`: one line per message with its board's receipt.
@@ -813,31 +789,39 @@ mod tests {
             json!({"date": "2026-10-14T13:05:41.123Z", "from": "konstantin/kosztya-devops-manager", "to": "kdobmayer/desk",
                    "message_id": "01M4X88ZE6EJS7A7HV3NHQSWNN", "line": line, "status": status, "delivery": delivery})
         };
-        let long = "S1 smoke on 8369aa7 is green on the NUC: install.sh identical, setup restarted the bridge itself";
-        let row = watch_row(&m(long, "unread", json!("retrying after 2026-10-14T13:06:00Z (recipient offline)")), "local", 120, true);
+        let long = "S1 smoke on 8369aa7 is green on the NUC: install.sh identical, setup restarted the bridge itself, \
+                    doctor and setup --check all clear";
+        let retrying = m(long, "unread", json!("retrying after 2026-10-14T13:06:00Z (recipient offline)"));
+        let row = watch_row(&retrying, 120);
         assert_eq!(
             row,
-            "13:05  kosztya-devops-mana… -> kdobmayer/desk        retrying    S1 smoke on 8369aa7 is gre…  01M4X88ZE6EJS7A7HV3NHQSWNN"
+            "13:05  kosztya-devops-mana… -> kdobmayer/desk        S1 smoke on 8369aa7 is green on the NUC: install.sh identical, set…"
         );
-        assert_eq!(row.chars().count(), 120);
+        assert_eq!(row.chars().count(), 120, "the text takes the rest of the width");
+        assert!(!row.contains("retrying") && !row.contains("01M4X88Z"), "no state, no id: {row}");
         // narrower terminals: exactly the width, the names shrinking first
-        let tabbed = m("first\tsecond and a long tail of words to cut", "unread", json!("delivered"));
-        let row = watch_row(&tabbed, "local", 100, true);
-        assert_eq!(row, "13:05  kosztya-dev… -> kdobma…/desk  delivered  first second and a long…  01M4X88ZE6EJS7A7HV3NHQSWNN");
+        let tabbed = m("first\tsecond and a long tail of words to cut, and then some more of them", "unread", json!("delivered"));
+        let row = watch_row(&tabbed, 100);
+        assert_eq!(row, "13:05  kosztya-dev… -> kdobma…/desk  first second and a long tail of words to cut, and then some mo…");
         assert_eq!(row.chars().count(), 100);
-        let row = watch_row(&tabbed, "local", 80, true);
-        assert_eq!(row, "13:05  kosztya-… -> kdo…/desk  delivered  first sec…  01M4X88ZE6EJS7A7HV3NHQSWNN");
+        let row = watch_row(&tabbed, 80);
+        assert_eq!(row, "13:05  kosztya-dev… -> kdobma…/desk  first second and a long tail of words to c…");
         assert_eq!(row.chars().count(), 80);
-        assert_eq!(watch_row(&tabbed, "dakai", 80, true).chars().count(), 80, "a board-qualified id still fits");
+        let row = watch_row(&tabbed, 40);
+        assert_eq!(row, "13:05  kosztya… -> kd…/desk  first seco…");
+        assert_eq!(row.chars().count(), 40);
         assert_eq!(fit_name("konstantin/conde.agent", 20), "konstan…/conde.agent");
         assert_eq!(fit_name("kdobmayer/desk", 20), "kdobmayer/desk      ");
         assert_eq!(fit_name("#a-very-long-channel-name", 20), "#a-very-long-channe…");
-        let row = watch_row(&m("ok", "read 2026-10-14T13:06:00Z", json!("delivered")), "dakai", 120, true);
-        assert!(row.contains("  read        ok") && row.ends_with("  dakai:01M4X88ZE6EJS7A7HV3NHQSWNN"), "{row}");
-        assert_eq!(row.chars().count(), 120, "a short text is padded so the ids line up");
-        let row = watch_row(&m("post", "read by 3/4", Value::Null), "local", 120, true);
-        assert!(row.contains("  read 3/4    post"), "{row}");
+        let row = watch_row(&m("ok", "read 2026-10-14T13:06:00Z", json!("delivered")), 120);
+        assert!(row.ends_with("  ok"), "a short text is not padded: {row}");
         assert_eq!(watch_day(&m("x", "unread", Value::Null)), "2026-10-14");
+        // the line for tools: the whole first line and the qualified id, still no state
+        assert_eq!(
+            watch_line(&retrying, "dakai"),
+            format!("2026-10-14T13:05  konstantin/kosztya-devops-manager -> kdobmayer/desk  {long}  dakai:01M4X88ZE6EJS7A7HV3NHQSWNN")
+        );
+        assert!(watch_line(&retrying, "local").ends_with(&format!("{long}  01M4X88ZE6EJS7A7HV3NHQSWNN")));
     }
 
     #[test]

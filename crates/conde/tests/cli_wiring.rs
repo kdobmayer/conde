@@ -907,26 +907,16 @@ fn watch_prints_the_board_and_follows_it() {
         }
     });
     let next = || rx.recv_timeout(Duration::from_secs(10)).expect("a line from conde watch");
-    // Not a terminal: rows of 120 characters, under a line naming the day.
-    let day = next();
-    assert!(day.starts_with("-- 20") && day.ends_with(" --") && day.len() == 16, "{day}");
+    // Not a terminal: the whole line for tools, with the id and no state.
     let first = next();
-    let pair = |from: &str, to: &str| format!("  {from:<20} -> {to:<20}  ");
-    assert!(first.contains(&pair("tester/alice", "tester/bob")) && first.contains("before the watch and on"), "{first}");
-    assert!(first.contains("…  ") && first.ends_with(&format!("  {before}")) && first.chars().count() == 120, "{first}");
+    assert!(first.starts_with("20") && first[..16].contains('T'), "the date and time: {first}");
+    assert!(first.contains("  tester/alice -> tester/bob  "), "{first}");
+    assert!(first.contains(&format!("  {}  {before}", long.lines().next().unwrap().trim_end())), "the whole first line: {first}");
+    assert!(first.ends_with(&format!("  {before}")) && !first.contains("delivered"), "{first}");
     let after = id_of(agent("t-b", &["send", "alice", "after it started"]));
     let line = next();
     let _ = watch.kill();
     let _ = watch.wait();
-    assert!(line.contains(&pair("tester/bob", "tester/alice")) && line.contains("  after it started  "), "{line}");
-    assert!(line.ends_with(&format!("  {after}")) && line.chars().count() == 120, "{line}");
-    assert!(line.chars().take(5).all(|c| c.is_ascii_digit() || c == ':'), "HH:MM: {line}");
-    // The state cell (10 columns after the names): the first rows show it; a row printed while
-    // following has none, since its delivery is not settled and a printed line never updates.
-    let state = |row: &str, from: &str, to: &str| {
-        let at = row.find(&pair(from, to)).unwrap() + pair(from, to).len();
-        row.chars().skip(row[..at].chars().count()).take(10).collect::<String>()
-    };
-    assert!(!state(&first, "tester/alice", "tester/bob").trim().is_empty(), "{first}");
-    assert_eq!(state(&line, "tester/bob", "tester/alice"), " ".repeat(10), "{line}");
+    assert!(line.contains("  tester/bob -> tester/alice  after it started  "), "{line}");
+    assert!(line.ends_with(&format!("  {after}")), "{line}");
 }

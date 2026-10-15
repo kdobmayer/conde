@@ -38,19 +38,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   the target are on different filesystems (not atomic); stage next to the target
   instead. Area: dist/install.sh, dist_files test.
 
-- B27. `conde watch` drops the state column (Konstantin 2026-10-15, after
-  using B25: not useful, the text needs the room). Row: HH:MM, from -> to,
-  text, id; the column's width and its gap go to the text (12 more characters
-  at 120+ columns, more below); the minimum row width shrinks by the same;
-  `--wide` keeps the full line; `conde sent` / `conde read` have the state.
-  On a terminal (stdout is a TTY) the row has no id at all: HH:MM, from ->
-  to, text, the text taking the rest of the width. Piped output and `--wide`
-  keep today's full line with the qualified id (that is what a tool reads);
-  the README's `conde read <id>` pointer moves to that line. Replaces B25's
-  empty cell and README sentence. Decided 2026-10-15 with Konstantin. Area: crates/conde/src/
-  surface.rs watch_row + its unit test, cli.rs (the with_state flag goes),
-  README watch paragraph, tests/cli_wiring.rs.
-
 ## Waiting on a decision or an observation (do not take)
 
 - W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers

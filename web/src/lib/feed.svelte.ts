@@ -25,7 +25,12 @@ export function parseFilters(path: string): Filters {
 	const f: Filters = {};
 	for (const part of path.split(';')) {
 		const [key, raw = ''] = part.split('=');
-		const value = decodeURIComponent(raw);
+		let value: string;
+		try {
+			value = decodeURIComponent(raw);
+		} catch {
+			continue;
+		}
 		if (key === 'agent' && value) f.agent = value;
 		else if (key === 'dir' && (value === 'in' || value === 'out' || value === 'own')) f.dir = value;
 		else if (key === 'place' && value) f.place = value;
@@ -133,11 +138,12 @@ export class Feed {
 		return this.window.older();
 	}
 
-	/** The owner is at the top: everything shown counts as seen, here and on this device. */
+	/** The owner is at the top: everything shown counts as seen, here and on this device. Neither
+	 * moves backward (a narrower filter or a row that stopped matching shows a lower watermark). */
 	atTop(): void {
-		this.seenTop = this.view.watermark;
+		this.seenTop = Math.max(this.seenTop, this.view.watermark);
 		this.fresh = 0;
-		if (this.view.watermark > 0) writeSeen(this.view.watermark);
+		if (this.view.watermark > readSeen()) writeSeen(this.view.watermark);
 	}
 
 	/** Search mode: `owner.search` replaces the list until it is cleared; filters do not apply. */

@@ -55,7 +55,7 @@ export interface WindowView<T> {
 
 /** An empty window that will not grow downward: "Nothing yet" / "No delivery problems". */
 export function isNone<T>(v: WindowView<T>): boolean {
-	return v.loaded && v.rows.length === 0 && v.exhausted;
+	return v.loaded && v.rows.length === 0 && v.exhausted && !v.error;
 }
 
 const newest = <T extends Row>(rows: T[]) => rows[0]?.seq;
@@ -172,9 +172,12 @@ export class FeedWindow<T extends Row> {
 	private start(): void {
 		this.running = true;
 		this.dirty = false;
-		this.lastStart = this.clock.now();
 		const generation = this.generation;
-		void this.enqueue(() => this.pass(generation)).finally(() => {
+		// stamped when the pass begins, not when it is queued behind a fresh window or an older page
+		void this.enqueue(() => {
+			this.lastStart = this.clock.now();
+			return this.pass(generation);
+		}).finally(() => {
 			this.running = false;
 			if (this.dirty) {
 				this.dirty = false;

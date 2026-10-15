@@ -128,40 +128,48 @@ function rpc(req, res) {
 	let raw = '';
 	req.on('data', (c) => (raw += c));
 	req.on('end', () => {
-		const r = JSON.parse(raw);
-		const b = r.body ?? {};
-		let result;
-		switch (r.op) {
-			case 'owner.list':
-				result = fx.rail();
-				break;
-			case 'owner.history':
-				result = history(b);
-				break;
-			case 'owner.message': {
-				const m = fx.messages.find((x) => x.message_id === b.id);
-				if (!m) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no such message' } });
-				result = { message: m };
-				break;
-			}
-			case 'fleet.list':
-				result = fx.fleet;
-				break;
-			case 'owner.feed':
-				result = feed(b);
-				break;
-			case 'owner.thread':
-				result = thread(b);
-				if (!result) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no such message visible to your agents' } });
-				break;
-			case 'owner.search':
-				result = search(b);
-				break;
-			default:
-				return json(res, 200, { ok: false, error: { code: 'forbidden', message: `op ${r.op} not mocked` } });
+		try {
+			answer(raw, res);
+		} catch (e) {
+			json(res, 200, { ok: false, error: { code: 'bad_request', message: e.message } });
 		}
-		json(res, 200, { v: 1, type: 'response', request_id: r.request_id, ok: true, result });
 	});
+}
+
+function answer(raw, res) {
+	const r = JSON.parse(raw);
+	const b = r.body ?? {};
+	let result;
+	switch (r.op) {
+		case 'owner.list':
+			result = fx.rail();
+			break;
+		case 'owner.history':
+			result = history(b);
+			break;
+		case 'owner.message': {
+			const m = fx.messages.find((x) => x.message_id === b.id);
+			if (!m) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no such message' } });
+			result = { message: m };
+			break;
+		}
+		case 'fleet.list':
+			result = fx.fleet;
+			break;
+		case 'owner.feed':
+			result = feed(b);
+			break;
+		case 'owner.thread':
+			result = thread(b);
+			if (!result) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no such message visible to your agents' } });
+			break;
+		case 'owner.search':
+			result = search(b);
+			break;
+		default:
+			return json(res, 200, { ok: false, error: { code: 'forbidden', message: `op ${r.op} not mocked` } });
+	}
+	json(res, 200, { v: 1, type: 'response', request_id: r.request_id, ok: true, result });
 }
 
 // The keys page: the server's own template and stylesheet, filled with fixture rows.

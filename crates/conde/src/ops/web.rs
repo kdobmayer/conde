@@ -279,7 +279,7 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             }
         }
     } else {
-        rows = ctx.db.owner_feed(owner, &ranges, after, before, limit + 1)?.into_iter().map(|m| (m, None)).collect();
+        rows = ctx.db.owner_feed(owner, &ranges, after, before, limit + 1, false)?.into_iter().map(|m| (m, None)).collect();
     }
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);

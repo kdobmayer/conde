@@ -2022,9 +2022,9 @@ impl Tx for PgTx {
             .collect())
     }
 
-    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64)
+    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64, oldest_first: bool)
     -> StoreResult<Vec<Message>> {
-        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, |n| format!("${n}")) else {
+        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, oldest_first, |n| format!("${n}")) else {
             return Ok(Vec::new());
         };
         let args: Vec<&(dyn ToSql + Sync)> = args
@@ -2034,7 +2034,8 @@ impl Tx for PgTx {
                 FeedArg::Text(t) => t as &(dyn ToSql + Sync),
             })
             .collect();
-        let sql = format!("{MSG_SELECT} WHERE m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC");
+        let order = if oldest_first { "ASC" } else { "DESC" };
+        let sql = format!("{MSG_SELECT} WHERE m.commit_seq IN ({seqs}) ORDER BY m.commit_seq {order}");
         Ok(self.query_planned(&sql, &args)?.iter().map(msg_row).collect())
     }
 

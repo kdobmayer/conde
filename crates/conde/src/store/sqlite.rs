@@ -1505,16 +1505,17 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64)
+    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64, oldest_first: bool)
     -> StoreResult<Vec<Message>> {
-        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, |n| format!("?{n}")) else {
+        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, oldest_first, |n| format!("?{n}")) else {
             return Ok(Vec::new());
         };
         let args = args.into_iter().map(|a| match a {
             FeedArg::Int(n) => rusqlite::types::Value::Integer(n),
             FeedArg::Text(t) => rusqlite::types::Value::Text(t),
         });
-        self.msgs(&format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq DESC"), params_from_iter(args))
+        let order = if oldest_first { "ASC" } else { "DESC" };
+        self.msgs(&format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq {order}"), params_from_iter(args))
     }
 
     fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>> {

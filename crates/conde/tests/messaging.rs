@@ -436,3 +436,42 @@ fn a_human_watches_a_shared_board_as_the_owner_on_the_test_store() {
     // Postgres when CONDE_TEST_PG is set, else SQLite again.
     a_human_watches_a_shared_board_as_the_owner(Board::new());
 }
+
+/// B24: a human catching up on a shared board over more than two pages gets them oldest first,
+/// one page a call, contiguous: nothing skipped, nothing twice.
+fn a_human_catches_up_on_a_shared_board_page_by_page(b: Board) {
+    use conde::protocol::PAGE;
+    b.d.share("shared");
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    let start = b.ok(HUMAN, "message.feed", json!({"last": 1}))["cursor"].clone();
+    let total = 2 * PAGE + 50;
+    for n in 0..total {
+        b.send(ALICE, "bob", &format!("m{n}"));
+    }
+    let (mut cursor, mut got, mut pages) = (start, Vec::new(), Vec::new());
+    loop {
+        let r = b.ok(HUMAN, "message.feed", json!({"after": cursor}));
+        let lines: Vec<String> = items(&r, "messages").iter().map(|m| m["line"].as_str().unwrap().to_string()).collect();
+        if lines.is_empty() {
+            break;
+        }
+        pages.push(lines.len());
+        got.extend(lines);
+        cursor = r["cursor"].clone();
+    }
+    let want: Vec<String> = (0..total).map(|n| format!("m{n}")).collect();
+    assert_eq!(pages, vec![PAGE, PAGE, 50], "one page a call");
+    assert_eq!(got, want, "oldest first, contiguous");
+}
+
+#[test]
+fn a_human_catches_up_on_a_shared_board_page_by_page_on_sqlite() {
+    a_human_catches_up_on_a_shared_board_page_by_page(Board::sqlite());
+}
+
+#[test]
+fn a_human_catches_up_on_a_shared_board_page_by_page_on_the_test_store() {
+    // Postgres when CONDE_TEST_PG is set, else SQLite again.
+    a_human_catches_up_on_a_shared_board_page_by_page(Board::new());
+}

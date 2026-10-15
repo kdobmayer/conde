@@ -909,9 +909,14 @@ async fn a_retired_name_leaves_the_lists_and_keeps_its_history(d: Arc<Dispatcher
         }
     };
     let code = |r: conde::protocol::Response| r.error.map(|e| e.code);
-    use conde::protocol::ErrorCode::Forbidden;
+    use conde::protocol::ErrorCode::{Forbidden, NotFound};
     assert_eq!(code(call(human, "agent.retire", json!({"name": "helper"})).await), Some(Forbidden), "bound");
     assert_eq!(code(call(human, "agent.retire", json!({"name": "david/scout"})).await), Some(Forbidden), "not yours");
+    assert_eq!(code(call(human, "agent.retire", json!({"name": "nobody"})).await), Some(NotFound), "unknown");
+    // a message only helper, of this owner's agents, can read: no other live agent keeps it visible
+    let note = ui
+        .op(&c.k, &c.helper, "message.send", json!({"to": {"agent": "david/scout"}, "text": "helper only note"}))
+        .await;
     ui.op(&c.k, human, "agent.unregister", json!({"name": "helper"})).await;
     assert_eq!(code(call(&c.worker, "agent.retire", json!({"name": "helper"})).await), Some(Forbidden), "an agent");
     ui.op(&c.k, human, "agent.retire", json!({"name": "helper"})).await;
@@ -934,8 +939,12 @@ async fn a_retired_name_leaves_the_lists_and_keeps_its_history(d: Arc<Dispatcher
     assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
     let t = ui.ok(&b, &csrf, "owner.thread", json!({"id": handoff.unwrap()["message_id"]})).await;
     assert_eq!(texts(&t), vec!["handoff to worker"]);
+    let found = ui.ok(&b, &csrf, "owner.search", json!({"pattern": "helper only note"})).await;
+    assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
+    let t = ui.ok(&b, &csrf, "owner.thread", json!({"id": note["message_id"]})).await;
+    assert_eq!(texts(&t), vec!["helper only note"]);
 
-    // registering it again brings it back
+    // registering it again locally brings it back
     ui.op(&c.k, &c.helper, "agent.register", json!({"name": "helper"})).await;
     let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
     assert!(names(&rail, "agents").contains(&helper), "{rail}");

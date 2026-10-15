@@ -504,7 +504,7 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 
 /// [`feed`] for a human on a shared board: the owner's index ranges (`owner.feed`'s), `agent`
 /// one of the owner's agents, `channel` one an own agent is in. After `after`, the oldest page
-/// first; the page is cut from the newest down to the cursor.
+/// above it, read oldest first (one page per call however far behind the cursor is).
 fn owner_feed(ctx: &Ctx, body: &Value) -> OpResult<(Vec<MsgRow>, i64)> {
     let agent = match opt_str(body, "agent")? {
         Some(_) => Some(web::own_agent(ctx, body)?),
@@ -515,19 +515,7 @@ fn owner_feed(ctx: &Ctx, body: &Value) -> OpResult<(Vec<MsgRow>, i64)> {
     match opt_i64(body, "after")? {
         Some(after) if after >= top => Ok((Vec::new(), after)),
         Some(after) => {
-            let (mut rows, mut before) = (Vec::new(), top + 1);
-            loop {
-                let page = ctx.db.owner_feed(owner, &ranges, after, before, PAGE as i64)?;
-                let full = page.len() == PAGE;
-                if let Some(last) = page.last() {
-                    before = last.seq;
-                }
-                rows.extend(page);
-                if !full {
-                    break;
-                }
-            }
-            rows.reverse();
+            let mut rows = ctx.db.owner_feed(owner, &ranges, after, top + 1, PAGE as i64 + 1, true)?;
             if rows.len() > PAGE {
                 rows.truncate(PAGE);
                 let last = rows[PAGE - 1].seq;
@@ -538,7 +526,7 @@ fn owner_feed(ctx: &Ctx, body: &Value) -> OpResult<(Vec<MsgRow>, i64)> {
         }
         None => {
             let last = opt_i64(body, "last")?.unwrap_or(PAGE as i64).clamp(0, PAGE as i64);
-            let mut rows = ctx.db.owner_feed(owner, &ranges, 0, top + 1, last)?;
+            let mut rows = ctx.db.owner_feed(owner, &ranges, 0, top + 1, last, false)?;
             rows.reverse();
             Ok((rows, top))
         }

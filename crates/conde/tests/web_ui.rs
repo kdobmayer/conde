@@ -104,6 +104,7 @@ on_both!(
     the_feed_is_what_the_owners_agents_can_read,
     the_feed_pages_between_exclusive_bounds,
     the_feed_lists_delivery_problems,
+    a_retry_to_an_unbound_recipient_is_a_problem,
     delivery_state_shows_the_retry_clock_the_hold_and_the_last_error,
     a_read_message_never_shows_the_error_of_a_stale_attempt,
     history_pages_back_in_chronological_order,
@@ -706,6 +707,11 @@ async fn the_feed_lists_delivery_problems(d: Arc<Dispatcher>) {
     ui.op(&c.dv, &c.scout, "message.read", json!({"id": read})).await;
     let theirs = send(&c.dv, &c.scout, json!({"channel": "#team"}), "@ranger see this").await;
     set(&theirs, "david/ranger", "denied").await;
+    // a hold still on the notification, beside the recipient's read marker: read wins
+    let marked = send(&c.k, &c.worker, scout.clone(), "held beside a read marker").await;
+    set(&marked, "david/scout", "held").await;
+    let (d, m, r) = (u.d.clone(), marked.clone(), agent_id["david/scout"].clone());
+    blocking(move || d.with_tx(|t| Ok(t.mark_dm_read(&m, &r, "2026-10-14T12:00:00.000Z")?)).unwrap()).await;
 
     let all = feed(json!({"problems": true})).await;
     let states: Vec<(String, String)> = all["messages"]
@@ -753,6 +759,29 @@ async fn the_feed_lists_delivery_problems(d: Arc<Dispatcher>) {
     ui.op(&p, "codex:thread-probe", "message.send", json!({"to": {"agent": format!("{USER}/worker")}, "text": "hello"})).await;
     let none = ui.ok(&b2, &csrf2, "owner.feed", json!({"problems": true})).await;
     assert_eq!(none, json!({"messages": [], "more": false}));
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A retry pending to a recipient that has since been unregistered (no address any more) is a
+/// problem in the feed, as the delivery view shows it.
+async fn a_retry_to_an_unbound_recipient_is_a_problem(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    ui.op(&c.dv, "codex:thread-lost", "agent.register", json!({"name": "lost"})).await;
+    let sent = ui.op(&c.k, &c.worker, "message.send", json!({"to": {"agent": "david/lost"}, "text": "to an agent that leaves"})).await;
+    let bridge = ui.d.bridge_principal(&c.dv);
+    let claim = ui.op(&bridge, "", "bridge.claim", json!({})).await;
+    let job = claim["jobs"].as_array().unwrap().iter().find(|j| j["message_id"] == sent["message_id"]).unwrap().clone();
+    ui.op(&bridge, "", "bridge.report", json!({"attempt_id": job["attempt_id"], "outcome": "expired", "reason": "no answer"})).await;
+    ui.op(&c.dv, "codex:thread-lost", "agent.unregister", json!({"name": "lost"})).await;
+
+    let h = ui.ok(&b, &csrf, "owner.history", json!({"agent": "worker", "with": "david/lost"})).await;
+    let shown = h["messages"].as_array().unwrap().last().unwrap()["delivery"]["recipients"][0]["state"].clone();
+    assert_eq!(shown, "retrying", "{h}");
+    let f = ui.ok(&b, &csrf, "owner.feed", json!({"problems": true})).await;
+    let row = f["messages"].as_array().unwrap().iter().find(|m| m["message_id"] == sent["message_id"]);
+    assert!(row.is_some_and(|m| m["delivery"]["recipients"][0]["state"] == shown), "the feed agrees with the delivery view: {f}");
     ui.server.shutdown().await.unwrap();
 }
 

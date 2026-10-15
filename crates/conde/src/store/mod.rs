@@ -230,7 +230,7 @@ pub(crate) fn problem_seqs_sql(ph: impl Fn(usize) -> String) -> String {
            AND NOT EXISTS (SELECT 1 FROM dm_read dr WHERE dr.message_id = n.message_id AND dr.agent_id = n.recipient_agent_id)
            AND NOT EXISTS (SELECT 1 FROM memberships rm WHERE rm.channel_id = p.channel_id
                            AND rm.agent_id = n.recipient_agent_id AND rm.read_seq >= p.commit_seq)
-           AND NOT (n.status = 'pending' AND na.address_kind = 'human')
+           AND NOT (n.status = 'pending' AND COALESCE(na.address_kind, '') = 'human')
            AND ((p.channel_id IS NULL AND (ps.owner_id = {owner} OR pr.owner_id = {owner}))
                 OR (p.channel_id IS NOT NULL AND EXISTS (SELECT 1 FROM memberships x JOIN agents o ON o.agent_id = x.agent_id
                                                          WHERE x.channel_id = p.channel_id AND o.owner_id = {owner})))
@@ -245,8 +245,8 @@ pub enum FeedArg {
     Text(String),
 }
 
-/// The seqs of the newest messages over `ranges` with `after < seq < before`, at most `limit`, in
-/// one statement for either store (`ph(n)` writes parameter n), with its parameters in order (the
+/// The seqs of the newest messages over `ranges` with `after < seq < before` (`oldest_first`: the
+/// oldest), at most `limit`, in one statement for either store (`ph(n)` writes parameter n), with its parameters in order (the
 /// owner id only when a range names a side, so every parameter is used). Each range walks its
 /// index newest first and stops at `limit`; UNION merges them without duplicates (a DM between
 /// two own agents sits in a sender and a recipient range). None when no range keeps anything.
@@ -256,8 +256,10 @@ pub(crate) fn feed_seqs_sql(
     after: i64,
     before: i64,
     limit: i64,
+    oldest_first: bool,
     ph: impl Fn(usize) -> String,
 ) -> Option<(String, Vec<FeedArg>)> {
+    let order = if oldest_first { "ASC" } else { "DESC" };
     let mut args = vec![FeedArg::Int(after), FeedArg::Int(before), FeedArg::Int(limit)];
     let (after, before, limit) = (ph(1), ph(2), ph(3));
     let mut arg = |a: FeedArg| {
@@ -310,7 +312,7 @@ pub(crate) fn feed_seqs_sql(
         let id = arg(FeedArg::Text(r.id.clone()));
         terms.push(format!(
             "SELECT commit_seq FROM (SELECT commit_seq FROM messages WHERE {column} = {id} AND commit_seq > {after}
-                 AND commit_seq < {before} AND ({keep}) ORDER BY commit_seq DESC LIMIT {limit}) AS r{n}",
+                 AND commit_seq < {before} AND ({keep}) ORDER BY commit_seq {order} LIMIT {limit}) AS r{n}",
             keep = keep.join(" OR "),
             n = terms.len()
         ));
@@ -324,7 +326,7 @@ pub(crate) fn feed_seqs_sql(
         .enumerate()
         .map(|(n, g)| format!("SELECT commit_seq FROM ({}) AS g{n}", g.join(" UNION ")))
         .collect();
-    let sql = format!("SELECT commit_seq FROM ({}) AS u ORDER BY commit_seq DESC LIMIT {limit}", groups.join(" UNION "));
+    let sql = format!("SELECT commit_seq FROM ({}) AS u ORDER BY commit_seq {order} LIMIT {limit}", groups.join(" UNION "));
     Some((sql, args))
 }
 
@@ -903,9 +905,9 @@ pub trait Tx {
     /// Every channel membership of the owner's agents, by agent then channel name.
     fn owner_memberships(&self, owner_id: i64) -> StoreResult<Vec<Membership>>;
     /// The newest messages over `ranges` (see [`feed_seqs_sql`]) with `after < seq < before`, at
-    /// most `limit`, newest first. The ranges decide what is read; the caller builds them from
-    /// what the owner's agents can read.
-    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64)
+    /// most `limit`, newest first (`oldest_first`: oldest first). The ranges decide what is read;
+    /// the caller builds them from what the owner's agents can read.
+    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64, oldest_first: bool)
     -> StoreResult<Vec<Message>>;
     /// The seqs of messages with `after < seq < before`, newest first, that the owner's agents can
     /// read and that have a notification in a problem status (held, denied, refused, gone, or

@@ -56,7 +56,10 @@ Review and integration by desk, one batch at a time; one release per batch.
   text, id; the column's width and its gap go to the text (12 more characters
   at 120+ columns, more below); the minimum row width shrinks by the same;
   `--wide` keeps the full line; `conde sent` / `conde read` have the state.
-  Replaces B25's empty cell and README sentence. Area: crates/conde/src/
+  The id cell is the bare 26-character ULID on every board (no `dakai:`
+  prefix; 6 more characters for the text); `conde read <ulid> --board dakai`
+  already reads it (the global `--board` applies to a bare id), and the README
+  watch paragraph says so. Replaces B25's empty cell and README sentence. Area: crates/conde/src/
   surface.rs watch_row + its unit test, cli.rs (the with_state flag goes),
   README watch paragraph, tests/cli_wiring.rs.
 

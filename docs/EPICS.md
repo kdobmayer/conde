@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 08:40: ROLLED conde:2520846 = revision ca-conde--0000026 (migration 14 agents_retired_at applied 06:39:49 UTC per startup log; dakai-helper and desk: healthz 200, /mcp 401). Konstantin's agent told; Konstantin retires native.nuc and konstantin-watcher himself.
 - 2026-10-15 08:39: ACR build conde:2520846 done; roll with migration 0014 requested from dakai-helper.
 - 2026-10-15 08:35: release c396f4c green (run 38692441978), fresh install prints conde 0.1.0 (c396f4c 2026-10-15); S1 requested; ACR build conde:2520846 still running.
 - 2026-10-15 08:27: batch 34 (B26 + fix 5ab38ee) landed: re-gate 638 passed 0 failed on Postgres, watch test ran; master 2520846 (code identical to PR 38), main c396f4c pushed, release run 38692441978 started, ACR build conde:2520846 started; PR 38 commented. Roll with migration 0014 follows the build.

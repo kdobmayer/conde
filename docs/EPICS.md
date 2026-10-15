@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 07:51: batch 33 (B25) landed: full run 635 passed 0 failed on Postgres, watch test ran, red-before confirmed (follow cell 'retrying' vs blank); master 8381029, main 5d18c1e pushed, release run 38689011441 started; PR 37 commented. No server roll: CLI-only change.
 - 2026-10-15 07:44: B25 PR 37 (fd49cd9 on main 6acf5db) received; diff read by desk = decided shape; Astra READY, no finding. Batch 33 lane: worktree conde-batch33, detached full run with Postgres plus red-before run of the proving test; ff master after its report.
 - 2026-10-15 07:40: Konstantin's agent took B26 right after B25, ahead of the U7 fixes (Konstantin wants the names gone first).
 - 2026-10-15 07:37: Konstantin asks how to remove unused names from the web UI view. Verified at source: unpublish/unregister only clear the binding, owner.list lists every row of the owner, so no owner-side way exists. Desk decision: B26 agent.retire (human owner, unbound own names, retired_at via migration 0014, lists skip it, history stays, register revives); offered to Konstantin's agent after U7 fixes and B25.

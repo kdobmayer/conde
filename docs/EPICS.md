@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 08:45: U7 landed on web-v2 at 205bbf0 (7f2f205 + 205bbf0, fast-forward; gate check 0/0 over 209 files, 23/23, build; mutations a/b/c each break only their own test); PR 36 commented; U8 free.
 - 2026-10-15 08:44: B26 confirmed in production: Konstantin retired native.nuc and konstantin-watcher himself (c396f4c, server 0000026). U7 fix 205bbf0 (six corrections + thread fixture) read at source by desk; web gate lane re-running with three red-before mutations.
 - 2026-10-15 08:43: Astra on B27 (PR 39): NOT READY, one P2 verified (mode picked from terminal_width()==None, which also covers a TTY with unknown width; fix: mode from is_terminal, width fallback 120) sent to the author; batch 35 gates continue on ccffe1a.
 - 2026-10-15 08:42: S1 green on c396f4c (NUC; the local SQLite board opens on the retired_at build). Batch 34 closed. B27 PR 39 (ccffe1a on main c396f4c) received: no state anywhere (call settled); Astra inline; batch 35 lane (red-before + full run with Postgres).

@@ -73,6 +73,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (11, "messages_by_day", include_str!("migrations/0011_messages_by_day.sql")),
     (12, "messages_dm_by_sender", include_str!("migrations/0012_messages_dm_by_sender.sql")),
     (13, "messages_by_reply_to", include_str!("migrations/0013_messages_by_reply_to.sql")),
+    (14, "agents_retired_at", include_str!("migrations/0014_agents_retired_at.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -652,7 +653,7 @@ impl Drop for PgTx {
 type Params<'a> = &'a [&'a (dyn ToSql + Sync)];
 
 const AGENT_SELECT: &str = "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
-    a.address_target, a.host_id, a.binding_version, a.pinned_address
+    a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL
     FROM agents a JOIN users u ON u.user_id = a.owner_id";
 
 fn agent_row(r: &Row) -> Agent {
@@ -665,6 +666,7 @@ fn agent_row(r: &Row) -> Agent {
         address: address_of(r.get(5), r.get(6), r.get(7)),
         binding_version: r.get(8),
         pinned: r.get(9),
+        retired: r.get(10),
     }
 }
 
@@ -1105,6 +1107,14 @@ impl Tx for PgTx {
             .collect())
     }
 
+    fn retire_agent(&self, agent_id: &str, at: &str) -> StoreResult<bool> {
+        let n = self.execute(
+            "UPDATE agents SET retired_at = $2 WHERE agent_id = $1 AND address_kind IS NULL",
+            &[&agent_id, &at],
+        )?;
+        Ok(n == 1)
+    }
+
     fn bound_agents(&self) -> StoreResult<Vec<Agent>> {
         Ok(self
             .query(&format!("{AGENT_SELECT} WHERE a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"), &[])?
@@ -1140,7 +1150,8 @@ impl Tx for PgTx {
         self.wakes.borrow_mut().hosts.extend(old.clone());
         self.execute(
             "UPDATE agents SET address_kind = $2, address_target = $3, host_id = $4,
-             binding_version = binding_version + 1 WHERE agent_id = $1",
+             binding_version = binding_version + 1,
+             retired_at = CASE WHEN $2::text IS NULL THEN retired_at END WHERE agent_id = $1",
             &[
                 &agent_id,
                 &address.map(|a| a.kind.as_str()),

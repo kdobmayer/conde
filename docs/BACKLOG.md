@@ -38,20 +38,6 @@ Review and integration by desk, one batch at a time; one release per batch.
   the target are on different filesystems (not atomic); stage next to the target
   instead. Area: dist/install.sh, dist_files test.
 
-- B26. No owner-side way to retire a name: `unpublish` and `unregister` only
-  clear the binding, the agents row stays, and `owner.list` lists every row of
-  the owner, so old names (Konstantin: native.nuc, konstantin-watcher) sit in
-  the web UI as unbound forever. Reported 2026-10-15. Decided (desk): a new op
-  `agent.retire {name}` for the human owner only, on an unbound own name
-  (a bound name is refused: unregister it first); it sets `agents.retired_at`
-  (migration 0014, both stores); `owner.list`, `fleet.list` and the agents
-  directory skip retired rows; history stays (messages keep the row; feed,
-  search and thread still read it); `conde register <name>` of a retired name
-  revives it (clears retired_at). CLI `conde retire <name> [--board <b>]`,
-  human only. Web control comes with the v2 Agents page (U10), not here.
-  Area: ops/agents.rs, store/{mod,sqlite,postgres}.rs + migration 0014,
-  cli.rs, surface.rs, README, tests/messaging.rs or web_ui.rs.
-
 ## Waiting on a decision or an observation (do not take)
 
 - W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers

@@ -622,7 +622,7 @@ impl Core {
         };
         // A human's watch reads as the owner the host's credential names, published or not
         // (the server scopes it to their agents); every other call needs a published name.
-        if me.is_human() && req.op == "message.feed" {
+        if me.is_human() && (req.op == "message.feed" || req.op == "agent.retire") {
             return Ok(Some(format!("human:{}@{}", conn.owner(), conn.host())));
         }
         let alias = &conn.alias;

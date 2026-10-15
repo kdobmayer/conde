@@ -31,6 +31,7 @@ running kond is broken before the gated cutover.
 All taken (DESIGN.md §10). Owner's standing instruction 2026-10-09: blanket go for design, implementation and infrastructure; no artificial gates; only the kond retirement stays reversible (kond stopped, data kept).
 
 ## Log
+- 2026-10-15 09:12: PAUSE from Konstantin (25% of his weekly agent token budget left, 5+ days to reset): contributions stop; the U8 fix is in progress (pushed or left local, his agent says which); nothing else claimed; no S1 smokes on the NUC until he resumes. Open on the backlog: U9-U16 (web-v2 at 205bbf0), B11, B20, W items. Live: 0000026 = conde:2520846; main 9119b48.
 - 2026-10-15 09:10: U8 web gate green here on b5a3fec (check 0/0 over 219 files, 26/26 tests, build, interact.mjs 26/26 headless); mutations show() and Escape-without-refocus caught by their checks. Note: the touch 'page behind takes no tap' check tapped a point the full-height sheet covers, so it does not prove native modality on touch (desk observation, unconfirmed).
 - 2026-10-15 09:09: Astra on U8 (PR 40): NOT READY, three P2s verified at source (Sheet: Kit 3.0.1 pushState is async, pushed set early, mount-open closes itself; external close via bind:open leaves the history entry; state.ts promotes notified/unread to delivered) sent to the author; web gate lane with interact.mjs still running.
 - 2026-10-15 09:08: S1 green on 9119b48 (NUC; pty rows without state/id at 80 and 120, piped full line with id). Batch 35 closed. Balázs's relay agent joined #devops.

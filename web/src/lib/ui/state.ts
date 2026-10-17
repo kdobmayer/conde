@@ -1,7 +1,8 @@
 /**
  * A message's one delivery word (ia.md "Feed": the worst recipient state). Problems are
- * retrying, held, denied, refused and gone; otherwise the word says how far it got: read,
- * delivered, read N of M on a channel post, posted.
+ * retrying, held, denied, refused and gone; otherwise the word says how far it got, never more
+ * than the server knows: read, delivered, notified and unread (a notification with no receipt
+ * yet), read N of M on a channel post, posted.
  */
 
 import type { Message } from '../types';
@@ -23,8 +24,8 @@ const RANK: [string, StateWord][] = [
 	['queued', { word: 'queued', tone: 'pending' }],
 	['sending', { word: 'sending', tone: 'pending' }],
 	['sent', { word: 'sent', tone: 'pending' }],
-	['notified', { word: 'delivered', tone: 'done' }],
-	['unread', { word: 'delivered', tone: 'done' }],
+	['notified', { word: 'notified', tone: 'pending' }],
+	['unread', { word: 'unread', tone: 'pending' }],
 	['delivered', { word: 'delivered', tone: 'done' }],
 	['read', { word: 'read', tone: 'done' }]
 ];

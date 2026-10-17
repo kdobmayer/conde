@@ -2,9 +2,10 @@
 	// A modal dialog: a bottom sheet under 720 px (its handle button toggles full height), a
 	// right-hand overlay panel from 720 px. Opening moves focus in and makes the page behind inert
 	// (showModal); Tab stays inside; Escape, Close and browser back close it, and focus returns
-	// to what opened it. Back works through a shallow history entry pushed on open.
+	// to what opened it. Back works through a shallow history entry pushed on open; any other close
+	// (Escape, Close, the parent setting `open`) leaves that entry again, once.
 	import type { Snippet } from 'svelte';
-	import { pushState } from '$app/navigation';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 
 	let { open = $bindable(false), label, children }: { open?: boolean; label: string; children: Snippet } = $props();
@@ -14,43 +15,63 @@
 	let close = $state<HTMLButtonElement>();
 	let full = $state(false);
 	let opener: HTMLElement | null = null;
-	/** Our history entry is the current one. */
-	let pushed = false;
+	/** Our history entry: none; being pushed (the push is async); the current one; being left. */
+	let entry: 'none' | 'pushing' | 'ours' | 'leaving' = 'none';
 
 	$effect(() => {
 		if (!dialog) return;
-		if (open && !dialog.open) show(dialog);
+		if (open && !dialog.open) void show(dialog);
 		else if (!open && dialog.open) hide(dialog);
 	});
 
-	// back (or forward) left our entry: close
 	$effect(() => {
 		const ours = (page.state as { sheet?: string }).sheet === id;
-		if (pushed && !ours) {
-			pushed = false;
+		if (ours) return;
+		if (entry === 'ours') {
+			// back (or forward) left our entry: close, with nothing more to leave
+			entry = 'none';
 			open = false;
+		} else if (entry === 'leaving') {
+			entry = 'none';
+			// reopened while the old entry was being left
+			if (open) void push();
 		}
 	});
 
-	function show(d: HTMLDialogElement) {
+	async function show(d: HTMLDialogElement) {
 		opener = document.activeElement as HTMLElement | null;
 		full = false;
 		d.showModal();
-		pushState('', { ...page.state, sheet: id });
-		pushed = true;
 		close?.focus();
+		if (entry === 'none') await push();
+	}
+
+	async function push() {
+		entry = 'pushing';
+		// the current URL, hash route included ('' would resolve without the hash)
+		await goto(new URL(location.href), { state: { ...page.state, sheet: id }, shallow: true });
+		entry = 'ours';
+		// closed while the entry was being pushed: leave it again
+		if (!open) leave();
 	}
 
 	function hide(d: HTMLDialogElement) {
 		d.close();
 		opener?.focus();
 		opener = null;
+		// closed by the parent: leave our entry (a close that came from back has none left)
+		if (entry === 'ours') leave();
 	}
 
-	/** Escape and Close: leave our history entry, which closes it; without one, close at once. */
+	function leave() {
+		entry = 'leaving';
+		history.back();
+	}
+
+	/** Escape and Close: leaving our entry closes it; until the push has landed, they wait. */
 	function dismiss() {
-		if (pushed) history.back();
-		else open = false;
+		if (entry === 'ours') history.back();
+		else if (entry === 'none') open = false;
 	}
 
 	function trapTab(e: KeyboardEvent) {

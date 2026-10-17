@@ -1,6 +1,6 @@
 // Design-only: drives the primitives harness (routes/_design/primitives) headless, by keyboard at
-// 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844, and exits non-zero when a
-// check fails. Serves the built app through mock-server.mjs.
+// 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844, in both skins, and exits
+// non-zero when a check fails. Serves the built app through mock-server.mjs.
 // Usage: node scripts/design/interact.mjs [build-dir]
 // Needs playwright-core 1.64.0 (npm i --no-save) and a Chromium headless shell (CHROME, as in
 // shoot.mjs).
@@ -24,20 +24,23 @@ const executablePath =
 const browser = await chromium.launch({ executablePath, args: ['--disable-gpu'] });
 
 let failed = 0;
+/** The skin and size the checks run in, printed with each. */
+let where = '';
 async function check(name, fn) {
 	try {
 		await fn();
-		console.log(`ok      ${name}`);
+		console.log(`ok      [${where}] ${name}`);
 	} catch (e) {
 		failed++;
-		console.log(`not ok  ${name}: ${e.message.split('\n')[0]}`);
+		console.log(`not ok  [${where}] ${name}: ${e.message.split('\n')[0]}`);
 	}
 }
 function expect(cond, what) {
 	if (!cond) throw new Error(what);
 }
 
-async function open(size) {
+async function open(size, skin) {
+	where = `${skin} ${size.width}`;
 	const context = await browser.newContext({
 		viewport: size,
 		...(size.width < 720 ? { isMobile: true, hasTouch: true } : {}),
@@ -50,6 +53,8 @@ async function open(size) {
 	});
 	await page.goto(URL, { waitUntil: 'networkidle' });
 	await page.waitForSelector('[data-test=open-sheet]');
+	await page.locator(`[data-skin-pick=${skin}]`).click();
+	if ((await page.evaluate(() => document.documentElement.dataset.skin)) !== skin) throw new Error(`skin ${skin} not set`);
 	return { context, page };
 }
 
@@ -69,12 +74,14 @@ const focus = (page) =>
 	});
 const filters = (page) => page.locator('[data-test=filters]').textContent();
 const listboxes = (page) => page.locator('[role=listbox]').count();
-const dialogOpen = (page) => page.evaluate(() => document.querySelector('dialog')?.open ?? false);
+const dialogOpen = (page) => page.evaluate(() => document.querySelector('[data-test=main-sheet] dialog')?.open ?? false);
+const pageState = (page) => page.locator('[data-test=page-state]').textContent();
+const settle = (page) => page.waitForTimeout(400);
 const box = (page, sel) => page.locator(sel).boundingBox();
 
 // ---- desktop, keyboard ----
-{
-	const { context, page } = await open({ width: 1440, height: 900 });
+for (const skin of ['a', 'b']) {
+	const { context, page } = await open({ width: 1440, height: 900 }, skin);
 	const dirButton = page.locator('[data-test=menu-dir] button');
 
 	await check('filter menu: Tab reaches the menu button', async () => {
@@ -117,11 +124,13 @@ const box = (page, sel) => page.locator(sel).boundingBox();
 		expect(f.test === 'menu-dir' && f.tag === 'button', `focus ${JSON.stringify(f)}`);
 		expect((await filters(page)) === 'agent=all;dir=in', await filters(page));
 	});
-	await check('filter menu: ArrowDown opens; Tab closes it', async () => {
+	await check('filter menu: ArrowDown opens; Tab closes it and moves on to the next control', async () => {
 		await page.keyboard.press('ArrowDown');
 		expect((await listboxes(page)) === 1, 'ArrowDown did not open');
 		await page.keyboard.press('Tab');
 		expect((await listboxes(page)) === 0, 'Tab left it open');
+		const f = await focus(page);
+		expect(f.test === 'open-sheet', `focus ${JSON.stringify(f)}`);
 	});
 	await check('filter menu: a press outside closes it', async () => {
 		await dirButton.focus();
@@ -134,7 +143,7 @@ const box = (page, sel) => page.locator(sel).boundingBox();
 	await check('sheet: Enter opens it as a modal dialog with focus inside', async () => {
 		await page.locator('[data-test=open-sheet]').focus();
 		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
 		const f = await focus(page);
 		expect(f.inDialog, `focus ${JSON.stringify(f)}`);
 	});
@@ -161,30 +170,72 @@ const box = (page, sel) => page.locator(sel).boundingBox();
 	});
 	await check('sheet: Escape closes it; focus returns to the opener; the URL is unchanged', async () => {
 		await page.keyboard.press('Escape');
-		await page.waitForFunction(() => !document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
 		const f = await focus(page);
 		expect(f.test === 'open-sheet', `focus ${JSON.stringify(f)}`);
 		expect((await page.evaluate(() => location.hash)) === hash, await page.evaluate(() => location.hash));
 	});
 	await check('sheet: browser back closes it; focus returns to the opener', async () => {
 		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
 		await page.goBack();
-		await page.waitForFunction(() => !document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
 		const f = await focus(page);
 		expect(f.test === 'open-sheet', `focus ${JSON.stringify(f)}`);
 		expect((await page.evaluate(() => location.hash)) === hash, 'left the page');
 	});
 	await check('sheet: Close closes it; reopening still works', async () => {
 		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('dialog')?.open);
-		await page.getByRole('button', { name: 'Close' }).click();
-		await page.waitForFunction(() => !document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
+		await page.locator('[data-test=main-sheet] dialog header button').click();
+		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
 		expect((await focus(page)).test === 'open-sheet', 'focus not on the opener');
 		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
 		await page.keyboard.press('Escape');
-		await page.waitForFunction(() => !document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
+	});
+	await check('sheet: the parent closing it at once leaves no history entry behind', async () => {
+		await page.locator('[data-test=race-parent]').click();
+		await settle(page);
+		expect(!(await dialogOpen(page)), 'still open');
+		expect((await pageState(page)) === '{}', `history state ${await pageState(page)}`);
+	});
+	await check('sheet: Close before the history entry exists keeps the page and closes once it does', async () => {
+		await page.locator('[data-test=race-dismiss]').click();
+		await settle(page);
+		expect((await page.evaluate(() => location.hash)) === hash, `left the page: ${page.url()}`);
+		if (await dialogOpen(page)) {
+			await page.keyboard.press('Escape');
+			await settle(page);
+		}
+		expect(!(await dialogOpen(page)), 'still open');
+		expect((await pageState(page)) === '{}', `history state ${await pageState(page)}`);
+	});
+	await check('sheet: closed by the parent, reopened, then back closes it', async () => {
+		await page.locator('[data-test=parent-later]').click();
+		await settle(page);
+		expect(!(await dialogOpen(page)), 'the parent did not close it');
+		expect((await pageState(page)) === '{}', `history state after the parent closed it: ${await pageState(page)}`);
+		await page.locator('[data-test=open-sheet]').focus();
+		await page.keyboard.press('Enter');
+		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
+		await settle(page);
+		await page.goBack();
+		await settle(page);
+		expect(!(await dialogOpen(page)), 'back left it open');
+		expect((await page.evaluate(() => location.hash)) === hash, 'left the page');
+	});
+	await check('sheet: mounted with open set, it stays open and back closes it', async () => {
+		await page.locator('[data-test=mount-open]').click();
+		await settle(page);
+		const mounted = () => page.evaluate(() => document.querySelector('[data-test=mounted-sheet] dialog')?.open ?? false);
+		expect(await mounted(), 'closed itself');
+		await page.goBack();
+		await settle(page);
+		expect(!(await mounted()), 'back left it open');
+		expect((await page.evaluate(() => location.hash)) === hash, 'left the page');
+		expect((await pageState(page)) === '{}', `history state ${await pageState(page)}`);
 	});
 
 	await check('disclosure: Enter and Space toggle aria-expanded and the region', async () => {
@@ -216,22 +267,22 @@ const box = (page, sel) => page.locator(sel).boundingBox();
 
 // ---- 1180: the overlay ----
 {
-	const { context, page } = await open({ width: 1180, height: 820 });
+	const { context, page } = await open({ width: 1180, height: 820 }, 'a');
 	await check('sheet at 1180: a 500 px overlay on the right, modal', async () => {
 		await page.locator('[data-test=open-sheet]').click();
-		await page.waitForFunction(() => document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
 		const b = await box(page, 'dialog');
 		expect(Math.round(b.x + b.width) === 1180 && Math.round(b.width) === 500 && Math.round(b.height) === 820, JSON.stringify(b));
 		expect(!(await page.locator('dialog .handle').isVisible()), 'the handle shows on the overlay');
 		await page.keyboard.press('Escape');
-		await page.waitForFunction(() => !document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
 	});
 	await context.close();
 }
 
 // ---- phone, touch ----
-{
-	const { context, page } = await open({ width: 390, height: 844 });
+for (const skin of ['a', 'b']) {
+	const { context, page } = await open({ width: 390, height: 844 }, skin);
 	await check('filter menu by touch: tap opens, tapping an option selects and closes', async () => {
 		await page.locator('[data-test=menu-dir] button').tap();
 		expect((await listboxes(page)) === 1, 'tap did not open');
@@ -241,9 +292,18 @@ const box = (page, sel) => page.locator(sel).boundingBox();
 	});
 	await check('sheet by touch: a bottom sheet over the page', async () => {
 		await page.locator('[data-test=open-sheet]').tap();
-		await page.waitForFunction(() => document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
 		const b = await box(page, 'dialog');
 		expect(Math.round(b.width) === 390 && Math.round(b.y + b.height) === 844 && b.height < 844 * 0.8, JSON.stringify(b));
+	});
+	await check('sheet by touch: the page behind takes no tap', async () => {
+		const sheet = await box(page, '[data-test=main-sheet] dialog');
+		const b = await box(page, '[data-test=behind]');
+		const [x, y] = [b.x + b.width / 2, b.y + b.height / 2];
+		expect(y < sheet.y, `the button behind is under the sheet (${y} >= ${sheet.y})`);
+		await page.touchscreen.tap(x, y);
+		expect((await page.locator('[data-test=behind]').textContent()).includes('(0)'), 'behind took it');
+		expect(await dialogOpen(page), 'a tap behind closed it');
 	});
 	await check('sheet by touch: the handle toggles full height', async () => {
 		const handle = page.locator('dialog .handle');
@@ -254,14 +314,9 @@ const box = (page, sel) => page.locator(sel).boundingBox();
 		b = await box(page, 'dialog');
 		expect(b.height < 844 * 0.8 && (await handle.getAttribute('aria-expanded')) === 'false', JSON.stringify(b));
 	});
-	await check('sheet by touch: the page behind takes no tap', async () => {
-		await page.touchscreen.tap(195, 40);
-		expect((await page.locator('[data-test=behind]').textContent()).includes('(0)'), 'behind took it');
-		expect(await dialogOpen(page), 'a tap behind closed it');
-	});
 	await check('sheet by touch: back closes it', async () => {
 		await page.goBack();
-		await page.waitForFunction(() => !document.querySelector('dialog')?.open);
+		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
 		expect((await focus(page)).test === 'open-sheet', 'focus not on the opener');
 	});
 	await check('disclosure by touch: tap toggles', async () => {

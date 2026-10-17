@@ -11,6 +11,8 @@
 	import Announcer from '#lib/ui/Announcer.svelte';
 	import { feed, thread, ids, fleet, session, short, clock, firstLine, NOW } from '#lib/design/model.ts';
 	import type { Message } from '#lib/types.ts';
+	import { tick } from 'svelte';
+	import { page } from '$app/state';
 
 	let skin = $state<'a' | 'b'>('a');
 	$effect(() => {
@@ -29,6 +31,24 @@
 
 	const teammates = [...new Set(fleet.hosts.filter((h) => h.owner !== session.user).map((h) => h.owner))];
 	let sheetOpen = $state(false);
+	let mountOpen = $state(false);
+	let mountedOpen = $state(true);
+
+	// closes that race the Sheet's history entry (interact.mjs)
+	async function openThenParentCloses() {
+		sheetOpen = true;
+		await tick();
+		sheetOpen = false;
+	}
+	async function openThenDismiss() {
+		sheetOpen = true;
+		await tick();
+		document.querySelector<HTMLButtonElement>('[data-test=main-sheet] dialog header button')?.click();
+	}
+	function openThenParentClosesLater() {
+		sheetOpen = true;
+		setTimeout(() => (sheetOpen = false), 300);
+	}
 	const chain = thread(ids.feedThread);
 	let behind = $state(0);
 	let retries = $state(0);
@@ -75,6 +95,19 @@
 			<button type="button" data-test="open-sheet" onclick={() => (sheetOpen = true)}>Open the thread</button>
 			<button type="button" class="quiet" data-test="behind" onclick={() => behind++}>Behind the sheet ({behind})</button>
 		</div>
+		<div class="bar">
+			<button type="button" class="quiet" data-test="race-parent" onclick={openThenParentCloses}>Open, parent closes at once</button>
+			<button type="button" class="quiet" data-test="race-dismiss" onclick={openThenDismiss}>Open, Close at once</button>
+			<button type="button" class="quiet" data-test="parent-later" onclick={openThenParentClosesLater}>Open, parent closes in 300 ms</button>
+			<button type="button" class="quiet" data-test="mount-open" onclick={() => ((mountedOpen = true), (mountOpen = true))}>Mount a sheet open</button>
+		</div>
+		<p class="muted">history state: <output data-test="page-state">{JSON.stringify(page.state)}</output></p>
+		{#if mountOpen}
+			<div data-test="mounted-sheet">
+				<Sheet bind:open={mountedOpen} label="Mounted open"><p>Mounted with open set.</p></Sheet>
+			</div>
+		{/if}
+		<div data-test="main-sheet" class="contents">
 		<Sheet bind:open={sheetOpen} label="Thread · {chain.length} messages">
 			<ol class="thread">
 				{#each chain as { m, depth } (m.message_id)}
@@ -86,6 +119,7 @@
 			</ol>
 			<p><a href="#/_design/primitives" data-test="sheet-link">A link inside</a></p>
 		</Sheet>
+		</div>
 	</section>
 
 	<section aria-labelledby="h-disc">
@@ -161,7 +195,11 @@
 		border-color: var(--accent);
 		color: var(--accent);
 	}
+	.contents {
+		display: contents;
+	}
 	.bar {
+		margin-top: 8px;
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;

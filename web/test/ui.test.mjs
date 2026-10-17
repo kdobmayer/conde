@@ -16,8 +16,8 @@ test('each recipient state has its word and tone', () => {
 	assert.deepEqual(table, {
 		read: 'read/done',
 		delivered: 'delivered/done',
-		notified: 'delivered/done',
-		unread: 'delivered/done',
+		notified: 'notified/pending',
+		unread: 'unread/pending',
 		queued: 'queued/pending',
 		sending: 'sending/pending',
 		sent: 'sent/pending',
@@ -33,6 +33,7 @@ test('the worst recipient wins, and a problem beats a channel read count', () =>
 	assert.deepEqual(stateWord(dm('read', 'retrying', 'delivered')), { word: 'retrying', tone: 'problem' });
 	assert.deepEqual(stateWord(dm('held', 'gone')), { word: 'gone', tone: 'problem' });
 	assert.deepEqual(stateWord(dm('read', 'delivered')), { word: 'delivered', tone: 'done' });
+	assert.deepEqual(stateWord(dm('read', 'unread')), { word: 'unread', tone: 'pending' }, 'a pending notification is not delivered');
 	assert.deepEqual(stateWord(dm('read', 'queued')), { word: 'queued', tone: 'pending' });
 	assert.deepEqual(stateWord(post(['held'], { read: 3, total: 4 })), { word: 'held', tone: 'problem' });
 	assert.deepEqual(stateWord(post(['delivered'], { read: 3, total: 4 })), { word: 'read 3 of 4', tone: 'done' });

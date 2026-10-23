@@ -617,7 +617,7 @@ async fn a_callback_from_another_browser_is_refused() {
     let (status, loc) = victim.peek(&callback).await;
     assert_eq!(
         (status, loc.as_str()),
-        (StatusCode::SEE_OTHER, "/auth/login?next=%2F")
+        (StatusCode::SEE_OTHER, SIGN_IN_AGAIN)
     );
     assert!(env.store.m().sessions.is_empty());
     // The attacker's own browser may still finish it once; a replay does not sign in again.
@@ -647,7 +647,41 @@ fn retry_marked<S>(env: &Env<S>, b: &Browser) -> bool {
         .is_some_and(|v| v.to_str().unwrap().contains("conde_login_retry="))
 }
 
-const SIGN_IN_AGAIN: &str = "/auth/login?next=%2F";
+const SIGN_IN_AGAIN: &str = "/auth/login?next=%2F&retry=1";
+
+/// The callback URL's `state`.
+fn state_of(callback: &str) -> String {
+    let url: reqwest::Url = callback.parse().unwrap();
+    let state = url.query_pairs().find(|(k, _)| k == "state").unwrap().1;
+    state.into_owned()
+}
+
+/// The callback URL with its `state` replaced.
+fn with_state(callback: &str, state: &str) -> String {
+    let mut url: reqwest::Url = callback.parse().unwrap();
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(k, v)| {
+            let v = if k == "state" {
+                state.to_string()
+            } else {
+                v.into_owned()
+            };
+            (k.into_owned(), v)
+        })
+        .collect();
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    url.to_string()
+}
+
+/// The Set-Cookie headers of a response.
+fn set_cookies(r: &reqwest::Response) -> Vec<String> {
+    r.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect()
+}
 
 /// Two sign-ins started in one browser (two tabs, or one page's concurrent 401s) both finish:
 /// the second does not void the first one's state.
@@ -764,7 +798,10 @@ async fn a_stale_callback_without_a_session_signs_in_again_once() {
     env.advance(601);
     assert_eq!(
         b.peek(&late).await,
-        (StatusCode::SEE_OTHER, SIGN_IN_AGAIN.to_string())
+        (
+            StatusCode::SEE_OTHER,
+            "/auth/login?next=%2Fkeys&retry=1".to_string()
+        )
     );
     assert!(retry_marked(&env, &b));
     let late = started_callback(&env, &b).await;
@@ -2291,4 +2328,175 @@ fn a_store_without_the_remote_mcp_refuses_every_mcp_call() {
     }
     assert!(s.mcp_grants(1, 0).unwrap().is_empty(), "the keys page lists no connected apps");
     s.purge_mcp(0, 60).unwrap();
+}
+
+/// A login cookie longer than four real states is not split or matched (even when it holds this
+/// browser's state) and never comes back in a Set-Cookie; an entry longer than a real state is
+/// dropped.
+#[tokio::test]
+async fn an_oversized_login_cookie_is_ignored_and_never_echoed() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let callback = started_callback(&env, &b).await;
+    let state = state_of(&callback);
+    let raw = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    // A real cookie is at most 4 states of 22 characters; every Set-Cookie stays near that.
+    let short = |set: &[String]| set.iter().all(|c| c.len() <= 400);
+    let huge = format!(
+        "conde_login={state}{}",
+        ".AAAAAAAAAAAAAAAAAAAAAA".repeat(8000)
+    );
+    let r = raw
+        .get(&callback)
+        .header(header::COOKIE, &huge)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert_eq!(r.headers()[header::LOCATION], SIGN_IN_AGAIN);
+    assert!(short(&set_cookies(&r)), "{:?}", set_cookies(&r));
+    assert!(
+        env.store.m().sessions.is_empty(),
+        "an oversized cookie matches nothing"
+    );
+    let r = raw
+        .get(env.url("/auth/login?next=%2Fkeys"))
+        .header(header::COOKIE, &huge)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let set = set_cookies(&r);
+    assert!(
+        short(&set) && set.iter().any(|c| c.starts_with("conde_login=")),
+        "{set:?}"
+    );
+
+    let long_entry = format!("conde_login={}.{state}", "x".repeat(100));
+    let r = raw
+        .get(&callback)
+        .header(header::COOKIE, long_entry)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.headers()[header::LOCATION],
+        "/keys",
+        "the real state still matches"
+    );
+    let set = set_cookies(&r);
+    assert!(
+        !set.iter().any(|c| c.contains("xxxx")),
+        "the long entry is dropped: {set:?}"
+    );
+}
+
+/// A browser that keeps no cookies cannot finish a sign-in: the stale callback's one retry finds
+/// no marker and shows why, instead of looping through the provider.
+#[tokio::test]
+async fn a_browser_that_keeps_no_cookies_is_told_instead_of_looping() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let cookieless = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .unwrap();
+    let r = cookieless
+        .get(env.url("/keys"))
+        .send()
+        .await
+        .expect("no redirect loop");
+    assert_eq!(r.url().path(), "/auth/login");
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let page = r.text().await.unwrap();
+    assert!(
+        page.contains("not keeping conde&#39;s cookies")
+            || page.contains("not keeping conde&#x27;s cookies"),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"<a href="/">Go to the board</a>"#),
+        "{page}"
+    );
+    assert_eq!(
+        env.idp.authorizations.load(Ordering::SeqCst),
+        1,
+        "one trip to the provider"
+    );
+
+    // retry=1 without the marker: no sign-in row, no redirect to the provider
+    let logins = env.store.m().logins.len();
+    let (status, at, _) = Browser::new().get(&env.url(SIGN_IN_AGAIN)).await;
+    assert_eq!(
+        (status, at),
+        (StatusCode::BAD_REQUEST, env.url(SIGN_IN_AGAIN))
+    );
+    assert_eq!(env.store.m().logins.len(), logins);
+    assert_eq!(env.idp.authorizations.load(Ordering::SeqCst), 1);
+    // with the marker the retry is an ordinary sign-in
+    let r = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(env.url(SIGN_IN_AGAIN))
+        .header(header::COOKIE, "conde_login_retry=1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let to = r.headers()[header::LOCATION].to_str().unwrap();
+    assert!(to.contains("/oauth2/v2.0/authorize?"), "{to}");
+    assert_eq!(env.store.m().logins.len(), logins + 1);
+}
+
+/// An expired sign-in restarts toward the page it was started for.
+#[tokio::test]
+async fn an_expired_sign_in_restarts_to_its_own_return_path() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let callback = started_callback(&env, &b).await;
+    env.advance(601);
+    assert_eq!(
+        b.peek(&callback).await,
+        (
+            StatusCode::SEE_OTHER,
+            "/auth/login?next=%2Fkeys&retry=1".to_string()
+        )
+    );
+}
+
+/// A forged state joining two pending states with the cookie's separator, and an empty state,
+/// match nothing: each is a single state this browser did not start.
+#[tokio::test]
+async fn joined_and_empty_states_match_nothing() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let first = started_callback(&env, &b).await;
+    let second = started_callback(&env, &b).await;
+    let joined = format!("{}.{}", state_of(&first), state_of(&second));
+    assert_eq!(
+        b.peek(&with_state(&first, &joined)).await,
+        (StatusCode::SEE_OTHER, SIGN_IN_AGAIN.to_string())
+    );
+    // the retry marker is set now, so the next stale callback shows the page
+    assert_eq!(
+        b.peek(&with_state(&first, "")).await,
+        (StatusCode::BAD_REQUEST, String::new())
+    );
+    assert!(env.store.m().sessions.is_empty());
+    assert_eq!(
+        env.store.m().logins.len(),
+        2,
+        "neither pending sign-in was consumed"
+    );
+    assert_eq!(
+        b.peek(&first).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string())
+    );
+    assert_eq!(
+        b.peek(&second).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string())
+    );
 }

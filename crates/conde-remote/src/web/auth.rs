@@ -318,24 +318,35 @@ impl Oidc {
 const MAX_PENDING: usize = 4;
 /// Joins the pending states in the login cookie; a state is base64url, so never contains it.
 const STATE_SEP: &str = ".";
+/// The longest entry taken for a state: a real one is 22 characters (16 random bytes, base64url).
+const MAX_STATE: usize = 64;
+/// The longest login cookie read at all; a longer one is ignored unsplit.
+const MAX_COOKIE: usize = MAX_PENDING * (MAX_STATE + 1);
 /// How long the marker of a stale callback's automatic sign-in lives.
 const RETRY_MARK: time::Duration = time::Duration::minutes(5);
 
-/// The states of the sign-ins this browser has pending, oldest first.
+/// The states of the sign-ins this browser has pending, oldest first: at most the newest
+/// [`MAX_PENDING`], none from an oversized cookie.
 fn pending_states(jar: &CookieJar, secure: bool) -> Vec<String> {
-    jar.get(login_cookie(secure))
-        .map(|c| {
-            c.value()
-                .split(STATE_SEP)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(cookie) = jar.get(login_cookie(secure)) else {
+        return Vec::new();
+    };
+    let value = cookie.value();
+    if value.len() > MAX_COOKIE {
+        return Vec::new();
+    }
+    let states: Vec<String> = value
+        .split(STATE_SEP)
+        .filter(|s| !s.is_empty() && s.len() <= MAX_STATE)
+        .map(String::from)
+        .collect();
+    states[states.len().saturating_sub(MAX_PENDING)..].to_vec()
 }
 
-/// The jar with `states` as the login cookie, or without the cookie when none remain.
+/// The jar with the newest [`MAX_PENDING`] of `states` as the login cookie, or without the
+/// cookie when none remain.
 fn with_pending(jar: CookieJar, states: &[String], secure: bool) -> CookieJar {
+    let states = &states[states.len().saturating_sub(MAX_PENDING)..];
     if states.is_empty() {
         jar.remove(removal(login_cookie(secure), "/", secure))
     } else {
@@ -369,6 +380,8 @@ fn local_path(next: Option<&str>) -> String {
 #[derive(Deserialize)]
 pub(crate) struct LoginQuery {
     next: Option<String>,
+    /// Set by a stale callback's one retry, which also set the retry marker.
+    retry: Option<String>,
 }
 
 /// `GET /auth/login?next=/path`: starts the authorization code flow.
@@ -383,6 +396,13 @@ pub(crate) async fn login(
         return Err(WebError::BadRequest(format!(
             "The page to return to after sign-in is longer than {MAX_NEXT} characters, so sign-in cannot carry it back. If an app sent you here, its request is too long."
         )));
+    }
+    let secure = state.config().secure_cookies();
+    if q.retry.is_some() && jar.get(login_retry_cookie(secure)).is_none() {
+        return Err(WebError::BadRequest(
+            "This browser is not keeping conde's cookies, so sign-in cannot finish. Allow cookies for this site and try again."
+                .into(),
+        ));
     }
     let begin = state
         .0
@@ -403,14 +423,9 @@ pub(crate) async fn login(
             s.insert_login(&key, &txn)
         })
         .await?;
-    let secure = state.config().secure_cookies();
     let mut pending = pending_states(&jar, secure);
     pending.push(begin.state);
-    let jar = with_pending(
-        jar,
-        &pending[pending.len().saturating_sub(MAX_PENDING)..],
-        secure,
-    );
+    let jar = with_pending(jar, &pending, secure);
     Ok((jar, Redirect::to(&begin.url)).into_response())
 }
 
@@ -456,15 +471,20 @@ pub(crate) async fn callback(
             &state,
             jar,
             "This sign-in was started in another browser or has already finished. Start again.",
+            "/",
         )
         .await;
     }
     let key = digest(&returned_state);
     let txn = state.store(move |s| s.take_login(&key)).await?;
     let now = state.now();
-    let Some(txn) = txn.filter(|t| now - t.created_at <= state.limits().login_ttl) else {
-        return stale(&state, jar, "This sign-in has expired. Start again.").await;
+    let expired = "This sign-in has expired. Start again.";
+    let Some(txn) = txn else {
+        return stale(&state, jar, expired, "/").await;
     };
+    if now - txn.created_at > state.limits().login_ttl {
+        return stale(&state, jar, expired, &txn.return_to).await;
+    }
     let identity = state
         .0
         .oidc
@@ -501,8 +521,14 @@ pub(crate) async fn callback(
 
 /// A callback whose sign-in is not pending here any more (another browser's, already finished,
 /// or expired), as after a tab restore: a signed-in browser goes to the board, any other starts
-/// one fresh sign-in; a second such callback in a row shows `message` instead of looping.
-async fn stale(state: &WebState, jar: CookieJar, message: &str) -> Result<Response, WebError> {
+/// one fresh sign-in back to `next`; a second such callback in a row shows `message` instead of
+/// looping.
+async fn stale(
+    state: &WebState,
+    jar: CookieJar,
+    message: &str,
+    next: &str,
+) -> Result<Response, WebError> {
     if session::current(state, &jar).await?.is_some() {
         return Ok((jar, Redirect::to("/")).into_response());
     }
@@ -514,7 +540,10 @@ async fn stale(state: &WebState, jar: CookieJar, message: &str) -> Result<Respon
     }
     let mut mark = session::cookie(retry, "1".into(), secure);
     mark.set_max_age(RETRY_MARK);
-    Ok((jar.add(mark), Redirect::to("/auth/login?next=%2F")).into_response())
+    let next: String =
+        openidconnect::url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
+    let login = format!("/auth/login?next={next}&retry=1");
+    Ok((jar.add(mark), Redirect::to(&login)).into_response())
 }
 
 /// An owner name from the identity: the local part of preferred_username (else the display

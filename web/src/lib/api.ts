@@ -20,6 +20,12 @@ export function onSession(fn: (s: Session) => void): () => void {
 }
 
 let signingIn = false;
+if (typeof window !== 'undefined') {
+	// A page restored from the back/forward cache keeps this module's state: it may sign in again.
+	window.addEventListener('pageshow', (e) => {
+		if (e.persisted) signingIn = false;
+	});
+}
 
 /** Sends the browser to sign in, then back to the current view; once per page load, so the
  * concurrent 401s of a resumed tab start one sign-in. */

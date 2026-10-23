@@ -36,3 +36,20 @@ test('concurrent 401s of a resumed page start one sign-in', async () => {
 	assert.ok(settled.every((s) => s.status === 'rejected' && s.reason.code === 'unauthenticated'));
 	assert.deepEqual(navigations, ['/auth/login?next=' + encodeURIComponent('/#/a/alice')]);
 });
+
+test('a page restored from the back/forward cache can sign in again', async () => {
+	const navigations = [];
+	const listeners = {};
+	globalThis.window = { addEventListener: (type, fn) => (listeners[type] = fn) };
+	globalThis.location = { hash: '', set href(url) { navigations.push(url); } };
+	globalThis.fetch = async () => new Response(null, { status: 401 });
+	const { loadSession } = await import('../src/lib/api.ts?signin-bfcache');
+	await loadSession().catch(() => {});
+	listeners.pageshow({ persisted: false });
+	await loadSession().catch(() => {});
+	assert.equal(navigations.length, 1, 'an ordinary pageshow keeps the latch');
+	listeners.pageshow({ persisted: true });
+	await loadSession().catch(() => {});
+	assert.equal(navigations.length, 2, 'a restored page signs in again');
+	delete globalThis.window;
+});

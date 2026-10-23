@@ -400,7 +400,7 @@ pub(crate) async fn login(
     let secure = state.config().secure_cookies();
     if q.retry.is_some() && jar.get(login_retry_cookie(secure)).is_none() {
         return Err(WebError::BadRequest(
-            "This browser is not keeping conde's cookies, so sign-in cannot finish. Allow cookies for this site and try again."
+            "This sign-in link is old, or this browser is not keeping conde's cookies, so sign-in cannot finish. Go to the board to start again; if this page comes back, allow cookies for this site."
                 .into(),
         ));
     }

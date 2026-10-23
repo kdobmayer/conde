@@ -238,7 +238,7 @@ async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>)
     assert!(keys.contains(r#"<link rel="icon" href="/app/favicon.svg" type="image/svg+xml">"#), "{keys}");
     let icon = b.step.get(ui.env.url("/favicon.ico")).send().await.unwrap();
     if icons_built() {
-        assert!(keys.contains(r#"<a class="brand" href="/keys"><svg "#), "{keys}");
+        assert!(keys.contains(r#"<a class="brand" href="/"><svg "#), "{keys}");
         assert_eq!(icon.status(), StatusCode::OK);
         assert_eq!(icon.headers()[header::CONTENT_TYPE], "image/png");
         let r = b.step.get(ui.env.url("/app/favicon.svg")).send().await.unwrap();

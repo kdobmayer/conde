@@ -612,15 +612,200 @@ async fn a_callback_from_another_browser_is_refused() {
     let (status, callback) = attacker.peek(&authorize).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert!(callback.contains("/auth/callback?code="), "{callback}");
-    // Login CSRF: the victim's browser lands on the attacker's callback URL.
-    let (status, _, body) = victim.get(&callback).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // Login CSRF: the victim's browser lands on the attacker's callback URL and is sent to its
+    // own sign-in, never signed in with the attacker's code.
+    let (status, loc) = victim.peek(&callback).await;
+    assert_eq!(
+        (status, loc.as_str()),
+        (StatusCode::SEE_OTHER, "/auth/login?next=%2F")
+    );
     assert!(env.store.m().sessions.is_empty());
-    // The attacker's own browser may still finish it once; a replay is refused.
+    // The attacker's own browser may still finish it once; a replay does not sign in again.
     let (status, _, _) = attacker.get(&callback).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, _) = attacker.get(&callback).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, loc) = attacker.peek(&callback).await;
+    assert_eq!((status, loc.as_str()), (StatusCode::SEE_OTHER, "/"));
+    assert_eq!(env.store.m().sessions.len(), 1);
+}
+
+/// Starts a sign-in in `b` (returning to /keys) and returns the provider's redirect back to the
+/// board: the callback URL with its code and state.
+async fn started_callback<S>(env: &Env<S>, b: &Browser) -> String {
+    let (status, authorize) = b.peek(&env.url("/auth/login?next=%2Fkeys")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{authorize}");
+    let (status, callback) = b.peek(&authorize).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{callback}");
+    assert!(callback.contains("/auth/callback?code="), "{callback}");
+    callback
+}
+
+/// Whether `b` holds the cookie that marks one automatic sign-in retry after a stale callback.
+fn retry_marked<S>(env: &Env<S>, b: &Browser) -> bool {
+    use reqwest::cookie::CookieStore;
+    b.jar
+        .cookies(&env.url("/").parse().unwrap())
+        .is_some_and(|v| v.to_str().unwrap().contains("conde_login_retry="))
+}
+
+const SIGN_IN_AGAIN: &str = "/auth/login?next=%2F";
+
+/// Two sign-ins started in one browser (two tabs, or one page's concurrent 401s) both finish:
+/// the second does not void the first one's state.
+#[tokio::test]
+async fn two_sign_ins_started_in_one_browser_both_finish() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let first = started_callback(&env, &b).await;
+    let second = started_callback(&env, &b).await;
+    assert_eq!(
+        b.peek(&first).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string()),
+        "first"
+    );
+    assert_eq!(
+        b.peek(&second).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string()),
+        "second"
+    );
+    assert_eq!(env.store.m().sessions.len(), 2);
+    assert!(env.store.m().logins.is_empty());
+}
+
+/// Login CSRF stays closed: a callback whose state this browser did not start is never finished
+/// here, even beside its own pending sign-in; it starts the browser's own sign-in instead.
+#[tokio::test]
+async fn a_state_this_browser_did_not_start_is_never_accepted() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let (victim, attacker) = (Browser::new(), Browser::new());
+    let own = started_callback(&env, &victim).await;
+    let forged = started_callback(&env, &attacker).await;
+    assert_eq!(
+        victim.peek(&forged).await,
+        (StatusCode::SEE_OTHER, SIGN_IN_AGAIN.to_string())
+    );
+    assert!(
+        env.store.m().sessions.is_empty(),
+        "the attacker's code was not redeemed"
+    );
+    assert_eq!(env.store.m().logins.len(), 2, "nor its sign-in consumed");
+    assert_eq!(
+        victim.peek(&own).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string())
+    );
+    assert_eq!(
+        attacker.peek(&forged).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string())
+    );
+}
+
+/// A finished callback opened again (tab restore, back button) while signed in goes to the board.
+#[tokio::test]
+async fn a_replayed_callback_with_a_live_session_goes_to_the_board() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let callback = started_callback(&env, &b).await;
+    assert_eq!(
+        b.peek(&callback).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string())
+    );
+    assert_eq!(
+        b.peek(&callback).await,
+        (StatusCode::SEE_OTHER, "/".to_string())
+    );
+    assert_eq!(env.store.m().sessions.len(), 1, "no second session");
+    assert!(!retry_marked(&env, &b));
+}
+
+/// A stale callback without a session (the session ended, then the tab came back on the old
+/// callback URL; or the sign-in expired) starts a fresh sign-in once. A second stale callback in
+/// a row shows the error page, which links home, and drops the marker.
+#[tokio::test]
+async fn a_stale_callback_without_a_session_signs_in_again_once() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let callback = started_callback(&env, &b).await;
+    assert_eq!(
+        b.peek(&callback).await,
+        (StatusCode::SEE_OTHER, "/keys".to_string())
+    );
+    env.advance(8 * 3600 + 1);
+    let r = b.step.get(&callback).send().await.unwrap();
+    assert_eq!(
+        (r.status(), &r.headers()[header::LOCATION]),
+        (StatusCode::SEE_OTHER, &SIGN_IN_AGAIN.parse().unwrap())
+    );
+    let set: Vec<&str> = r
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert!(
+        set.iter().any(|c| c.starts_with("conde_login_retry=1;")
+            && ["Max-Age=300", "HttpOnly", "SameSite=Lax", "Path=/"]
+                .iter()
+                .all(|a| c.contains(a))),
+        "{set:?}"
+    );
+    assert!(retry_marked(&env, &b));
+    let (_, authorize) = b.peek(&env.url(SIGN_IN_AGAIN)).await;
+    let (_, fresh) = b.peek(&authorize).await;
+    assert_eq!(
+        b.peek(&fresh).await,
+        (StatusCode::SEE_OTHER, "/".to_string())
+    );
+    assert!(
+        !retry_marked(&env, &b),
+        "a finished sign-in drops the marker"
+    );
+
+    let b = Browser::new();
+    let late = started_callback(&env, &b).await;
+    env.advance(601);
+    assert_eq!(
+        b.peek(&late).await,
+        (StatusCode::SEE_OTHER, SIGN_IN_AGAIN.to_string())
+    );
+    assert!(retry_marked(&env, &b));
+    let late = started_callback(&env, &b).await;
+    env.advance(601);
+    let (status, _, page) = b.get(&late).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{page}");
+    assert!(page.contains("expired"), "{page}");
+    assert!(page.contains(r#"<a class="brand" href="/">"#), "{page}");
+    assert!(
+        page.contains(r#"<a href="/">Go to the board</a>"#),
+        "{page}"
+    );
+    assert!(!retry_marked(&env, &b), "no loop: the marker is dropped");
+    assert!(env.store.m().sessions.len() == 1);
+}
+
+/// The login cookie keeps the four newest pending sign-ins: a fifth drops the oldest.
+#[tokio::test]
+async fn a_fifth_pending_sign_in_drops_the_oldest() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    let b = Browser::new();
+    let mut callbacks = Vec::new();
+    for _ in 0..5 {
+        callbacks.push(started_callback(&env, &b).await);
+    }
+    assert_eq!(
+        b.peek(&callbacks[0]).await,
+        (StatusCode::SEE_OTHER, SIGN_IN_AGAIN.to_string())
+    );
+    assert!(
+        env.store.m().sessions.is_empty(),
+        "the oldest state was dropped"
+    );
+    for (i, callback) in callbacks[1..].iter().enumerate() {
+        assert_eq!(
+            b.peek(callback).await,
+            (StatusCode::SEE_OTHER, "/keys".to_string()),
+            "{}",
+            i + 2
+        );
+    }
 }
 
 /// A return path of 2048 characters survives the sign-in; a longer one is refused with a reason,

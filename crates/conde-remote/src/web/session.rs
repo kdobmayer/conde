@@ -45,6 +45,15 @@ pub(crate) fn login_cookie(secure: bool) -> &'static str {
     }
 }
 
+/// Marks the one automatic sign-in a stale callback starts, so a second one in a row stops.
+pub(crate) fn login_retry_cookie(secure: bool) -> &'static str {
+    if secure {
+        "__Host-conde_login_retry"
+    } else {
+        "conde_login_retry"
+    }
+}
+
 pub(crate) fn cookie(name: &'static str, value: String, secure: bool) -> Cookie<'static> {
     Cookie::build((name, value))
         .path("/")
@@ -249,7 +258,11 @@ mod tests {
     fn https_cookie_deletions_carry_the_issuance_attributes() {
         use axum::http::{HeaderMap, HeaderValue, header};
         use axum::response::IntoResponse;
-        for name in [session_cookie(true), login_cookie(true)] {
+        for name in [
+            session_cookie(true),
+            login_cookie(true),
+            login_retry_cookie(true),
+        ] {
             let mut headers = HeaderMap::new();
             let old = HeaderValue::from_str(&format!("{name}=old-value")).unwrap();
             headers.insert(header::COOKIE, old);

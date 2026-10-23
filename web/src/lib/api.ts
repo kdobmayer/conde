@@ -19,8 +19,13 @@ export function onSession(fn: (s: Session) => void): () => void {
 	return () => sessionListeners.delete(fn);
 }
 
-/** Sends the browser to sign in, then back to the current view. */
+let signingIn = false;
+
+/** Sends the browser to sign in, then back to the current view; once per page load, so the
+ * concurrent 401s of a resumed tab start one sign-in. */
 export function signIn(): void {
+	if (signingIn) return;
+	signingIn = true;
 	location.href = '/auth/login?next=' + encodeURIComponent('/' + location.hash);
 }
 

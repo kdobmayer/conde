@@ -30,7 +30,9 @@ use thiserror::Error;
 
 use super::keys::{self, host_slug};
 use super::ratelimit::ClientIp;
-use super::session::{self, WebError, digest, login_cookie, random_token, removal, same_secret};
+use super::session::{
+    self, WebError, digest, login_cookie, login_retry_cookie, random_token, removal, same_secret,
+};
 use super::{CliCode, CliIssued, CreateUser, Identity, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
 
 /// Discovery and JWKS are re-read after this long (and at once when a token's key is unknown).
@@ -311,6 +313,40 @@ impl Oidc {
     }
 }
 
+/// Sign-ins one browser may have pending at once (tabs, a page's concurrent 401s); a newer one
+/// drops the oldest.
+const MAX_PENDING: usize = 4;
+/// Joins the pending states in the login cookie; a state is base64url, so never contains it.
+const STATE_SEP: &str = ".";
+/// How long the marker of a stale callback's automatic sign-in lives.
+const RETRY_MARK: time::Duration = time::Duration::minutes(5);
+
+/// The states of the sign-ins this browser has pending, oldest first.
+fn pending_states(jar: &CookieJar, secure: bool) -> Vec<String> {
+    jar.get(login_cookie(secure))
+        .map(|c| {
+            c.value()
+                .split(STATE_SEP)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The jar with `states` as the login cookie, or without the cookie when none remain.
+fn with_pending(jar: CookieJar, states: &[String], secure: bool) -> CookieJar {
+    if states.is_empty() {
+        jar.remove(removal(login_cookie(secure), "/", secure))
+    } else {
+        jar.add(session::cookie(
+            login_cookie(secure),
+            states.join(STATE_SEP),
+            secure,
+        ))
+    }
+}
+
 /// The longest path a sign-in carries back (it is stored with the login until the callback).
 const MAX_NEXT: usize = 2048;
 
@@ -368,7 +404,13 @@ pub(crate) async fn login(
         })
         .await?;
     let secure = state.config().secure_cookies();
-    let jar = jar.add(session::cookie(login_cookie(secure), begin.state, secure));
+    let mut pending = pending_states(&jar, secure);
+    pending.push(begin.state);
+    let jar = with_pending(
+        jar,
+        &pending[pending.len().saturating_sub(MAX_PENDING)..],
+        secure,
+    );
     Ok((jar, Redirect::to(&begin.url)).into_response())
 }
 
@@ -387,8 +429,15 @@ pub(crate) async fn callback(
     Query(q): Query<CallbackQuery>,
 ) -> Result<Response, WebError> {
     let secure = state.config().secure_cookies();
-    let started = jar.get(login_cookie(secure)).map(|c| c.value().to_string());
-    let jar = jar.remove(removal(login_cookie(secure), "/", secure));
+    let mut pending = pending_states(&jar, secure);
+    let started = q
+        .state
+        .as_deref()
+        .and_then(|returned| pending.iter().position(|p| same_secret(p, returned)));
+    if let Some(i) = started {
+        pending.remove(i);
+    }
+    let jar = with_pending(jar, &pending, secure);
     if let Some(error) = q.error {
         let detail = q.error_description.unwrap_or(error);
         return Ok((
@@ -402,19 +451,19 @@ pub(crate) async fn callback(
             "The sign-in response is incomplete.".into(),
         ));
     };
-    if !started.is_some_and(|s| same_secret(&s, &returned_state)) {
-        return Err(WebError::BadRequest(
-            "This sign-in was started in another browser or has already finished. Start again."
-                .into(),
-        ));
+    if started.is_none() {
+        return stale(
+            &state,
+            jar,
+            "This sign-in was started in another browser or has already finished. Start again.",
+        )
+        .await;
     }
     let key = digest(&returned_state);
     let txn = state.store(move |s| s.take_login(&key)).await?;
     let now = state.now();
     let Some(txn) = txn.filter(|t| now - t.created_at <= state.limits().login_ttl) else {
-        return Err(WebError::BadRequest(
-            "This sign-in has expired. Start again.".into(),
-        ));
+        return stale(&state, jar, "This sign-in has expired. Start again.").await;
     };
     let identity = state
         .0
@@ -446,7 +495,26 @@ pub(crate) async fn callback(
         .unwrap_or_else(|| user.name.clone());
     tracing::info!(user = %user.name, "signed in");
     let jar = session::start(&state, jar, user.user_id, user.name, display).await?;
+    let jar = jar.remove(removal(login_retry_cookie(secure), "/", secure));
     Ok((jar, Redirect::to(&txn.return_to)).into_response())
+}
+
+/// A callback whose sign-in is not pending here any more (another browser's, already finished,
+/// or expired), as after a tab restore: a signed-in browser goes to the board, any other starts
+/// one fresh sign-in; a second such callback in a row shows `message` instead of looping.
+async fn stale(state: &WebState, jar: CookieJar, message: &str) -> Result<Response, WebError> {
+    if session::current(state, &jar).await?.is_some() {
+        return Ok((jar, Redirect::to("/")).into_response());
+    }
+    let secure = state.config().secure_cookies();
+    let retry = login_retry_cookie(secure);
+    if jar.get(retry).is_some() {
+        let jar = jar.remove(removal(retry, "/", secure));
+        return Ok((jar, WebError::BadRequest(message.into())).into_response());
+    }
+    let mut mark = session::cookie(retry, "1".into(), secure);
+    mark.set_max_age(RETRY_MARK);
+    Ok((jar.add(mark), Redirect::to("/auth/login?next=%2F")).into_response())
 }
 
 /// An owner name from the identity: the local part of preferred_username (else the display

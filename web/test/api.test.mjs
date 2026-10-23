@@ -26,3 +26,13 @@ test('a stale session is reloaded and the read retried once with the new token',
 	assert.deepEqual(requests.map((r) => r.csrf), ['token-1', 'token-2']);
 	assert.ok(requests.every((r) => r.request.idempotency_key === undefined), 'reads carry no key');
 });
+
+test('concurrent 401s of a resumed page start one sign-in', async () => {
+	const navigations = [];
+	globalThis.location = { hash: '#/a/alice', set href(url) { navigations.push(url); } };
+	globalThis.fetch = async () => new Response(null, { status: 401 });
+	const { loadSession } = await import('../src/lib/api.ts?signin-once');
+	const settled = await Promise.allSettled([loadSession(), loadSession(), loadSession()]);
+	assert.ok(settled.every((s) => s.status === 'rejected' && s.reason.code === 'unauthenticated'));
+	assert.deepEqual(navigations, ['/auth/login?next=' + encodeURIComponent('/#/a/alice')]);
+});

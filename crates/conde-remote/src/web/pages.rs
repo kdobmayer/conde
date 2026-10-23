@@ -62,7 +62,7 @@ pub(crate) struct Header<'a> {
 </head>
 <body>
 <header>
-<a class="brand" href="/keys">{{ mark|safe }}conde</a>
+<a class="brand" href="/">{{ mark|safe }}conde</a>
 {% if let Some(h) = header %}<span class="who">{{ h.display }}</span>
 <form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{ h.csrf }}"><button class="quiet">Sign out</button></form>{% endif %}
 </header>
@@ -282,7 +282,7 @@ struct CliCodeBody<'a> {
     ext = "html",
     source = r#"<h1>{{ title }}</h1>
 <p>{{ message }}</p>
-<p><a href="/keys">Back to host keys</a></p>"#
+<p><a href="/">Go to the board</a></p>"#
 )]
 struct ErrorBody<'a> {
     title: &'a str,

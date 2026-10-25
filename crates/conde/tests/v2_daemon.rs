@@ -988,6 +988,43 @@ fn g11b_a_held_attempt_pauses_only_its_origin() {
     assert!(a.harness.mapped(&p_open.token));
 }
 
+/// A Claude acceptance that no receipt follows (Claude Code sends one only for a held or a
+/// dropped frame) frees its slot after the accept grace, so long-lived sessions cannot pin the
+/// budget; a held one keeps its slot past the grace, and a late receipt for a released token
+/// is ignored.
+#[test]
+fn a_silent_claude_acceptance_frees_its_slot_after_the_grace() {
+    let tuning = Tuning { receipt_budget: 1, accept_grace: Duration::from_millis(300), ..fast() };
+    let mut a = Host::tuned("kdobmayer", "homepc", tuning);
+    a.start();
+    let worker = a.claude("worker", "s-worker");
+    a.claude("reviewer", "s-reviewer");
+
+    let first = id_of(&a.send(&worker, "reviewer", "first, silently accepted", None).unwrap());
+    let p1 = a.harness.wait_pushes(&first, 1).remove(0);
+    wait_for("the one slot used", || (slots(&a, "local").used == 1).then_some(()));
+    let second = id_of(&a.send(&worker, "reviewer", "second, waits for the slot", None).unwrap());
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(a.harness.pushes_of(&second).is_empty(), "the budget holds until the grace");
+    let p2 = a.harness.wait_pushes(&second, 1).remove(0);
+    wait_for("the first mapping released", || (!a.harness.mapped(&p1.token)).then_some(()));
+    assert!(a.harness.mapped(&p2.token));
+    a.harness.receipt(&p1.token, ReceiptStatus::Delivered);
+    wait_for("the second released by the grace too", || (!a.harness.mapped(&p2.token)).then_some(()));
+    assert_eq!(slots(&a, "local").used, 0);
+
+    // a held frame keeps its slot past the grace
+    a.harness.st().auto = Some(ReceiptStatus::Held);
+    let held = id_of(&a.send(&worker, "reviewer", "held at the gate", None).unwrap());
+    let p3 = a.harness.wait_pushes(&held, 1).remove(0);
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(a.harness.mapped(&p3.token), "a held attempt is not expired");
+    assert_eq!(slots(&a, "local").used, 1);
+    a.harness.receipt(&p3.token, ReceiptStatus::Delivered);
+    wait_for("the held one released by its receipt", || (!a.harness.mapped(&p3.token)).then_some(()));
+    assert_eq!(slots(&a, "local").used, 0);
+}
+
 // --- G12 --------------------------------------------------------------------------------
 
 /// G12 a lost board: a revoked credential, and separately a fence by another instance, stop the

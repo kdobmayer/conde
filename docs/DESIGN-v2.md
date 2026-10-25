@@ -488,7 +488,11 @@ Each line closes a question the sections above left open; the gate tests in
 - **Notifies beyond the window** (a board pushing more than W unresolved): settled `failed` with
   `transport error`, so the board retries them and the queue keeps its bound.
 - **Release of a slot**: Claude's acceptance holds its slot until a terminal receipt (or an
-  `abandoned`) is in the book. A Codex `delivered`, a Codex `held` (queued; no receipt can follow,
+  `abandoned`) is in the book, or until the accept grace (`Tuning::accept_grace`, 30 s) passes
+  with no receipt at all: Claude Code sends a receipt only for a frame it held or dropped, both
+  decided at admission, never for a plain acceptance, so a silent acceptance is resolved as
+  accepted and released (found 25 Oct 2026: 1133 Claude acceptances, no `delivered` ever, and
+  the local origin at 256/256 twice). A `held` receipt within the grace keeps the slot. A Codex `delivered`, a Codex `held` (queued; no receipt can follow,
   the board settles it on the read) and every `failed` release theirs once the book takes them.
   Locally, a Codex result releases at once; a Claude acceptance whose session is gone releases
   without a report (the local board keeps v1's `notified`); a local hold on a gone session is

@@ -41,6 +41,11 @@ pub struct Tuning {
     pub window: u32,
     /// The receipt budget R of each origin.
     pub receipt_budget: usize,
+    /// How long a Claude acceptance with no receipt keeps its slot. Claude Code sends a
+    /// receipt only for a frame it held (then `delivered`, `denied` or `expired`) or dropped,
+    /// both at admission; a plainly accepted frame is never followed by one, so after the grace
+    /// the attempt is resolved as accepted and its slot, entry and mapping are released.
+    pub accept_grace: Duration,
     /// The local origin's queue capacity (its claim limit).
     pub local_queue: usize,
     /// Endpoint reporting, session-replacement and liveness checks.
@@ -74,6 +79,7 @@ impl Default for Tuning {
         Tuning {
             window: conde_remote::DEFAULT_WINDOW,
             receipt_budget: 256,
+            accept_grace: Duration::from_secs(30),
             local_queue: conde_remote::DEFAULT_WINDOW as usize,
             rescan: Duration::from_secs(5),
             aggregate_wait: Duration::from_secs(2),
@@ -132,6 +138,9 @@ struct Entry {
     status: OutcomeStatus,
     /// A final outcome is recorded; later receipts are ignored.
     resolved: bool,
+    /// When the frame was injected: a Claude acceptance still without a receipt after
+    /// `Tuning::accept_grace` is released.
+    injected: Instant,
 }
 
 /// An outcome waiting to be accepted by a board client's book.
@@ -693,6 +702,7 @@ impl Delivery {
                 address: address.clone(),
                 status: OutcomeStatus::Accepted,
                 resolved: false,
+                injected: Instant::now(),
             },
         );
         token
@@ -813,8 +823,30 @@ impl Delivery {
         }
     }
 
+    /// Claude acceptances past the grace with no receipt: resolved as accepted, slots freed.
+    /// Without this every plainly accepted frame held its slot until its session ended, and a
+    /// host with long-lived sessions ran out of slots after a few hundred deliveries.
+    fn expire_silent_acceptances(&self) {
+        let grace = self.mux.tuning.accept_grace;
+        let expired: Vec<String> = {
+            let st = self.mux.lock();
+            st.entries
+                .iter()
+                .filter(|(_, e)| {
+                    !e.resolved && e.status == OutcomeStatus::Accepted && e.address.kind == Kind::Claude && e.injected.elapsed() >= grace
+                })
+                .map(|(t, _)| t.clone())
+                .collect()
+        };
+        for token in expired {
+            tracing::debug!(token, "accepted with no receipt within the grace; slot released");
+            self.mux.release_now(&token);
+        }
+    }
+
     /// Endpoint reporting, then session replacement and liveness of every unresolved attempt.
     fn rescan<N: Notifier>(&self, notifier: &mut N) {
+        self.expire_silent_acceptances();
         let Some(sqlite) = self.local.sqlite() else { return };
         let clients: Vec<(String, BridgeClient)> = {
             let st = self.mux.lock();

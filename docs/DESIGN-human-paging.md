@@ -280,8 +280,9 @@ overrule.
       own per-owner query for the lookups, so they never fill the claim batch and starve others.
     - A page refuses U+2028 and U+2029 as well as control characters, and an agent stores at most
       10 pages in a rolling hour (`not paged: you paged your human 10 times in the last hour, ...`).
-    - The ensure takes over a retired row named `human` (its history stays, its channel seats
-      go); only a live agent with that name is left alone.
+    - The ensure takes over a retired or unbound row named `human` (its history stays, its
+      channel seats go), such as an old human name left unbound by the import; only a bound agent
+      with that name is left alone.
     - `conde admin slack` refuses a plain `http://` server unless it is this machine (loopback).
     - `paged` and `slack id: set` say the board will try to send, never that a DM arrived.
 12. What the rules guard: rulings 1 and 3 hold for honest clients, this release's CLI, MCP and
@@ -290,3 +291,9 @@ overrule.
     `crates/conde/src/identity.rs:110-114`), and an old daemon still forwards a human's `--from`
     (rollout step 8). The server enforces ruling 2 (only the caller's own human, only by page) and
     the protection of the human row whatever the client.
+13. After the deploy (2026-10-26): users who signed in before emails were stored had none, so no
+    lookup could run until they signed in again. The server's startup pass now fills every NULL
+    email from the user's identity by the sign-in rule (`preferred_username` when it holds an `@`;
+    the `email` claim is not stored), never replacing a stored one, before the Slack worker's
+    first pass looks those users up. A startup pass, not a migration: SQLite boards have no
+    versioned migrations, and the pass is one idempotent UPDATE.

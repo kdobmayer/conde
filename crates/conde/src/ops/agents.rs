@@ -303,9 +303,17 @@ pub fn pin(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
 }
 
+/// The caller's name and address; on a shared board an agent also learns its human
+/// (`human.status`).
 pub fn whoami(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
-    Ok(json!({"name": me.canonical(), "address": me.address.map(|a| a.to_string())}))
+    let mut out = json!({"name": me.canonical(), "address": me.address.as_ref().map(|a| a.to_string())});
+    if ctx.board.is_some() && !me.is_human()
+        && let Ok(human) = super::paging::status_of(ctx)
+    {
+        out["human"] = human;
+    }
+    Ok(out)
 }
 
 pub fn resolve(ctx: &Ctx, body: &Value) -> OpResult<Value> {

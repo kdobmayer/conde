@@ -4,7 +4,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -86,6 +86,8 @@ pub struct Ctx<'a> {
     pub board: Option<&'a str>,
     /// The caller's host migrated to v2 (`hosts.mailbox_only`; shared boards only).
     pub mailbox_only: bool,
+    /// The server sends Slack DMs (a bot token is configured): a page can reach a human.
+    pub slack: bool,
 }
 
 impl Ctx<'_> {
@@ -194,6 +196,8 @@ pub struct Dispatcher {
     retry_ms: AtomicI64,
     /// Set once this dispatcher serves a shared board: its advertised name.
     shared: OnceLock<String>,
+    /// The server's Slack worker runs.
+    slack: AtomicBool,
 }
 
 impl Dispatcher {
@@ -217,7 +221,17 @@ impl Dispatcher {
             clock_offset_ms: AtomicI64::new(0),
             retry_ms: AtomicI64::new(NOTIFY_RETRY_MS),
             shared: OnceLock::new(),
+            slack: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the Slack worker runs on this board (`conde server` with a bot token).
+    pub fn set_slack(&self, on: bool) {
+        self.slack.store(on, Ordering::Relaxed);
+    }
+
+    pub fn slack(&self) -> bool {
+        self.slack.load(Ordering::Relaxed)
     }
 
     /// Serve this board as a shared board advertised as `name` (`conde server`, DESIGN-v2.md
@@ -389,6 +403,7 @@ impl Dispatcher {
             retry_ms: self.retry_ms.load(Ordering::Relaxed),
             board,
             mailbox_only,
+            slack: self.slack(),
         };
         let result = (spec.run)(&ctx, &req.body)?;
         if spec.mutation && !spec.bridge_only {

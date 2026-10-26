@@ -130,7 +130,11 @@ pub fn resolve(req: &Request, default_board: &str, enrolled: &[String]) -> Resul
             out,
         ));
     }
-    let board = explicit.unwrap_or(default_board);
+    // Paging reaches a human on a shared board: with a local default, the one enrolled board.
+    let board = match (explicit, enrolled) {
+        (None, [only]) if default_board == LOCAL_BOARD && req.op.starts_with("human.") => only.as_str(),
+        _ => explicit.unwrap_or(default_board),
+    };
     if board == LOCAL_BOARD {
         return Ok((Target::Local, out));
     }
@@ -216,6 +220,9 @@ mod tests {
         let reply = json!({"to": {"agent": "x"}, "text": "t", "reply_to": "dakai:01MAAA"});
         let (t, r) = resolve(&req("message.send", reply, None), "local", &["dakai".to_string()]).unwrap();
         assert_eq!((t, r.body["reply_to"].as_str()), (Target::Board("dakai".into()), Some("01MAAA")));
+        // paging goes to the one enrolled board even when the default is local
+        assert_eq!(target("human.page", json!({"text": "t"}), None, "local"), Ok(Target::Board("dakai".into())));
+        assert_eq!(target("human.page", json!({"text": "t"}), Some("local"), "dakai"), Ok(Target::Local));
         let bare_with_board = target("message.read", json!({"id": "01MAAA"}), Some("dakai"), "local").unwrap_err();
         assert_eq!(bare_with_board.1, "01MAAA is a local message; drop --board, or use the dakai: id");
         assert!(target("reaction.set", json!({"message_id": "other:01M"}), None, "local").is_err());

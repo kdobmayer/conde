@@ -466,9 +466,27 @@ pub fn receipts(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let mut out = Vec::with_capacity(rows.len());
     for m in &rows {
         let (status, delivery) = receipt(ctx, m)?;
-        out.push(json!({"message_id": m.id, "seq": m.seq, "to": m.to(), "status": status, "delivery": delivery}));
+        let mut row = json!({"message_id": m.id, "seq": m.seq, "to": m.to(), "status": status, "delivery": delivery});
+        if m.page.is_some() {
+            row["slack"] = json!(slack_state(ctx, m)?);
+        }
+        out.push(row);
     }
     Ok(json!({"receipts": out, "next_cursor": next}))
+}
+
+/// Whether a page reached its human on Slack: `pending`, `sent`, `failed (<Slack's error>)`, or
+/// `not sent (<why>)`. Slack attempts are hidden from every other receipt; a page shows them,
+/// because its sender must know whether the human was reached.
+fn slack_state(ctx: &Ctx, m: &MsgRow) -> OpResult<String> {
+    let old = ms_from_iso(&m.created_at).is_some_and(|at| ctx.now_ms - at > crate::slack::MAX_AGE_MS);
+    Ok(match ctx.db.slack_attempt(&m.id)? {
+        Some((status, _)) if status == "delivered" => "sent".to_string(),
+        Some((status, reason)) if status == "refused" => format!("failed ({})", reason.unwrap_or_default()),
+        Some((status, _)) if status == "dropped" => "not sent (read on the board first)".to_string(),
+        _ if old => "not sent (unread past the hour a page is sent in)".to_string(),
+        _ => "pending".to_string(),
+    })
 }
 
 /// A message's read state (DM: read time; channel: how many members other than the sender

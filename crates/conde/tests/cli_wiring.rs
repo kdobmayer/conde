@@ -920,3 +920,37 @@ fn watch_prints_the_board_and_follows_it() {
     assert!(line.contains("  tester/bob -> tester/alice  after it started  "), "{line}");
     assert!(line.ends_with(&format!("  {after}")), "{line}");
 }
+
+/// `conde page` and `conde human done-pages` send the paging ops and print their answers.
+#[test]
+fn page_and_done_pages_send_the_paging_ops() {
+    let r = Root::new();
+    let d = r.fake(|req: &Value| {
+        Ok(match (req["op"].as_str().unwrap(), req["body"]["kind"].as_str()) {
+            ("human.page", Some("done")) => json!({"to": "tester/human", "status": "not paged", "reason": "done pages are off", "board": "dakai"}),
+            ("human.page", _) => json!({"message_id": "dakai:01MP", "to": "tester/human", "kind": "blocked", "status": "paged", "board": "dakai"}),
+            ("human.done_pages", _) => json!({"human": "tester/human", "done_pages": req["body"]["on"], "board": "dakai"}),
+            _ => json!({}),
+        })
+    });
+    let (ok, out, err) = r.conde(&["page", "need a go for PR 41"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "paged (dakai:01MP to tester/human)\n");
+    let (ok, out, _) = r.conde(&["page", "--done", "PR 41 merged"]);
+    assert!(ok);
+    assert_eq!(out, "not paged: done pages are off\n");
+    let (ok, out, _) = r.conde(&["human", "done-pages", "on"]);
+    assert!(ok);
+    assert_eq!(out, "done pages on for tester/human on dakai\n");
+    assert!(!r.conde(&["human", "done-pages", "maybe"]).0);
+    let sent: Vec<(String, Value)> = d.take().iter().map(|q| (q["op"].as_str().unwrap().to_string(), q["body"].clone())).collect();
+    assert_eq!(
+        sent,
+        [
+            ("human.page".to_string(), json!({"text": "need a go for PR 41", "kind": "blocked"})),
+            ("human.page".to_string(), json!({"text": "PR 41 merged", "kind": "done"})),
+            ("human.done_pages".to_string(), json!({"on": true})),
+        ]
+    );
+}
+

@@ -815,8 +815,9 @@ impl Core {
         Response::ok(&id, result)
     }
 
-    /// `whoami`: the local name and address, the caller's publications and the shared boards
-    /// (local data only).
+    /// `whoami`: the local name and address, the caller's publications and the shared boards,
+    /// and for an agent its human on each connected board it is published on (`human.status`,
+    /// within the aggregate wait).
     async fn whoami(&self, req: Request) -> Response {
         let id = req.request_id.clone();
         let local = self.local(req.clone()).await;
@@ -824,8 +825,37 @@ impl Core {
         let publications = self.local_identity(&req).map(|me| self.publications_of(&me.id)).unwrap_or_default();
         result["publications"] = Value::Array(publications);
         result["boards"] = json!(enrolled_names(self));
+        result["humans"] = Value::Array(self.humans(&req).await);
         label(&mut result, LOCAL_BOARD);
         Response::ok(&id, result)
+    }
+
+    /// The caller's human on each connected board it is published on, by board.
+    async fn humans(&self, req: &Request) -> Vec<Value> {
+        let Ok(me) = self.local_identity(req) else { return Vec::new() };
+        if me.is_human() {
+            return Vec::new();
+        }
+        let wait = self.mux.tuning.aggregate_wait;
+        let mut calls = JoinSet::new();
+        for conn in self.boards() {
+            let published = board::publication_of(self, &conn.alias, &me.id).filter(|p| p.state == PublicationState::Published);
+            let Some(p) = published else { continue };
+            if !conn.connected() || !self.mux.is_reconciled(&conn.alias) {
+                continue;
+            }
+            let actor = format!("mailbox:{}@{}", p.mailbox_id.unwrap_or_default(), conn.host());
+            let status = Request { op: "human.status".into(), body: json!({}), board: None, from: None, ..req.clone() };
+            calls.spawn(async move { forward(&conn, &status, Some(actor), wait).await });
+        }
+        let mut out = Vec::new();
+        while let Ok(Some(Ok(resp))) = tokio::time::timeout(wait, calls.join_next()).await {
+            if let Some(r) = resp.result.filter(|_| resp.ok) {
+                out.push(r);
+            }
+        }
+        out.sort_by(|a, b| a["board"].as_str().cmp(&b["board"].as_str()));
+        out
     }
 
     /// One agent's publications: `[{board, name: owner/shared, state}]`.

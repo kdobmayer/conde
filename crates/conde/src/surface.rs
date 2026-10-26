@@ -370,6 +370,32 @@ pub fn sent_line(r: &Value) -> String {
     out
 }
 
+/// `conde page`: `paged`, `stored, not paged: <reason>` or `not paged: <reason>`, with the
+/// page's id when it was stored.
+pub fn paged(r: &Value) -> String {
+    let mut out = s(&r["status"]).to_string();
+    if let Some(why) = r["reason"].as_str() {
+        let _ = write!(out, ": {why}");
+    }
+    if let Some(id) = r["message_id"].as_str() {
+        let _ = write!(out, " ({} to {})", qualify(result_board(r), id), s(&r["to"]));
+    }
+    out
+}
+
+/// `conde human done-pages`.
+pub fn done_pages(r: &Value) -> String {
+    let on = if r["done_pages"] == true { "on" } else { "off" };
+    format!("done pages {on} for {} on {}", s(&r["human"]), result_board(r))
+}
+
+/// One human as `whoami` shows it: `human: <name> on <board> · slack: yes · done pages: off`.
+pub fn human_line(h: &Value) -> String {
+    let yes = |v: &Value| if *v == true { "yes" } else { "no" };
+    let on = if h["done_pages"] == true { "on" } else { "off" };
+    format!("human: {} on {} · slack: {} · done pages: {on}", s(&h["human"]), s(&h["board"]), yes(&h["slack"]))
+}
+
 pub fn inbox(r: &Value, surface: Surface) -> Out {
     let requested = result_board(r);
     let mut out = Out::default();
@@ -596,9 +622,10 @@ pub fn sent(r: &Value, surface: Surface) -> Out {
     for x in &rows {
         let board = board_of(x, requested);
         let delivery = x["delivery"].as_str().map(|d| format!("  delivery: {d}")).unwrap_or_default();
+        let slack = x["slack"].as_str().map(|d| format!("  slack: {d}")).unwrap_or_default();
         let _ = writeln!(
             out.text,
-            "{board}  {}  {}  {}{delivery}",
+            "{board}  {}  {}  {}{delivery}{slack}",
             qualify(board, s(&x["message_id"])),
             s(&x["to"]),
             s(&x["status"])
@@ -741,6 +768,10 @@ pub fn whoami(r: &Value) -> String {
         if !pubs.iter().any(|p| s(&p["board"]) == b) {
             let _ = write!(out, "\nnot published on {b}");
         }
+    }
+    let humans = r["humans"].as_array().into_iter().flatten().chain(Some(&r["human"]).filter(|h| h.is_object()));
+    for h in humans {
+        let _ = write!(out, "\n{}", human_line(h));
     }
     out
 }
@@ -901,6 +932,9 @@ mod tests {
             "publications": [{"board": "dakai", "name": "me/reviewer", "state": "published"}],
             "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true}, {"board": "two", "available": false}]});
         assert_eq!(whoami(&r), "me/worker (local, claude:s1@h)\npublished: dakai as me/reviewer\nnot published on two");
+        let r = json!({"name": "me/worker", "address": "claude:s1@h", "publications": [], "boards": [],
+            "humans": [{"human": "me/krisz", "board": "dakai", "slack": true, "done_pages": false}]});
+        assert_eq!(whoami(&r), "me/worker (local, claude:s1@h)\nhuman: me/krisz on dakai · slack: yes · done pages: off");
         let r = json!({"name": "me/worker", "address": "claude:s1@h", "publications": [], "boards": ["dakai"]});
         assert_eq!(
             registered(&r, "worker"),

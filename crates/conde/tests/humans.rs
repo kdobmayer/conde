@@ -18,11 +18,12 @@ use serde_json::{Value, json};
 
 const ZBOT: &str = "codex:t-zbot";
 
-/// A shared board `dakai`: krisz (alice) and zed (zbot) on their hosts,
+/// A shared board `dakai` that sends Slack DMs: krisz (alice) and zed (zbot) on their hosts,
 /// each with their human name; krisz's member id U0KRISZ.
 fn shared() -> (Board, Principal) {
     let b = Board::new();
     b.d.share("dakai");
+    b.d.set_slack(true);
     b.register(ALICE, "alice");
     let zed = b.other("zed", "zbox");
     b.call_as(&zed, ZBOT, "agent.register", json!({"name": "zbot"})).unwrap();
@@ -266,6 +267,7 @@ fn a_human_never_sends_not_even_as_an_agent() {
         ("channel.invite", json!({"channel": "#dev", "name": "zed/zbot"})),
         ("channel.join", json!({"channel": "#dev"})),
         ("channel.create", json!({"channel": "#mine"})),
+        ("human.page", json!({"text": "paging myself"})),
     ] {
         // as the human, and as the human acting for alice (`--from`, a local socket's override)
         assert_eq!(refused(b.call(HUMAN, op, body.clone())), (ErrorCode::Forbidden, no.to_string()), "{op}");
@@ -317,4 +319,85 @@ fn a_channel_mention_of_a_human_is_listed_not_delivered() {
     assert_eq!(b.status_of(all["message_id"].as_str().unwrap(), "zbot"), "pending");
     let humans: Vec<_> = b.notifications().into_iter().filter(|(k, _, _)| k.ends_with(".human")).collect();
     assert!(humans.is_empty(), "{humans:?}");
+}
+
+#[test]
+fn a_page_is_stored_and_paged_and_a_done_page_follows_the_setting() {
+    let (b, zed) = shared();
+    let r = b.ok(ALICE, "human.page", json!({"text": "need a go for the deploy"}));
+    assert_eq!((r["status"].as_str(), r["to"].as_str(), r["kind"].as_str()), (Some("paged"), Some("krisz/human"), Some("blocked")));
+    let mid = r["message_id"].as_str().unwrap();
+    let m = b.d.with_conn(|tx| tx.message_by_id(mid)).unwrap().unwrap();
+    assert_eq!((m.sender.as_str(), m.recipient.as_deref(), m.page.as_deref()), ("krisz/alice", Some("krisz/human"), Some("blocked")));
+    assert_eq!(b.notifications().iter().find(|(k, _, _)| k == &format!("{mid}.human")).map(|(_, kind, _)| kind.as_str()), Some("dm"));
+
+    // done pages are off by default: not stored
+    let count = b.message_count();
+    let r = b.ok(ALICE, "human.page", json!({"text": "deploy finished", "kind": "done"}));
+    assert_eq!((r["status"].as_str(), r["reason"].as_str()), (Some("not paged"), Some("done pages are off")));
+    assert!(r.get("message_id").is_none());
+    assert_eq!(b.message_count(), count);
+    // on: stored and paged
+    assert_eq!(b.ok(ALICE, "human.done_pages", json!({"on": true})), json!({"human": "krisz/human", "done_pages": true}));
+    let r = b.ok(ALICE, "human.page", json!({"text": "deploy finished", "kind": "done"}));
+    assert_eq!(r["status"], "paged");
+    let m = b.d.with_conn(|tx| tx.message_by_id(r["message_id"].as_str().unwrap())).unwrap().unwrap();
+    assert_eq!(m.page.as_deref(), Some("done"));
+    b.ok(ALICE, "human.done_pages", json!({"on": false}));
+    assert_eq!(b.ok(ALICE, "human.page", json!({"text": "x", "kind": "done"}))["status"], "not paged");
+
+    // zed has no member id and no email: stored, not paged, with the fix
+    let r = b.call_as(&zed, ZBOT, "human.page", json!({"text": "blocked"})).unwrap();
+    assert_eq!(r["status"], "stored, not paged");
+    assert_eq!(
+        r["reason"],
+        "no Slack member id and no sign-in email for zed; the board admin sets it: conde admin slack zed <member-id>"
+    );
+    // a board without Slack stores it and says so
+    b.d.set_slack(false);
+    let r = b.ok(ALICE, "human.page", json!({"text": "blocked again"}));
+    assert_eq!((r["status"].as_str(), r["reason"].as_str()), (Some("stored, not paged"), Some("dakai sends no Slack DMs (no bot token is set); your human reads it on the web board")));
+    // a page is the caller's own human's: no recipient is taken from the body
+    let r = b.ok(ALICE, "human.page", json!({"text": "to whom?", "to": {"agent": "zed/human"}}));
+    assert_eq!(r["to"], "krisz/human");
+    // the kind is blocked or done; the local board pages nobody
+    assert_eq!(refused(b.call(ALICE, "human.page", json!({"text": "x", "kind": "fyi"}))).0, ErrorCode::BadRequest);
+    let local = Board::new();
+    local.register(ALICE, "alice");
+    let e = refused(local.call(ALICE, "human.page", json!({"text": "x"})));
+    assert_eq!(e, (ErrorCode::Forbidden, "paging reaches your human on a shared board: name it with --board <alias>".into()));
+}
+
+#[test]
+fn a_page_is_one_line_of_at_most_140_characters() {
+    let (b, _) = shared();
+    let full = "é".repeat(140);
+    assert_eq!(b.ok(ALICE, "human.page", json!({"text": full}))["status"], "paged");
+    let count = b.message_count();
+    let long = refused(b.call(ALICE, "human.page", json!({"text": "é".repeat(141)})));
+    assert_eq!(long, (ErrorCode::BadRequest, "a page is at most 140 characters; this one is 141".into()));
+    let two = refused(b.call(ALICE, "human.page", json!({"text": "first\nsecond"})));
+    assert_eq!(two, (ErrorCode::BadRequest, "a page is one line: say what you need in one line".into()));
+    let empty = refused(b.call(ALICE, "human.page", json!({"text": "   "})));
+    assert_eq!(empty.0, ErrorCode::BadRequest);
+    assert_eq!(b.message_count(), count);
+}
+
+#[test]
+fn whoami_and_human_status_name_the_human() {
+    let (b, zed) = shared();
+    let want = json!({"human": "krisz/human", "board": "dakai", "slack": true, "done_pages": false});
+    assert_eq!(b.ok(ALICE, "human.status", json!({})), want);
+    let who = b.ok(ALICE, "agent.whoami", json!({}));
+    assert_eq!(who["human"], want);
+    assert_eq!(
+        conde::surface::whoami(&who).lines().last().unwrap(),
+        "human: krisz/human on dakai · slack: yes · done pages: off"
+    );
+    let zw = b.call_as(&zed, ZBOT, "agent.whoami", json!({})).unwrap();
+    assert_eq!((zw["human"]["human"].as_str(), zw["human"]["slack"].as_bool()), (Some("zed/human"), Some(false)));
+    // a local board has no human line
+    let local = Board::new();
+    local.register(ALICE, "alice");
+    assert!(local.ok(ALICE, "agent.whoami", json!({})).get("human").is_none());
 }

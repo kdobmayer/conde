@@ -988,6 +988,10 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
                 }
             }
         },
+        "human.status" => match actor(s, host, req) {
+            None => err(&id, "unauthenticated", "the actor is not a mailbox of this host"),
+            Some(_) => ok(&id, json!({"human": format!("{owner}/human"), "board": "dakai", "slack": true, "done_pages": false})),
+        },
         "message.get" | "message.read" | "inbox.list" | "receipt.list" | "agent.whoami" => match actor(s, host, req) {
             None => err(&id, "unauthenticated", "the actor is not a mailbox of this host"),
             Some(me) => read_op(s, &id, &op, body, &me),

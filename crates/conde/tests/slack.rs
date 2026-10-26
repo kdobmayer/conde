@@ -584,3 +584,20 @@ fn an_unchanged_or_admin_id_is_final_after_one_refusal() {
     assert_eq!(f.user("krisz").slack_member_id.as_deref(), Some("U0ADMIN"));
     assert_eq!(f.outcomes(), [("refused".to_string(), Some("slack: user_not_found".to_string()))]);
 }
+
+#[test]
+fn pages_waiting_for_a_member_id_never_starve_an_owner_with_one() {
+    let f = Fixture::new(Vec::new());
+    // zed has no member id and no email: his pages wait, more of them than one pass takes
+    let zed = f.b.other("zed", "zbox");
+    f.b.call_as(&zed, "codex:t-zed", "agent.register", json!({"name": "zbot"})).unwrap();
+    f.b.d.with_tx(|tx| Ok(conde::humans::ensure(tx, tx.user_id("zed")?.unwrap())?)).unwrap();
+    for i in 0..25 {
+        f.b.call_as(&zed, "codex:t-zed", "human.page", json!({"text": format!("zed blocked {i}")})).unwrap();
+    }
+    f.page("krisz's own page");
+    assert_eq!(f.pass(), 1);
+    let calls = f.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1["channel"], "U0KRISZ");
+}

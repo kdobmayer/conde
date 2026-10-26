@@ -884,11 +884,14 @@ pub trait Tx {
     /// Pending notifications due at `now` whose recipient is bound on `host`,
     /// by due time then insertion order.
     fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>>;
-    /// The Slack worker's candidates: the dm notifications of pages to humans, pending or badged
-    /// (a bridge only badges a human), created in [since, now], unread by their human, and whose
-    /// message has no [`SLACK_INSTANCE`] attempt that is final (delivered, refused, dropped) or
-    /// not yet due (`not_before` after `now`). By insertion order.
+    /// The Slack worker's candidates: the dm notifications of pages to humans whose owner has a
+    /// Slack member id, pending or badged (a bridge only badges a human), created in [since, now],
+    /// unread by their human, and whose message has no [`SLACK_INSTANCE`] attempt that is final
+    /// (delivered, refused, dropped) or not yet due (`not_before` after `now`). By insertion order.
     fn slack_due(&self, now: i64, since: i64, limit: i64) -> StoreResult<Vec<SlackDue>>;
+    /// Pages to humans whose owner has no Slack member id yet, created in [since, now] and unread:
+    /// (owner id, the newest such page's message id), one row per owner.
+    fn slack_waiting(&self, now: i64, since: i64) -> StoreResult<Vec<(i64, String)>>;
     /// The latest [`SLACK_INSTANCE`] attempt on the message's notifications as (status, reason).
     fn slack_attempt(&self, message_id: &str) -> StoreResult<Option<(String, Option<String>)>>;
     /// Abandons the [`SLACK_INSTANCE`] attempts still dispatching on `owner`'s notifications of the

@@ -1615,7 +1615,7 @@ impl Tx for PgTx {
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN users u ON u.user_id = a.owner_id JOIN messages m ON m.message_id = n.message_id
                  WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $2 AND $1
-                   AND n.kind = 'dm' AND m.page IS NOT NULL
+                   AND n.kind = 'dm' AND m.page IS NOT NULL AND u.slack_member_id IS NOT NULL
                    AND a.address_kind = 'human' AND m.created_at >= $3
                    AND NOT EXISTS (SELECT 1 FROM dm_read r WHERE r.message_id = m.message_id AND r.agent_id = a.agent_id)
                    AND NOT EXISTS (SELECT 1 FROM agents a2
@@ -1634,6 +1634,24 @@ impl Tx for PgTx {
                 owner_id: r.get(3),
                 owner: r.get(4),
             })
+            .collect())
+    }
+
+    fn slack_waiting(&self, now: i64, since: i64) -> StoreResult<Vec<(i64, String)>> {
+        Ok(self
+            .query(
+                "SELECT a.owner_id, MAX(n.message_id)
+                 FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
+                 JOIN users u ON u.user_id = a.owner_id JOIN messages m ON m.message_id = n.message_id
+                 WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $2 AND $1
+                   AND n.kind = 'dm' AND m.page IS NOT NULL AND a.address_kind = 'human' AND m.created_at >= $3
+                   AND u.slack_member_id IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM dm_read r WHERE r.message_id = m.message_id AND r.agent_id = a.agent_id)
+                 GROUP BY a.owner_id ORDER BY a.owner_id",
+                &[&now, &since, &crate::util::iso_from_ms(since)],
+            )?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
             .collect())
     }
 

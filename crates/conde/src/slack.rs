@@ -288,25 +288,25 @@ impl Worker {
     }
 
     /// Looks up the member id by email of the users without one: the sign-ins since the last
-    /// pass, every such user on the first pass, and the owner of each page waiting for it (once
-    /// per page).
+    /// pass, every such user on the first pass, and each owner with a page waiting for it (once
+    /// per newest waiting page).
     async fn lookups(&mut self) -> anyhow::Result<()> {
         let d = self.d.clone();
         let now = d.now_ms();
-        let (users, due) = tokio::task::spawn_blocking(move || {
-            d.with_conn(|tx| Ok((tx.users_slack()?, tx.slack_due(now, now - MAX_AGE_MS, BATCH)?)))
+        let (users, waiting) = tokio::task::spawn_blocking(move || {
+            d.with_conn(|tx| Ok((tx.users_slack()?, tx.slack_waiting(now, now - MAX_AGE_MS)?)))
         })
         .await??;
-        let missing = |id: &i64| users.iter().any(|u| u.user_id == *id && u.slack_member_id.is_none());
         let mut wanted = self.d.take_slack_lookups();
         if std::mem::take(&mut self.startup) {
             wanted.extend(users.iter().filter(|u| u.slack_member_id.is_none()).map(|u| u.user_id));
         }
         self.looked_up.retain(|_, at| now - *at <= MAX_AGE_MS);
-        for n in &due {
-            if missing(&n.owner_id) && !self.looked_up.contains_key(&n.message_id) {
-                self.looked_up.insert(n.message_id.clone(), now);
-                wanted.insert(n.owner_id);
+        // once per page: an owner's newest waiting page not looked up yet
+        for (owner_id, message_id) in waiting {
+            if !self.looked_up.contains_key(&message_id) {
+                self.looked_up.insert(message_id, now);
+                wanted.insert(owner_id);
             }
         }
         for user in users.iter().filter(|u| wanted.contains(&u.user_id) && u.slack_member_id.is_none()) {
@@ -372,12 +372,7 @@ pub async fn claim_due(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>) -> anyhow
     tokio::task::spawn_blocking(move || {
         let now = d.now_ms();
         // A read first: most passes find nothing, and a write transaction takes the board-wide lock.
-        let due = d.with_conn(|tx| {
-            let reachable: BTreeSet<i64> =
-                tx.users_slack()?.into_iter().filter(|u| u.slack_member_id.is_some()).map(|u| u.user_id).collect();
-            Ok(tx.slack_due(now, now - MAX_AGE_MS, BATCH)?.iter().any(|n| reachable.contains(&n.owner_id)))
-        })?;
-        if !due {
+        if d.with_conn(|tx| tx.slack_due(now, now - MAX_AGE_MS, 1))?.is_empty() {
             return Ok(Vec::new());
         }
         d.with_tx(|tx| claim(tx, &config, now))

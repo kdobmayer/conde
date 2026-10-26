@@ -45,7 +45,7 @@ pub enum Ensured {
     Rebound(String),
     /// A new `<owner>/human` row.
     Created(String),
-    /// No human row, and the owner's `human` name is another agent's: nothing changed.
+    /// No human row, and the owner's `human` name is another live agent's: nothing changed.
     Conflict(String),
 }
 
@@ -77,6 +77,12 @@ pub fn ensure(tx: &dyn Tx, user_id: i64) -> StoreResult<Option<Ensured>> {
         return Ok(Some(Ensured::Rebound(name)));
     }
     if let Some(taken) = tx.agent_by_name(user_id, HUMAN_NAME)? {
+        // a retired row holds the name only for its history: it becomes the human name
+        if taken.retired {
+            tx.set_binding(&taken.id, Some(&address))?;
+            tracing::info!(owner = %user.name, name = %taken.canonical(), "retired name became the human name");
+            return Ok(Some(Ensured::Rebound(taken.canonical())));
+        }
         tracing::warn!(owner = %user.name, name = %taken.canonical(), "no human name made: the name is another agent's");
         return Ok(Some(Ensured::Conflict(taken.canonical())));
     }

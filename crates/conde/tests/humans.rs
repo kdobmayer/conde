@@ -432,3 +432,20 @@ fn an_agent_pages_its_human_at_most_ten_times_an_hour() {
     b.d.advance_clock(3_600_001);
     assert_eq!(b.ok(ALICE, "human.page", json!({"text": "blocked again"}))["status"], "paged");
 }
+
+#[test]
+fn a_retired_name_human_is_taken_over_by_the_human_name() {
+    let b = Board::new();
+    // krisz once had an agent named `human`, unbound and retired before the board kept human names
+    b.register(ALICE, "human");
+    b.ok(ALICE, "agent.unregister", json!({"name": "human"}));
+    b.ok(HUMAN, "agent.retire", json!({"name": "human"}));
+    let old = agent(&b.d, "krisz", "human").unwrap();
+    assert!(old.retired);
+    b.d.share("dakai");
+    let done = b.d.with_tx(|tx| Ok(humans::ensure(tx, tx.user_id("krisz")?.unwrap())?)).unwrap();
+    assert_eq!(done, Some(Ensured::Rebound("krisz/human".into())));
+    let now = agent(&b.d, "krisz", "human").unwrap();
+    assert_eq!((now.id, now.retired), (old.id, false));
+    assert_eq!(now.address, Some(Address::new(Kind::Human, "krisz", "web")));
+}

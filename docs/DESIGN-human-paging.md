@@ -44,7 +44,7 @@ One migration (0016), Postgres and SQLite:
 
 | Column | Type | Meaning |
 |---|---|---|
-| `users.email` | text, null | the id token's `email` claim, else `preferred_username`; refreshed on every login |
+| `users.email` | text, null | `preferred_username` (the UPN), else the `email` claim when the UPN has no `@`; refreshed on every login |
 | `users.slack_member_id` | text, null | the Slack member id (`U…`/`W…`) |
 | `users.slack_source` | text, null | `env` (imported once), `lookup` or `admin` |
 | `users.done_pages` | boolean, not null, default false | the human's choice |
@@ -100,20 +100,24 @@ The server ensures every user has exactly one human row:
 ### The `page` verb
 
 ```
-conde page "<text>"            # blocked: always delivered
-conde page "<text>" --done     # done: delivered only if the human turned done pages on
+conde page "<text>"            # blocked: always sent to Slack when the board has the human's id
+conde page "<text>" --done     # done: stored only if the human turned done pages on
 ```
 
 - No name argument: the server resolves the caller's own human from the caller's owner. Only an
   agent may page; a human actor is refused.
-- Server op `human.page {text, kind}`: one line of at most 140 characters, so the Slack DM carries
-  the whole text. It stores a message from the agent to its human with `messages.page = kind`,
+- Server op `human.page {text, kind}`: one line (no control character, no U+2028 or U+2029) of at
+  most 140 characters, so the Slack DM carries the whole text; at most 10 pages per agent in a
+  rolling hour. It stores a message from the agent to its human with `messages.page = kind`,
   which creates a `dm` notification.
 - Result:
-  - `paged`: stored, and the human has a Slack member id;
+  - `paged`: stored, and the human has a Slack member id, so the board will try to send it (the
+    CLI says `paged: queued for Slack; conde sent shows whether it went`). It never says the DM
+    arrived;
   - `stored, not paged: <reason>`: no Slack member id, with the fix;
   - `not paged: done pages are off`: a done page when done pages is off. It is not stored.
-- `conde sent` shows a `slack:` field on pages: pending, sent, or failed with Slack's error code.
+- `conde sent` shows a `slack:` field on pages: pending, sent (Slack accepted it), or failed with
+  Slack's error code.
   Today Slack attempts are hidden from receipts on purpose (`postgres.rs:1874`, `sqlite.rs:1156`);
   pages are the one exception, because the agent must know whether its human was reached.
 - MCP tool `page` with the same arguments and results.
@@ -127,8 +131,10 @@ conde page "<text>" --done     # done: delivered only if the human turned done p
 - For every user without an id, the server looks it up from the stored email with
   `users.lookupByEmail` (`slack_source = lookup`): at login, at startup, and at page time when
   the id is still empty. The page is stored before the lookup runs.
-- When a send fails with `user_not_found` or `account_inactive`, the worker looks the id up again
-  once. If the id changed, it retries the same page; otherwise the attempt is final, as today.
+- When a send fails with `channel_not_found` or `user_not_found`, if Slack returns them for a
+  member id that changed or was wrong, the worker looks the id up again once. If the id changed,
+  it retries the same page; otherwise the attempt is final, as today. `account_inactive` is the
+  bot's own account and never triggers a lookup.
 - A mismatched email is fixed by the admin, not by agents: `conde admin slack <owner> <member-id>`
   with the admin key (`slack_source = admin`, never replaced by a lookup). An agent setting its
   owner's id could point pages at another person's Slack, which breaks ruling 2.
@@ -145,13 +151,13 @@ conde page "<text>" --done     # done: delivered only if the human turned done p
 `whoami` on a shared board adds one line from a new server op `human.status`:
 
 ```
-human: kdobmayer/krisz on dakai · slack: yes · done pages: off
+human: kdobmayer/krisz on dakai · slack id: set · done pages: off
 ```
 
 The MCP instructions and both skills (`skills/claude/SKILL.md`, `skills/codex/SKILL.md`) carry the
 rule:
 
-- `whoami` names your human, whether Slack reaches them, and whether done pages are on.
+- `whoami` names your human, whether the board has their Slack member id, and whether done pages are on.
 - Page your human (`conde page`) only when you are blocked on them: a decision, a go, a blocker.
   Say what you need in one line.
 - Page `--done` only when done pages are on.
@@ -188,6 +194,11 @@ lease. This is true today and stays so.
    page to the owner.
 6. Remove `slack_notify` from the infra tfvars and the env.
 7. The teammates' agents pick up the new skill with `conde setup`; their owners are told.
+8. Every host runs the new binary (`conde setup` after the release). An old daemon still turns a
+   human's `--from <agent>` into that agent's mailbox and forwards the send; the server cannot
+   tell it from the agent, because a request carries no client version (only the frame version
+   and the hello's protocol, which old and new daemons send alike). Until every host upgraded, an
+   old binary can still let a human send as one of their own agents.
 
 Rollback before step 6 is the previous image: it ignores the new columns and still has the env
 map. The humans rebound to `web` stay there; the old image delivers to them through the Slack
@@ -240,16 +251,19 @@ overrule.
 4. Slack DM: the first line is the kind line without the board (`kdobmayer/desk is blocked on
    you:`), so the board moved to the link (`Open in conde on dakai`), or a plain `on dakai` line
    when the server has no public URL.
-5. The re-lookup after a refused send also covers `channel_not_found`, beside `user_not_found`
-   and `account_inactive`. Inference, not checked against live Slack: `chat.postMessage` to a
-   member id that no longer exists answers `channel_not_found`.
+5. The re-lookup after a refused send fires on `channel_not_found` and `user_not_found`, if Slack
+   returns them for a member id that no longer fits: neither is checked against live Slack. Not on
+   `account_inactive`, which is the bot's own account.
 6. Lookups: a sign-in of a user without a member id asks the Slack worker of the replica that
    took the sign-in (an in-process queue); the worker's first pass after start looks up every
-   user without one; a page waiting for an id is looked up once. A user without an email (none
-   signed in yet) gets the admin fix in the page result.
-7. `conde sent` on a page: `slack: pending`, `sent`, `failed (<Slack's error>)`, and a fourth
-   state, `not sent (<why>)`, for a page read on the board before the post and for an unsent
-   page past the hour; "pending" would be false there.
+   user without one; an owner whose pages wait for an id is looked up once per newest waiting
+   page. A user without an email (none signed in yet) gets the admin fix in the page result. The
+   email is `preferred_username` (the UPN, which the tenant controls); the `email` claim, which
+   Microsoft documents as mutable and unverified, is used only when the UPN has no `@`.
+7. `conde sent` on a page: `slack: pending`, `sent` (Slack accepted it), `failed (<Slack's
+   error>)`, and `not sent (<why>)` for an unsent page past the hour, where "pending" would be
+   false. `not sent (read before the post)` exists for a send dropped by a read; nothing marks a
+   web-bound human's DM read today, so it shows only once a read is added.
 8. Page results carry the reason and the fix: `stored, not paged: no Slack member id for <owner>
    yet; the board looks it up by <email> ...` or `... no sign-in email ...; the board admin sets
    it: conde admin slack <owner> <member-id>`, and `stored, not paged: <board> sends no Slack DMs
@@ -261,4 +275,18 @@ overrule.
     the default board is local; `--board` names one otherwise. `whoami` (local, every board) asks
     `human.status` of each connected board the caller is published on, within the aggregate
     wait; `whoami --board <alias>` carries the same line from the board's `agent.whoami`.
-
+11. Security review fixes (2026-10-26):
+    - The worker claims only pages of owners with a member id; pages waiting for an id have their
+      own per-owner query for the lookups, so they never fill the claim batch and starve others.
+    - A page refuses U+2028 and U+2029 as well as control characters, and an agent stores at most
+      10 pages in a rolling hour (`not paged: you paged your human 10 times in the last hour, ...`).
+    - The ensure takes over a retired row named `human` (its history stays); only a live agent
+      with that name is left alone.
+    - `conde admin slack` refuses a plain `http://` server unless it is this machine (loopback).
+    - `paged` and `slack id: set` say the board will try to send, never that a DM arrived.
+12. What the rules guard: rulings 1 and 3 hold for honest clients, this release's CLI, MCP and
+    daemon. The security boundary is the host key: any process on an enrolled host can act as any
+    of that host's agents (a shell with `CLAUDE_CODE_SESSION_ID` set acts as that Claude session,
+    `crates/conde/src/identity.rs:110-114`), and an old daemon still forwards a human's `--from`
+    (rollout step 8). The server enforces ruling 2 (only the caller's own human, only by page) and
+    the protection of the human row whatever the client.

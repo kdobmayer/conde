@@ -111,9 +111,9 @@ SQLite on Azure Files (unsafe).
   the insert path creates a human's notification only for a page.
 - The server's Slack worker (`crates/conde/src/slack.rs`) sends each page as a Slack DM to the
   owner's member id (`users.slack_member_id`: imported once from `CONDE_SLACK_NOTIFY`, looked
-  up by the sign-in email, or set by the admin, which a lookup never replaces), once per page,
+  up by the sign-in UPN, or set by the admin, which a lookup never replaces), once per page,
   while it is unread and younger than an hour; a "done" page is stored only when the human
-  turned done pages on. Each send is an attempt of the reserved instance `slack` (no bridge or
+  turned done pages on, and an agent stores at most 10 pages an hour. Each send is an attempt of the reserved instance `slack` (no bridge or
   host may take that name) with its lease or retry time in `not_before`; it never changes the
   notification, and the web views and the fleet ignore those attempts. The page's sender alone
   sees its Slack state (`slack:` in `conde sent`).

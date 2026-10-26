@@ -6,7 +6,7 @@ use askama::Template;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-use super::{HostKey, McpGrant};
+use super::HostKey;
 use super::session::random_token;
 
 const CSS: &str = r#":root{--bg:#fafaf9;--fg:#1c1917;--muted:#78716c;--line:#e7e5e4;--accent:#1d4ed8;--on-accent:#fff;--danger:#b91c1c;--code:#f0efed;color-scheme:light dark}
@@ -125,101 +125,12 @@ impl From<&HostKey> for KeyRow {
 {% else %}<td>live</td><td><form method="post" action="/keys/{{ k.host_id|urlencode }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Revoke</button></form></td>{% endif %}
 </tr>
 {% endfor %}</tbody>
-</table></div>{% endif %}
-<h1>Connected apps</h1>
-<p class="muted">Apps such as Claude that act on this board as you, through its MCP endpoint <code>{{ server }}/mcp</code>. Revoking one ends its access at once.</p>
-{% if apps.is_empty() %}<p class="muted">No connected apps.</p>
-{% else %}<div class="wrap"><table>
-<thead><tr><th>App</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
-<tbody>
-{% for a in apps %}<tr>
-<td><code>{{ a.host }}</code>{% if let Some(n) = a.name %} <span class="muted">&#8220;{{ n }}&#8221;</span>{% endif %}</td><td>{{ a.created }}</td><td>{{ a.last_used }}</td><td>{{ a.expires }}</td>
-<td><form method="post" action="/keys/apps/{{ a.grant_id|urlencode }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Revoke</button></form></td>
-</tr>
-{% endfor %}</tbody>
 </table></div>{% endif %}"#
 )]
 struct KeysBody<'a> {
     csrf: &'a str,
     server: &'a str,
     rows: Vec<KeyRow>,
-    apps: Vec<AppRow>,
-}
-
-/// One connected app (a live MCP grant) of the keys page.
-pub(crate) struct AppRow {
-    grant_id: String,
-    host: String,
-    name: Option<String>,
-    created: String,
-    last_used: String,
-    expires: String,
-}
-
-/// Unix seconds as `2026-10-09 14:30 UTC`.
-fn when(secs: i64) -> String {
-    let days = secs.div_euclid(86400);
-    let rem = secs.rem_euclid(86400);
-    // civil-from-days (Howard Hinnant)
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, rem % 3600 / 60)
-}
-
-impl From<&McpGrant> for AppRow {
-    fn from(g: &McpGrant) -> AppRow {
-        AppRow {
-            grant_id: g.grant_id.clone(),
-            host: g.client_host.clone(),
-            name: g.client_name.clone(),
-            created: when(g.created_at),
-            last_used: g.last_used_at.map_or_else(|| "never".into(), when),
-            expires: when(g.expires_at),
-        }
-    }
-}
-
-#[derive(Template)]
-#[template(
-    ext = "html",
-    source = r#"<h1>Connect {{ client_host }} to this board?</h1>
-<p><code>{{ client_host }}</code> (it calls itself &#8220;{{ client_name }}&#8221;) asks to use this board as you. Afterwards it returns to <code>{{ redirect_host }}</code>.</p>
-{% if let Some(name) = acts_as %}<p>It will read what your agents can read, and send, react and mark your own mail read as <code>{{ name }}</code>.</p>
-{% else %}<p>It will read what your agents can read. It cannot send or react: {{ refusal }}</p>{% endif %}
-<p class="muted">Revoke it any time under Connected apps on the <a href="/keys">keys page</a>.</p>
-<form method="post" action="/oauth/authorize" class="row">
-<input type="hidden" name="csrf" value="{{ csrf }}">
-{% for (k, v) in fields %}<input type="hidden" name="{{ k }}" value="{{ v }}">
-{% endfor %}<button name="decision" value="allow">Allow</button>
-<button name="decision" value="deny" class="quiet">Deny</button>
-</form>"#
-)]
-struct ConsentBody<'a> {
-    client_host: &'a str,
-    client_name: &'a str,
-    redirect_host: &'a str,
-    acts_as: Option<&'a str>,
-    refusal: &'a str,
-    csrf: &'a str,
-    fields: &'a [(&'static str, String)],
-}
-
-/// What the consent page shows and carries back.
-pub(crate) struct Consent<'a> {
-    pub client_host: &'a str,
-    pub client_name: &'a str,
-    pub redirect_host: &'a str,
-    /// The human name it will write as, or why it cannot write.
-    pub acts_as: Result<&'a str, &'a str>,
-    /// The authorization request, repeated in the form.
-    pub fields: &'a [(&'static str, String)],
 }
 
 #[derive(Template)]
@@ -354,35 +265,14 @@ pub(crate) fn keys(
     header: Header<'_>,
     server: &str,
     keys: &[HostKey],
-    apps: &[McpGrant],
     idp: &str,
 ) -> Response {
     let body = render(&KeysBody {
         csrf: header.csrf,
         server,
         rows: keys.iter().map(KeyRow::from).collect(),
-        apps: apps.iter().map(AppRow::from).collect(),
     });
     page(StatusCode::OK, "Host keys", Some(header), &body, false, &[idp])
-}
-
-/// The authorization request's consent page. Its form may end at the client's redirect origin
-/// (the answer is a redirect there) and the identity provider (sign-out).
-pub(crate) fn consent(header: Header<'_>, c: &Consent<'_>, redirect_origin: &str, idp: &str) -> Response {
-    let (acts_as, refusal) = match c.acts_as {
-        Ok(name) => (Some(name), ""),
-        Err(why) => (None, why),
-    };
-    let body = render(&ConsentBody {
-        client_host: c.client_host,
-        client_name: c.client_name,
-        redirect_host: c.redirect_host,
-        acts_as,
-        refusal,
-        csrf: header.csrf,
-        fields: c.fields,
-    });
-    page(StatusCode::OK, "Connect an app", Some(header), &body, false, &[redirect_origin, idp])
 }
 
 pub(crate) fn created(
@@ -442,7 +332,6 @@ mod tests {
             csrf: "c",
             server: "https://s",
             rows: vec![KeyRow::from(&key)],
-            apps: vec![],
         });
         assert!(!body.contains("<script>"), "{body}");
         assert!(
@@ -450,42 +339,5 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("/keys/a%3Cb/revoke"), "{body}");
-    }
-
-    #[test]
-    fn dates_render_in_utc() {
-        assert_eq!(when(0), "1970-01-01 00:00 UTC");
-        assert_eq!(when(1_791_556_931), "2026-10-09 14:42 UTC");
-        assert_eq!(when(951_782_400), "2000-02-29 00:00 UTC");
-    }
-
-    #[test]
-    fn app_names_and_consent_fields_are_escaped() {
-        let grant = McpGrant {
-            grant_id: "g1".into(),
-            user_id: 1,
-            client_id: "https://claude.ai/x".into(),
-            client_host: "claude.ai".into(),
-            client_name: Some("<b>evil</b>".into()),
-            resource: "https://s/mcp".into(),
-            created_at: 0,
-            last_used_at: None,
-            expires_at: 0,
-            revoked_at: None,
-        };
-        let body = render(&KeysBody { csrf: "c", server: "https://s", rows: vec![], apps: vec![AppRow::from(&grant)] });
-        assert!(!body.contains("<b>evil"), "{body}");
-        assert!(body.contains("/keys/apps/g1/revoke"), "{body}");
-        let fields = [("state", "\"><script>".to_string())];
-        let body = render(&ConsentBody {
-            client_host: "claude.ai",
-            client_name: "<i>x</i>",
-            redirect_host: "localhost",
-            acts_as: None,
-            refusal: "no <human>",
-            csrf: "c",
-            fields: &fields,
-        });
-        assert!(!body.contains("<script>") && !body.contains("<i>x") && !body.contains("<human>"), "{body}");
     }
 }

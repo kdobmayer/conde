@@ -3,8 +3,6 @@
 //! `_meta["io.modelcontextprotocol/protocolVersion"]` is served statelessly;
 //! an `initialize` handshake selects legacy (2025-11-25 and earlier) semantics
 //! for the rest of the process, which is what Claude Code and Codex speak today.
-//! The JSON-RPC core ([`handle`]) also serves the remote endpoint's tools
-//! ([`crate::mcp_remote`]), where the era comes with each HTTP request.
 //!
 //! Identity is never taken from tool arguments. The actor is derived exactly as
 //! the CLI derives it, from the harness markers this process inherited and its

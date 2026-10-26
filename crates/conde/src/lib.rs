@@ -22,7 +22,6 @@ pub mod import;
 pub mod login;
 pub mod maildir;
 pub mod mcp;
-pub mod mcp_remote;
 pub mod notify;
 pub mod ops;
 pub mod paths;

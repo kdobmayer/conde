@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, pa
 
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
+    Delivery, DmDelivery, DmThread, DueNotification, UserSlack, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
     FeedArg, FeedRange, Membership, problem_seqs_sql, thread_down_sql, thread_up_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
     WebSessionRow, address_of, feed_seqs_sql,
 };
@@ -40,6 +40,11 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("hosts", "mailbox_only", "INTEGER NOT NULL DEFAULT 0"),
     ("mcp_grants", "code_digest", "TEXT"),
     ("attempts", "not_before", "INTEGER"),
+    ("users", "email", "TEXT"),
+    ("users", "slack_member_id", "TEXT"),
+    ("users", "slack_source", "TEXT"),
+    ("users", "done_pages", "INTEGER NOT NULL DEFAULT 0"),
+    ("messages", "page", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -232,7 +237,8 @@ fn agent_row(r: &Row) -> rusqlite::Result<Agent> {
 }
 
 const MSG_SELECT: &str = "SELECT m.commit_seq, m.message_id, m.sender_agent_id, su.name || '/' || s.name_lower,
-    m.recipient_agent_id, ru.name || '/' || r.name_lower, m.channel_id, c.name_lower, m.text, m.reply_to, m.created_at
+    m.recipient_agent_id, ru.name || '/' || r.name_lower, m.channel_id, c.name_lower, m.text, m.reply_to, m.created_at,
+    m.page
     FROM messages m
     JOIN agents s ON s.agent_id = m.sender_agent_id JOIN users su ON su.user_id = s.owner_id
     LEFT JOIN agents r ON r.agent_id = m.recipient_agent_id LEFT JOIN users ru ON ru.user_id = r.owner_id
@@ -269,6 +275,21 @@ fn msg_row(r: &Row) -> rusqlite::Result<Message> {
         text: r.get(8)?,
         reply_to: r.get(9)?,
         created_at: r.get(10)?,
+        page: r.get(11)?,
+    })
+}
+
+const USER_SLACK_SELECT: &str =
+    "SELECT user_id, name, email, slack_member_id, slack_source, done_pages FROM users";
+
+fn user_slack_row(r: &Row) -> rusqlite::Result<UserSlack> {
+    Ok(UserSlack {
+        user_id: r.get(0)?,
+        name: r.get(1)?,
+        email: r.get(2)?,
+        slack_member_id: r.get(3)?,
+        slack_source: r.get(4)?,
+        done_pages: r.get(5)?,
     })
 }
 
@@ -533,6 +554,32 @@ impl Tx for SqliteTx<'_> {
             "UPDATE identities SET display_name = ?2, preferred_username = ?3 WHERE user_id = ?1",
             params![user_id, display, upn],
         )?;
+        Ok(())
+    }
+
+    fn users_slack(&self) -> StoreResult<Vec<UserSlack>> {
+        self.rows(&format!("{USER_SLACK_SELECT} ORDER BY user_id"), [], user_slack_row)
+    }
+
+    fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>> {
+        self.opt(&format!("{USER_SLACK_SELECT} WHERE user_id = ?1"), [user_id], user_slack_row)
+    }
+
+    fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()> {
+        self.exec("UPDATE users SET email = ?2 WHERE user_id = ?1", params![user_id, email])?;
+        Ok(())
+    }
+
+    fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()> {
+        self.exec(
+            "UPDATE users SET slack_member_id = ?2, slack_source = ?3 WHERE user_id = ?1",
+            params![user_id, member_id, source],
+        )?;
+        Ok(())
+    }
+
+    fn set_done_pages(&self, user_id: i64, on: bool) -> StoreResult<()> {
+        self.exec("UPDATE users SET done_pages = ?2 WHERE user_id = ?1", params![user_id, on])?;
         Ok(())
     }
 
@@ -838,6 +885,11 @@ impl Tx for SqliteTx<'_> {
         Ok(self.conn.last_insert_rowid())
     }
 
+    fn set_message_page(&self, message_id: &str, kind: &str) -> StoreResult<()> {
+        self.exec("UPDATE messages SET page = ?2 WHERE message_id = ?1", params![message_id, kind])?;
+        Ok(())
+    }
+
     fn insert_message_if_absent(&self, m: &NewMessage) -> StoreResult<bool> {
         Ok(self.exec(
             "INSERT OR IGNORE INTO messages(message_id, sender_agent_id, recipient_agent_id, channel_id, text,
@@ -1095,6 +1147,15 @@ impl Tx for SqliteTx<'_> {
              ORDER BY n.rowid LIMIT ?5",
             params![owner, now, since, crate::util::iso_from_ms(since), limit, super::SLACK_INSTANCE],
             |r| Ok(DueNotification { id: r.get(0)?, message_id: r.get(1)?, recipient_id: r.get(2)?, kind: r.get(3)? }),
+        )
+    }
+
+    fn slack_attempt(&self, message_id: &str) -> StoreResult<Option<(String, Option<String>)>> {
+        self.opt(
+            "SELECT t.status, t.reason FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
+             WHERE n.message_id = ?1 AND t.bridge_instance = ?2 ORDER BY t.rowid DESC LIMIT 1",
+            params![message_id, super::SLACK_INSTANCE],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
     }
 

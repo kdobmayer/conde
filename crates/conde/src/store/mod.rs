@@ -115,6 +115,8 @@ pub struct Message {
     pub text: String,
     pub reply_to: Option<String>,
     pub created_at: String,
+    /// `blocked` or `done` on a page to a human (`human.page`), None otherwise.
+    pub page: Option<String>,
 }
 
 impl Message {
@@ -395,6 +397,18 @@ pub struct NewNotification<'a> {
 
 /// The bridge instance (and host) of the attempts the server's Slack worker makes.
 pub use conde_remote::SLACK_INSTANCE;
+
+/// A user as human paging sees it: the sign-in email, the Slack member id and where it came
+/// from (`env`, `lookup`, `admin`), and whether the human takes "work done" pages.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserSlack {
+    pub user_id: i64,
+    pub name: String,
+    pub email: Option<String>,
+    pub slack_member_id: Option<String>,
+    pub slack_source: Option<String>,
+    pub done_pages: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DueNotification {
@@ -715,6 +729,16 @@ pub trait Tx {
     /// (user id, host) of a live credential with this digest whose user is not disabled.
     fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>>;
 
+    // human paging
+    /// Every user's paging fields, by user id.
+    fn users_slack(&self) -> StoreResult<Vec<UserSlack>>;
+    fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>>;
+    /// The sign-in email (the id token's `email`, else `preferred_username`).
+    fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()>;
+    /// The Slack member id and its source (`env`, `lookup`, `admin`).
+    fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()>;
+    fn set_done_pages(&self, user_id: i64, on: bool) -> StoreResult<()>;
+
     // idempotency
     /// (request_hash, result_json) stored for this key.
     fn idempotency_get(&self, actor_id: &str, op: &str, key: &str) -> StoreResult<Option<(String, String)>>;
@@ -780,6 +804,8 @@ pub trait Tx {
     // messages
     /// Returns the commit_seq.
     fn insert_message(&self, m: &NewMessage) -> StoreResult<i64>;
+    /// Marks a message as a page of `kind` (`blocked` or `done`).
+    fn set_message_page(&self, message_id: &str, kind: &str) -> StoreResult<()>;
     /// Inserts unless the id exists; true when inserted.
     fn insert_message_if_absent(&self, m: &NewMessage) -> StoreResult<bool>;
     fn insert_attachment(&self, id: &str, message_id: &str, filename: &str, bytes: &[u8]) -> StoreResult<()>;
@@ -853,6 +879,8 @@ pub trait Tx {
     /// [`SLACK_INSTANCE`] attempt on any of the owner's notifications that is final (delivered,
     /// refused, dropped) or not yet due (`not_before` after `now`). By insertion order.
     fn slack_due(&self, owner: &str, now: i64, since: i64, limit: i64) -> StoreResult<Vec<DueNotification>>;
+    /// The latest [`SLACK_INSTANCE`] attempt on the message's notifications as (status, reason).
+    fn slack_attempt(&self, message_id: &str) -> StoreResult<Option<(String, Option<String>)>>;
     /// Abandons the [`SLACK_INSTANCE`] attempts still dispatching on `owner`'s notifications of the
     /// message (their lease ran out); the number abandoned.
     fn slack_abandon(&self, message_id: &str, owner: &str, at: &str) -> StoreResult<u64>;

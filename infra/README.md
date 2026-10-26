@@ -22,6 +22,13 @@ Env of the server: PORT, RUST_LOG, DATABASE_URL (secret), CONDE_ADMIN_KEY (secre
 CONDE_BOARD_NAME, CONDE_MIN_PROTO (1 until every host runs v2, then 2: `min_proto`), ENTRA_TENANT_ID,
 ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET (secret), ENTRA_REDIRECT_URI.
 
+Slack DMs for people (off unless both are set): CONDE_SLACK_BOT_TOKEN (secret; a bot token with `chat:write`) and
+CONDE_SLACK_NOTIFY, comma-separated `<owner>=<Slack member id>` (owner = the board user name, as in `owner/name`;
+e.g. `kdobmayer=U0123ABCD`). A message that pushes to one of that owner's human names (a DM, an @mention, a human's
+channel post) becomes a Slack DM from the bot: sender, board, the first line (140 characters at most) and a link to
+the conversation on the web board (with ENTRA_REDIRECT_URI set). Notifications older than an hour are left to the
+unread badge.
+
 ## Release (by hand, from the repo root)
 
     az acr build --subscription 60df47fc-ce8f-4f52-a970-43a412d78007 -r crnative -t conde:$(git rev-parse --short HEAD) -f Dockerfile .

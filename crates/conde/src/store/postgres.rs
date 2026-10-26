@@ -1558,6 +1558,28 @@ impl Tx for PgTx {
             .collect())
     }
 
+    fn due_human_notifications(&self, owner: &str, now: i64, since: i64, limit: i64)
+    -> StoreResult<Vec<DueNotification>> {
+        Ok(self
+            .query(
+                "SELECT n.notification_id, n.message_id, n.recipient_agent_id, n.kind
+                 FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
+                 JOIN users u ON u.user_id = a.owner_id JOIN messages m ON m.message_id = n.message_id
+                 WHERE n.status IN ('pending', 'badge', 'dispatching') AND n.next_attempt_at <= $2
+                   AND n.next_attempt_at >= $3 AND a.address_kind = 'human' AND LOWER(u.name) = $1
+                   AND m.created_at >= $4
+                 ORDER BY n.next_attempt_at, n.notification_seq LIMIT $5",
+                &[&owner, &now, &since, &crate::util::iso_from_ms(since), &limit],
+            )?
+            .iter()
+            .map(|r| DueNotification { id: r.get(0), message_id: r.get(1), recipient_id: r.get(2), kind: r.get(3) })
+            .collect())
+    }
+
+    fn notification_status(&self, id: &str) -> StoreResult<Option<String>> {
+        Ok(self.query_opt("SELECT status FROM notifications WHERE notification_id = $1", &[&id])?.map(|r| r.get(0)))
+    }
+
     fn set_notification_status(&self, id: &str, status: &str) -> StoreResult<()> {
         self.settle_notification(id, status, None)
     }
@@ -1644,8 +1666,9 @@ impl Tx for PgTx {
                    AND n.status IN ('pending', 'dispatching', 'notified', 'held')
                    AND (a.host_id = $2 OR a.host_id IS NULL)
                    AND (t.bridge_instance <> $1 OR t.target_binding_version <> a.binding_version)
+                   AND t.bridge_instance <> $3
                  ORDER BY t.attempt_seq",
-                &[&bridge_instance, &host],
+                &[&bridge_instance, &host, &super::SLACK_INSTANCE],
             )?
             .iter()
             .map(|r| StaleAttempt {

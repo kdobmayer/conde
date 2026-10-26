@@ -100,6 +100,10 @@ SQLite on Azure Files (unsafe).
 
 - Store-then-notify. DMs and @mentions push; plain channel posts badge only;
   a human's channel post pushes to all members; reactions never push.
+- A human has no harness: a bridge only badges their notifications. On the shared board, the
+  humans of an owner that `CONDE_SLACK_NOTIFY` maps to a Slack member id get those pushes as a
+  Slack DM from the server (`crates/conde/src/slack.rs`), as attempts of the instance `slack`
+  in the same outbox: delivered, refused (final), or failed and retried.
 - Claude delivery asserts no false sender mode; permission-parity holds are
   the recipient's policy (owner decision pending on `from-mode`).
 - Receipts: delivered / held / expired / denied / dropped; denied is terminal;

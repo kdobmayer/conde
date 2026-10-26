@@ -30,6 +30,7 @@ pub mod private;
 pub mod protocol;
 pub mod server;
 pub mod setup;
+pub mod slack;
 pub mod store;
 pub mod surface;
 pub mod util;

@@ -449,9 +449,16 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
         if let Some(w) = &web {
             tracing::info!(entra = w.entra.is_some(), admin = w.admin_key.is_some(), "web surface enabled");
         }
+        let public_url = web.as_ref().and_then(|w| w.entra.as_ref()).map(|c| c.public_url.clone());
+        let slack = crate::slack::SlackConfig::from_env(&board_name()?, public_url)?;
         let min_proto = min_proto()?;
         tracing::info!(board = %board_name()?, min_proto, "shared board");
-        let handle = start(d, listen, ServerConfig { dist_base_url, web, min_proto, ..ServerConfig::default() }).await?;
+        let handle =
+            start(d.clone(), listen, ServerConfig { dist_base_url, web, min_proto, ..ServerConfig::default() }).await?;
+        if let Some(config) = slack {
+            tracing::info!(people = config.members.len(), "slack notifications on");
+            crate::slack::spawn(d, Arc::new(config))?;
+        }
         tracing::info!(addr = %handle.local_addr(), "conde server ready");
         crate::daemon::termination().await;
         tracing::info!("terminating: closing bridge connections");

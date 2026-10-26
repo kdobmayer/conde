@@ -255,6 +255,11 @@ impl Dispatcher {
         self.retry_ms.store(ms.max(0), Ordering::Relaxed);
     }
 
+    /// The notification retry backoff.
+    pub fn retry_ms(&self) -> i64 {
+        self.retry_ms.load(Ordering::Relaxed)
+    }
+
     /// Run `f` in one read transaction (tests, diagnostics, lookups).
     pub fn with_conn<T>(&self, f: impl FnOnce(&dyn Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
         let tx = self.store.begin(Mode::Read)?;

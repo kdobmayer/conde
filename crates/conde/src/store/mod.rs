@@ -393,6 +393,9 @@ pub struct NewNotification<'a> {
     pub next_attempt_at: i64,
 }
 
+/// The bridge instance (and host) of the attempts the server's Slack worker makes.
+pub const SLACK_INSTANCE: &str = "slack";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DueNotification {
     pub id: String,
@@ -844,6 +847,12 @@ pub trait Tx {
     /// Pending notifications due at `now` whose recipient is bound on `host`,
     /// by due time then insertion order.
     fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>>;
+    /// Notifications of the humans of `owner` (lower-cased user name) due at `now`: pending or
+    /// badged (a bridge only badges a human), or dispatching past their lease; due and written no
+    /// earlier than `since`. By due time then insertion order.
+    fn due_human_notifications(&self, owner: &str, now: i64, since: i64, limit: i64)
+    -> StoreResult<Vec<DueNotification>>;
+    fn notification_status(&self, id: &str) -> StoreResult<Option<String>>;
     fn set_notification_status(&self, id: &str, status: &str) -> StoreResult<()>;
     /// Settles the recipient's notification of the message as read while it is still open
     /// (pending, dispatching, notified, held); true when one was.
@@ -878,6 +887,7 @@ pub trait Tx {
     /// still stands at 'notified', for recipients on `host` (or unbound), that
     /// another instance owns or that target an older binding. Only attempts of open
     /// notifications (pending, dispatching, notified, held): a read or delivered one keeps its attempts.
+    /// The server's Slack sends ([`SLACK_INSTANCE`]) are never a bridge's to abandon.
     fn stale_attempts(&self, bridge_instance: &str, host: &str) -> StoreResult<Vec<StaleAttempt>>;
     /// This instance's holds on Claude or mailbox recipients of `host` whose session or
     /// mailbox is not a live endpoint.

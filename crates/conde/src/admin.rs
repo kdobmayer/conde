@@ -89,6 +89,13 @@ pub fn slack(server: &str, owner: &str, member_id: &str) -> anyhow::Result<i32> 
 /// `POST /v1/admin/users/<owner>/slack {member_id}` with the admin key; the line to print.
 pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyhow::Result<String> {
     let base = credentials::rpc_url(server)?;
+    let parsed = reqwest::Url::parse(&base)?;
+    let host = parsed.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if parsed.scheme() == "http" && !loopback {
+        bail!("refusing to send the admin key over plain http to {server}; use https://");
+    }
     let origin = base.trim_end_matches("/v1/rpc");
     let url = format!("{origin}/v1/admin/users/{}/slack", owner.trim().to_lowercase());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;

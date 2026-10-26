@@ -998,3 +998,12 @@ fn admin_slack_sets_the_member_id_with_the_admin_key() {
     assert!(request.to_ascii_lowercase().contains(&format!("authorization: bearer {}", key.to_ascii_lowercase())), "{request}");
     assert!(request.ends_with(r#"{"member_id":"U0ADMIN"}"#), "{request}");
 }
+
+/// The admin key never travels over plain http, except to this machine.
+#[test]
+fn admin_slack_refuses_plain_http_off_this_machine() {
+    for server in ["http://conde.example", "http://10.0.0.5:8080"] {
+        let e = conde::admin::set_slack(server, "k", "krisz", "U0ADMIN").unwrap_err().to_string();
+        assert!(e.starts_with("refusing to send the admin key over plain http"), "{server}: {e}");
+    }
+}

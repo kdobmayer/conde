@@ -435,9 +435,19 @@ pub async fn start_on(
     config: ServerConfig,
 ) -> std::io::Result<ServerHandle> {
     d.share(&board_name().map_err(std::io::Error::other)?);
-    // Every owner has exactly one human name before the board answers anyone.
+    // Every owner has exactly one human name before the board answers anyone, and every user
+    // who signed in before emails were stored has one for the Slack worker's first lookups.
     let d2 = d.clone();
-    tokio::task::spawn_blocking(move || d2.with_tx(|tx| Ok(crate::humans::ensure_all(tx)?)))
+    tokio::task::spawn_blocking(move || {
+        d2.with_tx(|tx| {
+            crate::humans::ensure_all(tx)?;
+            let filled = tx.backfill_emails()?;
+            if filled > 0 {
+                tracing::info!(filled, "emails filled from sign-in identities");
+            }
+            Ok(())
+        })
+    })
         .await
         .map_err(std::io::Error::other)?
         .map_err(std::io::Error::other)?;

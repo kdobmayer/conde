@@ -1000,6 +1000,16 @@ impl Tx for PgTx {
         Ok(())
     }
 
+    fn backfill_emails(&self) -> StoreResult<u64> {
+        self.execute(
+            "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')
+             WHERE email IS NULL AND EXISTS (SELECT 1 FROM identities i
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')",
+            &[],
+        )
+    }
+
     fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()> {
         self.execute(
             "UPDATE users SET slack_member_id = $2, slack_source = $3 WHERE user_id = $1",

@@ -570,6 +570,16 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
+    fn backfill_emails(&self) -> StoreResult<u64> {
+        Ok(self.exec(
+            "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')
+             WHERE email IS NULL AND EXISTS (SELECT 1 FROM identities i
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')",
+            [],
+        )? as u64)
+    }
+
     fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()> {
         self.exec(
             "UPDATE users SET slack_member_id = ?2, slack_source = ?3 WHERE user_id = ?1",

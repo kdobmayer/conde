@@ -623,3 +623,34 @@ fn account_inactive_is_the_bots_own_and_never_looks_the_member_up() {
     assert_eq!(f.user("krisz").slack_member_id.as_deref(), Some("U0OLD"));
     assert_eq!(f.outcomes(), [("refused".to_string(), Some("slack: account_inactive".to_string()))]);
 }
+
+#[test]
+fn a_users_email_is_filled_from_the_identity_at_start_and_looked_up() {
+    // users from before migration 0016: identities with their UPNs, no email stored
+    let f = Fixture::with(Vec::new(), |b| {
+        b.other("zed", "zbox");
+        b.other("dora", "dbox");
+        b.d.with_tx(|tx| {
+            let id = |n: &str| tx.user_id(n).map(Option::unwrap);
+            tx.bind_identity(id("krisz")?, "t", "o-krisz", None, Some("krisz@dakai.io"))?;
+            tx.bind_identity(id("zed")?, "t", "o-zed", None, Some("zed@dakai.io"))?;
+            tx.set_user_email(id("zed")?, Some("kept@dakai.io"))?;
+            tx.bind_identity(id("dora")?, "t", "o-dora", None, Some("dora"))?;
+            Ok(())
+        })
+        .unwrap();
+    });
+    f.mock.lock().unwrap().directory.insert("krisz@dakai.io".into(), "U0KRISZ2".into());
+    let handle = f.rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        conde::cloud::start_on(f.b.d.clone(), listener, conde_remote::ServerConfig::default()).await.unwrap()
+    });
+    assert_eq!(f.user("krisz").email.as_deref(), Some("krisz@dakai.io"), "the UPN, at start");
+    assert_eq!(f.user("zed").email.as_deref(), Some("kept@dakai.io"), "a stored email is never overwritten");
+    assert_eq!(f.user("dora").email, None, "a UPN without an @ is no address");
+    // the worker's first pass looks the filled-in user up
+    assert_eq!(f.pass(), 0);
+    assert!(f.lookups().contains(&"krisz@dakai.io".to_string()), "{:?}", f.lookups());
+    assert_eq!(f.user("krisz").slack_member_id.as_deref(), Some("U0KRISZ2"));
+    f.rt.block_on(handle.shutdown()).unwrap();
+}

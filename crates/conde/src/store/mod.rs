@@ -746,6 +746,9 @@ pub trait Tx {
     fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>>;
     /// The sign-in email (`preferred_username`, else the `email` claim when that is no address).
     fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()>;
+    /// Fills every NULL email from the user's identity by the sign-in rule (`preferred_username`
+    /// when it holds an `@`); a stored email is never replaced. The number filled.
+    fn backfill_emails(&self) -> StoreResult<u64>;
     /// The Slack member id and its source (`env`, `lookup`, `admin`).
     fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()>;
     fn set_done_pages(&self, user_id: i64, on: bool) -> StoreResult<()>;

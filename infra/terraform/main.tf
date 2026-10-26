@@ -267,17 +267,22 @@ resource "azurerm_key_vault_secret" "admin_key" {
 }
 
 locals {
+  # The Slack bot token is written by hand (README) and referenced by name only, so its value never enters this state.
+  slack_token_secret = "conde-slack-bot-token"
+
   app_secrets = {
     (azurerm_key_vault_secret.database_url.name)        = azurerm_key_vault_secret.database_url.versionless_id
     (azurerm_key_vault_secret.admin_key.name)           = azurerm_key_vault_secret.admin_key.versionless_id
     (azurerm_key_vault_secret.entra_client_secret.name) = azurerm_key_vault_secret.entra_client_secret.versionless_id
+    (local.slack_token_secret)                          = "${azurerm_key_vault.this.vault_uri}secrets/${local.slack_token_secret}"
   }
   secret_env = {
-    DATABASE_URL        = azurerm_key_vault_secret.database_url.name
-    CONDE_ADMIN_KEY     = azurerm_key_vault_secret.admin_key.name
-    ENTRA_CLIENT_SECRET = azurerm_key_vault_secret.entra_client_secret.name
+    DATABASE_URL          = azurerm_key_vault_secret.database_url.name
+    CONDE_ADMIN_KEY       = azurerm_key_vault_secret.admin_key.name
+    ENTRA_CLIENT_SECRET   = azurerm_key_vault_secret.entra_client_secret.name
+    CONDE_SLACK_BOT_TOKEN = local.slack_token_secret
   }
-  plain_env = {
+  plain_env = merge({
     RUST_LOG            = "info"
     CONDE_BOARD_NAME    = var.board_name
     CONDE_MIN_PROTO     = tostring(var.min_proto)
@@ -285,7 +290,8 @@ locals {
     ENTRA_TENANT_ID     = data.azurerm_client_config.current.tenant_id
     ENTRA_CLIENT_ID     = azuread_application.sso.client_id
     ENTRA_REDIRECT_URI  = local.sso_redirect
-  }
+    # Slack DM notifications: owner=Slack user id pairs; the worker runs only with this and the token both set.
+  }, var.slack_notify != "" ? { CONDE_SLACK_NOTIFY = var.slack_notify } : {})
 }
 
 # ── The server: public HTTPS + WebSocket ingress, one replica until the app is proven stateless ────────────────────

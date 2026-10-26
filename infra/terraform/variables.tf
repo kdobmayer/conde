@@ -49,3 +49,9 @@ variable "min_proto" {
   description = "Lowest protocol version a host may speak: 1 keeps v1 hosts working until every teammate upgrades; 2 afterwards."
   default     = 1
 }
+
+# "owner=U…" pairs (comma-separated) the Slack worker DMs when a message is addressed to that owner; empty = off.
+variable "slack_notify" {
+  type    = string
+  default = ""
+}

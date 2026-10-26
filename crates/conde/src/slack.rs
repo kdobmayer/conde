@@ -6,8 +6,8 @@
 //! Each owner's Slack member id is `users.slack_member_id`: imported once from
 //! `CONDE_SLACK_NOTIFY` where empty, looked up by the sign-in email (`users.lookupByEmail`) at
 //! sign-in, at startup and when a page waits for it, or set by the admin (never replaced by a
-//! lookup). A send refused for an unknown or inactive user looks the id up once more and, when it
-//! changed, sends the page again.
+//! lookup). A send refused with `channel_not_found` or `user_not_found` (if Slack returns them for
+//! a wrong member id) looks the id up once more and, when it changed, sends the page again.
 //!
 //! The Slack copy is a side channel: it never changes the notification, so the web views and the
 //! badges read as they would without it; only the page's sender sees its Slack state (`conde
@@ -49,9 +49,9 @@ const CONFIG_ERRORS: &[&str] = &[
     "channel_not_found",
     "no_permission",
 ];
-/// Slack's `error` codes after which the member id is looked up again once (the person's id
-/// changed, or the stored one was wrong).
-const RELOOKUP: &[&str] = &["user_not_found", "account_inactive", "channel_not_found"];
+/// Slack's `error` codes after which the member id is looked up again once, if Slack returns them
+/// for a member id that changed or was wrong. Not `account_inactive`: that is the bot's own account.
+const RELOOKUP: &[&str] = &["user_not_found", "channel_not_found"];
 /// Slack's `error` codes worth another attempt; any other is final.
 const RETRYABLE: &[&str] = &["internal_error", "fatal_error", "service_unavailable", "request_timeout"];
 
@@ -441,8 +441,8 @@ async fn still_ours(d: &Arc<Dispatcher>, job: &Job) -> bool {
     }
 }
 
-/// After a send refused for an unknown or inactive user: the owner's member id looked up once
-/// more, when it changed.
+/// After a send refused for an unknown member id: the owner's member id looked up once more, when
+/// it changed.
 async fn relookup(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>, http: &reqwest::Client, job: &Job) -> Option<String> {
     let (d2, owner_id) = (d.clone(), job.owner_id);
     let user = tokio::task::spawn_blocking(move || d2.with_conn(|tx| tx.user_slack(owner_id))).await.ok()?.ok()??;

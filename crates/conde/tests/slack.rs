@@ -552,7 +552,7 @@ fn a_send_to_a_changed_id_is_looked_up_again_and_retried_once() {
 #[test]
 fn an_unchanged_or_admin_id_is_final_after_one_refusal() {
     // the lookup finds the same id: final, one post
-    let f = Fixture::with(vec![(200, None, json!({"ok": false, "error": "account_inactive"}))], |b| {
+    let f = Fixture::with(vec![(200, None, json!({"ok": false, "error": "channel_not_found"}))], |b| {
         let uid = b.p.user_id;
         b.d.with_tx(|tx| {
             tx.set_user_email(uid, Some("krisz@dakai.io"))?;
@@ -565,7 +565,7 @@ fn an_unchanged_or_admin_id_is_final_after_one_refusal() {
     assert_eq!(f.pass(), 1);
     assert_eq!(f.calls().len(), 1);
     assert_eq!(f.lookups(), ["krisz@dakai.io"]);
-    assert_eq!(f.outcomes(), [("refused".to_string(), Some("slack: account_inactive".to_string()))]);
+    assert_eq!(f.outcomes(), [("refused".to_string(), Some("slack: channel_not_found".to_string()))]);
 
     // the admin's id is never looked up nor replaced
     let f = Fixture::with(vec![(200, None, json!({"ok": false, "error": "user_not_found"}))], |b| {
@@ -603,4 +603,23 @@ fn pages_waiting_for_a_member_id_never_starve_an_owner_with_one() {
     let calls = f.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].1["channel"], "U0KRISZ");
+}
+
+#[test]
+fn account_inactive_is_the_bots_own_and_never_looks_the_member_up() {
+    let f = Fixture::with(vec![(200, None, json!({"ok": false, "error": "account_inactive"}))], |b| {
+        let uid = b.p.user_id;
+        b.d.with_tx(|tx| {
+            tx.set_user_email(uid, Some("krisz@dakai.io"))?;
+            Ok(tx.set_user_slack(uid, "U0OLD", "env")?)
+        })
+        .unwrap();
+    });
+    f.mock.lock().unwrap().directory.insert("krisz@dakai.io".into(), "U0NEW".into());
+    f.page("hello");
+    assert_eq!(f.pass(), 1);
+    assert_eq!(f.calls().len(), 1);
+    assert!(f.lookups().is_empty());
+    assert_eq!(f.user("krisz").slack_member_id.as_deref(), Some("U0OLD"));
+    assert_eq!(f.outcomes(), [("refused".to_string(), Some("slack: account_inactive".to_string()))]);
 }

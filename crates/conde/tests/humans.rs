@@ -454,3 +454,22 @@ fn a_retired_name_human_is_taken_over_by_the_human_name() {
     let seats = b.d.with_conn(|tx| tx.owner_memberships(tx.user_id("krisz")?.unwrap())).unwrap();
     assert!(seats.iter().all(|m| m.agent_id != now.id), "{seats:?}");
 }
+
+#[test]
+fn an_unbound_name_human_is_taken_over_by_the_human_name() {
+    let b = Board::new();
+    // an imported human name left unbound (never retired), seated in #dev
+    b.register(ALICE, "human");
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    b.ok(ALICE, "agent.unregister", json!({"name": "human"}));
+    let old = agent(&b.d, "krisz", "human").unwrap();
+    assert!(old.address.is_none() && !old.retired);
+    b.d.share("dakai");
+    let done = b.d.with_tx(|tx| Ok(humans::ensure(tx, tx.user_id("krisz")?.unwrap())?)).unwrap();
+    assert_eq!(done, Some(Ensured::Rebound("krisz/human".into())));
+    let now = agent(&b.d, "krisz", "human").unwrap();
+    assert_eq!(&now.id, &old.id, "its history stays");
+    assert_eq!(now.address, Some(Address::new(Kind::Human, "krisz", "web")));
+    let seats = b.d.with_conn(|tx| tx.owner_memberships(tx.user_id("krisz")?.unwrap())).unwrap();
+    assert!(seats.iter().all(|m| m.agent_id != now.id), "{seats:?}");
+}

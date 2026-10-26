@@ -45,7 +45,7 @@ pub enum Ensured {
     Rebound(String),
     /// A new `<owner>/human` row.
     Created(String),
-    /// No human row, and the owner's `human` name is another live agent's: nothing changed.
+    /// No human row, and the owner's `human` name is a bound agent's: nothing changed.
     Conflict(String),
 }
 
@@ -77,14 +77,15 @@ pub fn ensure(tx: &dyn Tx, user_id: i64) -> StoreResult<Option<Ensured>> {
         return Ok(Some(Ensured::Rebound(name)));
     }
     if let Some(taken) = tx.agent_by_name(user_id, HUMAN_NAME)? {
-        // a retired row holds the name only for its history: it becomes the human name
-        if taken.retired {
-            // retire kept its channel seats; a human name sits in no channel
+        // an unbound or retired row holds the name only for its history (an imported old human
+        // name, say): it becomes the human name
+        if taken.retired || taken.address.is_none() {
+            // unbind and retire keep channel seats; a human name sits in no channel
             for m in tx.owner_memberships(user_id)?.into_iter().filter(|m| m.agent_id == taken.id) {
                 tx.delete_membership(&m.channel_id, &taken.id)?;
             }
             tx.set_binding(&taken.id, Some(&address))?;
-            tracing::info!(owner = %user.name, name = %taken.canonical(), "retired name became the human name");
+            tracing::info!(owner = %user.name, name = %taken.canonical(), "unbound name became the human name");
             return Ok(Some(Ensured::Rebound(taken.canonical())));
         }
         tracing::warn!(owner = %user.name, name = %taken.canonical(), "no human name made: the name is another agent's");

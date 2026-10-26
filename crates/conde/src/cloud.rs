@@ -461,8 +461,8 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
         let handle =
             start(d.clone(), listen, ServerConfig { dist_base_url, web, min_proto, ..ServerConfig::default() }).await?;
         if let Some(config) = slack {
-            tracing::info!(people = config.members.len(), "slack notifications on");
-            crate::slack::spawn(d, Arc::new(config))?;
+            tracing::info!(import = config.import.len(), "slack notifications on");
+            crate::slack::spawn(d, Arc::new(config)).await?;
         }
         tracing::info!(addr = %handle.local_addr(), "conde server ready");
         crate::daemon::termination().await;

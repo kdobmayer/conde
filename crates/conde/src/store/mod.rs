@@ -410,6 +410,17 @@ pub struct UserSlack {
     pub done_pages: bool,
 }
 
+/// A page the Slack worker may send: its notification, and the owner of the human it is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlackDue {
+    pub id: String,
+    pub message_id: String,
+    pub recipient_id: String,
+    pub owner_id: i64,
+    /// The owner's user name, lower-cased.
+    pub owner: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DueNotification {
     pub id: String,
@@ -873,12 +884,11 @@ pub trait Tx {
     /// Pending notifications due at `now` whose recipient is bound on `host`,
     /// by due time then insertion order.
     fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>>;
-    /// The Slack worker's candidates: notifications of the humans of `owner` (lower-cased user
-    /// name), pending or badged (a bridge only badges a human), created in [since, now], unread by
-    /// their human, not sent by a human of the same owner, and whose message has no
-    /// [`SLACK_INSTANCE`] attempt on any of the owner's notifications that is final (delivered,
-    /// refused, dropped) or not yet due (`not_before` after `now`). By insertion order.
-    fn slack_due(&self, owner: &str, now: i64, since: i64, limit: i64) -> StoreResult<Vec<DueNotification>>;
+    /// The Slack worker's candidates: the dm notifications of pages to humans, pending or badged
+    /// (a bridge only badges a human), created in [since, now], unread by their human, and whose
+    /// message has no [`SLACK_INSTANCE`] attempt that is final (delivered, refused, dropped) or
+    /// not yet due (`not_before` after `now`). By insertion order.
+    fn slack_due(&self, now: i64, since: i64, limit: i64) -> StoreResult<Vec<SlackDue>>;
     /// The latest [`SLACK_INSTANCE`] attempt on the message's notifications as (status, reason).
     fn slack_attempt(&self, message_id: &str) -> StoreResult<Option<(String, Option<String>)>>;
     /// Abandons the [`SLACK_INSTANCE`] attempts still dispatching on `owner`'s notifications of the

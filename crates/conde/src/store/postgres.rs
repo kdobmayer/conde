@@ -31,7 +31,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, UserSlack, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
+    Delivery, DmDelivery, DmThread, DueNotification, SlackDue, UserSlack, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
     FeedArg, FeedRange, Membership, problem_seqs_sql, thread_down_sql, thread_up_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
     WebSessionRow, address_of, feed_seqs_sql,
 };
@@ -1607,30 +1607,33 @@ impl Tx for PgTx {
             .collect())
     }
 
-    fn slack_due(&self, owner: &str, now: i64, since: i64, limit: i64) -> StoreResult<Vec<DueNotification>> {
+    fn slack_due(&self, now: i64, since: i64, limit: i64) -> StoreResult<Vec<SlackDue>> {
         // A human's notification keeps its creation time in next_attempt_at: no bridge attempts it.
         Ok(self
             .query(
-                "SELECT n.notification_id, n.message_id, n.recipient_agent_id, n.kind
+                "SELECT n.notification_id, n.message_id, n.recipient_agent_id, a.owner_id, LOWER(u.name)
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN users u ON u.user_id = a.owner_id JOIN messages m ON m.message_id = n.message_id
-                 JOIN agents s ON s.agent_id = m.sender_agent_id
-                 WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $3 AND $2
-                   AND a.address_kind = 'human' AND LOWER(u.name) = $1 AND m.created_at >= $4
-                   AND NOT (s.owner_id = a.owner_id AND s.address_kind IS NOT DISTINCT FROM 'human')
+                 WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $2 AND $1
+                   AND n.kind = 'dm' AND m.page IS NOT NULL
+                   AND a.address_kind = 'human' AND m.created_at >= $3
                    AND NOT EXISTS (SELECT 1 FROM dm_read r WHERE r.message_id = m.message_id AND r.agent_id = a.agent_id)
-                   AND NOT EXISTS (SELECT 1 FROM memberships x WHERE x.channel_id = m.channel_id
-                                   AND x.agent_id = a.agent_id AND x.read_seq >= m.commit_seq)
                    AND NOT EXISTS (SELECT 1 FROM agents a2
                                    JOIN notifications n2 ON n2.recipient_agent_id = a2.agent_id AND n2.message_id = n.message_id
                                    JOIN attempts t ON t.notification_id = n2.notification_id
-                                   WHERE a2.owner_id = a.owner_id AND t.bridge_instance = $6
-                                     AND (t.status IN ('delivered', 'refused', 'dropped') OR t.not_before > $2))
-                 ORDER BY n.notification_seq LIMIT $5",
-                &[&owner, &now, &since, &crate::util::iso_from_ms(since), &limit, &super::SLACK_INSTANCE],
+                                   WHERE a2.owner_id = a.owner_id AND t.bridge_instance = $5
+                                     AND (t.status IN ('delivered', 'refused', 'dropped') OR t.not_before > $1))
+                 ORDER BY n.notification_seq LIMIT $4",
+                &[&now, &since, &crate::util::iso_from_ms(since), &limit, &super::SLACK_INSTANCE],
             )?
             .iter()
-            .map(|r| DueNotification { id: r.get(0), message_id: r.get(1), recipient_id: r.get(2), kind: r.get(3) })
+            .map(|r| SlackDue {
+                id: r.get(0),
+                message_id: r.get(1),
+                recipient_id: r.get(2),
+                owner_id: r.get(3),
+                owner: r.get(4),
+            })
             .collect())
     }
 

@@ -2,8 +2,9 @@
 //! in, response frame out. Every mutation runs in one transaction together
 //! with its idempotency record.
 
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use serde_json::Value;
@@ -198,6 +199,8 @@ pub struct Dispatcher {
     shared: OnceLock<String>,
     /// The server's Slack worker runs.
     slack: AtomicBool,
+    /// Users whose Slack member id the worker looks up by email (a sign-in stored the email).
+    slack_lookups: Mutex<BTreeSet<i64>>,
 }
 
 impl Dispatcher {
@@ -222,6 +225,7 @@ impl Dispatcher {
             retry_ms: AtomicI64::new(NOTIFY_RETRY_MS),
             shared: OnceLock::new(),
             slack: AtomicBool::new(false),
+            slack_lookups: Mutex::default(),
         }
     }
 
@@ -232,6 +236,16 @@ impl Dispatcher {
 
     pub fn slack(&self) -> bool {
         self.slack.load(Ordering::Relaxed)
+    }
+
+    /// Asks the Slack worker to look up the user's member id by email on its next pass.
+    pub fn request_slack_lookup(&self, user_id: i64) {
+        self.slack_lookups.lock().unwrap_or_else(|e| e.into_inner()).insert(user_id);
+    }
+
+    /// The lookups asked for since the last call.
+    pub fn take_slack_lookups(&self) -> BTreeSet<i64> {
+        std::mem::take(&mut *self.slack_lookups.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Serve this board as a shared board advertised as `name` (`conde server`, DESIGN-v2.md

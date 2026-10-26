@@ -394,7 +394,7 @@ pub struct NewNotification<'a> {
 }
 
 /// The bridge instance (and host) of the attempts the server's Slack worker makes.
-pub const SLACK_INSTANCE: &str = "slack";
+pub use conde_remote::SLACK_INSTANCE;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DueNotification {
@@ -847,12 +847,18 @@ pub trait Tx {
     /// Pending notifications due at `now` whose recipient is bound on `host`,
     /// by due time then insertion order.
     fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>>;
-    /// Notifications of the humans of `owner` (lower-cased user name) due at `now`: pending or
-    /// badged (a bridge only badges a human), or dispatching past their lease; due and written no
-    /// earlier than `since`. By due time then insertion order.
-    fn due_human_notifications(&self, owner: &str, now: i64, since: i64, limit: i64)
-    -> StoreResult<Vec<DueNotification>>;
-    fn notification_status(&self, id: &str) -> StoreResult<Option<String>>;
+    /// The Slack worker's candidates: notifications of the humans of `owner` (lower-cased user
+    /// name), pending or badged (a bridge only badges a human), created in [since, now], unread by
+    /// their human, not sent by a human of the same owner, and whose message has no
+    /// [`SLACK_INSTANCE`] attempt on any of the owner's notifications that is final (delivered,
+    /// refused, dropped) or not yet due (`not_before` after `now`). By insertion order.
+    fn slack_due(&self, owner: &str, now: i64, since: i64, limit: i64) -> StoreResult<Vec<DueNotification>>;
+    /// Abandons the [`SLACK_INSTANCE`] attempts still dispatching on `owner`'s notifications of the
+    /// message (their lease ran out); the number abandoned.
+    fn slack_abandon(&self, message_id: &str, owner: &str, at: &str) -> StoreResult<u64>;
+    /// The Slack worker's time mark of an attempt: lease end while dispatching, retry time after a failure.
+    fn set_attempt_not_before(&self, id: &str, not_before: i64) -> StoreResult<()>;
+    fn attempt_not_before(&self, id: &str) -> StoreResult<Option<i64>>;
     fn set_notification_status(&self, id: &str, status: &str) -> StoreResult<()>;
     /// Settles the recipient's notification of the message as read while it is still open
     /// (pending, dispatching, notified, held); true when one was.
@@ -862,7 +868,9 @@ pub trait Tx {
     fn settle_read_in_channel(&self, channel_id: &str, recipient_id: &str, cursor: i64) -> StoreResult<u64>;
     /// Sets the status and, when given, the next attempt time.
     fn settle_notification(&self, id: &str, status: &str, next_attempt_at: Option<i64>) -> StoreResult<()>;
-    /// The push state of the DM `message_id` to `recipient`.
+    /// The push state of the DM `message_id` to `recipient`. Here and in [`Tx::latest_attempt`],
+    /// [`Tx::deliveries`] and [`Tx::agent_health`], [`SLACK_INSTANCE`] attempts do not count: the
+    /// Slack copy never changes what the board shows.
     fn dm_delivery(&self, message_id: &str, recipient: &str) -> StoreResult<Option<DmDelivery>>;
     /// Unread channel posts by others as (channel name, count), by name.
     fn unread_badges(&self, agent_id: &str) -> StoreResult<Vec<(String, i64)>>;
@@ -906,7 +914,7 @@ pub trait Tx {
     /// Sets status and reason, and last_event_seq when given; `at` is when the outcome was recorded.
     fn update_attempt(&self, id: &str, status: &str, reason: Option<&str>, event_seq: Option<i64>, at: &str)
     -> StoreResult<()>;
-    /// The notification's most recently created attempt.
+    /// The notification's most recently created bridge attempt.
     fn latest_attempt(&self, notification_id: &str) -> StoreResult<Option<String>>;
     fn notifications(&self) -> StoreResult<Vec<NotificationRow>>;
     fn attempts(&self) -> StoreResult<Vec<AttemptRow>>;

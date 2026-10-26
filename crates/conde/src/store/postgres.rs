@@ -74,6 +74,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (12, "messages_dm_by_sender", include_str!("migrations/0012_messages_dm_by_sender.sql")),
     (13, "messages_by_reply_to", include_str!("migrations/0013_messages_by_reply_to.sql")),
     (14, "agents_retired_at", include_str!("migrations/0014_agents_retired_at.sql")),
+    (15, "attempt_not_before", include_str!("migrations/0015_attempt_not_before.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -1558,26 +1559,52 @@ impl Tx for PgTx {
             .collect())
     }
 
-    fn due_human_notifications(&self, owner: &str, now: i64, since: i64, limit: i64)
-    -> StoreResult<Vec<DueNotification>> {
+    fn slack_due(&self, owner: &str, now: i64, since: i64, limit: i64) -> StoreResult<Vec<DueNotification>> {
+        // A human's notification keeps its creation time in next_attempt_at: no bridge attempts it.
         Ok(self
             .query(
                 "SELECT n.notification_id, n.message_id, n.recipient_agent_id, n.kind
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN users u ON u.user_id = a.owner_id JOIN messages m ON m.message_id = n.message_id
-                 WHERE n.status IN ('pending', 'badge', 'dispatching') AND n.next_attempt_at <= $2
-                   AND n.next_attempt_at >= $3 AND a.address_kind = 'human' AND LOWER(u.name) = $1
-                   AND m.created_at >= $4
-                 ORDER BY n.next_attempt_at, n.notification_seq LIMIT $5",
-                &[&owner, &now, &since, &crate::util::iso_from_ms(since), &limit],
+                 JOIN agents s ON s.agent_id = m.sender_agent_id
+                 WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $3 AND $2
+                   AND a.address_kind = 'human' AND LOWER(u.name) = $1 AND m.created_at >= $4
+                   AND NOT (s.owner_id = a.owner_id AND s.address_kind IS NOT DISTINCT FROM 'human')
+                   AND NOT EXISTS (SELECT 1 FROM dm_read r WHERE r.message_id = m.message_id AND r.agent_id = a.agent_id)
+                   AND NOT EXISTS (SELECT 1 FROM memberships x WHERE x.channel_id = m.channel_id
+                                   AND x.agent_id = a.agent_id AND x.read_seq >= m.commit_seq)
+                   AND NOT EXISTS (SELECT 1 FROM agents a2
+                                   JOIN notifications n2 ON n2.recipient_agent_id = a2.agent_id AND n2.message_id = n.message_id
+                                   JOIN attempts t ON t.notification_id = n2.notification_id
+                                   WHERE a2.owner_id = a.owner_id AND t.bridge_instance = $6
+                                     AND (t.status IN ('delivered', 'refused', 'dropped') OR t.not_before > $2))
+                 ORDER BY n.notification_seq LIMIT $5",
+                &[&owner, &now, &since, &crate::util::iso_from_ms(since), &limit, &super::SLACK_INSTANCE],
             )?
             .iter()
             .map(|r| DueNotification { id: r.get(0), message_id: r.get(1), recipient_id: r.get(2), kind: r.get(3) })
             .collect())
     }
 
-    fn notification_status(&self, id: &str) -> StoreResult<Option<String>> {
-        Ok(self.query_opt("SELECT status FROM notifications WHERE notification_id = $1", &[&id])?.map(|r| r.get(0)))
+    fn slack_abandon(&self, message_id: &str, owner: &str, at: &str) -> StoreResult<u64> {
+        self.execute(
+            "UPDATE attempts SET status = 'abandoned', reason = 'lease expired', settled_at = $3
+             WHERE bridge_instance = $4 AND status = 'dispatching' AND notification_id IN (
+                 SELECT n.notification_id FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
+                 JOIN users u ON u.user_id = a.owner_id WHERE n.message_id = $1 AND LOWER(u.name) = $2)",
+            &[&message_id, &owner, &at, &super::SLACK_INSTANCE],
+        )
+    }
+
+    fn set_attempt_not_before(&self, id: &str, not_before: i64) -> StoreResult<()> {
+        self.execute("UPDATE attempts SET not_before = $2 WHERE attempt_id = $1", &[&id, &not_before])?;
+        Ok(())
+    }
+
+    fn attempt_not_before(&self, id: &str) -> StoreResult<Option<i64>> {
+        Ok(self
+            .query_opt("SELECT not_before FROM attempts WHERE attempt_id = $1", &[&id])?
+            .and_then(|r| r.get::<_, Option<i64>>(0)))
     }
 
     fn set_notification_status(&self, id: &str, status: &str) -> StoreResult<()> {
@@ -1733,7 +1760,8 @@ impl Tx for PgTx {
     fn latest_attempt(&self, notification_id: &str) -> StoreResult<Option<String>> {
         Ok(self
             .query_opt(
-                "SELECT attempt_id FROM attempts WHERE notification_id = $1 ORDER BY attempt_seq DESC LIMIT 1",
+                "SELECT attempt_id FROM attempts WHERE notification_id = $1 AND bridge_instance <> 'slack'
+                 ORDER BY attempt_seq DESC LIMIT 1",
                 &[&notification_id],
             )?
             .map(|r| r.get(0)))
@@ -1843,7 +1871,7 @@ impl Tx for PgTx {
             .query_opt(
                 "SELECT n.status, t.status, t.reason FROM notifications n
                  LEFT JOIN attempts t ON t.attempt_seq =
-                     (SELECT MAX(attempt_seq) FROM attempts WHERE notification_id = n.notification_id)
+                     (SELECT MAX(attempt_seq) FROM attempts WHERE notification_id = n.notification_id AND bridge_instance <> 'slack')
                  WHERE n.message_id = $1 AND n.recipient_agent_id = $2 ORDER BY n.notification_id LIMIT 1",
                 &[&message_id, &recipient],
             )?
@@ -2278,11 +2306,11 @@ impl Tx for PgTx {
         Ok(self
             .query(
                 "SELECT n.recipient_agent_id, ru.name || '/' || r.name_lower, n.kind, n.status, n.next_attempt_at,
-                        (SELECT COUNT(*) FROM attempts WHERE notification_id = n.notification_id), t.status, t.reason
+                        (SELECT COUNT(*) FROM attempts WHERE notification_id = n.notification_id AND bridge_instance <> 'slack'), t.status, t.reason
                  FROM notifications n
                  JOIN agents r ON r.agent_id = n.recipient_agent_id JOIN users ru ON ru.user_id = r.owner_id
                  LEFT JOIN attempts t ON t.attempt_seq =
-                     (SELECT MAX(attempt_seq) FROM attempts WHERE notification_id = n.notification_id)
+                     (SELECT MAX(attempt_seq) FROM attempts WHERE notification_id = n.notification_id AND bridge_instance <> 'slack')
                  WHERE n.notification_id > $1 || '.' AND n.notification_id < $1 || '/' AND n.message_id = $1
                  ORDER BY 2",
                 &[&message_id],
@@ -2338,7 +2366,7 @@ impl Tx for PgTx {
                             FILTER (WHERE t.status = 'delivered' OR (t.status = 'accepted' AND a.address_kind = 'codex')) > 0
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN messages m ON m.message_id = n.message_id
-                 LEFT JOIN attempts t ON t.notification_id = n.notification_id
+                 LEFT JOIN attempts t ON t.notification_id = n.notification_id AND t.bridge_instance <> 'slack'
                  WHERE a.owner_id = $1 GROUP BY n.recipient_agent_id ORDER BY n.recipient_agent_id",
                 &[&owner_id, &stuck_before],
             )?

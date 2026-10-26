@@ -119,6 +119,7 @@ on_both!(
     owner_reads_end_when_the_last_own_member_leaves_a_channel,
     a_credential_on_the_browser_host_never_reaches_the_owner_view,
     a_connected_bridge_keeps_its_host_online,
+    the_slack_instance_is_never_a_host,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -1418,6 +1419,47 @@ async fn a_credential_on_the_browser_host_never_reaches_the_owner_view(d: Arc<Di
     let req = Request::new("r", "owner.history", json!({"agent": "worker", "with": "david/scout"}));
     let resp = blocking(move || d2.dispatch(&p, &req)).await;
     assert_eq!(resp.error.map(|e| e.code), Some(conde::protocol::ErrorCode::Forbidden));
+    ui.server.shutdown().await.unwrap();
+}
+
+/// `slack` names the server's own Slack sends: never minted from the keys page or the admin path,
+/// and a credential on it never authenticates.
+async fn the_slack_instance_is_never_a_host(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let b = Browser::new();
+    let page = b.sign_in(&ui.env).await;
+    let created = b.create_key(&ui.env, &csrf_of(&page), "slack").await;
+    assert!(created.contains("slack-2"), "{created}");
+    let d2 = ui.d.clone();
+    let owner = blocking(move || d2.with_conn(|c| c.host_owner("slack")).unwrap()).await;
+    assert!(owner.is_none(), "{owner:?}");
+    let d2 = ui.d.clone();
+    let admin = blocking(move || {
+        d2.with_tx(|c| conde::ops::hosts::insert_key(c, USER, "slack", "digest", "admin", "2026-10-09T00:00:00.000Z"))
+    })
+    .await;
+    assert!(admin.unwrap_err().to_string().contains("reserved"));
+    let token = conde::util::new_ulid();
+    let digest = conde_remote::token_digest(&token);
+    let d2 = ui.d.clone();
+    blocking(move || {
+        d2.with_tx(|tx| {
+            let uid = tx.ensure_user(USER)?;
+            tx.ensure_host("slack", uid)?;
+            tx.insert_credential(&digest, uid, "slack", "legacy", "2026-10-01T00:00:00.000Z")?;
+            Ok(())
+        })
+        .unwrap()
+    })
+    .await;
+    let r = reqwest::Client::new()
+        .post(ui.env.url("/v1/rpc"))
+        .bearer_auth(&token)
+        .json(&json!({"v": 1, "type": "request", "request_id": "r", "op": "agent.list", "body": {}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     ui.server.shutdown().await.unwrap();
 }
 

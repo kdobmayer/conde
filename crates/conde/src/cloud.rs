@@ -198,7 +198,11 @@ impl Authenticator for Board {
         match self.d.with_conn(|c| ops::hosts::authenticate(c, &digest)) {
             // The browser's reserved host is never a host credential, even one minted before
             // the name was reserved.
-            Ok(Some((_, host_id))) if host_id == conde_remote::web::BROWSER_HOST => Authentication::Invalid,
+            Ok(Some((_, host_id)))
+                if host_id == conde_remote::web::BROWSER_HOST || host_id == conde_remote::SLACK_INSTANCE =>
+            {
+                Authentication::Invalid
+            }
             Ok(Some((user_id, host_id))) => {
                 Authentication::Valid(RemotePrincipal { user_id: user_id.to_string(), host_id })
             }

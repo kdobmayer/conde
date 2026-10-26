@@ -25,9 +25,10 @@ ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET (secret), ENTRA_REDIRECT_URI.
 Slack DMs for people (off unless both are set): CONDE_SLACK_BOT_TOKEN (secret; a bot token with `chat:write`) and
 CONDE_SLACK_NOTIFY, comma-separated `<owner>=<Slack member id>` (owner = the board user name, as in `owner/name`;
 e.g. `kdobmayer=U0123ABCD`). A message that pushes to one of that owner's human names (a DM, an @mention, a human's
-channel post) becomes a Slack DM from the bot: sender, board, the first line (140 characters at most) and a link to
-the conversation on the web board (with ENTRA_REDIRECT_URI set). Notifications older than an hour are left to the
-unread badge.
+channel post) becomes one Slack DM from the bot, never about the owner's own post: sender, board, the first line
+(140 characters at most) and a link to the conversation on the web board (with ENTRA_REDIRECT_URI set). Messages
+read or older than an hour are not sent. Senders' receipts and the web views are unchanged by it. The names `slack`
+(bridge instance, host) are reserved for it.
 
 ## Release (by hand, from the repo root)
 

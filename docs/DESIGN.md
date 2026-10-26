@@ -102,8 +102,11 @@ SQLite on Azure Files (unsafe).
   a human's channel post pushes to all members; reactions never push.
 - A human has no harness: a bridge only badges their notifications. On the shared board, the
   humans of an owner that `CONDE_SLACK_NOTIFY` maps to a Slack member id get those pushes as a
-  Slack DM from the server (`crates/conde/src/slack.rs`), as attempts of the instance `slack`
-  in the same outbox: delivered, refused (final), or failed and retried.
+  Slack DM from the server (`crates/conde/src/slack.rs`): once per message per owner, never
+  about the owner's own post, while unread and younger than an hour. Each send is an attempt of
+  the reserved instance `slack` (no bridge or host may take that name) with its lease or retry
+  time in `not_before`; it never changes the notification, and receipts, the web views and the
+  fleet ignore those attempts, so senders read exactly what they would without Slack.
 - Claude delivery asserts no false sender mode; permission-parity holds are
   the recipient's policy (owner decision pending on `from-mode`).
 - Receipts: delivered / held / expired / denied / dropped; denied is terminal;

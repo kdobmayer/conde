@@ -236,6 +236,9 @@ pub struct Hello {
     pub window: Option<u32>,
 }
 
+/// The bridge instance and host of the server's own Slack sends: never a bridge's, never a host.
+pub const SLACK_INSTANCE: &str = "slack";
+
 fn proto_v1() -> u32 {
     PROTO_V1
 }
@@ -247,6 +250,9 @@ fn is_proto_v1(proto: &u32) -> bool {
 impl Hello {
     /// The shape rules of a hello for its declared protocol; the error is the refusal text.
     pub fn check(&self) -> Result<(), String> {
+        if self.bridge_instance.eq_ignore_ascii_case(SLACK_INSTANCE) {
+            return Err(format!("bridge instance id '{SLACK_INSTANCE}' is reserved"));
+        }
         let mailboxes = self
             .endpoints
             .iter()

@@ -97,6 +97,7 @@ pub(crate) async fn mint(
                     format!("{base}-{n}")
                 };
                 if host == super::BROWSER_HOST
+                    || host == crate::SLACK_INSTANCE
                     || s.host_owner(&host)?.is_some_and(|owner| owner != user_id)
                 {
                     continue;

@@ -9,9 +9,13 @@ use super::messages::{Target, insert_message};
 use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, not_found, opt_str, str_param};
 use crate::humans;
 use crate::store::UserSlack;
+use crate::util::iso_from_ms;
 
 /// The longest page, in characters: the whole line fits the Slack DM.
 pub const PAGE_CHARS: usize = 140;
+/// The most pages one agent stores in a rolling hour.
+pub const PAGES_PER_HOUR: i64 = 10;
+const HOUR_MS: i64 = 3_600_000;
 
 /// The caller (an agent, never a human) on a shared board, with its owner's human row and
 /// paging fields.
@@ -48,8 +52,8 @@ fn not_paged(ctx: &Ctx, board: &str, user: &UserSlack) -> Option<String> {
     })
 }
 
-/// `human.page {text, kind?}`: one line of at most [`PAGE_CHARS`] characters from the calling
-/// agent to its own human, stored with `messages.page = kind` (`blocked`, the default, or
+/// `human.page {text, kind?}`: one line of at most [`PAGE_CHARS`] characters, at most
+/// [`PAGES_PER_HOUR`] an hour per agent, from the calling agent to its own human, stored with `messages.page = kind` (`blocked`, the default, or
 /// `done`), which makes the human's `dm` notification the Slack worker sends. A done page while
 /// the human's done pages are off is not stored.
 pub fn page(ctx: &Ctx, body: &Value) -> OpResult<Value> {
@@ -58,7 +62,8 @@ pub fn page(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if text.is_empty() {
         return Err(bad_request("a page needs a line: what you need from your human"));
     }
-    if text.chars().any(char::is_control) {
+    // a line separator would split the line in Slack as a newline does
+    if text.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}') {
         return Err(bad_request("a page is one line: say what you need in one line"));
     }
     let chars = text.chars().count();
@@ -72,6 +77,12 @@ pub fn page(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let to = human.canonical();
     if kind == "done" && !user.done_pages {
         return Ok(json!({"to": to, "status": "not paged", "reason": "done pages are off"}));
+    }
+    if ctx.db.pages_since(&me.id, &iso_from_ms(ctx.now_ms - HOUR_MS))? >= PAGES_PER_HOUR {
+        return Err(forbidden(format!(
+            "not paged: you paged your human {PAGES_PER_HOUR} times in the last hour, the limit; say what you need in \
+             one page when the oldest is an hour old"
+        )));
     }
     let inserted = insert_message(ctx, &me, Target::Agent(&human), text, None, Vec::new(), Some(kind))?;
     let mut out = json!({"message_id": inserted.id, "seq": inserted.seq, "to": to, "kind": kind});

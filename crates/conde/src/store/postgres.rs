@@ -1393,6 +1393,15 @@ impl Tx for PgTx {
         Ok(())
     }
 
+    fn pages_since(&self, sender_id: &str, since: &str) -> StoreResult<i64> {
+        Ok(self
+            .query_one(
+                "SELECT COUNT(*) FROM messages WHERE sender_agent_id = $1 AND page IS NOT NULL AND created_at >= $2",
+                &[&sender_id, &since],
+            )?
+            .get(0))
+    }
+
     fn insert_attachment(&self, id: &str, message_id: &str, filename: &str, bytes: &[u8]) -> StoreResult<()> {
         self.execute(
             "INSERT INTO attachments(attachment_id, message_id, filename, bytes, size) VALUES ($1, $2, $3, $4, $5)",

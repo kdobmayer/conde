@@ -383,6 +383,10 @@ fn a_page_is_one_line_of_at_most_140_characters() {
     assert_eq!(long, (ErrorCode::BadRequest, "a page is at most 140 characters; this one is 141".into()));
     let two = refused(b.call(ALICE, "human.page", json!({"text": "first\nsecond"})));
     assert_eq!(two, (ErrorCode::BadRequest, "a page is one line: say what you need in one line".into()));
+    for separator in ['\u{2028}', '\u{2029}'] {
+        let two = refused(b.call(ALICE, "human.page", json!({"text": format!("first{separator}second")})));
+        assert_eq!(two, (ErrorCode::BadRequest, "a page is one line: say what you need in one line".into()), "{separator:?}");
+    }
     let empty = refused(b.call(ALICE, "human.page", json!({"text": "   "})));
     assert_eq!(empty.0, ErrorCode::BadRequest);
     assert_eq!(b.message_count(), count);
@@ -405,4 +409,26 @@ fn whoami_and_human_status_name_the_human() {
     let local = Board::new();
     local.register(ALICE, "alice");
     assert!(local.ok(ALICE, "agent.whoami", json!({})).get("human").is_none());
+}
+
+#[test]
+fn an_agent_pages_its_human_at_most_ten_times_an_hour() {
+    let (b, zed) = shared();
+    for i in 0..10 {
+        assert_eq!(b.ok(ALICE, "human.page", json!({"text": format!("blocked {i}")}))["status"], "paged", "{i}");
+    }
+    let count = b.message_count();
+    let over = refused(b.call(ALICE, "human.page", json!({"text": "one more"})));
+    assert_eq!(
+        over,
+        (ErrorCode::Forbidden, "not paged: you paged your human 10 times in the last hour, the limit; say what you need in one page when the oldest is an hour old".into())
+    );
+    assert_eq!(b.message_count(), count, "the refused page is not stored");
+    // the cap is per agent: another agent of the owner still pages, and zed's are his own
+    b.register(BOB, "bob");
+    assert_eq!(b.ok(BOB, "human.page", json!({"text": "bob blocked"}))["status"], "paged");
+    assert_eq!(b.call_as(&zed, ZBOT, "human.page", json!({"text": "zed blocked"})).unwrap()["status"], "stored, not paged");
+    // an hour after the first, alice pages again
+    b.d.advance_clock(3_600_001);
+    assert_eq!(b.ok(ALICE, "human.page", json!({"text": "blocked again"}))["status"], "paged");
 }

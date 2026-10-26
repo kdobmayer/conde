@@ -817,6 +817,8 @@ pub trait Tx {
     fn insert_message(&self, m: &NewMessage) -> StoreResult<i64>;
     /// Marks a message as a page of `kind` (`blocked` or `done`).
     fn set_message_page(&self, message_id: &str, kind: &str) -> StoreResult<()>;
+    /// How many pages the agent sent dated on or after `since` (an ISO time).
+    fn pages_since(&self, sender_id: &str, since: &str) -> StoreResult<i64>;
     /// Inserts unless the id exists; true when inserted.
     fn insert_message_if_absent(&self, m: &NewMessage) -> StoreResult<bool>;
     fn insert_attachment(&self, id: &str, message_id: &str, filename: &str, bytes: &[u8]) -> StoreResult<()>;

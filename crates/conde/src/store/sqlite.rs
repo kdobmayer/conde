@@ -890,6 +890,14 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
+    fn pages_since(&self, sender_id: &str, since: &str) -> StoreResult<i64> {
+        self.one(
+            "SELECT COUNT(*) FROM messages WHERE sender_agent_id = ?1 AND page IS NOT NULL AND created_at >= ?2",
+            params![sender_id, since],
+            one_col,
+        )
+    }
+
     fn insert_message_if_absent(&self, m: &NewMessage) -> StoreResult<bool> {
         Ok(self.exec(
             "INSERT OR IGNORE INTO messages(message_id, sender_agent_id, recipient_agent_id, channel_id, text,

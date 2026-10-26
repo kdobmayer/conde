@@ -105,7 +105,8 @@ pub fn done_pages(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({"human": human.canonical(), "done_pages": on}))
 }
 
-/// The caller's human as `whoami` shows it: name, board, whether Slack reaches them, and
+/// The caller's human as `whoami` shows it: name, board, whether the board has a Slack member id
+/// to send to (`slack`: a bot token and an id; not that a DM arrives), and
 /// whether done pages are on.
 pub fn status_of(ctx: &Ctx) -> OpResult<Value> {
     let (board, _, human, user) = caller(ctx)?;

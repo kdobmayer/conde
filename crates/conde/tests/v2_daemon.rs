@@ -2135,7 +2135,7 @@ fn the_daemon_names_the_human_and_keeps_humans_from_sending_on_a_board() {
     let who = h.ok(&desk, "agent.whoami", json!({}), None);
     assert_eq!(who["humans"], json!([{"human": "kd/human", "board": "dakai", "slack": true, "done_pages": false}]), "{who}");
     let line = conde::surface::whoami(&who);
-    assert!(line.ends_with("\nhuman: kd/human on dakai · slack: yes · done pages: off"), "{line}");
+    assert!(line.ends_with("\nhuman: kd/human on dakai · slack id: set · done pages: off"), "{line}");
 
     h.ok(&h.human(), "agent.register", json!({"name": "kd"}), None);
     let before = board.capture("homepc").len();

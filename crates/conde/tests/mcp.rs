@@ -494,14 +494,14 @@ fn the_page_tool_pages_the_sessions_own_human() {
     let init = p.rpc("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}));
     let instructions = init["result"]["instructions"].as_str().unwrap();
     for rule in [
-        "whoami names your human, whether Slack reaches them, and whether done pages are on",
+        "whoami names your human, whether the board has their Slack member id, and whether done pages are on",
         "Page your human (the page tool) only when you are blocked on them: a decision, a go, a blocker; say what you need in one line",
         "Page with done=true only when done pages are on",
         "Never message a human name; other people are reached through their agents",
     ] {
         assert!(instructions.contains(rule), "{rule}");
     }
-    assert_eq!(p.ok("page", json!({"text": "need a go"}), json!({})), "paged (dakai:01MP to tester/human)");
+    assert_eq!(p.ok("page", json!({"text": "need a go"}), json!({})), "paged: queued for Slack; conde sent shows whether it went (dakai:01MP to tester/human)");
     assert_eq!(p.ok("page", json!({"text": "done", "done": true, "board": "dakai"}), json!({})), "not paged: done pages are off");
     // a board argument first probes the daemon (board.list), as for every board tool
     let reqs: Vec<Value> = d.take().into_iter().filter(|r| r["op"] != "board.list").collect();

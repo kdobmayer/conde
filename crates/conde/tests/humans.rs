@@ -401,7 +401,7 @@ fn whoami_and_human_status_name_the_human() {
     assert_eq!(who["human"], want);
     assert_eq!(
         conde::surface::whoami(&who).lines().last().unwrap(),
-        "human: krisz/human on dakai · slack: yes · done pages: off"
+        "human: krisz/human on dakai · slack id: set · done pages: off"
     );
     let zw = b.call_as(&zed, ZBOT, "agent.whoami", json!({})).unwrap();
     assert_eq!((zw["human"]["human"].as_str(), zw["human"]["slack"].as_bool()), (Some("zed/human"), Some(false)));

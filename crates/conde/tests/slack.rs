@@ -144,7 +144,7 @@ impl Fixture {
         r["message_id"].as_str().unwrap().to_string()
     }
 
-    /// krisz's human reads the page (the web board's read).
+    /// A read of the page, written to the store: nothing marks a web-bound human's DM read today.
     fn read(&self, mid: &str) {
         let human = self.b.agent_id("human");
         let (mid, at) = (mid.to_string(), conde::util::iso_from_ms(self.b.d.now_ms()));
@@ -423,7 +423,7 @@ fn a_page_read_before_the_post_is_not_sent() {
     }
     assert!(f.calls().is_empty());
     assert_eq!(f.outcomes(), [("dropped".to_string(), Some("read".to_string()))]);
-    assert_eq!(f.b.ok(ALICE, "receipt.list", json!({}))["receipts"][0]["slack"], "not sent (read on the board first)");
+    assert_eq!(f.b.ok(ALICE, "receipt.list", json!({}))["receipts"][0]["slack"], "not sent (read before the post)");
 }
 
 #[test]

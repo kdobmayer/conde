@@ -475,7 +475,8 @@ pub fn receipts(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({"receipts": out, "next_cursor": next}))
 }
 
-/// Whether a page reached its human on Slack: `pending`, `sent`, `failed (<Slack's error>)`, or
+/// What the board's Slack send of a page did: `pending`, `sent` (Slack accepted it),
+/// `failed (<Slack's error>)`, or
 /// `not sent (<why>)`. Slack attempts are hidden from every other receipt; a page shows them,
 /// because its sender must know whether the human was reached.
 fn slack_state(ctx: &Ctx, m: &MsgRow) -> OpResult<String> {
@@ -483,7 +484,8 @@ fn slack_state(ctx: &Ctx, m: &MsgRow) -> OpResult<String> {
     Ok(match ctx.db.slack_attempt(&m.id)? {
         Some((status, _)) if status == "delivered" => "sent".to_string(),
         Some((status, reason)) if status == "refused" => format!("failed ({})", reason.unwrap_or_default()),
-        Some((status, _)) if status == "dropped" => "not sent (read on the board first)".to_string(),
+        // only a read drops a send; nothing marks a web-bound human's DM read today
+        Some((status, _)) if status == "dropped" => "not sent (read before the post)".to_string(),
         _ if old => "not sent (unread past the hour a page is sent in)".to_string(),
         _ => "pending".to_string(),
     })

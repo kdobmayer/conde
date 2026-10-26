@@ -370,10 +370,14 @@ pub fn sent_line(r: &Value) -> String {
     out
 }
 
-/// `conde page`: `paged`, `stored, not paged: <reason>` or `not paged: <reason>`, with the
-/// page's id when it was stored.
+/// `conde page`: `paged: queued for Slack; ...` (the board will try to send it; `conde sent`
+/// shows the outcome), `stored, not paged: <reason>` or `not paged: <reason>`, with the page's id
+/// when it was stored.
 pub fn paged(r: &Value) -> String {
     let mut out = s(&r["status"]).to_string();
+    if out == "paged" {
+        out.push_str(": queued for Slack; conde sent shows whether it went");
+    }
     if let Some(why) = r["reason"].as_str() {
         let _ = write!(out, ": {why}");
     }
@@ -389,11 +393,12 @@ pub fn done_pages(r: &Value) -> String {
     format!("done pages {on} for {} on {}", s(&r["human"]), result_board(r))
 }
 
-/// One human as `whoami` shows it: `human: <name> on <board> · slack: yes · done pages: off`.
+/// One human as `whoami` shows it: `human: <name> on <board> · slack id: set · done pages: off`.
+/// `set` says the board has a member id to send to, never that a DM arrives.
 pub fn human_line(h: &Value) -> String {
-    let yes = |v: &Value| if *v == true { "yes" } else { "no" };
+    let id = if h["slack"] == true { "set" } else { "none" };
     let on = if h["done_pages"] == true { "on" } else { "off" };
-    format!("human: {} on {} · slack: {} · done pages: {on}", s(&h["human"]), s(&h["board"]), yes(&h["slack"]))
+    format!("human: {} on {} · slack id: {id} · done pages: {on}", s(&h["human"]), s(&h["board"]))
 }
 
 pub fn inbox(r: &Value, surface: Surface) -> Out {
@@ -934,7 +939,7 @@ mod tests {
         assert_eq!(whoami(&r), "me/worker (local, claude:s1@h)\npublished: dakai as me/reviewer\nnot published on two");
         let r = json!({"name": "me/worker", "address": "claude:s1@h", "publications": [], "boards": [],
             "humans": [{"human": "me/krisz", "board": "dakai", "slack": true, "done_pages": false}]});
-        assert_eq!(whoami(&r), "me/worker (local, claude:s1@h)\nhuman: me/krisz on dakai · slack: yes · done pages: off");
+        assert_eq!(whoami(&r), "me/worker (local, claude:s1@h)\nhuman: me/krisz on dakai · slack id: set · done pages: off");
         let r = json!({"name": "me/worker", "address": "claude:s1@h", "publications": [], "boards": ["dakai"]});
         assert_eq!(
             registered(&r, "worker"),

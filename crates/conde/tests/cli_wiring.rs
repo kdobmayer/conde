@@ -935,7 +935,7 @@ fn page_and_done_pages_send_the_paging_ops() {
     });
     let (ok, out, err) = r.conde(&["page", "need a go for PR 41"]);
     assert!(ok, "{err}");
-    assert_eq!(out, "paged (dakai:01MP to tester/human)\n");
+    assert_eq!(out, "paged: queued for Slack; conde sent shows whether it went (dakai:01MP to tester/human)\n");
     let (ok, out, _) = r.conde(&["page", "--done", "PR 41 merged"]);
     assert!(ok);
     assert_eq!(out, "not paged: done pages are off\n");

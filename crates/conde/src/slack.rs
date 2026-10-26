@@ -304,8 +304,8 @@ impl Worker {
         self.looked_up.retain(|_, at| now - *at <= MAX_AGE_MS);
         // once per page: an owner's newest waiting page not looked up yet
         for (owner_id, message_id) in waiting {
-            if !self.looked_up.contains_key(&message_id) {
-                self.looked_up.insert(message_id, now);
+            if let std::collections::btree_map::Entry::Vacant(e) = self.looked_up.entry(message_id) {
+                e.insert(now);
                 wanted.insert(owner_id);
             }
         }

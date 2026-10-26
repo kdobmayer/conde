@@ -100,7 +100,7 @@ pub fn join(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     add_member(ctx, &channel, &me.id)?;
     let text = format!("@{} joined {label}.", me.canonical());
-    let (post, _) = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new())?;
+    let post = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new(), None)?.id;
     Ok(json!({"channel": label, "already_member": false, "message_id": post, "topic": channel.topic}))
 }
 
@@ -124,7 +124,7 @@ pub fn invite(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     add_member(ctx, &channel, &invitee.id)?;
     let text = format!("@{} was added to {label} by {}.", invitee.canonical(), me.canonical());
-    let (post, _) = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new())?;
+    let post = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new(), None)?.id;
     Ok(json!({"channel": label, "name": invitee.canonical(), "message_id": post}))
 }
 

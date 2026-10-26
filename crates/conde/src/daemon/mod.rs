@@ -649,6 +649,13 @@ impl Core {
         let Some(conn) = self.board(alias) else {
             return Response::err(&id, ErrorCode::NotFound, format!("no board '{alias}' on this host"));
         };
+        // Before `--from` makes the human act as an agent: a human never sends on a shared board.
+        let human = req.actor.as_deref().is_some_and(|a| {
+            Address::parse_v1(a, &self.principal.host).is_ok_and(|x| x.kind == Kind::Human)
+        });
+        if human && crate::humans::SEND_OPS.contains(&req.op.as_str()) {
+            return Response::err(&id, ErrorCode::Forbidden, crate::humans::no_sending(alias));
+        }
         let actor = match self.shared_actor(&conn, &req) {
             Ok(a) => a,
             Err((code, message)) => return Response::err(&id, code, message),

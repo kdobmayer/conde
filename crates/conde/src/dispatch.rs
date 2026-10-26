@@ -362,6 +362,13 @@ impl Dispatcher {
         if mailbox_only {
             refuse_on_migrated_host(p, req)?;
         }
+        // Before any identity substitution (`--from`): a human never sends on a shared board.
+        if let Some(board) = board
+            && crate::humans::SEND_OPS.contains(&spec.name)
+            && req.actor.as_deref().is_some_and(|a| Address::parse(a, &p.host).is_ok_and(|x| x.kind == Kind::Human))
+        {
+            return Err(forbidden(crate::humans::no_sending(board)));
+        }
         if let (Some(key), Some(hash)) = (key, &request_hash)
             && let Some((stored_hash, result)) = tx.idempotency_get(&actor_id, spec.name, key)?
         {

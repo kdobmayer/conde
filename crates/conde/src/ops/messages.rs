@@ -39,9 +39,19 @@ pub struct NewAttachment {
     pub bytes: Vec<u8>,
 }
 
+/// A committed message: its id, its seq, and the @mentions not delivered (a human mentioned in
+/// a channel on a shared board), each as `not delivered: @x is a human`.
+pub struct Inserted {
+    pub id: String,
+    pub seq: i64,
+    pub not_delivered: Vec<String>,
+}
+
 /// Commit a message plus its attachments and notification intents.
 /// DMs and @mentions push; plain channel posts only badge; a human's channel
-/// post pushes to every member; the sender is never notified.
+/// post pushes to every member; the sender is never notified. On a shared board a human gets a
+/// notification only of a page (`page`: `blocked` or `done`), so no mention, `@everybody` or
+/// later path reaches one.
 pub fn insert_message(
     ctx: &Ctx,
     sender: &Agent,
@@ -49,7 +59,8 @@ pub fn insert_message(
     text: &str,
     reply_to: Option<&str>,
     attachments: Vec<NewAttachment>,
-) -> OpResult<(String, i64)> {
+    page: Option<&str>,
+) -> OpResult<Inserted> {
     let id = new_ulid();
     let (recipient, channel) = match target {
         Target::Agent(a) => (Some(a.id.as_str()), None),
@@ -65,10 +76,14 @@ pub fn insert_message(
         reply_to,
         created_at: &created_at,
     })?;
+    if let Some(kind) = page {
+        ctx.db.set_message_page(&id, kind)?;
+    }
     for a in attachments {
         ctx.db.insert_attachment(&new_ulid(), &id, &a.filename, &a.bytes)?;
     }
     let mut push: BTreeMap<String, &'static str> = BTreeMap::new();
+    let mut not_delivered = Vec::new();
     match target {
         Target::Agent(r) => {
             push.insert(r.id.clone(), "dm");
@@ -82,6 +97,10 @@ pub fn insert_message(
                 if m == "everybody" {
                     push.extend(members.iter().map(|m| (m.clone(), "mention")));
                 } else if let Some(agent) = mentioned_agent(ctx, sender, &m)? {
+                    if ctx.board.is_some() && agent.is_human() {
+                        not_delivered.push(format!("not delivered: @{m} is a human"));
+                        continue;
+                    }
                     push.insert(agent.id, "mention");
                 }
             }
@@ -90,6 +109,9 @@ pub fn insert_message(
     push.remove(&sender.id);
     for (rcpt, kind) in push {
         let Some(agent) = agents::by_id(ctx.db, &rcpt)? else { continue };
+        if ctx.board.is_some() && agent.is_human() && page.is_none() {
+            continue;
+        }
         ctx.db.insert_notification(&NewNotification {
             id: &format!("{id}.{rcpt}"),
             message_id: &id,
@@ -99,7 +121,7 @@ pub fn insert_message(
             next_attempt_at: ctx.now_ms,
         })?;
     }
-    Ok((id, seq))
+    Ok(Inserted { id, seq, not_delivered })
 }
 
 /// A mention resolves in the sender's namespace unless qualified; only
@@ -171,23 +193,34 @@ pub fn send(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     let attachments = decode_attachments(body)?;
     let to = body.get("to").ok_or_else(|| bad_request("missing field 'to'"))?;
-    let (id, seq, to_name) = if let Some(name) = to.get("agent").and_then(Value::as_str) {
+    let (inserted, to_name) = if let Some(name) = to.get("agent").and_then(Value::as_str) {
         // A local board queues for a name that is not registered now; a shared board addresses
         // published names only.
         let rcpt = match ctx.board {
             Some(_) => agents::lookup_bound(ctx, name)?,
             None => agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent registered as '{name}'")))?,
         };
-        let (id, seq) = insert_message(ctx, &me, Target::Agent(&rcpt), text, reply_to, attachments)?;
-        (id, seq, rcpt.canonical())
+        if ctx.board.is_some() && rcpt.is_human() {
+            return Err(forbidden(if rcpt.owner_id == me.owner_id {
+                "use `conde page` to reach your human".to_string()
+            } else {
+                format!("humans are reached through their own agents; message one of `{}`'s agents instead", rcpt.owner)
+            }));
+        }
+        let to = rcpt.canonical();
+        (insert_message(ctx, &me, Target::Agent(&rcpt), text, reply_to, attachments, None)?, to)
     } else if let Some(raw) = to.get("channel").and_then(Value::as_str) {
         let channel = channels::member_channel(ctx, &me, raw)?;
-        let (id, seq) = insert_message(ctx, &me, Target::Channel(&channel), text, reply_to, attachments)?;
-        (id, seq, format!("#{}", channel.name))
+        let to = format!("#{}", channel.name);
+        (insert_message(ctx, &me, Target::Channel(&channel), text, reply_to, attachments, None)?, to)
     } else {
         return Err(bad_request("'to' must be {\"agent\": name} or {\"channel\": \"#name\"}"));
     };
-    Ok(json!({"message_id": id, "seq": seq, "to": to_name}))
+    let mut out = json!({"message_id": inserted.id, "seq": inserted.seq, "to": to_name});
+    if !inserted.not_delivered.is_empty() {
+        out["not_delivered"] = json!(inserted.not_delivered);
+    }
+    Ok(out)
 }
 
 fn decode_attachments(body: &Value) -> OpResult<Vec<NewAttachment>> {

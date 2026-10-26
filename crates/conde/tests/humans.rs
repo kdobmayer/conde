@@ -234,6 +234,8 @@ fn nothing_binds_moves_renames_or_seats_the_human_name() {
     let (code, message) = refused(b.call(ALICE, "channel.invite", json!({"channel": "#dev", "name": "zed/human"})));
     assert_eq!(code, ErrorCode::Forbidden);
     assert!(message.contains("zed/human is its owner's human name"), "{message}");
+    let (code, _) = refused(b.call(HUMAN, "channel.join", json!({"channel": "#dev"})));
+    assert_eq!(code, ErrorCode::Forbidden);
     let _ = zed;
     // nothing changed
     let after = agent(&b.d, "krisz", "human").unwrap();
@@ -247,4 +249,72 @@ fn request(actor: Option<&str>, op: &str, body: Value) -> conde::protocol::Reque
     req.actor = actor.map(Into::into);
     req.idempotency_key = Some(conde::util::new_ulid());
     req
+}
+
+#[test]
+fn a_human_never_sends_not_even_as_an_agent() {
+    let (b, _) = shared();
+    let mid = b.send(ALICE, "zed/zbot", "hi");
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    let no = "humans do not send on dakai: your agents page you on Slack (conde page), and you read the board on its \
+              web page; ask one of your agents to send";
+    let count = b.message_count();
+    for (op, body) in [
+        ("message.send", json!({"to": {"agent": "zed/zbot"}, "text": "from a human"})),
+        ("message.send", json!({"to": {"channel": "#dev"}, "text": "a human's post"})),
+        ("reaction.set", json!({"message_id": mid, "emoji": "👍", "present": true})),
+        ("channel.invite", json!({"channel": "#dev", "name": "zed/zbot"})),
+        ("channel.join", json!({"channel": "#dev"})),
+        ("channel.create", json!({"channel": "#mine"})),
+    ] {
+        // as the human, and as the human acting for alice (`--from`, a local socket's override)
+        assert_eq!(refused(b.call(HUMAN, op, body.clone())), (ErrorCode::Forbidden, no.to_string()), "{op}");
+        let from = b.request(&b.p, HUMAN, Some("alice"), op, body, Some(&conde::util::new_ulid()));
+        assert_eq!(refused(from), (ErrorCode::Forbidden, no.to_string()), "{op} --from alice");
+    }
+    assert_eq!(b.message_count(), count, "nothing stored");
+    // the local board is unchanged: there the human sends, as themselves or for an agent
+    let local = Board::new();
+    local.register(ALICE, "alice");
+    local.register(BOB, "bob");
+    local.register(HUMAN, "krisz");
+    local.send(HUMAN, "bob", "from the human");
+    local.request(&local.p, HUMAN, Some("alice"), "message.send", json!({"to": {"agent": "bob"}, "text": "as alice"}), Some("k")).unwrap();
+}
+
+#[test]
+fn a_send_to_a_human_is_refused_and_names_the_way() {
+    let (b, zed) = shared();
+    let count = b.message_count();
+    let own = refused(b.call(ALICE, "message.send", json!({"to": {"agent": "human"}, "text": "hi"})));
+    assert_eq!(own, (ErrorCode::Forbidden, "use `conde page` to reach your human".to_string()));
+    let other = refused(b.call(ALICE, "message.send", json!({"to": {"agent": "zed/human"}, "text": "hi"})));
+    assert_eq!(
+        other,
+        (ErrorCode::Forbidden, "humans are reached through their own agents; message one of `zed`'s agents instead".to_string())
+    );
+    let mine = refused(b.call_as(&zed, ZBOT, "message.send", json!({"to": {"agent": "krisz/human"}, "text": "hi"})));
+    assert!(mine.1.contains("one of `krisz`'s agents"), "{mine:?}");
+    assert_eq!(b.message_count(), count);
+}
+
+#[test]
+fn a_channel_mention_of_a_human_is_listed_not_delivered() {
+    let (b, zed) = shared();
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    b.call_as(&zed, ZBOT, "channel.join", json!({"channel": "#dev"})).unwrap();
+    let r = b.ok(ALICE, "message.send", json!({"to": {"channel": "#dev"}, "text": "@human @zed/human @zed/zbot `conde page @human`"}));
+    assert_eq!(r["not_delivered"], json!(["not delivered: @human is a human", "not delivered: @zed/human is a human"]));
+    let mid = r["message_id"].as_str().unwrap();
+    assert_eq!(b.status_of(mid, "zbot"), "pending", "the agent's mention is delivered");
+    assert_eq!(b.status_of(mid, "human"), "none");
+    // @everybody reaches the members, never a human, even one seated in the channel before the
+    // board kept human names (a legacy membership)
+    let (dev, human) = (b.d.with_conn(|tx| tx.channel_by_name("dev")).unwrap().unwrap().id, b.agent_id("human"));
+    b.d.with_tx(|tx| Ok(tx.insert_membership(&dev, &human, 0)?)).unwrap();
+    let all = b.ok(ALICE, "message.send", json!({"to": {"channel": "#dev"}, "text": "@everybody standup"}));
+    assert!(all.get("not_delivered").is_none());
+    assert_eq!(b.status_of(all["message_id"].as_str().unwrap(), "zbot"), "pending");
+    let humans: Vec<_> = b.notifications().into_iter().filter(|(k, _, _)| k.ends_with(".human")).collect();
+    assert!(humans.is_empty(), "{humans:?}");
 }

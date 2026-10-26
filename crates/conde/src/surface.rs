@@ -361,9 +361,13 @@ fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
     }
 }
 
-/// `queued <id> to <recipient>`.
+/// `queued <id> to <recipient>`, then one line per @mention not delivered.
 pub fn sent_line(r: &Value) -> String {
-    format!("queued {} to {}", qualify(result_board(r), s(&r["message_id"])), s(&r["to"]))
+    let mut out = format!("queued {} to {}", qualify(result_board(r), s(&r["message_id"])), s(&r["to"]));
+    for note in r["not_delivered"].as_array().into_iter().flatten() {
+        let _ = write!(out, "\n{}", s(note));
+    }
+    out
 }
 
 pub fn inbox(r: &Value, surface: Surface) -> Out {

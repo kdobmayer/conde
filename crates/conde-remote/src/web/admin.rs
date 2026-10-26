@@ -302,7 +302,7 @@ async fn create_user(
         tid: req.tid,
         oid: req.oid,
         display_name: req.display.filter(|d| !d.trim().is_empty()),
-        email: preferred_username.clone(),
+        email: super::auth::lookup_email(preferred_username.as_deref(), None),
         preferred_username,
     };
     let result = state

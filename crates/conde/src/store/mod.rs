@@ -744,7 +744,7 @@ pub trait Tx {
     /// Every user's paging fields, by user id.
     fn users_slack(&self) -> StoreResult<Vec<UserSlack>>;
     fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>>;
-    /// The sign-in email (the id token's `email`, else `preferred_username`).
+    /// The sign-in email (`preferred_username`, else the `email` claim when that is no address).
     fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()>;
     /// The Slack member id and its source (`env`, `lookup`, `admin`).
     fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()>;

@@ -358,7 +358,8 @@ async fn admin_binds_existing_users_and_disables_them(d: Arc<Dispatcher>) {
     assert!(authenticates(&d, &key).await);
 }
 
-/// Sign-in stores the email (the `email` claim, else preferred_username) and asks the Slack
+/// Sign-in stores the email (preferred_username, the UPN; the `email` claim only when the UPN is
+/// not an address) and asks the Slack
 /// worker to look its member id up; the user gets a human name; the admin key alone sets the
 /// member id, which a lookup never replaces.
 async fn sign_in_stores_the_email_and_the_admin_sets_the_slack_id(d: Arc<Dispatcher>) {
@@ -371,10 +372,14 @@ async fn sign_in_stores_the_email_and_the_admin_sets_the_slack_id(d: Arc<Dispatc
     let u = user(&d).await;
     assert_eq!(u.email.as_deref(), Some("Krisztian.Dobmayer@dakai.example"), "no email claim: preferred_username");
     assert!(d.take_slack_lookups().contains(&u.user_id));
-    env.idp.person.lock().unwrap().email = Some("krisztian@dakai.io".into());
+    // the email claim is mutable and unverified: the UPN wins while it is an address
+    env.idp.person.lock().unwrap().email = Some("someone-else@dakai.io".into());
     Browser::new().sign_in(&env).await;
-    assert_eq!(user(&d).await.email.as_deref(), Some("krisztian@dakai.io"), "the email claim, refreshed at sign-in");
+    assert_eq!(user(&d).await.email.as_deref(), Some("Krisztian.Dobmayer@dakai.example"), "the UPN, not the email claim");
     assert!(d.take_slack_lookups().contains(&u.user_id), "every sign-in asks again");
+    env.idp.person.lock().unwrap().upn = "krisztian".into();
+    Browser::new().sign_in(&env).await;
+    assert_eq!(user(&d).await.email.as_deref(), Some("someone-else@dakai.io"), "a UPN without an @: the email claim, refreshed");
     let d2 = d.clone();
     let humans = blocking(move || d2.with_conn(|t| t.owner_agents(u.user_id)).unwrap()).await;
     assert_eq!(humans.iter().filter(|a| a.is_human()).map(|a| a.canonical()).collect::<Vec<_>>(), ["krisztian-dobmayer/human"]);

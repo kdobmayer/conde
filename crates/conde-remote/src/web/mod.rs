@@ -166,8 +166,8 @@ pub struct Identity {
     pub oid: String,
     pub display_name: Option<String>,
     pub preferred_username: Option<String>,
-    /// The id token's `email` claim, else `preferred_username`: where pages reach the person on
-    /// Slack (looked up by email).
+    /// What the Slack worker looks the person up by: `preferred_username` (the UPN), else the
+    /// `email` claim when the UPN is not an address.
     pub email: Option<String>,
 }
 

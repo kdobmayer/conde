@@ -33,6 +33,16 @@ const BATCH: i64 = 20;
 const LINE_CHARS: usize = 140;
 /// The longest Retry-After honoured, in seconds.
 const MAX_RETRY_AFTER: i64 = 3600;
+/// Slack's `error` codes that mean the token or the member id is wrong, not this one message.
+const CONFIG_ERRORS: &[&str] = &[
+    "invalid_auth",
+    "not_authed",
+    "token_revoked",
+    "account_inactive",
+    "missing_scope",
+    "channel_not_found",
+    "no_permission",
+];
 /// Slack's `error` codes worth another attempt; any other is final.
 const RETRYABLE: &[&str] = &["internal_error", "fatal_error", "service_unavailable", "request_timeout"];
 
@@ -269,7 +279,13 @@ pub async fn deliver(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>, http: &reqw
     let outcome = post(http, config, &job).await;
     match &outcome {
         Outcome::Delivered => tracing::info!(notification = %job.notification_id, "slack: delivered"),
-        Outcome::Refused(why) => tracing::warn!(notification = %job.notification_id, reason = %why, "slack: refused"),
+        Outcome::Refused(why) => match why.strip_prefix("slack: ").filter(|code| CONFIG_ERRORS.contains(code)) {
+            Some(code) => tracing::error!(
+                owner = %job.owner, code, notification = %job.notification_id,
+                "slack: refused for a configuration fault (bot token or member id), every message to this owner fails"
+            ),
+            None => tracing::warn!(notification = %job.notification_id, reason = %why, "slack: refused"),
+        },
         Outcome::Retry(why) => tracing::warn!(notification = %job.notification_id, reason = %why, "slack: retrying"),
         Outcome::RateLimited { after_ms } => {
             tracing::warn!(notification = %job.notification_id, ?after_ms, "slack: rate limited")

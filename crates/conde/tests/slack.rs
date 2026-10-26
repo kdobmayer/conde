@@ -20,6 +20,28 @@ use serde_json::{Value, json};
 
 type Answer = (u16, Option<&'static str>, Value);
 
+/// This test binary's log (every case writes to it).
+fn log() -> String {
+    static LOG: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buf = LOG.get_or_init(|| {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let w = buf.clone();
+        let _ = tracing_subscriber::fmt().with_ansi(false).with_writer(move || Sink(w.clone())).try_init();
+        buf
+    });
+    String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
+}
+
 #[derive(Default)]
 struct Mock {
     script: VecDeque<Answer>,
@@ -55,7 +77,8 @@ impl Fixture {
     /// alice (an agent) and krisz (a human, owner krisz mapped to U0KRISZ) on one board; Slack
     /// answers `script`, then ok.
     fn new(script: Vec<Answer>) -> Fixture {
-        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        log();
+        let rt =tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let mock = Arc::new(Mutex::new(Mock { script: script.into(), calls: Vec::new() }));
         let app = Router::new().route("/api/chat.postMessage", post(post_message)).with_state(mock.clone());
         let addr = rt.block_on(async {
@@ -188,6 +211,11 @@ fn a_final_slack_error_is_recorded_once() {
     assert_eq!(f.pass(), 1);
     assert_eq!(f.outcomes(), [("refused".to_string(), Some("slack: channel_not_found".to_string()))]);
     assert_eq!(f.b.status_of(&mid, "krisz"), "pending");
+    // a configuration fault: an error naming the code and the owner, never the token
+    let log = log();
+    let line = log.lines().find(|l| l.contains("code=\"channel_not_found\"")).expect(&log);
+    assert!(line.contains("ERROR") && line.contains("owner=krisz"), "{line}");
+    assert!(!log.contains("xoxb-test"));
     f.b.d.advance_clock(10 * 60_000);
     assert_eq!(f.pass(), 0);
     assert_eq!(f.calls().len(), 1);

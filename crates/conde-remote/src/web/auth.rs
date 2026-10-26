@@ -288,6 +288,11 @@ impl Oidc {
                 .and_then(|n| n.get(None))
                 .map(|n| n.as_str().to_string()),
             preferred_username: claims.preferred_username().map(|u| u.as_str().to_string()),
+            email: claims
+                .email()
+                .map(|e| e.as_str().to_string())
+                .or_else(|| claims.preferred_username().map(|u| u.as_str().to_string()))
+                .filter(|e| !e.trim().is_empty()),
         })
     }
 
@@ -1082,6 +1087,7 @@ mod tests {
             oid: "o".into(),
             display_name: name.map(Into::into),
             preferred_username: upn.map(Into::into),
+            email: upn.map(Into::into),
         }
     }
 

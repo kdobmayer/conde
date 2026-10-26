@@ -142,6 +142,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/v1/admin/users", post(create_user))
         .route("/v1/admin/users/{name}/disable", post(disable_user))
         .route("/v1/admin/users/{name}/enable", post(enable_user))
+        .route("/v1/admin/users/{name}/slack", post(set_slack))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin))
         .with_state(state)
 }
@@ -296,11 +297,13 @@ async fn create_user(
         }
         other => other.flatten(),
     };
+    let preferred_username = req.preferred_username.filter(|u| !u.trim().is_empty());
     let identity = Identity {
         tid: req.tid,
         oid: req.oid,
         display_name: req.display.filter(|d| !d.trim().is_empty()),
-        preferred_username: req.preferred_username.filter(|u| !u.trim().is_empty()),
+        email: preferred_username.clone(),
+        preferred_username,
     };
     let result = state
         .core()
@@ -383,9 +386,52 @@ async fn enable_user(State(state): State<AdminState>, Path(name): Path<String>) 
     set_disabled(state, name, false).await
 }
 
+#[derive(Deserialize)]
+struct SlackMember {
+    member_id: String,
+}
+
+/// A Slack member id as Slack writes one: `U...` or `W...`, upper-case letters and digits.
+fn member_id(input: &str) -> Option<String> {
+    let id = input.trim();
+    let ok = (3..=32).contains(&id.len())
+        && id.starts_with(['U', 'W'])
+        && id.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    ok.then(|| id.to_string())
+}
+
+/// `POST /v1/admin/users/{name}/slack {member_id}`: the Slack member id pages to the user's human
+/// reach; set by the admin, it is never replaced by a lookup by email.
+async fn set_slack(State(state): State<AdminState>, Path(name): Path<String>, Json(req): Json<SlackMember>) -> Response {
+    let Some(name) = owner_name(&name) else {
+        return fail(StatusCode::BAD_REQUEST, "bad_request", "bad user name");
+    };
+    let Some(id) = member_id(&req.member_id) else {
+        return fail(StatusCode::BAD_REQUEST, "bad_request", "member_id is a Slack member id (U... or W...)");
+    };
+    let (target, member) = (name.clone(), id.clone());
+    match state.core().store(move |s| s.set_slack_member(&target, &member)).await {
+        Ok(Some(user)) => {
+            tracing::info!(user = %user.name, "admin set the user's Slack member id");
+            reply(StatusCode::OK, json!({"user": user.name, "slack_member_id": id, "slack_source": "admin"}))
+        }
+        Ok(None) => fail(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => store_failed(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slack_member_ids() {
+        assert_eq!(member_id(" U0123ABC ").as_deref(), Some("U0123ABC"));
+        assert_eq!(member_id("W99").as_deref(), Some("W99"));
+        for bad in ["", "U1", "u0123", "C0123ABC", "U01 23", "U0123abc"] {
+            assert_eq!(member_id(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn constant_time_equality() {

@@ -166,6 +166,9 @@ pub struct Identity {
     pub oid: String,
     pub display_name: Option<String>,
     pub preferred_username: Option<String>,
+    /// The id token's `email` claim, else `preferred_username`: where pages reach the person on
+    /// Slack (looked up by email).
+    pub email: Option<String>,
 }
 
 /// Result of [`WebStore::create_user`].
@@ -375,6 +378,11 @@ pub trait WebStore: Send + Sync {
     /// Sets the user's disabled flag (disabling also deletes the user's browser sessions);
     /// returns the user's hosts, or None for an unknown user.
     fn set_disabled(&self, name: &str, disabled: bool) -> WebResult<Option<Vec<String>>>;
+    /// Sets the user's Slack member id as the admin's (a lookup by email never replaces it);
+    /// None for an unknown user. Default: refused (a store without human paging).
+    fn set_slack_member(&self, _name: &str, _member_id: &str) -> WebResult<Option<WebUser>> {
+        Err(WebStoreError("this board has no Slack member ids".into()))
+    }
 }
 
 /// Lifetimes for [`WebStore::purge_expired`], in seconds.

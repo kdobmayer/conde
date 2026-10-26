@@ -954,3 +954,47 @@ fn page_and_done_pages_send_the_paging_ops() {
     );
 }
 
+/// `conde admin slack` posts the member id to the admin API with the admin key, and never prints
+/// the key; an agent's shell is refused before anything is sent.
+#[test]
+fn admin_slack_sets_the_member_id_with_the_admin_key() {
+    use std::io::Read;
+    let r = Root::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let key = "q7Zx2Lm9Vt4Rk8Wp3Ny6Hb1Jc5Fd0GsUe";
+    let out = r.cmd(Path::new(BIN)).env("CODEX_THREAD_ID", "t-1").env("CONDE_ADMIN_KEY", key)
+        .args(["admin", "slack", "krisz", "U0ADMIN", "--server", &url]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("admin commands are for the human only"));
+    let seen = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = conn.read(&mut chunk).unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                    .unwrap_or(0);
+                if buf.len() >= end + 4 + len || n == 0 {
+                    break;
+                }
+            }
+        }
+        let body = json!({"user": "krisz", "slack_member_id": "U0ADMIN", "slack_source": "admin"}).to_string();
+        let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        conn.write_all(reply.as_bytes()).unwrap();
+        String::from_utf8(buf).unwrap()
+    });
+    let line = conde::admin::set_slack(&url, key, "Krisz", "U0ADMIN").unwrap();
+    assert_eq!(line, format!("slack member id of krisz on {url}: U0ADMIN (set by the admin)"));
+    assert!(!line.contains(key));
+    let request = seen.join().unwrap();
+    assert!(request.starts_with("POST /v1/admin/users/krisz/slack HTTP/1.1\r\n"), "{request}");
+    assert!(request.to_ascii_lowercase().contains(&format!("authorization: bearer {}", key.to_ascii_lowercase())), "{request}");
+    assert!(request.ends_with(r#"{"member_id":"U0ADMIN"}"#), "{request}");
+}

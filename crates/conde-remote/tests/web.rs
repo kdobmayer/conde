@@ -2088,6 +2088,49 @@ async fn a_wrong_guess_gets_the_login_back_from_another_accounts_confirm() {
     assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
 }
 
+// --- a store without human paging ----------------------------------------------------------------
+
+/// A store with only the required methods (sign-in, keys, admin), none of which this test calls:
+/// the Slack member id is the trait's default.
+struct Minimal;
+
+impl WebStore for Minimal {
+    fn user_by_identity(&self, _: &str, _: &str) -> WebResult<Option<WebUser>> { unreachable!() }
+    fn create_user(&self, _: &Identity, _: &str) -> WebResult<CreateUser> { unreachable!() }
+    fn set_profile(&self, _: i64, _: &Identity) -> WebResult<()> { unreachable!() }
+    fn user_disabled(&self, _: i64) -> WebResult<bool> { unreachable!() }
+    fn insert_session(&self, _: &str, _: &SessionRecord) -> WebResult<bool> { unreachable!() }
+    fn session(&self, _: &str) -> WebResult<Option<SessionRecord>> { unreachable!() }
+    fn touch_session(&self, _: &str, _: i64) -> WebResult<()> { unreachable!() }
+    fn delete_session(&self, _: &str) -> WebResult<()> { unreachable!() }
+    fn insert_login(&self, _: &str, _: &LoginTxn) -> WebResult<()> { unreachable!() }
+    fn take_login(&self, _: &str) -> WebResult<Option<LoginTxn>> { unreachable!() }
+    fn insert_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> { unreachable!() }
+    fn take_cli_code(&self, _: &str) -> WebResult<Option<CliCode>> { unreachable!() }
+    fn issue_cli_code(&self, _: &str, _: &CliCode, _: i64) -> WebResult<CliIssued> { unreachable!() }
+    fn restore_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> { unreachable!() }
+    fn end_cli_code(&self, _: &str, _: i64) -> WebResult<()> { unreachable!() }
+    fn insert_key_display(&self, _: &str, _: &KeyDisplay) -> WebResult<()> { unreachable!() }
+    fn take_key_display(&self, _: &str) -> WebResult<Option<KeyDisplay>> { unreachable!() }
+    fn purge_expired(&self, _: i64, _: &Limits) -> WebResult<()> { unreachable!() }
+    fn host_keys(&self, _: i64) -> WebResult<Vec<HostKey>> { unreachable!() }
+    fn host_owner(&self, _: &str) -> WebResult<Option<i64>> { unreachable!() }
+    fn mint_host_key(&self, _: i64, _: &str, _: &str, _: &str, _: i64) -> WebResult<Minted> { unreachable!() }
+    fn revoke_host(&self, _: i64, _: &str, _: i64) -> WebResult<u64> { unreachable!() }
+    fn ensure_user(&self, _: &str) -> WebResult<WebUser> { unreachable!() }
+    fn bind_identity(&self, _: &str, _: &Identity) -> WebResult<BindUser> { unreachable!() }
+    fn all_keys(&self) -> WebResult<Vec<AdminKey>> { unreachable!() }
+    fn revoke_key(&self, _: &str, _: i64) -> WebResult<Option<String>> { unreachable!() }
+    fn set_disabled(&self, _: &str, _: bool) -> WebResult<Option<Vec<String>>> { unreachable!() }
+}
+
+/// The trait's default for the Slack member id, called directly: refused.
+#[test]
+fn a_store_without_human_paging_refuses_a_slack_member_id() {
+    let e = Minimal.set_slack_member("krisz", "U0123").unwrap_err();
+    assert_eq!(e.to_string(), "this board has no Slack member ids");
+}
+
 /// A login cookie longer than four real states is not split or matched (even when it holds this
 /// browser's state) and never comes back in a Set-Cookie; an entry longer than a real state is
 /// dropped.

@@ -72,6 +72,43 @@ pub fn key_create(data: Option<PathBuf>, user: &str, host: &str, label: &str) ->
     Ok(0)
 }
 
+/// `conde admin slack <owner> <member-id> --server <url>`: the admin API sets the owner's Slack
+/// member id (`slack_source = admin`) with the admin key from `CONDE_ADMIN_KEY` or a prompt.
+pub fn slack(server: &str, owner: &str, member_id: &str) -> anyhow::Result<i32> {
+    let key = match std::env::var("CONDE_ADMIN_KEY").ok().filter(|k| !k.trim().is_empty()) {
+        Some(k) => k.trim().to_string(),
+        None => credentials::prompt_secret(
+            &format!("admin key for {server}: "),
+            "admin slack needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+        )?,
+    };
+    println!("{}", set_slack(server, &key, owner, member_id)?);
+    Ok(0)
+}
+
+/// `POST /v1/admin/users/<owner>/slack {member_id}` with the admin key; the line to print.
+pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyhow::Result<String> {
+    let base = credentials::rpc_url(server)?;
+    let origin = base.trim_end_matches("/v1/rpc");
+    let url = format!("{origin}/v1/admin/users/{}/slack", owner.trim().to_lowercase());
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let (status, body) = runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(crate::login::tls()?)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let r = client.post(&url).bearer_auth(key).json(&serde_json::json!({"member_id": member_id})).send().await?;
+        let status = r.status();
+        anyhow::Ok((status, r.json::<serde_json::Value>().await.unwrap_or_default()))
+    })?;
+    if !status.is_success() {
+        bail!("{} ({status})", body["message"].as_str().unwrap_or("the server refused"));
+    }
+    let user = body["user"].as_str().unwrap_or(owner);
+    Ok(format!("slack member id of {user} on {server}: {member_id} (set by the admin)"))
+}
+
 pub fn key_revoke(data: Option<PathBuf>, host: Option<&str>, id: Option<&str>) -> anyhow::Result<i32> {
     let board = open_board(data, PgOpen::COMMAND)?;
     let now = iso_from_ms(now_ms());

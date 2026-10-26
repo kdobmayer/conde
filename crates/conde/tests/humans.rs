@@ -174,12 +174,17 @@ fn a_user_made_by_the_admin_key_or_a_sign_in_gets_a_human_name() {
         oid: oid.into(),
         display_name: None,
         preferred_username: Some(format!("{oid}@dakai.io")),
+        email: Some(format!("{oid}@dakai.io")),
     };
     web.create_user(&person("cili"), "cili").unwrap();
     web.bind_identity("dora", &person("dora")).unwrap();
     for owner in ["cili", "dora"] {
         assert_eq!(humans_of(&b.d, owner).len(), 1, "{owner}");
     }
+    // the sign-in stored the email and asked for a lookup
+    let cili = b.d.with_conn(|tx| tx.user_slack(tx.user_id("cili")?.unwrap())).unwrap().unwrap();
+    assert_eq!(cili.email.as_deref(), Some("cili@dakai.io"));
+    assert!(b.d.take_slack_lookups().contains(&cili.user_id));
 }
 
 #[test]

@@ -93,19 +93,28 @@ impl WebStore for WebBoard {
                 identity.display_name.as_deref(),
                 identity.preferred_username.as_deref(),
             )?;
+            t.set_user_email(user_id, identity.email.as_deref())?;
             crate::humans::ensure(t, user_id)?;
             Ok(CreateUser::Created(WebUser { user_id, name: name.to_string(), disabled: false }))
+        })
+        .inspect(|c| {
+            if let CreateUser::Created(u) = c {
+                self.d.request_slack_lookup(u.user_id);
+            }
         })
     }
 
     fn set_profile(&self, user_id: i64, identity: &Identity) -> WebResult<()> {
         self.write(|t| {
+            t.set_user_email(user_id, identity.email.as_deref())?;
             Ok(t.set_identity_profile(
                 user_id,
                 identity.display_name.as_deref(),
                 identity.preferred_username.as_deref(),
             )?)
-        })
+        })?;
+        self.d.request_slack_lookup(user_id);
+        Ok(())
     }
 
     fn user_disabled(&self, user_id: i64) -> WebResult<bool> {
@@ -299,7 +308,8 @@ impl WebStore for WebBoard {
                     &identity.oid,
                     identity.display_name.as_deref(),
                     identity.preferred_username.as_deref(),
-                )
+                )?;
+                t.set_user_email(user_id, identity.email.as_deref())
             };
             Ok(match t.user_by_name(name)? {
                 Some(u) if u.bound => BindUser::NameBound,
@@ -339,6 +349,16 @@ impl WebStore for WebBoard {
             let [one] = &live[..] else { return Ok(None) };
             t.revoke_credential(key, &iso(now))?;
             Ok(Some(one.host.clone()))
+        })
+    }
+
+    fn set_slack_member(&self, name: &str, member_id: &str) -> WebResult<Option<WebUser>> {
+        self.write(|t| match t.user_by_name(name)? {
+            Some(u) => {
+                t.set_user_slack(u.user_id, member_id, "admin")?;
+                Ok(Some(web_user(u)))
+            }
+            None => Ok(None),
         })
     }
 

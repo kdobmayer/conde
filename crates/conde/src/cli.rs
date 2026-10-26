@@ -446,6 +446,15 @@ enum AdminCmd {
         #[command(subcommand)]
         cmd: KeyCmd,
     },
+    /// Set an owner's Slack member id on a shared board (the admin key; CONDE_ADMIN_KEY or a
+    /// prompt): the id pages reach, never replaced by a lookup by email.
+    Slack {
+        owner: String,
+        member_id: String,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -629,6 +638,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::History { cmd: HistoryCmd::PruneCandidates { snapshot, out } } => {
             no_board("history", "")?;
             return crate::history::prune_main(&snapshot, out.as_deref());
+        }
+        Cmd::Admin { cmd: AdminCmd::Slack { owner, member_id, server } } => {
+            no_board("admin", "")?;
+            admin::require_human()?;
+            return admin::slack(&server, &owner, &member_id);
         }
         Cmd::Admin { cmd: AdminCmd::Key { cmd } } => {
             no_board("admin", "")?;

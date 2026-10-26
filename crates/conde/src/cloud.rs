@@ -435,6 +435,12 @@ pub async fn start_on(
     config: ServerConfig,
 ) -> std::io::Result<ServerHandle> {
     d.share(&board_name().map_err(std::io::Error::other)?);
+    // Every owner has exactly one human name before the board answers anyone.
+    let d2 = d.clone();
+    tokio::task::spawn_blocking(move || d2.with_tx(|tx| Ok(crate::humans::ensure_all(tx)?)))
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)?;
     let board = Arc::new(Board::new(d));
     conde_remote::start_on(listener, config, board.clone(), board.clone(), board).await
 }

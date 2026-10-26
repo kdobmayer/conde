@@ -92,6 +92,7 @@ pub fn topic(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 
 pub fn join(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
+    agents::unprotected(ctx, &me)?;
     let channel = existing(ctx, str_param(body, "channel")?)?;
     let label = format!("#{}", channel.name);
     if read_seq(ctx.db, &channel.id, &me.id)?.is_some() {
@@ -117,6 +118,7 @@ pub fn invite(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let channel = member_channel(ctx, &me, str_param(body, "channel")?)?;
     let label = format!("#{}", channel.name);
     let invitee = agents::lookup_bound(ctx, str_param(body, "name")?)?;
+    agents::unprotected(ctx, &invitee)?;
     if read_seq(ctx.db, &channel.id, &invitee.id)?.is_some() {
         return Err(conflict(format!("{} is already a member of '{label}'", invitee.canonical())));
     }

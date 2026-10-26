@@ -7,6 +7,7 @@ use crate::address::{Address, Kind, split_qualified};
 use crate::dispatch::{
     Ctx, OpError, OpResult, bad_request, conflict, forbidden, not_found, one_line, opt_str, str_param,
 };
+use crate::humans::{self, HUMAN_NAME};
 pub use crate::store::Agent;
 use crate::store::Tx;
 use crate::util::new_ulid;
@@ -74,6 +75,31 @@ fn set_binding(db: &dyn Tx, agent_id: &str, address: Option<&Address>) -> OpResu
     Ok(db.set_binding(agent_id, address)?)
 }
 
+/// On a shared board a new name is never `human` (each owner's human name is the board's own).
+pub(crate) fn not_reserved(ctx: &Ctx, name: &str) -> OpResult<()> {
+    if ctx.board.is_some() && name == HUMAN_NAME {
+        return Err(bad_request(format!("'{HUMAN_NAME}' is reserved on this board for each owner's human name")));
+    }
+    Ok(())
+}
+
+/// The refusal of a binding or membership change of the owner's human row on a shared board.
+pub(crate) fn unprotected(ctx: &Ctx, a: &Agent) -> OpResult<()> {
+    if ctx.board.is_some() && a.is_human() {
+        return Err(forbidden(humans::protected(a)));
+    }
+    Ok(())
+}
+
+/// A name taken on a shared board: an existing row must not be the human row, a new one must
+/// not be the reserved name.
+pub(crate) fn may_bind(ctx: &Ctx, name: &str) -> OpResult<()> {
+    match by_name(ctx.db, ctx.p.user_id, name)? {
+        Some(existing) => unprotected(ctx, &existing),
+        None => not_reserved(ctx, name),
+    }
+}
+
 pub(crate) fn ensure_row(ctx: &Ctx, name: &str) -> OpResult<Agent> {
     if let Some(a) = by_name(ctx.db, ctx.p.user_id, name)? {
         return Ok(a);
@@ -89,6 +115,12 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         return Err(bad_request("'everybody' is reserved (channel-wide mention)"));
     }
     let own = ctx.actor_address()?;
+    if ctx.board.is_some() && own.kind == Kind::Human {
+        return Err(forbidden(
+            "a human's name on this board is the board's own; humans do not register here (your agents page you)",
+        ));
+    }
+    may_bind(ctx, &name)?;
     if let Some(explicit) = opt_str(body, "address")? {
         let explicit = Address::parse_v1(explicit, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
         if explicit != own {
@@ -136,6 +168,7 @@ pub fn unregister(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let Some(current) = &agent.address else {
         return Ok(json!({"name": canonical, "was_registered": false}));
     };
+    unprotected(ctx, &agent)?;
     if let Some(pin) = &agent.pinned {
         return Err(forbidden(format!(
             "{canonical} is owner-pinned to {pin}; refusing unregister. Unpin it first."
@@ -207,6 +240,10 @@ pub fn rename(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         }
     };
     let old = agent.canonical();
+    unprotected(ctx, &agent)?;
+    if agent.name != new {
+        not_reserved(ctx, &new)?;
+    }
     if let Some(pin) = &agent.pinned {
         return Err(forbidden(format!(
             "{old} is owner-pinned to {pin}; refusing rename. Unpin it first (conde unpin {}).",
@@ -243,10 +280,16 @@ pub fn pin(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         return Err(forbidden("pins are set by the human owner only"));
     }
     let name = ctx.own_name(str_param(body, "name")?)?;
+    may_bind(ctx, &name)?;
     let agent = ensure_row(ctx, &name)?;
     match opt_str(body, "address")? {
         Some(raw) => {
             let address = Address::parse_v1(raw, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
+            if ctx.board.is_some() && address.kind == Kind::Human {
+                return Err(forbidden(
+                    "a human address is never pinned on this board: each owner's human name is the board's own",
+                ));
+            }
             ctx.db.set_pin(&agent.id, Some(&address.to_string()))?;
             if agent.address.as_ref() != Some(&address) {
                 set_binding(ctx.db, &agent.id, Some(&address))?;

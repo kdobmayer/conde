@@ -1,0 +1,250 @@
+//! Each owner's one human name on a shared board (docs/DESIGN-human-paging.md), through the
+//! dispatcher: the ensure (new rows, existing ones rebound to the web host, extras retired, a
+//! taken name, racing ensures, at user creation and at the server's start), the protection of the
+//! human row, humans never sending (`--from` included), sends and @mentions to humans, and the
+//! page ops. On SQLite, and on Postgres with CONDE_TEST_PG.
+
+mod common;
+
+use std::sync::{Arc, Barrier};
+
+use common::*;
+use conde::address::{Address, Kind};
+use conde::dispatch::{Dispatcher, Principal};
+use conde::humans::{self, Ensured};
+use conde::protocol::ErrorCode;
+use conde::store::Agent;
+use serde_json::{Value, json};
+
+const ZBOT: &str = "codex:t-zbot";
+
+/// A shared board `dakai`: krisz (alice) and zed (zbot) on their hosts,
+/// each with their human name; krisz's member id U0KRISZ.
+fn shared() -> (Board, Principal) {
+    let b = Board::new();
+    b.d.share("dakai");
+    b.register(ALICE, "alice");
+    let zed = b.other("zed", "zbox");
+    b.call_as(&zed, ZBOT, "agent.register", json!({"name": "zbot"})).unwrap();
+    b.d.with_tx(|tx| Ok(humans::ensure_all(tx)?)).unwrap();
+    let uid = b.p.user_id;
+    b.d.with_tx(|tx| Ok(tx.set_user_slack(uid, "U0KRISZ", "env")?)).unwrap();
+    (b, zed)
+}
+
+fn agent(d: &Dispatcher, owner: &str, name: &str) -> Option<Agent> {
+    d.with_conn(|tx| {
+        let Some(id) = tx.user_id(owner)? else { return Ok(None) };
+        tx.agent_by_name(id, name)
+    })
+    .unwrap()
+}
+
+fn humans_of(d: &Dispatcher, owner: &str) -> Vec<Agent> {
+    d.with_conn(|tx| {
+        let id = tx.user_id(owner)?.unwrap();
+        Ok(tx.owner_agents(id)?.into_iter().filter(Agent::is_human).collect())
+    })
+    .unwrap()
+}
+
+fn refused(r: Reply) -> (ErrorCode, String) {
+    r.expect_err("refused")
+}
+
+#[test]
+fn every_owner_gets_one_human_name_bound_to_the_web_host() {
+    let (b, _) = shared();
+    let krisz = agent(&b.d, "krisz", "human").unwrap();
+    assert_eq!(krisz.address, Some(Address::new(Kind::Human, "krisz", "web")));
+    assert_eq!(humans_of(&b.d, "zed").len(), 1);
+    // an ensure on a row that is right changes nothing
+    let again = b.d.with_tx(|tx| Ok(humans::ensure(tx, tx.user_id("krisz")?.unwrap())?)).unwrap();
+    assert_eq!(again, Some(Ensured::Kept("krisz/human".into())));
+    assert_eq!(agent(&b.d, "krisz", "human").unwrap().binding_version, krisz.binding_version);
+    // the directory lists it as a human on the web host, never a target
+    let list = b.ok(ALICE, "agent.list", json!({}));
+    let row = list["agents"].as_array().unwrap().iter().find(|a| a["name"] == "krisz/human").cloned().unwrap();
+    assert_eq!((row["kind"].as_str(), row["host"].as_str()), (Some("human"), Some("web")));
+}
+
+#[test]
+fn an_existing_human_name_is_kept_and_rebound_to_the_web_host() {
+    let b = Board::new();
+    // before the ensure: zed's human name published from a host, pinned there
+    let zed = b.other("zed", "zbox");
+    b.call_as(&zed, "human:zed", "agent.register", json!({"name": "zed"})).unwrap();
+    b.call_as(&zed, "human:zed", "agent.pin", json!({"name": "zed", "address": "human:zed"})).unwrap();
+    let before = agent(&b.d, "zed", "zed").unwrap();
+    b.d.share("dakai");
+    let done = b.d.with_tx(|tx| Ok(humans::ensure_all(tx)?)).unwrap();
+    assert!(done.contains(&Ensured::Rebound("zed/zed".into())), "{done:?}");
+    assert!(done.contains(&Ensured::Created("krisz/human".into())), "{done:?}");
+    let after = agent(&b.d, "zed", "zed").unwrap();
+    assert_eq!(after.id, before.id, "the same row: history and links stay valid");
+    assert_eq!(after.address, Some(Address::new(Kind::Human, "zed", "web")));
+    assert_eq!((after.binding_version, after.pinned), (before.binding_version + 1, None));
+    assert!(agent(&b.d, "zed", "human").is_none(), "no second human name");
+    // the old host routes nothing of it any more: zed's host session no longer acts as the name
+    let e = refused(b.call_as(&zed, "human:zed", "inbox.list", json!({})));
+    assert_eq!(e.0, ErrorCode::Unauthenticated, "{e:?}");
+}
+
+#[test]
+fn extra_human_names_are_retired_and_a_taken_name_is_left_alone() {
+    let b = Board::new();
+    let zed = b.other("zed", "zbox");
+    let zed2 = b.other("zed", "zbox2");
+    b.call_as(&zed, "human:zed", "agent.register", json!({"name": "zed"})).unwrap();
+    b.call_as(&zed2, "human:zed", "agent.register", json!({"name": "zed2"})).unwrap();
+    b.call_as(&zed2, "human:zed", "agent.unregister", json!({"name": "zed2"})).unwrap();
+    b.call_as(&zed2, "human:zed", "agent.register", json!({"name": "zed2"})).unwrap();
+    // krisz has an agent named `human` and no human name
+    b.register(ALICE, "human");
+    b.d.share("dakai");
+    let done = b.d.with_tx(|tx| Ok(humans::ensure_all(tx)?)).unwrap();
+    assert!(done.contains(&Ensured::Conflict("krisz/human".into())), "{done:?}");
+    assert!(done.contains(&Ensured::Rebound("zed/zed2".into())), "the highest binding version stays: {done:?}");
+    let kept = humans_of(&b.d, "zed");
+    assert_eq!(kept.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["zed2"]);
+    let retired = agent(&b.d, "zed", "zed").unwrap();
+    assert!(retired.retired && retired.address.is_none(), "{retired:?}");
+    let taken = agent(&b.d, "krisz", "human").unwrap();
+    assert_eq!(taken.address.unwrap().kind, Kind::Codex, "the agent named human is left alone");
+    assert!(humans_of(&b.d, "krisz").is_empty());
+}
+
+#[test]
+fn racing_ensures_leave_one_human_name() {
+    // SQLite: one board, many threads
+    let d = Arc::new(Dispatcher::open_in_memory().unwrap());
+    let uid = d.principal("krisz", "box", false).unwrap().user_id;
+    race(vec![d.clone(); 8], uid);
+    assert_eq!(humans_of(&d, "krisz").len(), 1);
+    // Postgres: separate connections to one database, as two replicas
+    let Some(url) = common::pg::fresh_database() else {
+        eprintln!("skipped: set CONDE_TEST_PG to race on Postgres");
+        return;
+    };
+    let open = || Arc::new(Dispatcher::connect(&url, conde::store::postgres::PgOpen::COMMAND).unwrap());
+    let first = open();
+    let uid = first.principal("krisz", "box", false).unwrap().user_id;
+    let mut replicas = vec![first];
+    replicas.extend((0..3).map(|_| open()));
+    race(replicas.clone(), uid);
+    assert_eq!(humans_of(&replicas[0], "krisz").len(), 1);
+}
+
+fn race(boards: Vec<Arc<Dispatcher>>, uid: i64) {
+    let start = Arc::new(Barrier::new(boards.len()));
+    let threads: Vec<_> = boards
+        .into_iter()
+        .map(|d| {
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                d.with_tx(|tx| Ok(humans::ensure(tx, uid)?)).unwrap()
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    let created = outcomes.iter().filter(|o| matches!(o, Some(Ensured::Created(_)))).count();
+    assert_eq!(created, 1, "{outcomes:?}");
+}
+
+#[test]
+fn a_user_made_by_the_admin_key_or_a_sign_in_gets_a_human_name() {
+    let b = Board::new();
+    b.d.share("dakai");
+    // `conde admin key create` and the admin API's key mint
+    let key = |user: &str, host: &str| {
+        let (u, h) = (user.to_string(), host.to_string());
+        b.d.with_tx(move |tx| conde::ops::hosts::insert_key(tx, &u, &h, &conde::util::new_ulid(), "l", "2026-10-26T00:00:00.000Z"))
+            .unwrap()
+    };
+    key("anna", "abox");
+    assert_eq!(humans_of(&b.d, "anna").iter().map(Agent::canonical).collect::<Vec<_>>(), ["anna/human"]);
+    use conde_remote::web::{Identity, WebStore};
+    let web = conde::web_store::WebBoard::new(b.d.clone());
+    web.ensure_user("bela").unwrap();
+    assert_eq!(humans_of(&b.d, "bela").len(), 1);
+    let person = |oid: &str| Identity {
+        tid: "t".into(),
+        oid: oid.into(),
+        display_name: None,
+        preferred_username: Some(format!("{oid}@dakai.io")),
+    };
+    web.create_user(&person("cili"), "cili").unwrap();
+    web.bind_identity("dora", &person("dora")).unwrap();
+    for owner in ["cili", "dora"] {
+        assert_eq!(humans_of(&b.d, owner).len(), 1, "{owner}");
+    }
+}
+
+#[test]
+fn the_server_start_gives_every_owner_a_human_name() {
+    let b = Board::new();
+    b.register(ALICE, "alice");
+    b.other("zed", "zbox");
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let handle = rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        conde::cloud::start_on(b.d.clone(), listener, conde_remote::ServerConfig::default()).await.unwrap()
+    });
+    assert_eq!(humans_of(&b.d, "krisz").len(), 1);
+    assert_eq!(humans_of(&b.d, "zed").len(), 1);
+    rt.block_on(handle.shutdown()).unwrap();
+}
+
+#[test]
+fn nothing_binds_moves_renames_or_seats_the_human_name() {
+    let (b, zed) = shared();
+    let before = agent(&b.d, "krisz", "human").unwrap();
+    let protected = |r: Reply| {
+        let (code, message) = refused(r);
+        assert_eq!(code, ErrorCode::Forbidden, "{message}");
+        assert!(message.contains("krisz/human is its owner's human name"), "{message}");
+    };
+    // register (a session taking the name), unregister, pin, unpin, rename (by the owner)
+    protected(b.call(CAROL, "agent.register", json!({"name": "human"})));
+    protected(b.call(HUMAN, "agent.unregister", json!({"name": "human"})));
+    protected(b.call(HUMAN, "agent.pin", json!({"name": "human", "address": CAROL})));
+    protected(b.call(HUMAN, "agent.pin", json!({"name": "human", "address": null})));
+    protected(b.call(HUMAN, "agent.rename", json!({"old": "human", "new": "boss"})));
+    // a human address is never pinned, a human never registers, `human` is never a new name
+    let (code, _) = refused(b.call(HUMAN, "agent.pin", json!({"name": "alice", "address": "human:krisz"})));
+    assert_eq!(code, ErrorCode::Forbidden);
+    let (code, message) = refused(b.call(HUMAN, "agent.register", json!({"name": "krisz"})));
+    assert_eq!(code, ErrorCode::Forbidden, "{message}");
+    let (code, message) = refused(b.call(ALICE, "agent.rename", json!({"new": "human"})));
+    assert_eq!((code, message.as_str()), (ErrorCode::BadRequest, "'human' is reserved on this board for each owner's human name"));
+    // publish and unpublish from a migrated host
+    let mbox = b.other("krisz", "mbox");
+    b.d.with_tx(|tx| Ok(tx.set_host_mailbox_only("mbox")?)).unwrap();
+    let publish = |body: Value| b.d.dispatch(&mbox, &request(None, "mailbox.publish", body));
+    let r = publish(json!({"name": "human"}));
+    assert!(r.error.unwrap().message.contains("krisz/human is its owner's human name"));
+    let r = publish(json!({"name": "krisz", "human": true}));
+    assert!(r.error.unwrap().message.starts_with("a human is not published"));
+    let r = b.d.dispatch(&mbox, &request(None, "mailbox.unpublish", json!({"mailbox_id": before.id, "expected_generation": before.binding_version})));
+    assert!(r.error.unwrap().message.contains("krisz/human is its owner's human name"));
+    // channel invite of a human (own or another owner's), and a human joining
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    protected(b.call(ALICE, "channel.invite", json!({"channel": "#dev", "name": "human"})));
+    let (code, message) = refused(b.call(ALICE, "channel.invite", json!({"channel": "#dev", "name": "zed/human"})));
+    assert_eq!(code, ErrorCode::Forbidden);
+    assert!(message.contains("zed/human is its owner's human name"), "{message}");
+    let _ = zed;
+    // nothing changed
+    let after = agent(&b.d, "krisz", "human").unwrap();
+    assert_eq!((after.address, after.binding_version, after.pinned), (before.address, before.binding_version, None));
+    let members = b.ok(ALICE, "channel.members", json!({"channel": "#dev"}));
+    assert_eq!(members["members"].as_array().unwrap().len(), 1, "{members}");
+}
+
+fn request(actor: Option<&str>, op: &str, body: Value) -> conde::protocol::Request {
+    let mut req = conde::protocol::Request::new(conde::util::new_ulid(), op, body);
+    req.actor = actor.map(Into::into);
+    req.idempotency_key = Some(conde::util::new_ulid());
+    req
+}

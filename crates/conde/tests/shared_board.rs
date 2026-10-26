@@ -360,8 +360,8 @@ struct Fx {
     ben: Key,
 }
 
-/// homepc (kd): desk (Claude, pinned), worker (Codex), lonely (Claude), kd (human). benbox (ben):
-/// relay (Codex). desk and relay exchange DMs and both are in #dev, where desk posts; one desk
+/// homepc (kd): desk (Claude, pinned by the human), worker (Codex), lonely (Claude); kd's human
+/// name kd/human is the board's own (bound to the web host). benbox (ben): relay (Codex). desk and relay exchange DMs and both are in #dev, where desk posts; one desk
 /// post in #dev is an imported row (no notification, dated before a notified message).
 async fn fixture(d: &Arc<Dispatcher>, config: ServerConfig) -> Fx {
     let s = srv(d, config).await;
@@ -370,7 +370,6 @@ async fn fixture(d: &Arc<Dispatcher>, config: ServerConfig) -> Fx {
     s.ok(&kd, Some(DESK), "agent.register", json!({"name": "desk"})).await;
     s.ok(&kd, Some(WORKER), "agent.register", json!({"name": "worker"})).await;
     s.ok(&kd, Some(LONELY), "agent.register", json!({"name": "lonely"})).await;
-    s.ok(&kd, Some(KD), "agent.register", json!({"name": "kd"})).await;
     s.ok(&kd, Some(KD), "agent.pin", json!({"name": "desk", "address": DESK})).await;
     s.ok(&ben, Some(RELAY), "agent.register", json!({"name": "relay"})).await;
     s.send(&ben, RELAY, "kd/desk", "hi desk").await;
@@ -441,7 +440,7 @@ async fn g8_the_preview_finds_candidates_in_message_relationships(d: Arc<Dispatc
     let p = fx.s.ok(&fx.kd, None, "host.migrate_preview", json!({})).await;
     let preview: conde::protocol::v2::MigratePreview = serde_json::from_value(p.clone()).unwrap();
     let names: Vec<&str> = preview.rows.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, ["desk", "kd", "lonely", "worker"], "every bound row of this host, nothing of benbox");
+    assert_eq!(names, ["desk", "lonely", "worker"], "every bound row of this host, nothing of benbox nor the web host");
     let row = |n: &str| preview.rows.iter().find(|r| r.name == n).unwrap().clone();
     let desk = row("desk");
     assert!(desk.candidate);
@@ -464,7 +463,7 @@ async fn g8_the_preview_finds_candidates_in_message_relationships(d: Arc<Dispatc
         "{p}"
     );
     assert!(desk.evidence.iter().all(|e| !e.last_at.is_empty()));
-    for n in ["kd", "lonely", "worker"] {
+    for n in ["lonely", "worker"] {
         let r = row(n);
         assert!(!r.candidate && r.evidence.is_empty(), "a same-owner DM is no evidence: {r:?}");
     }
@@ -484,10 +483,10 @@ async fn g8_migration_publishes_the_list_fences_v1_and_replays_its_manifest(d: A
         async move { blocking(move || d.with_conn(|t| t.endpoint_rows()).unwrap()).await.iter().any(|e| e.host == "homepc") }
     })
     .await;
-    let (desk, kd) = (id(s, "desk").await, id(s, "kd").await);
+    let desk = id(s, "desk").await;
     let before = s.agent("kd", "desk").await.binding_version;
     let key = conde::util::new_ulid();
-    let manifest = s.migrate(&fx.kd, &[&desk, &kd], &key).await;
+    let manifest = s.migrate(&fx.kd, &[&desk], &key).await;
 
     // The connected v1 bridge of the host is fenced and closed.
     assert_eq!(old.refused().await["code"], "fenced");
@@ -504,7 +503,6 @@ async fn g8_migration_publishes_the_list_fences_v1_and_replays_its_manifest(d: A
         rows,
         [
             ("desk", desk_at.as_str(), Some(desk_at.as_str()), true),
-            ("kd", "human:kd@homepc", None, true),
             ("lonely", lonely_at.as_str(), None, false),
             ("worker", worker_at.as_str(), None, false),
         ]
@@ -514,7 +512,7 @@ async fn g8_migration_publishes_the_list_fences_v1_and_replays_its_manifest(d: A
     assert_eq!((desk_row.binding_version, desk_row.pinned), (before + 1, None), "a new generation, no pin");
     let route = m.bindings[0].published.clone().unwrap();
     assert_eq!((route.mailbox_id.as_str(), route.route_generation as i64), (desk.as_str(), before + 1));
-    assert_eq!(s.agent("kd", "kd").await.address.unwrap().to_string(), "human:kd@homepc", "a human keeps human:");
+    assert_eq!(s.agent("kd", "human").await.address.unwrap().to_string(), "human:kd@web", "the human name is not the host's");
     assert!(s.agent("kd", "lonely").await.address.is_none() && s.agent("kd", "worker").await.address.is_none());
     // No harness address and no endpoint row left for the host, and the host is mailbox-only.
     let (agents, endpoints) = blocking({
@@ -532,7 +530,7 @@ async fn g8_migration_publishes_the_list_fences_v1_and_replays_its_manifest(d: A
     assert!(mailbox_only);
 
     // The stored answer replays identically under the same key (after a kill before the local apply).
-    let replay = s.migrate(&fx.kd, &[&desk, &kd], &key).await;
+    let replay = s.migrate(&fx.kd, &[&desk], &key).await;
     assert_eq!(replay, manifest);
     // A new key on a migrated host is refused, and changes nothing.
     let r = s.rpc(&fx.kd, None, "host.migrate_v2", json!({"publish": []}), Some("another")).await;
@@ -770,8 +768,8 @@ async fn moved_generation(d: Arc<Dispatcher>, status: &str, reason: Option<&str>
 async fn g11_the_window_bounds_claims_while_acks_and_routes_flow(d: Arc<Dispatcher>) {
     let fx = fixture(&d, config()).await;
     let s = &fx.s;
-    let (desk, kd) = (id(s, "desk").await, id(s, "kd").await);
-    s.migrate(&fx.kd, &[&desk, &kd], "m1").await;
+    let desk = id(s, "desk").await;
+    s.migrate(&fx.kd, &[&desk], "m1").await;
     let mut home = s.v2(&fx.kd, "v2-window", 2, &[&desk]).await;
     home.next("routes").await;
     for i in 0..4 {
@@ -798,7 +796,7 @@ async fn g11_the_window_bounds_claims_while_acks_and_routes_flow(d: Arc<Dispatch
 
     // While the window is full, routes frames and acks are still served.
     s.ok(&fx.kd, None, "mailbox.publish", json!({"name": "scribe"})).await;
-    assert_eq!(routes_of(&home.next("routes").await).len(), 3, "desk, kd, scribe");
+    assert_eq!(routes_of(&home.next("routes").await).len(), 2, "desk, scribe");
     let bad = home.outcome(a["attempt_id"].as_str().unwrap(), 1, "failed", Some("cannot deliver to /run/x.sock")).await;
     assert_eq!((bad["rejected"].clone(), bad["retry"].clone()), (json!(true), json!(false)), "{bad}");
     home.none("notify", Duration::from_millis(300)).await;

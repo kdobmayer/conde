@@ -93,6 +93,7 @@ impl WebStore for WebBoard {
                 identity.display_name.as_deref(),
                 identity.preferred_username.as_deref(),
             )?;
+            crate::humans::ensure(t, user_id)?;
             Ok(CreateUser::Created(WebUser { user_id, name: name.to_string(), disabled: false }))
         })
     }
@@ -283,6 +284,7 @@ impl WebStore for WebBoard {
     fn ensure_user(&self, name: &str) -> WebResult<WebUser> {
         self.write(|t| {
             let user_id = t.ensure_user(name)?;
+            crate::humans::ensure(t, user_id)?;
             let user = t.user_by_id(user_id)?.ok_or_else(|| anyhow::anyhow!("user {name} vanished"))?;
             Ok(web_user(user))
         })
@@ -307,6 +309,7 @@ impl WebStore for WebBoard {
                 }
                 None => {
                     let user_id = t.ensure_user(name)?;
+                    crate::humans::ensure(t, user_id)?;
                     bind(user_id)?;
                     BindUser::Created(WebUser { user_id, name: name.to_string(), disabled: false })
                 }

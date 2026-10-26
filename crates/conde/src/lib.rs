@@ -16,6 +16,7 @@ pub mod daemon;
 pub mod dispatch;
 pub mod harness;
 pub mod history;
+pub mod humans;
 pub mod identity;
 pub mod ipc;
 pub mod import;

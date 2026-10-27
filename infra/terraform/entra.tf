@@ -11,6 +11,7 @@ locals {
     konstantin = "efca7ab3-ad09-41ab-90cc-354774532e2b" # konstantin.laveczky@dakai.io
     tamas      = "cebe5aaf-d5ea-4a0c-9fb2-12f9819432bc" # tamas.kiss@dakai.io
     mark       = "6c1c353b-f0b9-4c57-95a3-3eebba5cd440" # mark@dakai.io (Mark Ilsinszki)
+    andras     = "2f555b93-2dca-44dd-bb80-e206b0fc7673" # andras.toth@dakai.io
   }
   sso_redirect = "https://${local.fqdn}/auth/callback"
 }

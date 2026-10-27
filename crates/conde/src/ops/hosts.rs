@@ -34,6 +34,7 @@ pub fn insert_key(db: &dyn Tx, user: &str, host: &str, digest: &str, label: &str
         bail!("host id '{host}' is reserved; choose another");
     }
     let user_id = db.ensure_user(&user)?;
+    crate::humans::ensure(db, user_id)?;
     db.ensure_host(&host, user_id)?;
     let owner = db.host_owner(&host)?.context("host row missing")?;
     if owner.0 != user_id {

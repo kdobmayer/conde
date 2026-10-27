@@ -148,11 +148,6 @@ impl conde_remote::Dispatcher for Board {
             "error": {"code": "internal", "message": e.to_string()}}))
     }
 
-    /// A remote MCP request as the grant's user (docs/REMOTE-MCP.md).
-    fn mcp(&self, caller: &conde_remote::McpCaller, request: Value) -> Value {
-        crate::mcp_remote::serve(&self.d, caller, &request)
-    }
-
     fn healthy(&self) -> bool {
         self.d.healthy()
     }
@@ -440,6 +435,22 @@ pub async fn start_on(
     config: ServerConfig,
 ) -> std::io::Result<ServerHandle> {
     d.share(&board_name().map_err(std::io::Error::other)?);
+    // Every owner has exactly one human name before the board answers anyone, and every user
+    // who signed in before emails were stored has one for the Slack worker's first lookups.
+    let d2 = d.clone();
+    tokio::task::spawn_blocking(move || {
+        d2.with_tx(|tx| {
+            crate::humans::ensure_all(tx)?;
+            let filled = tx.backfill_emails()?;
+            if filled > 0 {
+                tracing::info!(filled, "emails filled from sign-in identities");
+            }
+            Ok(())
+        })
+    })
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)?;
     let board = Arc::new(Board::new(d));
     conde_remote::start_on(listener, config, board.clone(), board.clone(), board).await
 }
@@ -460,8 +471,8 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
         let handle =
             start(d.clone(), listen, ServerConfig { dist_base_url, web, min_proto, ..ServerConfig::default() }).await?;
         if let Some(config) = slack {
-            tracing::info!(people = config.members.len(), "slack notifications on");
-            crate::slack::spawn(d, Arc::new(config))?;
+            tracing::info!(import = config.import.len(), "slack notifications on");
+            crate::slack::spawn(d, Arc::new(config)).await?;
         }
         tracing::info!(addr = %handle.local_addr(), "conde server ready");
         crate::daemon::termination().await;

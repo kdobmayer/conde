@@ -361,9 +361,44 @@ fn more(out: &mut Out, r: &Value, surface: Surface, tool: &str) {
     }
 }
 
-/// `queued <id> to <recipient>`.
+/// `queued <id> to <recipient>`, then one line per @mention not delivered.
 pub fn sent_line(r: &Value) -> String {
-    format!("queued {} to {}", qualify(result_board(r), s(&r["message_id"])), s(&r["to"]))
+    let mut out = format!("queued {} to {}", qualify(result_board(r), s(&r["message_id"])), s(&r["to"]));
+    for note in r["not_delivered"].as_array().into_iter().flatten() {
+        let _ = write!(out, "\n{}", s(note));
+    }
+    out
+}
+
+/// `conde page`: `paged: queued for Slack; ...` (the board will try to send it; `conde sent`
+/// shows the outcome), `stored, not paged: <reason>` or `not paged: <reason>`, with the page's id
+/// when it was stored.
+pub fn paged(r: &Value) -> String {
+    let mut out = s(&r["status"]).to_string();
+    if out == "paged" {
+        out.push_str(": queued for Slack; conde sent shows whether it went");
+    }
+    if let Some(why) = r["reason"].as_str() {
+        let _ = write!(out, ": {why}");
+    }
+    if let Some(id) = r["message_id"].as_str() {
+        let _ = write!(out, " ({} to {})", qualify(result_board(r), id), s(&r["to"]));
+    }
+    out
+}
+
+/// `conde human done-pages`.
+pub fn done_pages(r: &Value) -> String {
+    let on = if r["done_pages"] == true { "on" } else { "off" };
+    format!("done pages {on} for {} on {}", s(&r["human"]), result_board(r))
+}
+
+/// One human as `whoami` shows it: `human: <name> on <board> · slack id: set · done pages: off`.
+/// `set` says the board has a member id to send to, never that a DM arrives.
+pub fn human_line(h: &Value) -> String {
+    let id = if h["slack"] == true { "set" } else { "none" };
+    let on = if h["done_pages"] == true { "on" } else { "off" };
+    format!("human: {} on {} · slack id: {id} · done pages: {on}", s(&h["human"]), s(&h["board"]))
 }
 
 pub fn inbox(r: &Value, surface: Surface) -> Out {
@@ -592,9 +627,10 @@ pub fn sent(r: &Value, surface: Surface) -> Out {
     for x in &rows {
         let board = board_of(x, requested);
         let delivery = x["delivery"].as_str().map(|d| format!("  delivery: {d}")).unwrap_or_default();
+        let slack = x["slack"].as_str().map(|d| format!("  slack: {d}")).unwrap_or_default();
         let _ = writeln!(
             out.text,
-            "{board}  {}  {}  {}{delivery}",
+            "{board}  {}  {}  {}{delivery}{slack}",
             qualify(board, s(&x["message_id"])),
             s(&x["to"]),
             s(&x["status"])
@@ -737,6 +773,10 @@ pub fn whoami(r: &Value) -> String {
         if !pubs.iter().any(|p| s(&p["board"]) == b) {
             let _ = write!(out, "\nnot published on {b}");
         }
+    }
+    let humans = r["humans"].as_array().into_iter().flatten().chain(Some(&r["human"]).filter(|h| h.is_object()));
+    for h in humans {
+        let _ = write!(out, "\n{}", human_line(h));
     }
     out
 }
@@ -897,6 +937,9 @@ mod tests {
             "publications": [{"board": "dakai", "name": "me/reviewer", "state": "published"}],
             "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true}, {"board": "two", "available": false}]});
         assert_eq!(whoami(&r), "me/worker (local, claude:s1@h)\npublished: dakai as me/reviewer\nnot published on two");
+        let r = json!({"name": "me/worker", "address": "claude:s1@h", "publications": [], "boards": [],
+            "humans": [{"human": "me/krisz", "board": "dakai", "slack": true, "done_pages": false}]});
+        assert_eq!(whoami(&r), "me/worker (local, claude:s1@h)\nhuman: me/krisz on dakai · slack id: set · done pages: off");
         let r = json!({"name": "me/worker", "address": "claude:s1@h", "publications": [], "boards": ["dakai"]});
         assert_eq!(
             registered(&r, "worker"),

@@ -920,3 +920,90 @@ fn watch_prints_the_board_and_follows_it() {
     assert!(line.contains("  tester/bob -> tester/alice  after it started  "), "{line}");
     assert!(line.ends_with(&format!("  {after}")), "{line}");
 }
+
+/// `conde page` and `conde human done-pages` send the paging ops and print their answers.
+#[test]
+fn page_and_done_pages_send_the_paging_ops() {
+    let r = Root::new();
+    let d = r.fake(|req: &Value| {
+        Ok(match (req["op"].as_str().unwrap(), req["body"]["kind"].as_str()) {
+            ("human.page", Some("done")) => json!({"to": "tester/human", "status": "not paged", "reason": "done pages are off", "board": "dakai"}),
+            ("human.page", _) => json!({"message_id": "dakai:01MP", "to": "tester/human", "kind": "blocked", "status": "paged", "board": "dakai"}),
+            ("human.done_pages", _) => json!({"human": "tester/human", "done_pages": req["body"]["on"], "board": "dakai"}),
+            _ => json!({}),
+        })
+    });
+    let (ok, out, err) = r.conde(&["page", "need a go for PR 41"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "paged: queued for Slack; conde sent shows whether it went (dakai:01MP to tester/human)\n");
+    let (ok, out, _) = r.conde(&["page", "--done", "PR 41 merged"]);
+    assert!(ok);
+    assert_eq!(out, "not paged: done pages are off\n");
+    let (ok, out, _) = r.conde(&["human", "done-pages", "on"]);
+    assert!(ok);
+    assert_eq!(out, "done pages on for tester/human on dakai\n");
+    assert!(!r.conde(&["human", "done-pages", "maybe"]).0);
+    let sent: Vec<(String, Value)> = d.take().iter().map(|q| (q["op"].as_str().unwrap().to_string(), q["body"].clone())).collect();
+    assert_eq!(
+        sent,
+        [
+            ("human.page".to_string(), json!({"text": "need a go for PR 41", "kind": "blocked"})),
+            ("human.page".to_string(), json!({"text": "PR 41 merged", "kind": "done"})),
+            ("human.done_pages".to_string(), json!({"on": true})),
+        ]
+    );
+}
+
+/// `conde admin slack` posts the member id to the admin API with the admin key, and never prints
+/// the key; an agent's shell is refused before anything is sent.
+#[test]
+fn admin_slack_sets_the_member_id_with_the_admin_key() {
+    use std::io::Read;
+    let r = Root::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let key = "q7Zx2Lm9Vt4Rk8Wp3Ny6Hb1Jc5Fd0GsUe";
+    let out = r.cmd(Path::new(BIN)).env("CODEX_THREAD_ID", "t-1").env("CONDE_ADMIN_KEY", key)
+        .args(["admin", "slack", "krisz", "U0ADMIN", "--server", &url]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("admin commands are for the human only"));
+    let seen = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = conn.read(&mut chunk).unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                    .unwrap_or(0);
+                if buf.len() >= end + 4 + len || n == 0 {
+                    break;
+                }
+            }
+        }
+        let body = json!({"user": "krisz", "slack_member_id": "U0ADMIN", "slack_source": "admin"}).to_string();
+        let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        conn.write_all(reply.as_bytes()).unwrap();
+        String::from_utf8(buf).unwrap()
+    });
+    let line = conde::admin::set_slack(&url, key, "Krisz", "U0ADMIN").unwrap();
+    assert_eq!(line, format!("slack member id of krisz on {url}: U0ADMIN (set by the admin)"));
+    assert!(!line.contains(key));
+    let request = seen.join().unwrap();
+    assert!(request.starts_with("POST /v1/admin/users/krisz/slack HTTP/1.1\r\n"), "{request}");
+    assert!(request.to_ascii_lowercase().contains(&format!("authorization: bearer {}", key.to_ascii_lowercase())), "{request}");
+    assert!(request.ends_with(r#"{"member_id":"U0ADMIN"}"#), "{request}");
+}
+
+/// The admin key never travels over plain http, except to this machine.
+#[test]
+fn admin_slack_refuses_plain_http_off_this_machine() {
+    for server in ["http://conde.example", "http://10.0.0.5:8080"] {
+        let e = conde::admin::set_slack(server, "k", "krisz", "U0ADMIN").unwrap_err().to_string();
+        assert!(e.starts_with("refusing to send the admin key over plain http"), "{server}: {e}");
+    }
+}

@@ -26,7 +26,7 @@ use tokio::net::TcpListener;
 
 use web::{
     AdminKey, BindUser, BridgeRegistry, CliCode, CliIssued, CreateUser, HostKey, Identity, KeyDisplay, Limits,
-    LoginTxn, McpCode, McpCodeState, McpCreated, McpGrant, McpRedeemed, McpTokens, Minted, SessionRecord, WebConfig,
+    LoginTxn, Minted, SessionRecord, WebConfig,
     WebResult, WebState, WebStore, WebStoreError, WebUser,
 };
 
@@ -72,16 +72,7 @@ struct Mem {
     displays: HashMap<String, KeyDisplay>,
     hosts: HashMap<String, i64>,
     creds: Vec<Cred>,
-    /// MCP purges started and finished, and how long each takes.
-    purges_started: usize,
-    purges_done: usize,
-    purge_takes: Duration,
-    /// MCP authorization codes by digest, and grants with the digest of the code they came from.
-    mcp_codes: HashMap<String, McpCode>,
-    mcp_grants: Vec<(String, McpGrant)>,
-    /// Holds the next code take between the take and the grant insert.
-    take_gate: Option<TakeGate>,
-    /// The same pause for a `conde login` record: in `take_cli_code` after the take (outside
+    /// A pause for a `conde login` record: in `take_cli_code` after the take (outside
     /// the lock), in `issue_cli_code` inside its one transaction (holding the lock).
     cli_gate: Option<TakeGate>,
 }
@@ -148,72 +139,6 @@ impl MemStore {
 }
 
 impl WebStore for MemStore {
-    fn take_mcp_code(&self, code_digest: &str) -> WebResult<Option<McpCode>> {
-        let (code, gate) = {
-            let mut m = self.m();
-            let code = m.mcp_codes.remove(code_digest);
-            let gate = if code.is_some() { m.take_gate.take() } else { None };
-            (code, gate)
-        };
-        // A call of its own: the take is visible to every reader while the gate holds.
-        if let Some(gate) = gate {
-            gate.hold();
-        }
-        Ok(code)
-    }
-    fn mcp_code_state(&self, code_digest: &str) -> WebResult<McpCodeState> {
-        let m = self.m();
-        Ok(if let Some(c) = m.mcp_codes.get(code_digest) {
-            McpCodeState::Issued(c.clone())
-        } else if m.mcp_grants.iter().any(|(k, _)| k == code_digest) {
-            McpCodeState::Redeemed
-        } else {
-            McpCodeState::Unknown
-        })
-    }
-    fn redeem_mcp_code(
-        &self,
-        code_digest: &str,
-        grant: &McpGrant,
-        tokens: &McpTokens,
-        _max_live: u32,
-        now: i64,
-    ) -> WebResult<McpRedeemed> {
-        // One lock for the whole call, as one transaction: no reader sees the code taken
-        // while its grant is missing.
-        let mut m = self.m();
-        if m.mcp_codes.remove(code_digest).is_none() {
-            return Ok(McpRedeemed::Taken);
-        }
-        if let Some(gate) = m.take_gate.take() {
-            gate.hold();
-        }
-        if m.users.iter().find(|u| u.id == grant.user_id).is_none_or(|u| u.disabled) {
-            return Ok(McpRedeemed::Disabled);
-        }
-        m.mcp_grants.push((code_digest.to_string(), grant.clone()));
-        let access_expires_at = (now + tokens.access_ttl).min(grant.expires_at);
-        Ok(McpRedeemed::Created(McpCreated { access_expires_at, revoked: Vec::new() }))
-    }
-    fn revoke_mcp_code_grant(&self, code_digest: &str, client_id: &str, now: i64) -> WebResult<Option<(McpGrant, bool)>> {
-        let mut m = self.m();
-        let Some((_, g)) = m.mcp_grants.iter_mut().find(|(k, g)| k == code_digest && g.client_id == client_id) else {
-            return Ok(None);
-        };
-        let live = g.revoked_at.is_none();
-        g.revoked_at.get_or_insert(now);
-        Ok(Some((g.clone(), live)))
-    }
-    fn purge_mcp(&self, _now: i64, _code_ttl: i64) -> WebResult<()> {
-        let takes = {
-            let mut m = self.m();
-            m.purges_started += 1;
-            m.purge_takes
-        };
-        std::thread::sleep(takes);
-        self.m().purges_done += 1;
-        Ok(())
-    }
     fn user_by_identity(&self, tid: &str, oid: &str) -> WebResult<Option<WebUser>> {
         let id = Some((tid.to_string(), oid.to_string()));
         Ok(self
@@ -1278,7 +1203,7 @@ async fn redeem_from<S>(env: &Env<S>, ip: &str, body: Value) -> (StatusCode, Opt
 
 #[tokio::test]
 async fn the_redeem_is_rate_limited_per_address() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_redeem_per_min = 3).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_redeem_per_min = 3).await;
     let run = cli_run();
     let body = json!({"code": "c".repeat(64), "state": run.state, "code_verifier": run.verifier, "host": "box"});
     for _ in 0..3 {
@@ -1301,7 +1226,7 @@ async fn the_redeem_is_rate_limited_per_address() {
 /// keeps its record (the refused attempt spends no try).
 #[tokio::test]
 async fn pasted_code_attempts_are_limited_per_account_across_reissued_codes() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_guesses_per_hour = 7).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_guesses_per_hour = 7).await;
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
@@ -1330,7 +1255,7 @@ async fn pasted_code_attempts_are_limited_per_account_across_reissued_codes() {
 /// budget or a per-code try, so the account's next real run still signs in with its code.
 #[tokio::test]
 async fn holding_only_the_login_url_spends_no_attempt_budget() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_guesses_per_hour = 3).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_guesses_per_hour = 3).await;
     let b = Browser::new();
     for round in 0..3 {
         let run = cli_run();
@@ -1393,7 +1318,7 @@ async fn the_last_wrong_try_leaves_no_other_accounts_record() {
 /// so instead of a retry that cannot succeed.
 #[tokio::test]
 async fn a_wait_past_the_logins_expiry_says_to_start_again() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.mcp.limits.cli_guesses_per_hour = 1).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_guesses_per_hour = 1).await;
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
@@ -2056,42 +1981,6 @@ async fn the_keys_page_needs_sign_in_and_unknown_paths_are_404() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
 
-/// A server with the MCP endpoints on `store` (Entra configured, never contacted).
-async fn mcp_server(store: &Arc<MemStore>, tune: impl FnOnce(&mut WebConfig)) -> conde_remote::ServerHandle {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut entra = web::WebConfig::entra(TENANT, CLIENT_ID, CLIENT_SECRET, "https://board.example/auth/callback").unwrap();
-    tune(&mut entra);
-    let config = conde_remote::ServerConfig {
-        web: Some(web::WebSetup { entra: Some(entra), admin_key: None, store: store.clone() }),
-        ..conde_remote::ServerConfig::default()
-    };
-    let board = Arc::new(NoBoard::default());
-    conde_remote::start("127.0.0.1:0".parse().unwrap(), config, Arc::new(MemAuth(store.clone())), board.clone(), board)
-        .await
-        .unwrap()
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_mcp_sweep_ends_at_shutdown_and_the_handle_waits_for_it() {
-    let store = Arc::new(MemStore::default());
-    store.m().purge_takes = Duration::from_millis(300);
-    let server = mcp_server(&store, |c| c.mcp.sweep_every = Duration::from_millis(20)).await;
-    // Shut down while a sweep is purging: the handle returns only after it finished.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while store.m().purges_started == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("a sweep starts");
-    server.shutdown().await.unwrap();
-    let (started, done) = { let m = store.m(); (m.purges_started, m.purges_done) };
-    assert_eq!(done, started, "shutdown waited for the running purge");
-    // And no sweep runs after it.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(store.m().purges_started, started, "the sweep ended");
-}
-
 /// Two confirming POSTs of one pasted-code login by its account, the second arriving while the
 /// first is held between reading the pending record and writing its own: both are answered (no
 /// 500 from a duplicate key), and the code shown last is the one that redeems.
@@ -2199,74 +2088,13 @@ async fn a_wrong_guess_gets_the_login_back_from_another_accounts_confirm() {
     assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
 }
 
-/// A replay that reads and takes the code while the first redemption sits between its take of
-/// the code and its insert of the grant: the replay must still find the grant and revoke it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_replay_landing_between_the_code_take_and_the_grant_insert_leaves_no_live_grant() {
-    const CLIENT: &str = "https://claude.ai/oauth/mcp-client";
-    const REDIRECT: &str = "https://claude.ai/api/mcp/auth_callback";
-    let store = Arc::new(MemStore::default());
-    let user_id = store.add_plain_user("krisztian");
-    let server = mcp_server(&store, |_| {}).await;
-    let (code, verifier) = ("c".repeat(64), "v".repeat(64));
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    let taken = Arc::new(tokio::sync::Notify::new());
-    let (release, held) = std::sync::mpsc::channel();
-    {
-        let mut m = store.m();
-        m.mcp_codes.insert(
-            token_digest(&code),
-            McpCode {
-                user_id,
-                client_id: CLIENT.into(),
-                client_name: None,
-                redirect_uri: REDIRECT.into(),
-                challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
-                resource: String::new(),
-                created_at: now,
-            },
-        );
-        m.take_gate = Some(TakeGate { taken: taken.clone(), release: held });
-    }
-    let url = format!("http://{}/oauth/token", server.local_addr());
-    let redeem = || {
-        let (url, code, verifier) = (url.clone(), code.clone(), verifier.clone());
-        async move {
-            let form = [("grant_type", "authorization_code"), ("code", code.as_str()), ("redirect_uri", REDIRECT),
-                        ("client_id", CLIENT), ("code_verifier", verifier.as_str())];
-            let r = reqwest::Client::new().post(url).form(&form).send().await.unwrap();
-            (r.status(), r.json::<Value>().await.unwrap())
-        }
-    };
-    let first = tokio::spawn(redeem());
-    tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the first redemption takes the code");
-    // The replay runs while the first is held after its take; it either completes in that gap
-    // (the take and the insert are separate) or waits for the first to finish (one transaction).
-    let mut second = tokio::spawn(redeem());
-    let early = tokio::time::timeout(Duration::from_millis(500), &mut second).await.ok();
-    release.send(()).unwrap();
-    let (s1, v1) = first.await.unwrap();
-    let (s2, v2) = match early {
-        Some(done) => done.unwrap(),
-        None => second.await.unwrap(),
-    };
-    let ok = [s1, s2].iter().filter(|s| **s == StatusCode::OK).count();
-    assert_eq!(ok, 1, "exactly one redemption gets tokens: {v1} {v2}");
-    let refused = if s1 == StatusCode::OK { &v2 } else { &v1 };
-    assert_eq!(refused["error"], "invalid_grant", "{refused}");
-    let live: Vec<String> =
-        store.m().mcp_grants.iter().filter(|(_, g)| g.revoked_at.is_none()).map(|(_, g)| g.grant_id.clone()).collect();
-    assert!(live.is_empty(), "the grant the first redemption made was revoked by the replay: {live:?}");
-    server.shutdown().await.unwrap();
-}
-
-// --- a store without the remote MCP --------------------------------------------------------------
+// --- a store without human paging ----------------------------------------------------------------
 
 /// A store with only the required methods (sign-in, keys, admin), none of which this test calls:
-/// the remote MCP is the trait's defaults.
-struct NoMcp;
+/// the Slack member id is the trait's default.
+struct Minimal;
 
-impl WebStore for NoMcp {
+impl WebStore for Minimal {
     fn user_by_identity(&self, _: &str, _: &str) -> WebResult<Option<WebUser>> { unreachable!() }
     fn create_user(&self, _: &Identity, _: &str) -> WebResult<CreateUser> { unreachable!() }
     fn set_profile(&self, _: i64, _: &Identity) -> WebResult<()> { unreachable!() }
@@ -2296,38 +2124,11 @@ impl WebStore for NoMcp {
     fn set_disabled(&self, _: &str, _: bool) -> WebResult<Option<Vec<String>>> { unreachable!() }
 }
 
-/// The trait's remote MCP defaults, called directly: every MCP call is refused with one message,
-/// listing a user's grants finds none and the grant purge is a no-op.
+/// The trait's default for the Slack member id, called directly: refused.
 #[test]
-fn a_store_without_the_remote_mcp_refuses_every_mcp_call() {
-    let s = NoMcp;
-    let refused = "this store keeps no MCP grants";
-    let code = McpCode {
-        user_id: 1, client_id: "c".into(), client_name: None, redirect_uri: "r".into(), challenge: "x".into(),
-        resource: "m".into(), created_at: 0,
-    };
-    let grant = McpGrant {
-        grant_id: "g".into(), user_id: 1, client_id: "c".into(), client_host: "h".into(), client_name: None,
-        resource: "m".into(), created_at: 0, last_used_at: None, expires_at: 1, revoked_at: None,
-    };
-    let tokens = McpTokens { access_digest: "a".into(), refresh_digest: "r".into(), access_ttl: 1, refresh_ttl: 1 };
-    let errors = [
-        s.insert_mcp_code("d", &code).unwrap_err(),
-        s.take_mcp_code("d").unwrap_err(),
-        s.mcp_code_state("d").unwrap_err(),
-        s.redeem_mcp_code("d", &grant, &tokens, 10, 0).unwrap_err(),
-        s.mcp_access("d", 0).unwrap_err(),
-        s.refresh_mcp_grant("d", "c", &tokens, 0).unwrap_err(),
-        s.revoke_mcp_grant(1, "g", 0).unwrap_err(),
-        s.revoke_mcp_token("d", "c", 0).unwrap_err(),
-        s.revoke_mcp_code_grant("d", "c", 0).unwrap_err(),
-        s.mcp_human(1).unwrap_err(),
-    ];
-    for e in errors {
-        assert_eq!(e.to_string(), refused);
-    }
-    assert!(s.mcp_grants(1, 0).unwrap().is_empty(), "the keys page lists no connected apps");
-    s.purge_mcp(0, 60).unwrap();
+fn a_store_without_human_paging_refuses_a_slack_member_id() {
+    let e = Minimal.set_slack_member("krisz", "U0123").unwrap_err();
+    assert_eq!(e.to_string(), "this board has no Slack member ids");
 }
 
 /// A login cookie longer than four real states is not split or matched (even when it holds this

@@ -289,8 +289,6 @@ pub struct ServerHandle {
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<std::io::Result<()>>,
-    /// Periodic tasks (the MCP sweep): they end on the shutdown signal and are awaited.
-    background: Vec<JoinHandle<()>>,
 }
 
 impl ServerHandle {
@@ -304,14 +302,10 @@ impl ServerHandle {
         self.wait().await
     }
 
-    /// Waits until the server stops (only on a listener error or after [`Self::shutdown`]),
-    /// then for its periodic tasks to end (signalled here too when the listener failed).
+    /// Waits until the server stops (only on a listener error or after [`Self::shutdown`]).
     pub async fn wait(self) -> std::io::Result<()> {
         let served = self.task.await.map_err(std::io::Error::other);
         let _ = self.shutdown.send(true);
-        for task in self.background {
-            let _ = task.await;
-        }
         served?
     }
 }
@@ -353,7 +347,6 @@ pub async fn start_on(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let body_limit = config.max_frame_bytes;
     let web = config.web.clone();
-    let mut background = Vec::new();
     let shared = Arc::new(Shared {
         auth,
         dispatcher,
@@ -388,8 +381,6 @@ pub async fn start_on(
             let app = app.merge(routes);
             match state {
                 Some(web) => {
-                    background.push(tokio::spawn(crate::web::oauth::sweep(web.clone(), shutdown_rx.clone())));
-                    let mcp = crate::web::mcp::McpState { web: web.clone(), dispatcher: shared.dispatcher.clone() };
                     let ui = crate::web::app::AppState {
                         web,
                         dispatcher: shared.dispatcher.clone(),
@@ -398,7 +389,7 @@ pub async fn start_on(
                     };
                     *shared.app.lock().unwrap_or_else(|p| p.into_inner()) = Some(ui.clone());
                     tracing::info!(embedded = crate::web::app::embedded(), "web app enabled");
-                    app.merge(crate::web::app::routes(ui)).merge(crate::web::mcp::routes(mcp))
+                    app.merge(crate::web::app::routes(ui))
                 }
                 None => app,
             }
@@ -416,7 +407,6 @@ pub async fn start_on(
         local_addr,
         shutdown: shutdown_tx,
         task,
-        background,
     })
 }
 

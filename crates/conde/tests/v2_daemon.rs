@@ -2123,3 +2123,45 @@ fn review_older_mine_snapshot_arriving_after_publish_must_not_delete_it() {
     assert_eq!(local_state().as_deref(), Some("published"),
         "response arrival order is not snapshot order: the old empty mine must not delete the new publication");
 }
+
+/// whoami names the agent's human on each board it is published on (`human.status`); a human's
+/// send to a shared board, as themselves or acting for an agent (`--from`), is refused by the
+/// daemon before anything reaches the board; a human name is never published; the local board
+/// still takes the human's sends.
+#[test]
+fn the_daemon_names_the_human_and_keeps_humans_from_sending_on_a_board() {
+    let board = FakeBoard::start();
+    let (h, desk) = published_host(&board, "kd", "homepc", "desk", "s-desk", fast());
+    let who = h.ok(&desk, "agent.whoami", json!({}), None);
+    assert_eq!(who["humans"], json!([{"human": "kd/human", "board": "dakai", "slack": true, "done_pages": false}]), "{who}");
+    let line = conde::surface::whoami(&who);
+    assert!(line.ends_with("\nhuman: kd/human on dakai · slack id: set · done pages: off"), "{line}");
+
+    h.ok(&h.human(), "agent.register", json!({"name": "kd"}), None);
+    let before = board.capture("homepc").len();
+    let no = "humans do not send on dakai: your agents page you on Slack (conde page), and you read the board on its \
+              web page; ask one of your agents to send";
+    for (op, body) in [
+        ("message.send", json!({"to": {"agent": "ben/relay"}, "text": "from the human"})),
+        ("reaction.set", json!({"message_id": "dakai:01MXYZ", "emoji": "👍", "present": true})),
+        ("channel.join", json!({"channel": "#dev"})),
+        ("human.page", json!({"text": "paging myself"})),
+    ] {
+        for from in [None, Some("desk")] {
+            let mut req = Request::new(new_ulid(), op, body.clone());
+            req.actor = Some(h.human());
+            req.from = from.map(str::to_string);
+            req.idempotency_key = Some(new_ulid());
+            req.board = Some("dakai".into());
+            let resp = Client::connect(&h.sock()).unwrap().call(&req).unwrap();
+            let e = resp.error.unwrap_or_else(|| panic!("{op} as the human (from {from:?}) went through"));
+            assert_eq!((e.code, e.message.as_str()), (ErrorCode::Forbidden, no), "{op} from {from:?}");
+        }
+    }
+    assert!(requests_since(&board, "homepc", before).is_empty(), "nothing reached the board");
+    let refused = h.request(&h.human(), op::MAILBOX_PUBLISH, json!({"agent": "kd", "name": "kd"}), Some("dakai")).unwrap_err();
+    assert_eq!(refused.0, ErrorCode::Forbidden);
+    assert!(refused.1.starts_with("kd is a human name: humans are not published on dakai"), "{}", refused.1);
+    // the local board is the human's own
+    h.ok(&h.human(), "message.send", json!({"to": {"agent": "desk"}, "text": "a local note"}), Some("local"));
+}

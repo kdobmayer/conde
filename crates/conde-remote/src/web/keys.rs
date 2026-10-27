@@ -170,15 +170,9 @@ pub(crate) async fn page(
     let Some(session) = session::current(&state, &jar).await? else {
         return Ok(to_login("/keys"));
     };
-    let (user_id, now) = (session.record.user_id, state.now());
-    let (keys, apps) = state.store(move |s| Ok((s.host_keys(user_id)?, s.mcp_grants(user_id, now)?))).await?;
-    Ok(pages::keys(
-        header(&session),
-        &state.config().public_url,
-        &one_per_host(keys),
-        &apps,
-        &idp_origin(&state),
-    ))
+    let user_id = session.record.user_id;
+    let keys = state.store(move |s| s.host_keys(user_id)).await?;
+    Ok(pages::keys(header(&session), &state.config().public_url, &one_per_host(keys), &idp_origin(&state)))
 }
 
 #[derive(Deserialize)]
@@ -310,28 +304,6 @@ pub(crate) async fn revoke(
     if revoked > 0 {
         state.core().registry.disconnect_host(&host);
         tracing::info!(user_id, %host, revoked, "host keys revoked");
-    }
-    Ok(Redirect::to("/keys").into_response())
-}
-
-/// `POST /keys/apps/{grant_id}/revoke`: ends one of the user's connected apps at once (its
-/// access and refresh tokens with it).
-pub(crate) async fn revoke_app(
-    State(state): State<WebState>,
-    jar: CookieJar,
-    Path(grant_id): Path<String>,
-    Form(form): Form<CsrfForm>,
-) -> Result<Response, WebError> {
-    let session = session::current(&state, &jar)
-        .await?
-        .ok_or_else(signed_out)?;
-    session.check_csrf(&form.csrf)?;
-    let (user_id, now, target) = (session.record.user_id, state.now(), grant_id.clone());
-    let revoked = state
-        .store(move |s| s.revoke_mcp_grant(user_id, &target, now))
-        .await?;
-    if revoked {
-        tracing::info!(user = %session.record.user_name, grant = %grant_id, by = "keys page", "mcp grant revoked");
     }
     Ok(Redirect::to("/keys").into_response())
 }

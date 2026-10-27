@@ -1,5 +1,5 @@
-//! The server's web configuration from its environment (`ENTRA_*`, `CONDE_MCP_*`,
-//! `CONDE_ADMIN_KEY`), as the container sets it. It changes the process environment, so the
+//! The server's web configuration from its environment (`ENTRA_*`, `CONDE_ADMIN_KEY`; the retired
+//! remote MCP's `CONDE_MCP_*` are ignored), as the container sets it. It changes the process environment, so the
 //! binary runs without the libtest harness (`harness = false`): its cases run on the main thread.
 
 mod serial;
@@ -89,11 +89,6 @@ fn the_web_configuration_comes_from_the_environment() {
                ("2e51b484-b008-4fc0-8f70-555c1317b555", "conde-client", "conde-secret"));
     assert_eq!(c.public_url, "https://conde.example");
     assert_eq!(c.post_logout_redirect_uri, "https://conde.example/");
-    assert_eq!(c.mcp_issuer(), "https://conde.example");
-    assert_eq!(c.mcp_resource(), "https://conde.example/mcp");
-    assert_eq!(c.mcp_resource_metadata(), "https://conde.example/.well-known/oauth-protected-resource/mcp");
-    assert_eq!(c.mcp.client_hosts, ["claude.ai", "claude.com"]);
-    assert_eq!(c.mcp.grants_per_client, 10);
     assert_eq!((c.session_idle.as_secs(), c.session_max.as_secs(), c.login_ttl.as_secs(), c.cli_code_ttl.as_secs()),
                (8 * 3600, 24 * 3600, 600, 300));
     // Printed (logs, panics), the configuration names its identity but never the client secret.
@@ -101,23 +96,9 @@ fn the_web_configuration_comes_from_the_environment() {
     assert!(shown.contains("conde-client") && shown.contains("https://conde.example/auth/callback"), "{shown}");
     assert!(!shown.contains("conde-secret"), "{shown}");
 
-    // The client hosts: comma-separated, trimmed, lower-cased, empty entries dropped.
-    env(&with(&[("CONDE_MCP_CLIENT_HOSTS", " Claude.AI , ,mcp.Example.com,")]));
-    assert_eq!(WebConfig::from_env().unwrap().unwrap().mcp.client_hosts, ["claude.ai", "mcp.example.com"]);
-    // Only separators: refused, not an empty list that would refuse every client.
-    env(&with(&[("CONDE_MCP_CLIENT_HOSTS", " , ")]));
-    assert_eq!(error(WebConfig::from_env()), "CONDE_MCP_CLIENT_HOSTS names no host; unset it for the default (claude.ai,claude.com)");
-    // Empty: the default, like unset.
-    env(&with(&[("CONDE_MCP_CLIENT_HOSTS", "")]));
-    assert_eq!(WebConfig::from_env().unwrap().unwrap().mcp.client_hosts, ["claude.ai", "claude.com"]);
-
-    // The grant cap: a whole number of at least 1, surrounding spaces allowed.
-    env(&with(&[("CONDE_MCP_GRANTS_PER_CLIENT", " 3 ")]));
-    assert_eq!(WebConfig::from_env().unwrap().unwrap().mcp.grants_per_client, 3);
-    for bad in ["0", "-1", "ten", "2.5"] {
-        env(&with(&[("CONDE_MCP_GRANTS_PER_CLIENT", bad)]));
-        assert_eq!(error(WebConfig::from_env()), "CONDE_MCP_GRANTS_PER_CLIENT must be a whole number of at least 1", "{bad}");
-    }
+    // The retired remote MCP's variables, still set in an older environment, are not read.
+    env(&with(&[("CONDE_MCP_CLIENT_HOSTS", " , "), ("CONDE_MCP_GRANTS_PER_CLIENT", "0")]));
+    assert_eq!(WebConfig::from_env().unwrap().unwrap().public_url, "https://conde.example");
 
     // The admin key: at least 32 characters; it alone turns the admin API on.
     env(&[("CONDE_ADMIN_KEY", "short")]);

@@ -288,6 +288,10 @@ impl Oidc {
                 .and_then(|n| n.get(None))
                 .map(|n| n.as_str().to_string()),
             preferred_username: claims.preferred_username().map(|u| u.as_str().to_string()),
+            email: lookup_email(
+                claims.preferred_username().map(|u| u.as_str()),
+                claims.email().map(|e| e.as_str()),
+            ),
         })
     }
 
@@ -544,6 +548,14 @@ async fn stale(
         openidconnect::url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
     let login = format!("/auth/login?next={next}&retry=1");
     Ok((jar.add(mark), Redirect::to(&login)).into_response())
+}
+
+/// The address the Slack worker looks the person up by: preferred_username (the UPN, which the
+/// tenant controls), else the `email` claim, which Microsoft documents as mutable and unverified,
+/// only when the UPN is not an address.
+pub(crate) fn lookup_email(upn: Option<&str>, email: Option<&str>) -> Option<String> {
+    let address = |v: Option<&str>| v.map(str::trim).filter(|v| v.contains('@')).map(str::to_string);
+    address(upn).or_else(|| address(email))
 }
 
 /// An owner name from the identity: the local part of preferred_username (else the display
@@ -1082,7 +1094,16 @@ mod tests {
             oid: "o".into(),
             display_name: name.map(Into::into),
             preferred_username: upn.map(Into::into),
+            email: upn.map(Into::into),
         }
+    }
+
+    #[test]
+    fn the_lookup_email_is_the_upn_unless_it_is_no_address() {
+        assert_eq!(lookup_email(Some("k@dakai.io"), Some("other@x.io")).as_deref(), Some("k@dakai.io"));
+        assert_eq!(lookup_email(Some("krisz"), Some("other@x.io")).as_deref(), Some("other@x.io"));
+        assert_eq!(lookup_email(None, Some("other@x.io")).as_deref(), Some("other@x.io"));
+        assert_eq!(lookup_email(Some("krisz"), None), None);
     }
 
     #[test]

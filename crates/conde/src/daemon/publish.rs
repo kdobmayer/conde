@@ -97,14 +97,23 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
         None => agent.name.clone(),
     };
     let take = req.body.get("take").and_then(Value::as_bool).unwrap_or(false);
-    let human = agent.address.as_ref().is_some_and(|a| a.kind == Kind::Human);
+    if agent.address.as_ref().is_some_and(|a| a.kind == Kind::Human) {
+        return Err(refuse(
+            ErrorCode::Forbidden,
+            format!(
+                "{} is a human name: humans are not published on {alias}; the board keeps your human name there, and \
+                 your agents page you on Slack",
+                agent.name
+            ),
+        ));
+    }
     let now = iso_from_ms(now_ms());
     let op = BoardOp {
         op_id: new_ulid(),
         board: alias.clone(),
         kind: BoardOpKind::Publish,
         agent_id: Some(agent.id.clone()),
-        request: serde_json::to_value(PublishBody { name: shared.clone(), human, take }).unwrap_or_default(),
+        request: serde_json::to_value(PublishBody { name: shared.clone(), human: false, take }).unwrap_or_default(),
         state: BoardOpState::Pending,
         result: None,
         created_at: now.clone(),

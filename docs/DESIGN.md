@@ -100,13 +100,23 @@ SQLite on Azure Files (unsafe).
 
 - Store-then-notify. DMs and @mentions push; plain channel posts badge only;
   a human's channel post pushes to all members; reactions never push.
-- A human has no harness: a bridge only badges their notifications. On the shared board, the
-  humans of an owner that `CONDE_SLACK_NOTIFY` maps to a Slack member id get those pushes as a
-  Slack DM from the server (`crates/conde/src/slack.rs`): once per message per owner, never
-  about the owner's own post, while unread and younger than an hour. Each send is an attempt of
-  the reserved instance `slack` (no bridge or host may take that name) with its lease or retry
-  time in `not_before`; it never changes the notification, and receipts, the web views and the
-  fleet ignore those attempts, so senders read exactly what they would without Slack.
+- A human has no harness: a bridge only badges their notifications. On a shared board each
+  owner has one human name, bound to `human:<owner>@web` and kept by the board (made at user
+  creation and at the server's start; never registered, unregistered, pinned, published,
+  renamed, invited or joined). Humans never send there: a human actor is refused for sends,
+  reactions, channel posts, invites and pages before any `--from` substitution, in the server
+  and in the local daemon; humans read the board on its web page. An agent reaches only its
+  own human, only by paging (`human.page`, docs/DESIGN-human-paging.md): a DM to a human is
+  refused, a channel @mention of a human is not delivered and is listed in the send result, and
+  the insert path creates a human's notification only for a page.
+- The server's Slack worker (`crates/conde/src/slack.rs`) sends each page as a Slack DM to the
+  owner's member id (`users.slack_member_id`: imported once from `CONDE_SLACK_NOTIFY`, looked
+  up by the sign-in UPN, or set by the admin, which a lookup never replaces), once per page,
+  while it is unread and younger than an hour; a "done" page is stored only when the human
+  turned done pages on, and an agent stores at most 10 pages an hour. Each send is an attempt of the reserved instance `slack` (no bridge or
+  host may take that name) with its lease or retry time in `not_before`; it never changes the
+  notification, and the web views and the fleet ignore those attempts. The page's sender alone
+  sees its Slack state (`slack:` in `conde sent`).
 - Claude delivery asserts no false sender mode; permission-parity holds are
   the recipient's policy (owner decision pending on `from-mode`).
 - Receipts: delivered / held / expired / denied / dropped; denied is terminal;

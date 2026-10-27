@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::agents::{self, Agent};
 use crate::address::{Address, Kind};
-use crate::dispatch::{Ctx, OpResult, bad_request, conflict, not_found};
+use crate::dispatch::{Ctx, OpResult, bad_request, conflict, forbidden, not_found};
 use crate::protocol::v2::{BoardInfo, Mine, MineMailbox, PublishBody, Published, UnpublishBody, Unpublished};
 
 pub(crate) fn parse<T: DeserializeOwned>(body: &Value) -> OpResult<T> {
@@ -45,9 +45,10 @@ pub fn board_info(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     json(&BoardInfo { name, owner: ctx.p.user.clone(), host: ctx.p.host.clone(), mailbox_only: ctx.mailbox_only })
 }
 
-/// `mailbox.publish {name, human?, take?}`: binds `<caller>/name` on the calling host and bumps
-/// its generation. Publishing again as the same mailbox is a no-op; a name bound on another
-/// host is a conflict unless `take`, which moves it here (the old host's routes are pushed).
+/// `mailbox.publish {name, take?}`: binds `<caller>/name` on the calling host and bumps its
+/// generation. Publishing again as the same mailbox is a no-op; a name bound on another host is
+/// a conflict unless `take`, which moves it here (the old host's routes are pushed). A human
+/// name is never published (`human: true` is refused): each owner's is the board's own.
 pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     ctx.migrated()?;
     let b: PublishBody = parse(body)?;
@@ -55,12 +56,14 @@ pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if name == "everybody" {
         return Err(bad_request("'everybody' is reserved (channel-wide mention)"));
     }
+    if b.human {
+        return Err(forbidden(
+            "a human is not published: each owner's human name is the board's own, and your agents page you there",
+        ));
+    }
+    agents::may_bind(ctx, &name)?;
     let row = agents::ensure_row(ctx, &name)?;
-    let target = if b.human {
-        Address::new(Kind::Human, &ctx.p.user, &ctx.p.host)
-    } else {
-        Address::new(Kind::Mailbox, &row.id, &ctx.p.host)
-    };
+    let target = Address::new(Kind::Mailbox, &row.id, &ctx.p.host);
     match &row.address {
         Some(a) if *a == target => return published(ctx, &row),
         Some(a) if a.host != ctx.p.host && !b.take => {
@@ -110,6 +113,7 @@ pub fn unpublish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         ))
     };
     let row = agents::by_id(ctx.db, &b.mailbox_id)?.filter(|a| a.owner_id == ctx.p.user_id).ok_or_else(moved)?;
+    agents::unprotected(ctx, &row)?;
     if !routed(&row, &ctx.p.host) || generation(&row) != b.expected_generation {
         return Err(moved());
     }

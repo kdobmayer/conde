@@ -56,6 +56,8 @@ struct Person {
     oid: String,
     upn: String,
     name: String,
+    /// The `email` claim, when the token carries one.
+    email: Option<String>,
 }
 
 struct Grant {
@@ -233,7 +235,7 @@ async fn token(
     } else {
         now + 3600
     };
-    let claims = json!({
+    let mut claims = json!({
         "iss": if spoil == Spoil::Issuer { "https://login.microsoftonline.com/other/v2.0".to_string() } else { idp.issuer.clone() },
         "aud": if spoil == Spoil::Audience { "someone-else" } else { CLIENT_ID },
         "sub": format!("pairwise-{}", p.oid),
@@ -242,6 +244,9 @@ async fn token(
         "tid": p.tid, "oid": p.oid, "name": p.name, "preferred_username": p.upn,
         "ver": "2.0",
     });
+    if let Some(email) = &p.email {
+        claims["email"] = json!(email);
+    }
     axum::Json(json!({
         "access_token": "at", "token_type": "Bearer", "expires_in": 3600, "scope": "openid profile email",
         "id_token": idp.sign(&claims),
@@ -260,6 +265,7 @@ async fn start_idp() -> Arc<Idp> {
             oid: "oid-krisztian".into(),
             upn: "Krisztian.Dobmayer@dakai.example".into(),
             name: "Krisztián Dobmayer".into(),
+            email: None,
         }),
         spoil: Mutex::new(Spoil::None),
         grants: Mutex::new(HashMap::new()),

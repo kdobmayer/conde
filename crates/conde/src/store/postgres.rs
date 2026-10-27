@@ -31,7 +31,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
+    Delivery, DmDelivery, DmThread, DueNotification, SlackDue, UserSlack, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
     FeedArg, FeedRange, Membership, problem_seqs_sql, thread_down_sql, thread_up_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
     WebSessionRow, address_of, feed_seqs_sql,
 };
@@ -75,6 +75,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (13, "messages_by_reply_to", include_str!("migrations/0013_messages_by_reply_to.sql")),
     (14, "agents_retired_at", include_str!("migrations/0014_agents_retired_at.sql")),
     (15, "attempt_not_before", include_str!("migrations/0015_attempt_not_before.sql")),
+    (16, "human_paging", include_str!("migrations/0016_human_paging.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -672,7 +673,8 @@ fn agent_row(r: &Row) -> Agent {
 }
 
 const MSG_SELECT: &str = "SELECT m.commit_seq, m.message_id, m.sender_agent_id, su.name || '/' || s.name_lower,
-    m.recipient_agent_id, ru.name || '/' || r.name_lower, m.channel_id, c.name_lower, m.text, m.reply_to, m.created_at
+    m.recipient_agent_id, ru.name || '/' || r.name_lower, m.channel_id, c.name_lower, m.text, m.reply_to, m.created_at,
+    m.page
     FROM messages m
     JOIN agents s ON s.agent_id = m.sender_agent_id JOIN users su ON su.user_id = s.owner_id
     LEFT JOIN agents r ON r.agent_id = m.recipient_agent_id LEFT JOIN users ru ON ru.user_id = r.owner_id
@@ -709,6 +711,21 @@ fn msg_row(r: &Row) -> Message {
         text: r.get(8),
         reply_to: r.get(9),
         created_at: r.get(10),
+        page: r.get(11),
+    }
+}
+
+const USER_SLACK_SELECT: &str =
+    "SELECT user_id, name, email, slack_member_id, slack_source, done_pages FROM users";
+
+fn user_slack_row(r: &Row) -> UserSlack {
+    UserSlack {
+        user_id: r.get(0),
+        name: r.get(1),
+        email: r.get(2),
+        slack_member_id: r.get(3),
+        slack_source: r.get(4),
+        done_pages: r.get(5),
     }
 }
 
@@ -967,6 +984,42 @@ impl Tx for PgTx {
             "UPDATE identities SET display_name = $2, preferred_username = $3 WHERE user_id = $1",
             &[&user_id, &display, &upn],
         )?;
+        Ok(())
+    }
+
+    fn users_slack(&self) -> StoreResult<Vec<UserSlack>> {
+        Ok(self.query(&format!("{USER_SLACK_SELECT} ORDER BY user_id"), &[])?.iter().map(user_slack_row).collect())
+    }
+
+    fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>> {
+        Ok(self.query_opt(&format!("{USER_SLACK_SELECT} WHERE user_id = $1"), &[&user_id])?.as_ref().map(user_slack_row))
+    }
+
+    fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()> {
+        self.execute("UPDATE users SET email = $2 WHERE user_id = $1", &[&user_id, &email])?;
+        Ok(())
+    }
+
+    fn backfill_emails(&self) -> StoreResult<u64> {
+        self.execute(
+            "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')
+             WHERE email IS NULL AND EXISTS (SELECT 1 FROM identities i
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')",
+            &[],
+        )
+    }
+
+    fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()> {
+        self.execute(
+            "UPDATE users SET slack_member_id = $2, slack_source = $3 WHERE user_id = $1",
+            &[&user_id, &member_id, &source],
+        )?;
+        Ok(())
+    }
+
+    fn set_done_pages(&self, user_id: i64, on: bool) -> StoreResult<()> {
+        self.execute("UPDATE users SET done_pages = $2 WHERE user_id = $1", &[&user_id, &on])?;
         Ok(())
     }
 
@@ -1345,6 +1398,20 @@ impl Tx for PgTx {
             .get(0))
     }
 
+    fn set_message_page(&self, message_id: &str, kind: &str) -> StoreResult<()> {
+        self.execute("UPDATE messages SET page = $2 WHERE message_id = $1", &[&message_id, &kind])?;
+        Ok(())
+    }
+
+    fn pages_since(&self, sender_id: &str, since: &str) -> StoreResult<i64> {
+        Ok(self
+            .query_one(
+                "SELECT COUNT(*) FROM messages WHERE sender_agent_id = $1 AND page IS NOT NULL AND created_at >= $2",
+                &[&sender_id, &since],
+            )?
+            .get(0))
+    }
+
     fn insert_attachment(&self, id: &str, message_id: &str, filename: &str, bytes: &[u8]) -> StoreResult<()> {
         self.execute(
             "INSERT INTO attachments(attachment_id, message_id, filename, bytes, size) VALUES ($1, $2, $3, $4, $5)",
@@ -1559,31 +1626,62 @@ impl Tx for PgTx {
             .collect())
     }
 
-    fn slack_due(&self, owner: &str, now: i64, since: i64, limit: i64) -> StoreResult<Vec<DueNotification>> {
+    fn slack_due(&self, now: i64, since: i64, limit: i64) -> StoreResult<Vec<SlackDue>> {
         // A human's notification keeps its creation time in next_attempt_at: no bridge attempts it.
         Ok(self
             .query(
-                "SELECT n.notification_id, n.message_id, n.recipient_agent_id, n.kind
+                "SELECT n.notification_id, n.message_id, n.recipient_agent_id, a.owner_id, LOWER(u.name)
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN users u ON u.user_id = a.owner_id JOIN messages m ON m.message_id = n.message_id
-                 JOIN agents s ON s.agent_id = m.sender_agent_id
-                 WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $3 AND $2
-                   AND a.address_kind = 'human' AND LOWER(u.name) = $1 AND m.created_at >= $4
-                   AND NOT (s.owner_id = a.owner_id AND s.address_kind IS NOT DISTINCT FROM 'human')
+                 WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $2 AND $1
+                   AND n.kind = 'dm' AND m.page IS NOT NULL AND u.slack_member_id IS NOT NULL
+                   AND a.address_kind = 'human' AND m.created_at >= $3
                    AND NOT EXISTS (SELECT 1 FROM dm_read r WHERE r.message_id = m.message_id AND r.agent_id = a.agent_id)
-                   AND NOT EXISTS (SELECT 1 FROM memberships x WHERE x.channel_id = m.channel_id
-                                   AND x.agent_id = a.agent_id AND x.read_seq >= m.commit_seq)
                    AND NOT EXISTS (SELECT 1 FROM agents a2
                                    JOIN notifications n2 ON n2.recipient_agent_id = a2.agent_id AND n2.message_id = n.message_id
                                    JOIN attempts t ON t.notification_id = n2.notification_id
-                                   WHERE a2.owner_id = a.owner_id AND t.bridge_instance = $6
-                                     AND (t.status IN ('delivered', 'refused', 'dropped') OR t.not_before > $2))
-                 ORDER BY n.notification_seq LIMIT $5",
-                &[&owner, &now, &since, &crate::util::iso_from_ms(since), &limit, &super::SLACK_INSTANCE],
+                                   WHERE a2.owner_id = a.owner_id AND t.bridge_instance = $5
+                                     AND (t.status IN ('delivered', 'refused', 'dropped') OR t.not_before > $1))
+                 ORDER BY n.notification_seq LIMIT $4",
+                &[&now, &since, &crate::util::iso_from_ms(since), &limit, &super::SLACK_INSTANCE],
             )?
             .iter()
-            .map(|r| DueNotification { id: r.get(0), message_id: r.get(1), recipient_id: r.get(2), kind: r.get(3) })
+            .map(|r| SlackDue {
+                id: r.get(0),
+                message_id: r.get(1),
+                recipient_id: r.get(2),
+                owner_id: r.get(3),
+                owner: r.get(4),
+            })
             .collect())
+    }
+
+    fn slack_waiting(&self, now: i64, since: i64) -> StoreResult<Vec<(i64, String)>> {
+        Ok(self
+            .query(
+                "SELECT a.owner_id, MAX(n.message_id)
+                 FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
+                 JOIN users u ON u.user_id = a.owner_id JOIN messages m ON m.message_id = n.message_id
+                 WHERE n.status IN ('pending', 'badge') AND n.next_attempt_at BETWEEN $2 AND $1
+                   AND n.kind = 'dm' AND m.page IS NOT NULL AND a.address_kind = 'human' AND m.created_at >= $3
+                   AND u.slack_member_id IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM dm_read r WHERE r.message_id = m.message_id AND r.agent_id = a.agent_id)
+                 GROUP BY a.owner_id ORDER BY a.owner_id",
+                &[&now, &since, &crate::util::iso_from_ms(since)],
+            )?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect())
+    }
+
+    fn slack_attempt(&self, message_id: &str) -> StoreResult<Option<(String, Option<String>)>> {
+        Ok(self
+            .query_opt(
+                "SELECT t.status, t.reason FROM attempts t JOIN notifications n ON n.notification_id = t.notification_id
+                 WHERE n.message_id = $1 AND t.bridge_instance = $2 ORDER BY t.attempt_seq DESC LIMIT 1",
+                &[&message_id, &super::SLACK_INSTANCE],
+            )?
+            .map(|r| (r.get(0), r.get(1))))
     }
 
     fn slack_abandon(&self, message_id: &str, owner: &str, at: &str) -> StoreResult<u64> {

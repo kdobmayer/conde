@@ -92,6 +92,7 @@ pub fn topic(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 
 pub fn join(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
+    agents::unprotected(ctx, &me)?;
     let channel = existing(ctx, str_param(body, "channel")?)?;
     let label = format!("#{}", channel.name);
     if read_seq(ctx.db, &channel.id, &me.id)?.is_some() {
@@ -99,7 +100,7 @@ pub fn join(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     add_member(ctx, &channel, &me.id)?;
     let text = format!("@{} joined {label}.", me.canonical());
-    let (post, _) = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new())?;
+    let post = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new(), None)?.id;
     Ok(json!({"channel": label, "already_member": false, "message_id": post, "topic": channel.topic}))
 }
 
@@ -117,12 +118,13 @@ pub fn invite(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let channel = member_channel(ctx, &me, str_param(body, "channel")?)?;
     let label = format!("#{}", channel.name);
     let invitee = agents::lookup_bound(ctx, str_param(body, "name")?)?;
+    agents::unprotected(ctx, &invitee)?;
     if read_seq(ctx.db, &channel.id, &invitee.id)?.is_some() {
         return Err(conflict(format!("{} is already a member of '{label}'", invitee.canonical())));
     }
     add_member(ctx, &channel, &invitee.id)?;
     let text = format!("@{} was added to {label} by {}.", invitee.canonical(), me.canonical());
-    let (post, _) = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new())?;
+    let post = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new(), None)?.id;
     Ok(json!({"channel": label, "name": invitee.canonical(), "message_id": post}))
 }
 

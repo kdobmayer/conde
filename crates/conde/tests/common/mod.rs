@@ -12,7 +12,7 @@ use conde::util::new_ulid;
 use serde_json::{Value, json};
 
 #[path = "../pg/mod.rs"]
-mod pg;
+pub mod pg;
 
 pub struct Board {
     pub d: Arc<Dispatcher>,

@@ -381,7 +381,9 @@ async fn the_browser_is_read_only_and_names_nobody(d: Arc<Dispatcher>) {
     assert_eq!(bound(ui.d.clone()).await, before, "no request names or binds anything");
     let d2 = ui.d.clone();
     let web = blocking(move || d2.with_conn(|t| t.bound_agents()).unwrap()).await;
-    assert!(web.iter().all(|a| a.address.as_ref().is_none_or(|x| x.host != "web")), "{web:?}");
+    // only each owner's human name is bound on the web host, never by a browser request
+    let on_web = |a: &&conde::store::Agent| a.address.as_ref().is_some_and(|x| x.host == "web");
+    assert!(web.iter().filter(on_web).all(|a| a.is_human() && a.name == "human"), "{web:?}");
     ui.server.shutdown().await.unwrap();
 }
 
@@ -396,8 +398,9 @@ async fn the_owner_sees_what_their_agents_can_read_and_nothing_else(d: Arc<Dispa
     assert_eq!(rail["owner"], USER);
     let agents = rail["agents"].as_array().unwrap();
     let names: Vec<&str> = agents.iter().map(|a| a["name"].as_str().unwrap()).collect();
-    assert_eq!(names, vec![format!("{USER}/helper"), format!("{USER}/worker")]);
-    let worker = &agents[1];
+    assert_eq!(names, vec![format!("{USER}/helper"), format!("{USER}/human"), format!("{USER}/worker")]);
+    assert_eq!(agents[1]["address"], format!("human:{USER}@web"), "the owner's human name is in the rail");
+    let worker = &agents[2];
     let partners: Vec<&str> = worker["dms"].as_array().unwrap().iter().map(|t| t["with"].as_str().unwrap()).collect();
     assert_eq!(partners, vec![format!("{USER}/helper").as_str(), "david/scout"], "newest first: {worker}");
     let scout_thread = &worker["dms"][1];
@@ -967,8 +970,9 @@ async fn another_owner_sees_only_their_own_agents(d: Arc<Dispatcher>) {
     ui.op(&p, probe, "channel.join", json!({"channel": "#team"})).await;
 
     let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
-    assert_eq!(rail["agents"].as_array().unwrap().len(), 1, "{rail}");
-    let a = &rail["agents"][0];
+    let names: Vec<&str> = rail["agents"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["dpacsuta/human", "dpacsuta/probe"], "{rail}");
+    let a = &rail["agents"][1];
     assert_eq!(a["name"], "dpacsuta/probe");
     assert_eq!(a["dms"].as_array().unwrap().iter().map(|t| t["with"].clone()).collect::<Vec<_>>(), vec![json!(format!("{USER}/worker"))]);
     assert_eq!(a["channels"][0]["channel"], "#team");

@@ -70,6 +70,20 @@ enum Cmd {
         #[arg(long)]
         remove: bool,
     },
+    /// Page your human on Slack, only when you are blocked on them (a decision, a go, a
+    /// blocker): one line of at most 140 characters saying what you need. With --done, a "work
+    /// done" page, sent only when your human turned done pages on.
+    Page {
+        text: String,
+        /// A "work done" page instead of a blocked one.
+        #[arg(long)]
+        done: bool,
+    },
+    /// Your human on a shared board.
+    Human {
+        #[command(subcommand)]
+        cmd: HumanCmd,
+    },
     /// Your sent messages with read receipts.
     Sent {
         #[arg(long)]
@@ -416,11 +430,30 @@ enum HistoryCmd {
 }
 
 #[derive(Subcommand)]
+enum HumanCmd {
+    /// Whether your human takes "work done" pages (`conde page --done`); switch it when your
+    /// human asks.
+    DonePages {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AdminCmd {
     /// Host keys (device credentials).
     Key {
         #[command(subcommand)]
         cmd: KeyCmd,
+    },
+    /// Set an owner's Slack member id on a shared board (the admin key; CONDE_ADMIN_KEY or a
+    /// prompt): the id pages reach, never replaced by a lookup by email.
+    Slack {
+        owner: String,
+        member_id: String,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
     },
 }
 
@@ -606,6 +639,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             no_board("history", "")?;
             return crate::history::prune_main(&snapshot, out.as_deref());
         }
+        Cmd::Admin { cmd: AdminCmd::Slack { owner, member_id, server } } => {
+            no_board("admin", "")?;
+            admin::require_human()?;
+            return admin::slack(&server, &owner, &member_id);
+        }
         Cmd::Admin { cmd: AdminCmd::Key { cmd } } => {
             no_board("admin", "")?;
             admin::require_human()?;
@@ -719,6 +757,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             } else {
                 println!("removed {emoji} from {id} in {}", s(&r["place"]));
             }
+        }
+        Cmd::Page { text, done } => {
+            let kind = if done { "done" } else { "blocked" };
+            println!("{}", surface::paged(&sx.call("human.page", json!({"text": text, "kind": kind}))?));
+        }
+        Cmd::Human { cmd: HumanCmd::DonePages { state } } => {
+            let r = sx.call("human.done_pages", json!({"on": state == "on"}))?;
+            println!("{}", surface::done_pages(&r));
         }
         Cmd::Sent { after } => print(surface::sent(&sx.call("receipt.list", json!({"after": after}))?, Surface::Cli)),
         Cmd::Create { channel } => {

@@ -156,7 +156,7 @@ fn discover_and_tools_list() {
     assert_eq!(first["result"], second["result"], "tools/list must be deterministic");
     let tools = first["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["whoami", "register", "rename", "agents", "send", "inbox", "read", "show", "search", "sent", "react", "publish", "unpublish"]);
+    assert_eq!(names, ["whoami", "register", "rename", "agents", "send", "inbox", "read", "show", "search", "page", "sent", "react", "publish", "unpublish"]);
     let register = &tools[1];
     assert_eq!(register["inputSchema"]["required"], json!(["name"]));
     assert!(register["inputSchema"]["properties"].get("address").is_none(), "identity never comes from arguments");
@@ -178,7 +178,7 @@ fn legacy_client_handshake_then_tools() {
     assert_eq!(r["result"]["serverInfo"]["name"], "conde");
     p.notify("notifications/initialized");
     let r = p.rpc("tools/list", json!({"_meta": {"progressToken": 0}}));
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 13);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 14);
     let r = p.rpc(
         "tools/call",
         json!({"_meta": {"threadId": "t-legacy"}, "name": "register", "arguments": {"name": "legacy"}}),
@@ -258,7 +258,7 @@ fn send_and_inbox_round_trip() {
 mod fake_daemon;
 
 /// The tools that take a board, as the CLI commands that take --board.
-const BOARD_TOOLS: [&str; 8] = ["send", "inbox", "read", "show", "search", "sent", "react", "agents"];
+const BOARD_TOOLS: [&str; 9] = ["send", "inbox", "read", "show", "search", "sent", "react", "agents", "page"];
 
 #[test]
 fn board_argument_on_the_board_tools_and_never_an_identity() {
@@ -477,4 +477,43 @@ fn search_after_takes_a_cursor_or_a_time() {
     let search = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "search").unwrap().clone();
     let after = &search["inputSchema"]["properties"]["after"];
     assert!(after["description"].as_str().unwrap().contains("RFC 3339"), "{after}");
+}
+
+/// The `page` tool sends `human.page` as the session, with the kind from `done`, and shows the
+/// board's answer; the instructions carry the paging rule.
+#[test]
+fn the_page_tool_pages_the_sessions_own_human() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
+    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+        Ok(match req["body"]["kind"].as_str() {
+            Some("done") => json!({"to": "tester/human", "status": "not paged", "reason": "done pages are off", "board": "dakai"}),
+            _ => json!({"message_id": "dakai:01MP", "to": "tester/human", "status": "paged", "board": "dakai"}),
+        })
+    });
+    let mut p = claude_peer_at(d.socket.clone(), "s-me");
+    let init = p.rpc("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}));
+    let instructions = init["result"]["instructions"].as_str().unwrap();
+    for rule in [
+        "whoami names your human, whether the board has their Slack member id, and whether done pages are on",
+        "Page your human (the page tool) only when you are blocked on them: a decision, a go, a blocker; say what you need in one line",
+        "Page with done=true only when done pages are on",
+        "Never message a human name; other people are reached through their agents",
+    ] {
+        assert!(instructions.contains(rule), "{rule}");
+    }
+    assert_eq!(p.ok("page", json!({"text": "need a go"}), json!({})), "paged: queued for Slack; conde sent shows whether it went (dakai:01MP to tester/human)");
+    assert_eq!(p.ok("page", json!({"text": "done", "done": true, "board": "dakai"}), json!({})), "not paged: done pages are off");
+    // a board argument first probes the daemon (board.list), as for every board tool
+    let reqs: Vec<Value> = d.take().into_iter().filter(|r| r["op"] != "board.list").collect();
+    let sent: Vec<(Value, Value, Value)> = reqs.iter().map(|r| (r["op"].clone(), r["body"].clone(), r["actor"].clone())).collect();
+    assert_eq!(
+        sent,
+        [
+            (json!("human.page"), json!({"text": "need a go", "kind": "blocked"}), json!("claude:s-me")),
+            (json!("human.page"), json!({"text": "done", "kind": "done"}), json!("claude:s-me")),
+        ]
+    );
+    assert_eq!(reqs[1]["board"], "dakai");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&root);
 }

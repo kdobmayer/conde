@@ -2,9 +2,10 @@
 //! in, response frame out. Every mutation runs in one transaction together
 //! with its idempotency record.
 
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -86,6 +87,8 @@ pub struct Ctx<'a> {
     pub board: Option<&'a str>,
     /// The caller's host migrated to v2 (`hosts.mailbox_only`; shared boards only).
     pub mailbox_only: bool,
+    /// The server sends Slack DMs (a bot token is configured): a page can reach a human.
+    pub slack: bool,
 }
 
 impl Ctx<'_> {
@@ -194,6 +197,10 @@ pub struct Dispatcher {
     retry_ms: AtomicI64,
     /// Set once this dispatcher serves a shared board: its advertised name.
     shared: OnceLock<String>,
+    /// The server's Slack worker runs.
+    slack: AtomicBool,
+    /// Users whose Slack member id the worker looks up by email (a sign-in stored the email).
+    slack_lookups: Mutex<BTreeSet<i64>>,
 }
 
 impl Dispatcher {
@@ -217,7 +224,28 @@ impl Dispatcher {
             clock_offset_ms: AtomicI64::new(0),
             retry_ms: AtomicI64::new(NOTIFY_RETRY_MS),
             shared: OnceLock::new(),
+            slack: AtomicBool::new(false),
+            slack_lookups: Mutex::default(),
         }
+    }
+
+    /// Whether the Slack worker runs on this board (`conde server` with a bot token).
+    pub fn set_slack(&self, on: bool) {
+        self.slack.store(on, Ordering::Relaxed);
+    }
+
+    pub fn slack(&self) -> bool {
+        self.slack.load(Ordering::Relaxed)
+    }
+
+    /// Asks the Slack worker to look up the user's member id by email on its next pass.
+    pub fn request_slack_lookup(&self, user_id: i64) {
+        self.slack_lookups.lock().unwrap_or_else(|e| e.into_inner()).insert(user_id);
+    }
+
+    /// The lookups asked for since the last call.
+    pub fn take_slack_lookups(&self) -> BTreeSet<i64> {
+        std::mem::take(&mut *self.slack_lookups.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Serve this board as a shared board advertised as `name` (`conde server`, DESIGN-v2.md
@@ -362,6 +390,13 @@ impl Dispatcher {
         if mailbox_only {
             refuse_on_migrated_host(p, req)?;
         }
+        // Before any identity substitution (`--from`): a human never sends on a shared board.
+        if let Some(board) = board
+            && crate::humans::SEND_OPS.contains(&spec.name)
+            && req.actor.as_deref().is_some_and(|a| Address::parse(a, &p.host).is_ok_and(|x| x.kind == Kind::Human))
+        {
+            return Err(forbidden(crate::humans::no_sending(board)));
+        }
         if let (Some(key), Some(hash)) = (key, &request_hash)
             && let Some((stored_hash, result)) = tx.idempotency_get(&actor_id, spec.name, key)?
         {
@@ -382,6 +417,7 @@ impl Dispatcher {
             retry_ms: self.retry_ms.load(Ordering::Relaxed),
             board,
             mailbox_only,
+            slack: self.slack(),
         };
         let result = (spec.run)(&ctx, &req.body)?;
         if spec.mutation && !spec.bridge_only {

@@ -14,10 +14,7 @@
 mod admin;
 pub(crate) mod app;
 mod auth;
-pub mod cimd;
 mod keys;
-pub(crate) mod mcp;
-pub(crate) mod oauth;
 mod pages;
 mod ratelimit;
 pub(crate) use pages::document;
@@ -39,7 +36,7 @@ pub use app::embedded as app_embedded;
 pub const BROWSER_HOST: &str = "web";
 pub use auth::{Oidc, RedeemResponse};
 pub use keys::new_host_key;
-pub use ratelimit::McpLimits;
+pub use ratelimit::RateLimits;
 
 /// Everything the web surface needs to know about the deployment.
 #[derive(Clone)]
@@ -64,52 +61,8 @@ pub struct WebConfig {
     pub login_ttl: Duration,
     /// Lifetime of a one-time `conde login` code.
     pub cli_code_ttl: Duration,
-    /// The remote MCP endpoint's authorization server.
-    pub mcp: McpConfig,
-}
-
-/// The `client_id` hosts accepted when `CONDE_MCP_CLIENT_HOSTS` is unset or empty.
-pub const DEFAULT_CLIENT_HOSTS: [&str; 2] = ["claude.ai", "claude.com"];
-
-/// The remote MCP's OAuth settings (docs/REMOTE-MCP.md §2, §3).
-#[derive(Clone)]
-pub struct McpConfig {
-    /// Hosts a client's metadata URL (its client_id) may be on, matched exactly
-    /// (`CONDE_MCP_CLIENT_HOSTS`, default [`DEFAULT_CLIENT_HOSTS`]).
-    pub client_hosts: Vec<String>,
-    /// Reads client metadata documents.
-    pub fetcher: Arc<dyn cimd::ClientMetadataFetcher>,
-    /// How long a fetched client metadata document is reused.
-    pub client_cache: Duration,
-    /// Lifetime of an authorization code.
-    pub code_ttl: Duration,
-    pub access_ttl: Duration,
-    pub refresh_ttl: Duration,
-    /// A grant ends this long after consent, whatever its refreshes.
-    pub grant_ttl: Duration,
-    /// Live grants a user may hold per client_id; a new grant beyond it revokes the oldest
-    /// (`CONDE_MCP_GRANTS_PER_CLIENT`, default 10).
-    pub grants_per_client: u32,
-    /// Period of the server's sweep of expired codes, tokens and grants.
-    pub sweep_every: Duration,
-    pub limits: McpLimits,
-}
-
-impl Default for McpConfig {
-    fn default() -> McpConfig {
-        McpConfig {
-            client_hosts: DEFAULT_CLIENT_HOSTS.map(String::from).to_vec(),
-            fetcher: Arc::new(cimd::HttpFetcher::default()),
-            client_cache: cimd::CACHE_FOR,
-            code_ttl: Duration::from_secs(60),
-            access_ttl: Duration::from_secs(3600),
-            refresh_ttl: Duration::from_secs(30 * 86400),
-            grant_ttl: Duration::from_secs(90 * 86400),
-            grants_per_client: 10,
-            sweep_every: Duration::from_secs(3600),
-            limits: McpLimits::default(),
-        }
-    }
+    /// The rate limits of the `conde login` redeem.
+    pub limits: RateLimits,
 }
 
 impl std::fmt::Debug for WebConfig {
@@ -130,25 +83,6 @@ pub enum ConfigError {
     AdminKey(usize),
     #[error("ENTRA_REDIRECT_URI '{0}' must be an https URL ending in /auth/callback")]
     RedirectUri(String),
-    #[error("{0} must be a whole number of at least 1")]
-    NotPositive(&'static str),
-    #[error("{0} names no host; unset it for the default ({default})", default = DEFAULT_CLIENT_HOSTS.join(","))]
-    NoHosts(&'static str),
-}
-
-/// `CONDE_MCP_CLIENT_HOSTS`: comma-separated hosts, trimmed and lower-cased, empty entries
-/// dropped; at least one (an empty list would refuse every client, silently).
-fn client_hosts(raw: &str) -> Result<Vec<String>, ConfigError> {
-    let hosts: Vec<String> = raw.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
-    if hosts.is_empty() {
-        return Err(ConfigError::NoHosts("CONDE_MCP_CLIENT_HOSTS"));
-    }
-    Ok(hosts)
-}
-
-/// `CONDE_MCP_GRANTS_PER_CLIENT`: a whole number of at least 1 (surrounding spaces allowed).
-fn grants_per_client(raw: &str) -> Result<u32, ConfigError> {
-    raw.trim().parse().ok().filter(|n| *n >= 1).ok_or(ConfigError::NotPositive("CONDE_MCP_GRANTS_PER_CLIENT"))
 }
 
 impl WebConfig {
@@ -176,7 +110,7 @@ impl WebConfig {
             session_max: Duration::from_secs(24 * 3600),
             login_ttl: Duration::from_secs(600),
             cli_code_ttl: Duration::from_secs(300),
-            mcp: McpConfig::default(),
+            limits: RateLimits::default(),
         })
     }
 
@@ -195,15 +129,9 @@ impl WebConfig {
             return Ok(None);
         }
         let get = |i: usize| values[i].as_deref().ok_or(ConfigError::Missing(names[i]));
-        let mut config = WebConfig::entra(get(0)?, get(1)?, get(2)?, get(3)?)?;
+        let config = WebConfig::entra(get(0)?, get(1)?, get(2)?, get(3)?)?;
         if !config.public_url.starts_with("https://") {
             return Err(ConfigError::RedirectUri(config.redirect_uri));
-        }
-        if let Some(hosts) = var("CONDE_MCP_CLIENT_HOSTS") {
-            config.mcp.client_hosts = client_hosts(&hosts)?;
-        }
-        if let Some(cap) = var("CONDE_MCP_GRANTS_PER_CLIENT") {
-            config.mcp.grants_per_client = grants_per_client(&cap)?;
         }
         Ok(Some(config))
     }
@@ -211,21 +139,6 @@ impl WebConfig {
     /// Cookies carry `Secure` and the `__Host-` prefix when the server is served over https.
     pub(crate) fn secure_cookies(&self) -> bool {
         self.public_url.starts_with("https://")
-    }
-
-    /// The remote MCP's authorization server identifier: the public origin.
-    pub fn mcp_issuer(&self) -> String {
-        self.public_url.clone()
-    }
-
-    /// The MCP endpoint's URL: the protected resource and its tokens' audience.
-    pub fn mcp_resource(&self) -> String {
-        format!("{}/mcp", self.public_url)
-    }
-
-    /// Where the MCP endpoint's protected resource metadata is.
-    pub fn mcp_resource_metadata(&self) -> String {
-        format!("{}/.well-known/oauth-protected-resource/mcp", self.public_url)
     }
 }
 
@@ -253,6 +166,9 @@ pub struct Identity {
     pub oid: String,
     pub display_name: Option<String>,
     pub preferred_username: Option<String>,
+    /// What the Slack worker looks the person up by: `preferred_username` (the UPN), else the
+    /// `email` claim when the UPN is not an address.
+    pub email: Option<String>,
 }
 
 /// Result of [`WebStore::create_user`].
@@ -360,91 +276,6 @@ pub struct HostKey {
     pub revoked_at: Option<String>,
 }
 
-/// A one-time remote MCP authorization code, keyed by its digest; taken once by the token
-/// endpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpCode {
-    pub user_id: i64,
-    pub client_id: String,
-    /// The client's `client_name` at consent (shown on the keys page, quoted).
-    pub client_name: Option<String>,
-    pub redirect_uri: String,
-    /// The PKCE S256 challenge.
-    pub challenge: String,
-    /// The resource the code is for (the MCP endpoint).
-    pub resource: String,
-    pub created_at: i64,
-}
-
-/// A remote MCP grant: one client's consented access for one user (unix seconds).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpGrant {
-    pub grant_id: String,
-    pub user_id: i64,
-    pub client_id: String,
-    pub client_host: String,
-    pub client_name: Option<String>,
-    /// The resource consented to: every token of the grant carries it as its audience.
-    pub resource: String,
-    pub created_at: i64,
-    pub last_used_at: Option<i64>,
-    pub expires_at: i64,
-    pub revoked_at: Option<i64>,
-}
-
-/// Fresh tokens of a grant as digests, with their lifetimes in seconds (each capped at the
-/// grant's end by the store).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpTokens {
-    pub access_digest: String,
-    pub refresh_digest: String,
-    pub access_ttl: i64,
-    pub refresh_ttl: i64,
-}
-
-/// An access token as the MCP endpoint checks it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpAccess {
-    pub grant: McpGrant,
-    /// The grant user's name (owner namespace).
-    pub user: String,
-    pub disabled: bool,
-    /// The token's audience.
-    pub audience: String,
-    pub expires_at: i64,
-}
-
-/// A grant stored by [`WebStore::redeem_mcp_code`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpCreated {
-    /// The first access token's expiry.
-    pub access_expires_at: i64,
-    /// The grants revoked to stay within the cap, oldest first.
-    pub revoked: Vec<String>,
-}
-
-/// Result of [`WebStore::mcp_code_state`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum McpCodeState {
-    /// Neither issued nor redeemed here (made up, expired and purged, or its grant purged).
-    Unknown,
-    /// Issued and not redeemed yet.
-    Issued(McpCode),
-    /// Redeemed: a stored grant was minted from it.
-    Redeemed,
-}
-
-/// Result of [`WebStore::redeem_mcp_code`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum McpRedeemed {
-    /// The code was taken and the grant stored, in one transaction.
-    Created(McpCreated),
-    /// The code was no longer there: another redemption took it.
-    Taken,
-    /// The code was taken (spent) but the user is disabled: no grant.
-    Disabled,
-}
-
 /// Result of [`WebStore::issue_cli_code`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliIssued {
@@ -455,27 +286,6 @@ pub enum CliIssued {
     /// The login was first confirmed more than the TTL ago: it expired, for every account, and
     /// nothing was stored.
     Expired,
-}
-
-/// Result of [`WebStore::refresh_mcp_grant`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum McpRefreshed {
-    /// The token was consumed and the new pair stored; the new access token's expiry.
-    Rotated { grant: McpGrant, access_expires_at: i64 },
-    /// An already consumed token was presented again: the grant was revoked in the same
-    /// transaction.
-    Reused { grant: McpGrant },
-    /// Unknown, expired, of another client, of an ended grant or a disabled user.
-    Invalid,
-}
-
-/// The user's published human name on the board, which the remote MCP writes as.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum McpHuman {
-    /// `owner/name`.
-    One(String),
-    /// None or several: why writes are refused, with what to do (the tools' wording).
-    Refused(String),
 }
 
 /// Result of [`WebStore::mint_host_key`].
@@ -568,88 +378,11 @@ pub trait WebStore: Send + Sync {
     /// Sets the user's disabled flag (disabling also deletes the user's browser sessions);
     /// returns the user's hosts, or None for an unknown user.
     fn set_disabled(&self, name: &str, disabled: bool) -> WebResult<Option<Vec<String>>>;
-
-    // remote MCP (a store without them refuses every MCP request)
-    fn insert_mcp_code(&self, _code_digest: &str, _code: &McpCode) -> WebResult<()> {
-        Err(no_mcp())
+    /// Sets the user's Slack member id as the admin's (a lookup by email never replaces it);
+    /// None for an unknown user. Default: refused (a store without human paging).
+    fn set_slack_member(&self, _name: &str, _member_id: &str) -> WebResult<Option<WebUser>> {
+        Err(WebStoreError("this board has no Slack member ids".into()))
     }
-    /// Returns and deletes the code.
-    fn take_mcp_code(&self, _code_digest: &str) -> WebResult<Option<McpCode>> {
-        Err(no_mcp())
-    }
-    /// What the store knows of an authorization code, in a read transaction.
-    fn mcp_code_state(&self, _code_digest: &str) -> WebResult<McpCodeState> {
-        Err(no_mcp())
-    }
-    /// Takes the authorization code and stores the grant minted from it in ONE transaction, so a
-    /// concurrent reader sees either the code or its grant, never neither: a replay always finds
-    /// the grant to revoke. The grant gets its first token pair unless the user is disabled
-    /// (checked in the same transaction; the code is spent either way), first revoking the user's
-    /// oldest live grants of the same client so at most `max_live` stay live with it.
-    fn redeem_mcp_code(
-        &self,
-        _code_digest: &str,
-        _grant: &McpGrant,
-        _tokens: &McpTokens,
-        _max_live: u32,
-        _now: i64,
-    ) -> WebResult<McpRedeemed> {
-        Err(no_mcp())
-    }
-    /// The access token with its grant and user, whatever their state; records the grant's use
-    /// at most once a minute while it is live.
-    fn mcp_access(&self, _token_digest: &str, _now: i64) -> WebResult<Option<McpAccess>> {
-        Err(no_mcp())
-    }
-    /// Rotates a refresh token of `client_id` in one transaction: consumes it and stores the
-    /// new pair; a consumed one presented again revokes its grant.
-    fn refresh_mcp_grant(
-        &self,
-        _refresh_digest: &str,
-        _client_id: &str,
-        _tokens: &McpTokens,
-        _now: i64,
-    ) -> WebResult<McpRefreshed> {
-        Err(no_mcp())
-    }
-    /// The user's live grants, newest first (none on a store without them).
-    fn mcp_grants(&self, _user_id: i64, _now: i64) -> WebResult<Vec<McpGrant>> {
-        Ok(Vec::new())
-    }
-    /// Revokes the user's grant with its tokens; false when it is not the user's or not live.
-    fn revoke_mcp_grant(&self, _user_id: i64, _grant_id: &str, _now: i64) -> WebResult<bool> {
-        Err(no_mcp())
-    }
-    /// RFC 7009: revokes the grant of an access or refresh token (whichever it is) with all its
-    /// tokens when the grant belongs to `client_id`; the grant and whether it was live, or None
-    /// when the token is unknown or another client's.
-    fn revoke_mcp_token(&self, _token_digest: &str, _client_id: &str, _now: i64) -> WebResult<Option<(McpGrant, bool)>> {
-        Err(no_mcp())
-    }
-    /// A used authorization code presented again (RFC 6749 §4.1.2) by `client_id`: revokes the
-    /// grant minted from it with its tokens and returns it with whether this call revoked it
-    /// (false: it had already ended); None when no stored grant came from that code or the
-    /// grant belongs to another client.
-    fn revoke_mcp_code_grant(
-        &self,
-        _code_digest: &str,
-        _client_id: &str,
-        _now: i64,
-    ) -> WebResult<Option<(McpGrant, bool)>> {
-        Err(no_mcp())
-    }
-    fn mcp_human(&self, _user_id: i64) -> WebResult<McpHuman> {
-        Err(no_mcp())
-    }
-    /// Deletes codes older than `code_ttl` and expired or revoked grants and tokens. Without
-    /// MCP there is nothing to purge (the hourly sweep calls it on every store).
-    fn purge_mcp(&self, _now: i64, _code_ttl: i64) -> WebResult<()> {
-        Ok(())
-    }
-}
-
-fn no_mcp() -> WebStoreError {
-    WebStoreError("this store keeps no MCP grants".into())
 }
 
 /// Lifetimes for [`WebStore::purge_expired`], in seconds.
@@ -710,7 +443,6 @@ struct Inner {
     core: Core,
     config: WebConfig,
     oidc: Oidc,
-    clients: cimd::Registry,
     limits: ratelimit::Limiters,
 }
 
@@ -734,9 +466,7 @@ impl WebState {
         clock: Clock,
     ) -> WebState {
         let oidc = Oidc::new(&config);
-        let m = &config.mcp;
-        let clients = cimd::Registry::new(m.client_hosts.clone(), m.fetcher.clone(), m.client_cache);
-        let limits = ratelimit::Limiters::new(m.limits);
+        let limits = ratelimit::Limiters::new(config.limits);
         WebState(Arc::new(Inner {
             core: Core {
                 store,
@@ -745,7 +475,6 @@ impl WebState {
             },
             config,
             oidc,
-            clients,
             limits,
         }))
     }
@@ -864,36 +593,5 @@ pub fn router(state: WebState) -> Router {
         .route("/keys", get(keys::page).post(keys::create))
         .route("/keys/created", get(keys::created))
         .route("/keys/{host}/revoke", post(keys::revoke))
-        .route("/keys/apps/{grant_id}/revoke", post(keys::revoke_app))
-        .route("/.well-known/oauth-protected-resource", get(oauth::origin_resource))
-        .route("/.well-known/oauth-protected-resource/mcp", get(oauth::protected_resource))
-        .route("/.well-known/oauth-authorization-server", get(oauth::authorization_server))
-        .route("/oauth/authorize", get(oauth::authorize).post(oauth::consent))
-        .route("/oauth/token", post(oauth::token))
-        .route("/oauth/revoke", post(oauth::revoke))
         .with_state(state)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_client_hosts_name_at_least_one_host() {
-        assert_eq!(client_hosts(" Claude.AI , ,mcp.Example.com,").unwrap(), ["claude.ai", "mcp.example.com"]);
-        for bad in [" , ", ",", ",,, ", " "] {
-            let e = client_hosts(bad).unwrap_err();
-            assert_eq!(e.to_string(), "CONDE_MCP_CLIENT_HOSTS names no host; unset it for the default (claude.ai,claude.com)", "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn the_grant_cap_is_a_whole_number_of_at_least_one() {
-        assert_eq!(grants_per_client(" 5 ").unwrap(), 5);
-        assert_eq!(grants_per_client("1").unwrap(), 1);
-        for bad in ["0", "-1", "abc", "4294967296", "", "2.5"] {
-            let e = grants_per_client(bad).unwrap_err();
-            assert_eq!(e.to_string(), "CONDE_MCP_GRANTS_PER_CLIENT must be a whole number of at least 1", "{bad:?}");
-        }
-    }
 }

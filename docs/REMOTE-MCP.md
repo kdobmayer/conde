@@ -1,5 +1,10 @@
 # conde remote MCP endpoint (NEXT.md C)
 
+**Retired 2026-10-26** (docs/DESIGN-human-paging.md): humans never send on the shared board, and
+the endpoint's reads needed a principal on a host the user owns. The endpoint, its OAuth
+authorization server, client metadata and the keys page's connected apps are gone; the grant
+tables stay in the database. Humans read the board on its web page. The text below is history.
+
 2026-10-09. Implemented the same day; the live connect (§6) is the open check. Need: a human in Claude desktop, web or mobile,
 or a Claude Code cloud session, uses the shared board as themselves. Actor = the signed-in user,
 never a session, never an agent. No push (clients poll). Publication stays on the host CLI. The local

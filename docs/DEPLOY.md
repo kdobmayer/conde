@@ -86,7 +86,8 @@ deploy/tenants/<name>.yaml):
   It carries the steps of https://conde.cloud/docs/setup with the workspace's address and the invited
   email; `CONDE_WORKSPACE_NAME` names the workspace (default: the public host's first label). `--by`
   puts "<who> invited you" in the subject and first line. Without a key nothing is sent and the CLI
-  says so.
+  says so. The request carries an Idempotency-Key from the user, the address and the inviter, so the
+  same invite repeated within Resend's 24-hour window is answered without a second email.
 - `password`: the server creates the realm account through the Keycloak admin REST API and Keycloak
   sends its account-setup email (verify the address, choose a password; the link lasts 7 days). conde
   never sets a password. It calls Keycloak at `KEYCLOAK_ADMIN_URL`, the in-cluster Service, since the
@@ -95,12 +96,18 @@ deploy/tenants/<name>.yaml):
   `KEYCLOAK_ADMIN_CLIENT_SECRET` or `_FILE` (Secret Manager `keycloak-admin-<name>`); the realm is the
   issuer's. The account id and a correlation value (the admin-only user attribute `conde_invite`) are
   recorded on the user: a re-invite reuses the id, and after a lost create answer only the account
-  carrying the value is adopted. Inviting a person who already has an account in the realm is not
-  supported in this release: the invite answers 409 and sends nothing.
+  carrying the value is adopted. A re-invite asks Keycloak only for the actions still pending, so an
+  account that is set up gets no new link. Inviting a person who already has an account in the realm
+  is not supported in this release: the invite answers 409 and sends nothing. Names need at least 3
+  characters there (the realm's username rule).
 - unset: no email.
 
 A user who has signed in already, or is disabled, gets no email. A mail or Keycloak failure after
 the user was created answers 502 with the user in place; run the invite again once it is fixed.
+
+When a user's realm account was deleted in Keycloak, a re-invite answers "the recorded sign-in account
+no longer matches". Clear the record through the job, then invite again, which creates a new account:
+`UPDATE users SET keycloak_id = NULL, keycloak_invite = NULL WHERE name = '<name>';`
 
 ## Moving a board to a new address
 

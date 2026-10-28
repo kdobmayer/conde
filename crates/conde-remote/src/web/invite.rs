@@ -60,6 +60,8 @@ pub struct InviteConfig {
     pub resend: Option<Resend>,
     /// Set exactly when `sign_in` is `Password`.
     pub keycloak: Option<KeycloakAdmin>,
+    /// How long an invite may wait for the mail service or Keycloak; None: [`DEADLINE`].
+    pub deadline: Option<std::time::Duration>,
 }
 
 impl std::fmt::Debug for InviteConfig {
@@ -77,6 +79,8 @@ impl std::fmt::Debug for InviteConfig {
 }
 
 pub const DEFAULT_FROM: &str = "conde <no-reply@conde.cloud>";
+/// The invite's whole wait for the mail service or Keycloak; the CLI waits 90 s.
+pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 const RESEND_URL: &str = "https://api.resend.com";
 const DEFAULT_ADMIN_CLIENT: &str = "conde-admin";
 /// The actions Keycloak's email walks the person through; the link lives as long as the invite
@@ -86,6 +90,8 @@ const ACTIONS_LIFESPAN: &str = "604800";
 /// The realm user attribute that marks the account an invite created.
 pub const INVITE_ATTRIBUTE: &str = "conde_invite";
 const NOT_OURS: &str =
+    "the sign-in server already has an account that this invitation did not create";
+const NOT_OURS_EMAIL: &str =
     "the sign-in server already has an account with this email that this invitation did not create";
 
 /// The public origin's first host label (`https://dakai.conde.cloud` gives `dakai`).
@@ -159,6 +165,7 @@ impl InviteConfig {
             workspace,
             resend,
             keycloak,
+            deadline: None,
         })
     }
 }
@@ -211,14 +218,15 @@ struct MailHtml<'a> {
 
 const PRE: &str = "font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f0efed;border-radius:6px;padding:10px 12px;white-space:pre-wrap;word-break:break-all";
 
-/// The invite email of a Google or Microsoft workspace at `server` for `email`.
+/// The invite email of a Google or Microsoft workspace at `server` for `email`; an error when
+/// the HTML part cannot be rendered (never sent unescaped).
 pub fn invite_mail(
     workspace: &str,
     server: &str,
     sign_in: SignIn,
     email: &str,
     inviter: Option<&str>,
-) -> Mail {
+) -> Result<Mail, String> {
     let account = match sign_in {
         SignIn::Google => "Google account",
         SignIn::Microsoft => "Microsoft account",
@@ -265,12 +273,12 @@ pub fn invite_mail(
         pre: PRE,
     }
     .render()
-    .unwrap_or_else(|_| text.clone());
-    Mail {
+    .map_err(|e| format!("the invite email could not be rendered ({e})"))?;
+    Ok(Mail {
         subject,
         text,
         html,
-    }
+    })
 }
 
 /// The detail of a refusal: the status and the body's message, when it gives one.
@@ -288,15 +296,18 @@ async fn refusal(response: reqwest::Response) -> String {
 }
 
 /// Sends `mail` to `to` through Resend; the reason on failure (never the key or the body).
+/// `idempotency_key` makes Resend answer a repeated request without sending again.
 pub(crate) async fn send_resend(
     http: &reqwest::Client,
     resend: &Resend,
     to: &str,
     mail: &Mail,
+    idempotency_key: &str,
 ) -> Result<(), String> {
     let response = http
         .post(format!("{}/emails", resend.base_url.trim_end_matches('/')))
         .bearer_auth(&resend.api_key)
+        .header("Idempotency-Key", idempotency_key)
         .json(&json!({
             "from": resend.from,
             "to": [to],
@@ -403,7 +414,7 @@ impl<'a> Realm<'a> {
         invite: &str,
         name: &str,
         email: &str,
-    ) -> Result<String, RealmError> {
+    ) -> Result<Account, RealmError> {
         if let Some(id) = recorded {
             return self.recorded(id, email).await;
         }
@@ -430,9 +441,13 @@ impl<'a> Realm<'a> {
                     .get(reqwest::header::LOCATION)
                     .and_then(|l| l.to_str().ok())
                     .and_then(|l| l.trim_end_matches('/').rsplit('/').next())
-                    .and_then(user_id);
-                id.ok_or_else(|| {
-                    RealmError::Failed(format!("{what}: the answer named no account id"))
+                    .and_then(user_id)
+                    .ok_or_else(|| {
+                        RealmError::Failed(format!("{what}: the answer named no account id"))
+                    })?;
+                Ok(Account {
+                    id,
+                    pending: ACTIONS.map(String::from).to_vec(),
                 })
             }
             409 => self.created_before(email, invite).await,
@@ -443,7 +458,7 @@ impl<'a> Realm<'a> {
         }
     }
 
-    async fn recorded(&self, id: &str, email: &str) -> Result<String, RealmError> {
+    async fn recorded(&self, id: &str, email: &str) -> Result<Account, RealmError> {
         const NO_MATCH: &str = "the recorded sign-in account no longer matches";
         let id = user_id(id).ok_or_else(|| RealmError::Failed(NO_MATCH.into()))?;
         let what = "reading the recorded sign-in account";
@@ -468,11 +483,14 @@ impl<'a> Realm<'a> {
         if !same_email(&account, email) {
             return Err(RealmError::Failed(NO_MATCH.into()));
         }
-        Ok(id)
+        Ok(Account {
+            id,
+            pending: pending(&account),
+        })
     }
 
     /// After a 409: the one account found by the exact email that carries this invite's value.
-    async fn created_before(&self, email: &str, invite: &str) -> Result<String, RealmError> {
+    async fn created_before(&self, email: &str, invite: &str) -> Result<Account, RealmError> {
         let what = "looking up the existing sign-in account";
         let response = self
             .http
@@ -489,6 +507,10 @@ impl<'a> Realm<'a> {
             )));
         }
         let found: Vec<Value> = response.json().await.unwrap_or_default();
+        if !found.iter().any(|a| same_email(a, email)) {
+            // the name is taken by an account with another email
+            return Err(RealmError::Conflict(NOT_OURS.into()));
+        }
         let ours: Vec<&Value> = found
             .iter()
             .filter(|a| {
@@ -499,23 +521,31 @@ impl<'a> Realm<'a> {
             })
             .collect();
         let [account] = ours[..] else {
-            return Err(RealmError::Conflict(NOT_OURS.into()));
+            return Err(RealmError::Conflict(NOT_OURS_EMAIL.into()));
         };
-        account["id"]
+        let id = account["id"]
             .as_str()
             .and_then(user_id)
-            .ok_or_else(|| RealmError::Failed(format!("{what}: the answer named no account id")))
+            .ok_or_else(|| RealmError::Failed(format!("{what}: the answer named no account id")))?;
+        Ok(Account {
+            id,
+            pending: pending(account),
+        })
     }
 
-    /// Has Keycloak send the account-setup email (verify the address, choose a password).
-    pub(crate) async fn send_setup_email(&self, id: &str) -> Result<(), RealmError> {
+    /// Has Keycloak send the account-setup email for the `actions` still pending.
+    pub(crate) async fn send_setup_email(
+        &self,
+        id: &str,
+        actions: &[String],
+    ) -> Result<(), RealmError> {
         let what = "sending the account-setup email";
         let response = self
             .http
             .put(format!("{}/{id}/execute-actions-email", self.users()))
             .query(&[("lifespan", ACTIONS_LIFESPAN)])
             .bearer_auth(&self.token)
-            .json(&ACTIONS)
+            .json(actions)
             .send()
             .await
             .map_err(|e| unreachable(what, e))?;
@@ -529,12 +559,32 @@ impl<'a> Realm<'a> {
     }
 }
 
-/// Keycloak stores emails lower-cased, so the invited address is compared ASCII
-/// case-insensitively.
+/// The realm account an invite uses, and which of its setup actions are still pending.
+pub(crate) struct Account {
+    pub id: String,
+    /// The account's required actions among VERIFY_EMAIL and UPDATE_PASSWORD, in that order;
+    /// empty once the person has set the account up.
+    pub pending: Vec<String>,
+}
+
+fn pending(account: &Value) -> Vec<String> {
+    let required: Vec<&str> = account["requiredActions"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    ACTIONS
+        .iter()
+        .filter(|a| required.contains(a))
+        .map(|a| a.to_string())
+        .collect()
+}
+
+/// The invited address and the account's, compared by their Unicode lowercase (Keycloak stores
+/// emails lower-cased).
 fn same_email(account: &Value, email: &str) -> bool {
     account["email"]
         .as_str()
-        .is_some_and(|e| e.eq_ignore_ascii_case(email))
+        .is_some_and(|e| e.to_lowercase() == email.to_lowercase())
 }
 
 #[cfg(test)]
@@ -558,6 +608,13 @@ mod tests {
     }
 
     #[test]
+    fn emails_compare_by_unicode_lowercase() {
+        assert!(same_email(&json!({"email": "ünal@x.de"}), "Ünal@X.de"));
+        assert!(!same_email(&json!({"email": "unal@x.de"}), "ünal@x.de"));
+        assert!(!same_email(&json!({}), "a@x.de"));
+    }
+
+    #[test]
     fn the_mail_carries_the_steps_and_escapes_its_html() {
         let m = invite_mail(
             "clearscale",
@@ -565,7 +622,8 @@ mod tests {
             SignIn::Google,
             "ann@clearscale.com",
             Some("Krisz <K>"),
-        );
+        )
+        .unwrap();
         assert_eq!(m.subject, "Krisz <K> invited you to clearscale on conde");
         let steps = [
             INSTALL,
@@ -603,7 +661,8 @@ mod tests {
             SignIn::Microsoft,
             "a@dakai.io",
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(plain.subject, "You're invited to dakai on conde");
         assert!(
             plain

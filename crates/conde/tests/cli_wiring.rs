@@ -1636,7 +1636,7 @@ fn admin_user_invites_and_lists_with_the_admin_key() {
         (
             "keycloak",
             "",
-            "invited ann ann@dakai.io, account-setup email sent by the sign-in server",
+            "invited ann ann@dakai.io, account-setup email sent by the sign-in server\ninviter not shown: the sign-in server sends this email",
         ),
         (
             "unconfigured",
@@ -1647,6 +1647,11 @@ fn admin_user_invites_and_lists_with_the_admin_key() {
             "none",
             "signed in",
             "ann ann@dakai.io has signed in already: no email sent",
+        ),
+        (
+            "none",
+            "set up",
+            "ann ann@dakai.io has set up the sign-in account already: no email sent",
         ),
     ] {
         let (url, seen) = one_admin_answer(json!({"user": "ann", "email": "ann@dakai.io",

@@ -488,8 +488,20 @@ impl WebStore for WebBoard {
         Ok(RealmAccount { id, invite })
     }
 
-    fn set_realm_account(&self, user_id: i64, a: &RealmAccount) -> WebResult<()> {
-        self.write(|t| Ok(t.set_user_keycloak(user_id, a.id.as_deref(), a.invite.as_deref())?))
+    fn claim_realm_invite(&self, user_id: i64, candidate: &str) -> WebResult<RealmAccount> {
+        let (id, invite) = self.write(|t| {
+            t.claim_user_keycloak_invite(user_id, candidate)?;
+            Ok(t.user_keycloak(user_id)?)
+        })?;
+        Ok(RealmAccount { id, invite })
+    }
+
+    fn record_realm_id(&self, user_id: i64, invite: &str, id: &str) -> WebResult<RealmAccount> {
+        let (id, invite) = self.write(|t| {
+            t.record_user_keycloak_id(user_id, invite, id)?;
+            Ok(t.user_keycloak(user_id)?)
+        })?;
+        Ok(RealmAccount { id, invite })
     }
 
     fn set_slack_member(&self, name: &str, member_id: &str) -> WebResult<Option<WebUser>> {

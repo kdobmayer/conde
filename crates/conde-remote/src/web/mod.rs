@@ -524,7 +524,14 @@ pub trait WebStore: Send + Sync {
     fn realm_account(&self, _user_id: i64) -> WebResult<RealmAccount> {
         Err(WebStoreError("this board has no invites".into()))
     }
-    fn set_realm_account(&self, _user_id: i64, _account: &RealmAccount) -> WebResult<()> {
+    /// Stores `candidate` as the user's correlation value unless a value or an account id is
+    /// stored already, in one transaction; the stored record, which every concurrent invite uses.
+    fn claim_realm_invite(&self, _user_id: i64, _candidate: &str) -> WebResult<RealmAccount> {
+        Err(WebStoreError("this board has no invites".into()))
+    }
+    /// Records the account id when the stored value is `invite` and no id is recorded, in one
+    /// transaction; the stored record.
+    fn record_realm_id(&self, _user_id: i64, _invite: &str, _id: &str) -> WebResult<RealmAccount> {
         Err(WebStoreError("this board has no invites".into()))
     }
     /// Sets the user's Slack member id as the admin's (a lookup by email never replaces it);

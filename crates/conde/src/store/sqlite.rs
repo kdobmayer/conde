@@ -727,17 +727,20 @@ impl Tx for SqliteTx<'_> {
             .unwrap_or_default())
     }
 
-    fn set_user_keycloak(
-        &self,
-        user_id: i64,
-        id: Option<&str>,
-        invite: Option<&str>,
-    ) -> StoreResult<()> {
-        self.exec(
-            "UPDATE users SET keycloak_id = ?2, keycloak_invite = ?3 WHERE user_id = ?1",
+    fn claim_user_keycloak_invite(&self, user_id: i64, candidate: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE users SET keycloak_invite = ?2
+                 WHERE user_id = ?1 AND keycloak_id IS NULL AND keycloak_invite IS NULL",
+            params![user_id, candidate],
+        )? > 0)
+    }
+
+    fn record_user_keycloak_id(&self, user_id: i64, invite: &str, id: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE users SET keycloak_id = ?2
+                 WHERE user_id = ?1 AND keycloak_invite = ?3 AND keycloak_id IS NULL",
             params![user_id, id, invite],
-        )?;
-        Ok(())
+        )? > 0)
     }
 
     fn backfill_emails(&self) -> StoreResult<u64> {

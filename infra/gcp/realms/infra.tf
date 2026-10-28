@@ -58,6 +58,8 @@ resource "keycloak_user" "krisztian" {
   realm_id       = local.infra_realm
   username       = "krisztian"
   email          = local.owner_email
+  first_name     = "Krisztián"
+  last_name      = "Dobmayer"
   email_verified = true
   enabled        = true
 

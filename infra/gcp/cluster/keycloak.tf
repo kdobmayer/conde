@@ -2,8 +2,7 @@
 locals {
   keycloak_labels = { "app.kubernetes.io/name" = "keycloak" }
   keycloak_secrets = {
-    "db-password"              = "keycloak-db-password"
-    "bootstrap-admin-password" = google_secret_manager_secret.keycloak_bootstrap_admin.secret_id
+    "db-password" = "keycloak-db-password"
   }
 }
 
@@ -41,29 +40,31 @@ resource "google_service_account_iam_member" "keycloak_workload_identity" {
   member             = "serviceAccount:${local.wi_pool}[${kubernetes_namespace_v1.keycloak.metadata[0].name}/${kubernetes_service_account_v1.keycloak.metadata[0].name}]"
 }
 
-# The first admin of the master realm; temporary until a named admin with MFA replaces it.
-ephemeral "random_password" "keycloak_bootstrap_admin" {
-  length  = 32
-  special = false
-}
-
-resource "google_secret_manager_secret" "keycloak_bootstrap_admin" {
-  secret_id = "keycloak-bootstrap-admin"
-
-  replication {
-    user_managed {
-      replicas {
-        location = local.region
-      }
-    }
+# The bootstrap admin is gone (realms/README.md); its secret leaves this state but stays in Secret Manager until deleted.
+removed {
+  from = google_secret_manager_secret.keycloak_bootstrap_admin
+  lifecycle {
+    destroy = false
   }
 }
 
-# Write-only: the generated password is in Secret Manager only, never in this state.
-resource "google_secret_manager_secret_version" "keycloak_bootstrap_admin" {
-  secret                 = google_secret_manager_secret.keycloak_bootstrap_admin.id
-  secret_data_wo         = ephemeral.random_password.keycloak_bootstrap_admin.result
-  secret_data_wo_version = 1
+removed {
+  from = google_secret_manager_secret_version.keycloak_bootstrap_admin
+  lifecycle {
+    destroy = false
+  }
+}
+
+moved {
+  from = google_secret_manager_secret_iam_member.keycloak["bootstrap-admin-password"]
+  to   = google_secret_manager_secret_iam_member.keycloak_bootstrap_admin
+}
+
+removed {
+  from = google_secret_manager_secret_iam_member.keycloak_bootstrap_admin
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "keycloak" {
@@ -234,26 +235,24 @@ resource "kubernetes_deployment_v1" "keycloak" {
           args = [<<-EOT
             set -e
             KC_DB_PASSWORD=$(< /secrets/db-password)
-            KC_BOOTSTRAP_ADMIN_PASSWORD=$(< /secrets/bootstrap-admin-password)
-            export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD
+            export KC_DB_PASSWORD
             exec /opt/keycloak/bin/kc.sh start --optimized
           EOT
           ]
 
           dynamic "env" {
             for_each = {
-              KC_HOSTNAME                 = "https://${local.keycloak_hostname}"
-              KC_HOSTNAME_ADMIN           = "https://${local.keycloak_admin_hostname}"
-              KC_PROXY_HEADERS            = "xforwarded"
-              KC_HTTP_ENABLED             = "true"
-              KC_HTTP_PORT                = "8080"
-              KC_HTTP_MANAGEMENT_PORT     = "9000"
-              KC_CACHE                    = "ispn"
-              KC_CACHE_STACK              = "jdbc-ping"
-              KC_DB_URL                   = "jdbc:postgresql://127.0.0.1:5432/keycloak"
-              KC_DB_USERNAME              = "keycloak"
-              KC_BOOTSTRAP_ADMIN_USERNAME = "bootstrap-admin"
-              KC_VAULT_DIR                = "/vault"
+              KC_HOSTNAME             = "https://${local.keycloak_hostname}"
+              KC_HOSTNAME_ADMIN       = "https://${local.keycloak_admin_hostname}"
+              KC_PROXY_HEADERS        = "xforwarded"
+              KC_HTTP_ENABLED         = "true"
+              KC_HTTP_PORT            = "8080"
+              KC_HTTP_MANAGEMENT_PORT = "9000"
+              KC_CACHE                = "ispn"
+              KC_CACHE_STACK          = "jdbc-ping"
+              KC_DB_URL               = "jdbc:postgresql://127.0.0.1:5432/keycloak"
+              KC_DB_USERNAME          = "keycloak"
+              KC_VAULT_DIR            = "/vault"
             }
             content {
               name  = env.key
@@ -372,7 +371,6 @@ resource "kubernetes_deployment_v1" "keycloak" {
     google_service_account_iam_member.keycloak_workload_identity,
     google_secret_manager_secret_iam_member.keycloak,
     google_secret_manager_secret_iam_member.keycloak_vault,
-    google_secret_manager_secret_version.keycloak_bootstrap_admin,
   ]
 }
 
@@ -417,7 +415,7 @@ resource "kubernetes_manifest" "keycloak_route" {
       }]
       hostnames = [local.keycloak_hostname]
       rules = [{
-        matches = [for prefix in ["/realms/dakai", "/realms/demo", "/realms/clearscale", "/realms/infra", "/resources"] : {
+        matches = [for prefix in ["/realms/demo", "/realms/clearscale", "/realms/infra", "/resources"] : {
           path = { type = "PathPrefix", value = prefix }
         }]
         backendRefs = [{

@@ -24,7 +24,9 @@ The master realm's frontend URL is https://admin-auth.conde.cloud (`master.tf`),
 Identity-Aware Proxy (docs/infra-gcp-s4-iap.md): its sign-in pages and the issuer of its tokens are there, while every
 other realm keeps https://auth.conde.cloud.
 
-The first apply, before the `terraform` client exists, signs in as the bootstrap admin instead:
+The first apply, before the `terraform` client exists, signs in as the bootstrap admin instead. The cluster root no
+longer creates the bootstrap admin (step 4 below), so a new installation first restores `KC_BOOTSTRAP_ADMIN_USERNAME`,
+the `bootstrap-admin-password` mount and the `keycloak-bootstrap-admin` secret there:
 
     export KEYCLOAK_CLIENT_ID=admin-cli KEYCLOAK_USER=bootstrap-admin
     export KEYCLOAK_PASSWORD="$(gcloud secrets versions access latest --secret keycloak-bootstrap-admin --project conde-prod)"
@@ -52,7 +54,7 @@ default requires them from the user), so an invited user gets no "complete your 
 
 ## Replacing the bootstrap admin
 
-Done for conde-prod (steps 1 to 3 and 5; step 4 is open). `master` is in `no_password_grant`, so on a new installation
+Done for conde-prod (steps 1 to 5). `master` is in `no_password_grant`, so on a new installation
 the first apply, which signs in with the bootstrap admin's password, runs with `master` taken out of that list.
 
 1. Read the temporary password: `gcloud secrets versions access latest --secret keycloak-admin-temp-password
@@ -64,7 +66,8 @@ the first apply, which signs in with the bootstrap admin's password, runs with `
 3. In the admin console as `admin`: realm master, Users, `bootstrap-admin`, Delete. Keycloak creates the bootstrap
    user only while the master realm has no user at all, so it does not come back on a restart.
 4. In the cluster root, drop `KC_BOOTSTRAP_ADMIN_USERNAME`, the `bootstrap-admin-password` mount and the
-   `keycloak-bootstrap-admin` secret; they are unused from step 3 on.
+   `keycloak-bootstrap-admin` secret; they are unused from step 3 on. On conde-prod the secret left the Terraform state
+   but stays in Secret Manager until it is deleted by hand.
 5. Add `"master"` to `no_password_grant` in flows.tf and apply: the first-apply path above was the last user of the
    master realm's password grant.
 

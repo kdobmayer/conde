@@ -30,10 +30,30 @@ locals {
     clearscale = { hosted_domain = "clearscale.com", client_id = "327673226052-m2lh9vekck7mhp473m4gk6h1qfi8fjpq.apps.googleusercontent.com" }
   }
 
+  # passwords: the realm signs its users in with Keycloak passwords, so it offers "Forgot password"; infra does not.
   realms = merge(
-    { for name, tenant in local.tenants : name => { display_name = tenant.display_name, require_mfa = var.require_mfa[name] } },
-    { infra = { display_name = "conde infra", require_mfa = true } },
+    { for name, tenant in local.tenants : name => {
+      display_name = tenant.display_name
+      require_mfa  = var.require_mfa[name]
+      passwords    = !contains(keys(local.google_sign_in), name)
+    } },
+    { infra = { display_name = "conde infra", require_mfa = true, passwords = false } },
   )
+
+  # Outbound mail of every realm, master included, through Resend (SMTPS); the password is the Resend API key.
+  smtp = {
+    host              = "smtp.resend.com"
+    port              = "465"
+    username          = "resend"
+    from              = "no-reply@conde.cloud"
+    from_display_name = "conde"
+    reply_to          = local.owner_email
+  }
+}
+
+# The provider has no write-only SMTP password, so the API key is in this state, like the Google client secret.
+data "google_secret_manager_secret_version" "resend" {
+  secret = "resend-api-key"
 }
 
 # Secrets this root writes; every value is write-only, so none is in this state.

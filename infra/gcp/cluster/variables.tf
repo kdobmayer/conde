@@ -26,8 +26,8 @@ variable "gitops_revision" {
   description = "Branch of github.com/kdobmayer/conde that Argo CD reads charts/ and deploy/ from."
 }
 
-# Off for the first adoption of the Terraform-created objects; on after it (selfHeal on, prune off).
+# Automated sync with self-heal, without pruning; it was off only for the first adoption of the Terraform-created objects.
 variable "workspaces_auto_sync" {
   type    = bool
-  default = false
+  default = true
 }

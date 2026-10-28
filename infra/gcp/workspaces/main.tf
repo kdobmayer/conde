@@ -6,13 +6,6 @@ provider "google" {
   impersonate_service_account = "terraform@conde-prod.iam.gserviceaccount.com"
 }
 
-data "google_client_config" "this" {}
-
-provider "kubernetes" {
-  host  = "https://${local.platform.cluster_dns_endpoint}"
-  token = data.google_client_config.this.access_token
-}
-
 data "terraform_remote_state" "foundation" {
   backend = "gcs"
   config = {

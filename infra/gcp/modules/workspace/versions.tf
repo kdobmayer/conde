@@ -3,9 +3,6 @@ terraform {
     google = {
       source = "hashicorp/google"
     }
-    kubernetes = {
-      source = "hashicorp/kubernetes"
-    }
     random = {
       source = "hashicorp/random"
     }

@@ -137,6 +137,17 @@ module, plus the Keycloak realms). Local run: `GOOGLE_IMPERSONATE_SERVICE_ACCOUN
   one-liner, `conde setup --board https://demo.conde.cloud`, and "your agent can run both; the browser
   sign-in is yours". `conde setup` already registers the MCP server and the skill for the agent.
 
+## Revisit after the cutover (owner, 2026-10-28)
+
+- Network layer: GKE Autopilot runs Dataplane V2, which is Cilium (eBPF) with NetworkPolicy enforcement,
+  so the tenant isolation today is Cilium-enforced L3/L4 policy. To revisit: FQDN-based egress policies
+  (Dataplane V2 supports them), Cilium cluster-wide policies, and whether a service mesh earns its place:
+  Cloud Service Mesh (managed Istio, ambient mode) for mTLS and L7 authorization between namespaces, with
+  the Gateway feeding the mesh ingress. Not now: no two workloads talk to each other inside the cluster
+  except conde to Keycloak over the public hostname, and a mesh is a component with no requirement yet.
+- Identity-aware access (IAP) for the admin surfaces, replacing the IP allowlist (8b above).
+- Keycloak file vault for the Google and SMTP secrets so they leave Terraform state (review finding).
+
 ## Open
 
 - The Cloudflare proxy in front of the Gateway needs origin locking (Cloudflare IP ranges or an

@@ -84,3 +84,30 @@ resource "google_secret_manager_secret_version" "terraform_client_secret" {
     replace_triggered_by = [keycloak_openid_client.terraform.id]
   }
 }
+
+# Managed for its outbound mail only (admin password resets and the console's test email); other settings stay Keycloak's.
+import {
+  to = keycloak_realm.master
+  id = "master"
+}
+
+resource "keycloak_realm" "master" {
+  realm                       = "master"
+  default_signature_algorithm = "RS256"
+
+  smtp_server {
+    host              = local.smtp.host
+    port              = local.smtp.port
+    ssl               = true
+    from              = local.smtp.from
+    from_display_name = local.smtp.from_display_name
+    reply_to          = local.smtp.reply_to
+
+    auth {
+      username = local.smtp.username
+      password = data.google_secret_manager_secret_version.resend.secret_data
+    }
+  }
+
+  terraform_deletion_protection = true
+}

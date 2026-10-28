@@ -108,12 +108,13 @@ d) Verify (every item, before step e):
       balancer routes on the Host header, so a mismatched certificate name gives no way around IAP); the cluster's
       HTTPRoutes (`kubectl get httproute -A -o wide`) name admin-auth.conde.cloud once and argocd.conde.cloud once.
    8. Encoded paths on the public host cannot reach the admin or master paths. From an address outside `admin_cidrs`
-      (Cloud Shell), each of these answers 403 and never Keycloak's master realm or console:
+      (a pod in the cluster leaves through Cloud NAT), none of these may answer 200:
       `https://auth.conde.cloud/realms/demo/%2e%2e/master/.well-known/openid-configuration`,
       `https://auth.conde.cloud/realms/demo/..%2fmaster/.well-known/openid-configuration`,
       `https://auth.conde.cloud/resources/%2e%2e/admin/master/console/`
-      (`curl -s -o /dev/null -w '%{http_code}\n' '<url>'`). Cloud Armor evaluates the normalised path, so rules
-      1000 and 1001 are what refuse them; rule 1002 is defence in depth only.
+      (`curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' '<url>'`). Observed 2026-10-28: the `%2e%2e` forms
+      get an empty 302 from the load balancer to the canonical path, which answers 403 (rules 1000 and 1001 after
+      normalisation); `..%2f` gets 403 directly. From an allowlisted address the same URLs answer 200 until step e.
    9. The realms root signs in through the port-forward: `./run.sh plan` shows no changes.
 
 e) Retire the allowlist (the commit "Retire the admin IP allowlist").
@@ -124,7 +125,8 @@ e) Retire the allowlist (the commit "Retire the admin IP allowlist").
    - Rule 1003 (Argo CD host from `admin_cidrs`) goes with them; it stopped applying at step c, when the Argo CD
      backend moved to `conde-argocd`.
    - Check from an address that was on the allowlist and from one that was not (Cloud Shell): on auth.conde.cloud,
-     `/admin/master/console/`, `/realms/master` and `/realms/demo/%2e%2e/master/` are refused (403 or 404);
+     `/admin/master/console/`, `/realms/master` and the encoded paths of d8 are refused (403, 404, or a 302 to a
+     canonical path that answers 403);
      `/realms/demo/.well-known/openid-configuration` and `/realms/infra/.well-known/openid-configuration` answer 200;
      a demo sign-in and an Argo CD sign-in still work.
 

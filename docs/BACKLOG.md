@@ -57,6 +57,13 @@ Owner's own steps, at his pace, none blocking the above:
   in Secret Manager infra-krisztian-temp-password); then desk flips `argocd_local_admin` to false and
   deletes argocd-initial-admin-secret.
 - D4: Cloudflare account 2FA (profile, Authentication); it holds the domain.
+- D5 (for S4, IAP): create the IAP OAuth client in the Google Auth Platform of conde-prod, because its secret is
+  shown once: https://console.cloud.google.com/auth/clients?project=conde-prod, Create client, Web application,
+  name `iap-admin`, Create; copy the client ID and the secret; edit the client and add the redirect URI
+  `https://iap.googleapis.com/v1/oauth/clientIds/<client ID>:handleRedirect`, Save. Then in a terminal:
+  `read -rs S && printf '%s' "$S" | pass insert -m conde/iap-admin-client-secret && unset S` and
+  `pass show conde/iap-admin-client-secret | gcloud secrets create iap-admin-client-secret --replication-policy=user-managed --locations=europe-west3 --data-file=- --project conde-prod`.
+  Send desk the client ID (not the secret). The audience of the "conde" app must be External (it is).
 
 ## Standing items (no claim needed)
 

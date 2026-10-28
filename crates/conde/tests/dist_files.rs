@@ -38,25 +38,26 @@ fn the_release_publishes_the_installer_but_builds_no_windows_binary() {
     }
 }
 
-/// install.sh against a local release (CONDE_DIST_URL on file://): a first install names the
-/// setup and the sign-in; installing again over a conde says what it replaced and names the
-/// upgrade's two commands (setup rewrites what changed, doctor shows the bridge's build).
-#[cfg(target_os = "linux")]
+/// install.sh against a local release (CONDE_DIST_BASE_URL on file://, the bucket's v<version>/
+/// layout): a first install names the setup and the sign-in; installing again over a conde says
+/// what it replaced and names the upgrade's two commands (setup rewrites what changed, doctor
+/// shows the bridge's build).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let (dist, bin) = (root.path().join("dist"), root.path().join("bin"));
-    std::fs::create_dir_all(&dist).unwrap();
-    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
-    let name = format!("conde-linux-{arch}");
+    let release_dir = dist.join("v0.1.0");
+    std::fs::create_dir_all(&release_dir).unwrap();
+    let name = "conde-linux-x86_64";
     let release = |version: &str| {
         let fake = format!("#!/bin/sh\necho 'conde 0.1.0 ({version} 2026-10-14)'\n");
-        std::fs::write(dist.join(&name), &fake).unwrap();
-        std::fs::set_permissions(dist.join(&name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(release_dir.join(name), &fake).unwrap();
+        std::fs::set_permissions(release_dir.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
         use sha2::Digest;
         let sum: String = sha2::Sha256::digest(fake.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
-        std::fs::write(dist.join("SHA256SUMS"), format!("{sum}  {name}\n")).unwrap();
+        std::fs::write(release_dir.join("SHA256SUMS"), format!("{sum}  {name}\n")).unwrap();
         std::fs::write(dist.join("latest"), "v0.1.0\n").unwrap();
     };
     // Each run carries its own marker in the environment, inherited by everything it starts, so
@@ -66,9 +67,9 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
     let install = || {
         runs.set(runs.get() + 1);
         let mark = format!("{}#{}", root.path().display(), runs.get());
-        let mut child = std::process::Command::new("sh")
+        let mut child = std::process::Command::new("bash")
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/install.sh"))
-            .env("CONDE_DIST_URL", format!("file://{}", dist.display()))
+            .env("CONDE_DIST_BASE_URL", format!("file://{}", dist.display()))
             .env("CONDE_INSTALL_DIR", &bin)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env(RUN_MARK, &mark)
@@ -149,10 +150,10 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const RUN_MARK: &str = "CONDE_INSTALL_TEST_RUN";
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn kill(procs: &[(i32, String)]) {
     for (pid, _) in procs {
         unsafe { libc::kill(*pid, libc::SIGKILL) };
@@ -160,7 +161,7 @@ fn kill(procs: &[(i32, String)]) {
 }
 
 /// The live processes (pid, command line) whose environment carries this run's marker.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn marked(mark: &str) -> Vec<(i32, String)> {
     let needle = format!("{RUN_MARK}={mark}");
     let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };

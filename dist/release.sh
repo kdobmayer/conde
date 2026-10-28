@@ -1,18 +1,17 @@
 #!/bin/sh
-# Local release build: static Linux binaries plus SHA256SUMS in dist/out/.
-# macOS builds come from .github/workflows/release.yml (GitHub macOS runners).
+# Local release build: the static Linux binary plus SHA256SUMS in dist/out/v<version>/, laid out
+# like the dist bucket. macOS builds come from .github/workflows/release.yml (GitHub macOS runners).
 #
-#   dist/release.sh            # both Linux targets, whatever this machine can build
+#   dist/release.sh
 #
 # Tool choice per target: cargo-zigbuild, else cross, else plain cargo when the
 # musl target's standard library and a C compiler for it are installed.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-out=$root/dist/out
-mkdir -p "$out"
-
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/crates/conde/Cargo.toml" | head -n 1)
+out=$root/dist/out/v$version
+mkdir -p "$out"
 built=0
 missing=""
 
@@ -45,17 +44,15 @@ build() {
 		return 0
 	fi
 	cp "$root/target/$target/release/conde" "$out/$name"
-	(cd "$out" && sha256sum "$name" >"$name.sha256")
 	built=$((built + 1))
-	echo "built dist/out/$name"
+	echo "built dist/out/v$version/$name"
 }
 
 build x86_64-unknown-linux-musl conde-linux-x86_64 musl-gcc
-build aarch64-unknown-linux-musl conde-linux-aarch64 aarch64-linux-musl-gcc
 
-cp "$root/dist/install.sh" "$out/install.sh"
-echo "v$version" >"$out/latest"
-sums=$(cd "$out" && find . -maxdepth 1 -type f ! -name '*.sha256' ! -name SHA256SUMS ! -name '.*' -exec basename {} \; | sort | xargs sha256sum)
+cp "$root/dist/install.sh" "$root/dist/out/install.sh"
+echo "v$version" >"$root/dist/out/latest"
+sums=$(cd "$out" && find . -maxdepth 1 -type f -name 'conde-*' -exec basename {} \; | sort | xargs sha256sum)
 printf '%s\n' "$sums" >"$out/SHA256SUMS"
 
 if [ -n "$missing" ]; then
@@ -65,4 +62,4 @@ if [ "$built" = 0 ]; then
 	echo "release.sh: nothing built" >&2
 	exit 1
 fi
-echo "dist/out ready for v$version ($built of 2 Linux targets)"
+echo "dist/out ready for v$version (Linux only; the release workflow publishes all three binaries)"

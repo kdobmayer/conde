@@ -109,6 +109,16 @@ resource "google_secret_manager_secret_iam_member" "app" {
   member = google_service_account.this.member
 }
 
+# Shared ones every server reads (the Resend API key for its own email) and the workspace's extra ones.
+resource "google_secret_manager_secret_iam_member" "extra" {
+  for_each = toset(concat(["resend-api-key"], var.extra_secrets))
+
+  project   = local.project
+  secret_id = "projects/${local.project}/secrets/${each.value}"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = google_service_account.this.member
+}
+
 resource "google_secret_manager_secret_iam_member" "dbinit" {
   project   = local.project
   secret_id = "projects/${local.project}/secrets/${var.platform.pg_admin_secret}"

@@ -424,8 +424,8 @@ resource "kubernetes_manifest" "keycloak_backend" {
   }
 }
 
-# Deny by default; in from the load balancer only, out to DNS, the metadata server, the Cloud SQL PSC endpoint, public
-# HTTPS (the Cloud SQL Admin API, the federated identity providers) and public SMTPS.
+# Deny by default; in from the load balancer and the demo workspace, out to DNS, the metadata server, the Cloud SQL
+# PSC endpoint, public HTTPS (the Cloud SQL Admin API, the federated identity providers) and public SMTPS.
 resource "kubernetes_network_policy_v1" "keycloak" {
   metadata {
     name      = "keycloak"
@@ -452,6 +452,19 @@ resource "kubernetes_network_policy_v1" "keycloak" {
       ports {
         protocol = "TCP"
         port     = "9000"
+      }
+    }
+
+    # The demo workspace's server calls the admin API (user invites) on the Service, not through the load balancer.
+    ingress {
+      from {
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = "ws-demo" }
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "8080"
       }
     }
 
@@ -540,4 +553,203 @@ resource "kubernetes_network_policy_v1" "keycloak" {
       }
     }
   }
+}
+
+# ── Database grants: Keycloak owns its schema, no other role reaches its database, `postgres` is closed to PUBLIC ──
+locals {
+  keycloak_dbinit = "keycloak-dbinit"
+  # Without a GSA annotation: the instance admin password is readable by this Job's principal only.
+  keycloak_dbinit_principal = "principal://iam.googleapis.com/projects/${local.foundation.project_number}/locations/global/workloadIdentityPools/${local.wi_pool}/subject/ns/${kubernetes_namespace_v1.keycloak.metadata[0].name}/sa/${local.keycloak_dbinit}"
+}
+
+resource "kubernetes_service_account_v1" "keycloak_dbinit" {
+  metadata {
+    name      = local.keycloak_dbinit
+    namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+  }
+}
+
+resource "google_project_iam_member" "keycloak_dbinit_sql" {
+  project = local.project
+  role    = "roles/cloudsql.client"
+  member  = local.keycloak_dbinit_principal
+}
+
+resource "google_secret_manager_secret_iam_member" "keycloak_dbinit" {
+  project   = local.project
+  secret_id = "projects/${local.project}/secrets/pg-admin-password"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = local.keycloak_dbinit_principal
+}
+
+resource "kubernetes_manifest" "keycloak_dbinit_secrets" {
+  manifest = {
+    apiVersion = "secrets-store.csi.x-k8s.io/v1"
+    kind       = "SecretProviderClass"
+    metadata = {
+      name      = local.keycloak_dbinit
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      provider = "gke"
+      parameters = {
+        secrets = yamlencode([{
+          resourceName = "projects/${local.project}/secrets/pg-admin-password/versions/latest"
+          path         = "pg-admin-password"
+        }])
+      }
+    }
+  }
+}
+
+# As the instance's admin user, idempotent. Cloud SQL makes every built-in user a member of cloudsqlsuperuser; once
+# Keycloak owns the public schema (it already owns every table) it needs neither that membership nor PUBLIC's grants.
+resource "kubernetes_job_v1" "keycloak_dbinit" {
+  metadata {
+    name      = local.keycloak_dbinit
+    namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+  }
+
+  spec {
+    backoff_limit = 6
+
+    template {
+      metadata {
+        labels = { "app.kubernetes.io/name" = local.keycloak_dbinit }
+      }
+
+      spec {
+        service_account_name = kubernetes_service_account_v1.keycloak_dbinit.metadata[0].name
+        restart_policy       = "Never"
+
+        toleration {
+          key      = "kubernetes.io/arch"
+          operator = "Equal"
+          value    = "amd64"
+          effect   = "NoSchedule"
+        }
+
+        security_context {
+          run_as_non_root = true
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
+        init_container {
+          name           = "cloud-sql-proxy"
+          image          = local.cloud_sql_proxy
+          restart_policy = "Always"
+          args = [
+            "--psc",
+            "--structured-logs",
+            "--address=127.0.0.1",
+            "--port=5432",
+            "--health-check",
+            "--http-address=0.0.0.0",
+            "--http-port=9090",
+            local.platform.sql_connection_name,
+          ]
+
+          startup_probe {
+            http_get {
+              path = "/startup"
+              port = 9090
+            }
+            period_seconds    = 2
+            failure_threshold = 60
+          }
+
+          resources {
+            requests = {
+              cpu                 = "250m"
+              memory              = "256Mi"
+              "ephemeral-storage" = "100Mi"
+            }
+            limits = {
+              "ephemeral-storage" = "100Mi"
+            }
+          }
+
+          security_context {
+            allow_privilege_escalation = false
+            read_only_root_filesystem  = true
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+        }
+
+        container {
+          name    = "psql"
+          image   = "docker.io/library/postgres:18.6-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5"
+          command = ["/bin/sh", "-c"]
+          # The admin must be a member of the role it hands the schema to.
+          args = [<<-EOT
+            set -eu
+            PGPASSWORD=$(cat /secrets/pg-admin-password)
+            export PGPASSWORD
+            psql -v ON_ERROR_STOP=1 -X -h 127.0.0.1 -U postgres -d postgres \
+              -c 'GRANT keycloak TO postgres' \
+              -c 'GRANT CONNECT, TEMPORARY ON DATABASE keycloak TO keycloak' \
+              -c 'REVOKE CONNECT, TEMPORARY ON DATABASE keycloak FROM PUBLIC' \
+              -c 'REVOKE CONNECT, TEMPORARY ON DATABASE postgres FROM PUBLIC'
+            psql -v ON_ERROR_STOP=1 -X -h 127.0.0.1 -U postgres -d keycloak \
+              -c 'ALTER SCHEMA public OWNER TO keycloak' \
+              -c 'REVOKE cloudsqlsuperuser FROM keycloak'
+          EOT
+          ]
+
+          resources {
+            requests = {
+              cpu                 = "250m"
+              memory              = "256Mi"
+              "ephemeral-storage" = "100Mi"
+            }
+            limits = {
+              "ephemeral-storage" = "100Mi"
+            }
+          }
+
+          security_context {
+            run_as_user                = 70
+            allow_privilege_escalation = false
+            read_only_root_filesystem  = true
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+
+          volume_mount {
+            name       = "secrets"
+            mount_path = "/secrets"
+            read_only  = true
+          }
+        }
+
+        volume {
+          name = "secrets"
+          csi {
+            driver    = "secrets-store-gke.csi.k8s.io"
+            read_only = true
+            volume_attributes = {
+              secretProviderClass = kubernetes_manifest.keycloak_dbinit_secrets.manifest.metadata.name
+            }
+          }
+        }
+      }
+    }
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "10m"
+    update = "10m"
+  }
+
+  depends_on = [
+    google_project_iam_member.keycloak_dbinit_sql,
+    google_secret_manager_secret_iam_member.keycloak_dbinit,
+  ]
 }

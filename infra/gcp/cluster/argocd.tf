@@ -472,9 +472,10 @@ resource "kubernetes_manifest" "argocd_workspaces" {
     project         = local.project
     postgres_image  = local.postgres_image
     pg_admin_secret = "pg-admin-password"
-    sync_policy = jsonencode(var.workspaces_auto_sync ? {
-      automated = { selfHeal = true, prune = false }
-    } : {})
+    # The same shape either way: the provider cannot drop the automated block in place.
+    sync_policy = jsonencode({
+      automated = { enabled = var.workspaces_auto_sync, selfHeal = true, prune = false }
+    })
   }))
 
   depends_on = [kubernetes_manifest.argocd_project]

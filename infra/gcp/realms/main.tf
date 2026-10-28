@@ -58,7 +58,7 @@ data "google_secret_manager_secret_version" "resend" {
 
 # Secrets this root writes; every value is write-only, so none is in this state.
 resource "google_secret_manager_secret" "generated" {
-  for_each = toset(["infra-krisztian-temp-password", "keycloak-admin-temp-password", "keycloak-terraform-client-secret"])
+  for_each = toset(["infra-krisztian-temp-password", "keycloak-admin-demo", "keycloak-admin-temp-password", "keycloak-terraform-client-secret"])
 
   secret_id = each.value
 

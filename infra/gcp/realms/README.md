@@ -30,10 +30,14 @@ Every generated value is write-only: it is in Keycloak and in Secret Manager, no
 | `keycloak-admin-temp-password` | the temporary password of `admin` in the master realm |
 | `infra-krisztian-temp-password` | the temporary password of `krisztian` in the realm `infra` |
 | `keycloak-terraform-client-secret` | the secret of the master realm's `terraform` client |
+| `keycloak-admin-demo` | the secret of the demo realm's `conde-admin` client (client credentials, `manage-users`), read by the demo server |
 
 A conde server reads its client secret at start: after a new version, `kubectl -n ws-<name> rollout restart
 deployment/conde`. Two secrets this root reads are in its state, because their provider fields are not write-only:
 `resend-api-key` (the SMTP password of every realm) and `<name>-google-oauth-client-secret`.
+
+Demo's user profile (`demo.tf`) deviates from Keycloak's default on purpose: first and last name are optional (the
+default requires them from the user), so an invited user gets no "complete your profile" form at first sign-in.
 
 ## Replacing the bootstrap admin
 
@@ -61,7 +65,8 @@ deployment/conde`. Two secrets this root reads are in its state, because their p
 - Email: every realm, master included, sends through Resend (`local.smtp` in main.tf: smtp.resend.com, SMTPS on 465,
   user `resend`, the API key from `resend-api-key`), from `no-reply@conde.cloud` with replies to the owner. Keycloak
   needs egress to TCP 465, an egress rule of its NetworkPolicy in the cluster root. "Forgot password" is on in the realms
-  that sign in with passwords (`passwords` in `local.realms`): demo.
+  that sign in with passwords (`passwords` in `local.realms`): demo. Demo's email theme `conde` (in the Keycloak image,
+  `infra/keycloak/themes`) turns the execute-actions email into the invitation with the onboarding steps.
 
 ## Adding a company
 

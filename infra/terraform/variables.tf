@@ -55,3 +55,10 @@ variable "slack_notify" {
   type    = string
   default = ""
 }
+
+# CONDE_MOVED_TO: the board's new address; set, the server answers every request but /healthz with 308 there and writes
+# nothing (docs/DEPLOY.md, docs/CUTOVER-dakai.md). Needs an image of 0c4ffff or later. Empty = serving.
+variable "moved_to" {
+  type    = string
+  default = ""
+}

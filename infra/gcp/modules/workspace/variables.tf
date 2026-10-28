@@ -29,3 +29,9 @@ variable "platform" {
     pg_admin_secret     = string
   })
 }
+
+variable "extra_secrets" {
+  type        = list(string)
+  default     = []
+  description = "Further Secret Manager secrets its server reads, such as a Keycloak admin client secret."
+}

@@ -95,8 +95,9 @@ from three sources:
 - the file name `<name>`: the workspace name, `<name>.conde.cloud`, the Google service account, the database
   `conde_<name>`, the Secret Manager secrets, the dbinit image and admin secret, and the network policy switch, all
   as Helm parameters, which outrank every other source;
-- the tenant file, of which only `boardName`, `oidc.issuer` and `oidc.clientId` are read (it is not a values file, so
-  nothing else in it reaches the chart);
+- the tenant file, of which only `boardName`, `oidc.issuer`, `oidc.clientId` and the optional `replicas` (default 2;
+  `replicas: 0` stops the server, as for a database restore) are read (it is not a values file, so nothing else in it
+  reaches the chart);
 - `deploy/image.yaml`, written by the release workflow, and the platform values from this root (project, Cloud SQL,
   Gateway, Cloud Armor policy, egress list).
 
@@ -107,5 +108,6 @@ A git files generator rather than a list in Terraform: adding or removing a work
 `preserveResourcesOnDeletion` is on: deleting a tenant file or the ApplicationSet leaves the workspace running.
 Sync is automated with self-heal, so a change made by hand to a workspace object is reverted to git; a new image goes
 in through `deploy/image.yaml`, not `kubectl set image`. Pruning is off: an object dropped from the chart stays until
-it is deleted by hand. `workspaces_auto_sync` turns automation off, as it was for the first adoption of the
-Terraform-created objects.
+it is deleted by hand. `workspaces_auto_sync = false` pauses automation for every workspace (`automated.enabled:
+false`), as for the first adoption of the Terraform-created objects; a targeted apply of
+`kubernetes_manifest.argocd_workspaces` switches it either way in about 15 seconds.

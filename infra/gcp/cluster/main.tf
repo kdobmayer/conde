@@ -50,7 +50,7 @@ locals {
   gfe_ranges        = ["35.191.0.0/16", "130.211.0.0/22"]
   private_ranges    = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
   cloud_sql_proxy   = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.3@sha256:f333a9c59890c3c67b8505166c5dbdcc0b29fca9173a2e09ca0446ab6997a736"
-  keycloak_image    = "${local.foundation.registry_url}/keycloak:26.8.1-conde1@sha256:89cdb465103c5a9107419a0202d77a30e4ce70d236f1d8c809fc680aba33a8f6"
+  keycloak_image    = "${local.foundation.registry_url}/keycloak:26.8.1-conde2@sha256:5456780ea5578e6ca93006b87dc39f1b46b95a4b4bd58845b8645a2fa1b21c49"
   keycloak_hostname = "auth.conde.cloud"
   network_policy_egress = [
     # NodeLocal DNSCache, the pods' resolver; it runs on the host network, so no pod selector matches it.

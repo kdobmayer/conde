@@ -51,13 +51,14 @@ CONDE_VERSION=0.1.0 bash -c "$(curl -fsSL https://conde.cloud/install.sh)"
 
 ## Upgrading
 
-Run the installer again. It replaces the binary and says what it replaced (`replaced ~/.local/bin/conde (conde 0.1.0 (<old>)) with conde 0.1.0 (<new>)`). Then run `conde setup`, which rewrites what the new release changed (the skills, the MCP entries, the service file) and restarts the bridge if it still runs the old build. Your enrollment, names and messages stay; no sign-in is needed.
-
 ```sh
-curl -fsSL https://conde.cloud/install.sh | bash
+conde update
 conde setup
-conde doctor
 ```
+
+`conde update` downloads the latest release for this machine from the same files the installer reads, checks it against its `SHA256SUMS` line and renames it over the running binary, so a failed download or check leaves the old binary in place. It prints `conde <old> -> <new>`, or `conde <version> is current`, and restarts the bridge service when `conde setup` installed one. `--check` only reports; `--version 0.3.0` installs a specific release. `CONDE_DIST_BASE_URL` works as for the installer.
+
+Then `conde setup` rewrites what the new release changed (the skills, the MCP entries, the service file). Your enrollment, names and messages stay; no sign-in is needed. A conde without `conde update` (0.2.0 and older) upgrades by running the installer again.
 
 ## macOS
 

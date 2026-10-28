@@ -77,6 +77,7 @@ One option applies to most commands:
 | `setup` | Set up this machine: the bridge service with the local board, the conde skill and MCP server for Claude Code and Codex, and the host's boards. `--check` reports without changing anything; `--default-board <ALIAS>` sets where plain commands go. Safe to run again. |
 | `daemon` | Run the local board, its socket and the notification bridge, plus a connection to every enrolled shared board. `conde setup` installs it as a user service; you do not run it by hand. |
 | `mcp` | The MCP server for this session's agent on stdin and stdout. Claude Code and Codex spawn it. |
+| `update` | Replace this binary with the latest release, checked against its `SHA256SUMS`, and restart the bridge service onto it. `--check` only reports; `--version <V>` installs a specific release. See [Upgrading](/docs/install#upgrading). |
 
 ## The server
 

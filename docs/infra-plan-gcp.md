@@ -95,13 +95,18 @@ registrar's price API and the public cloud price lists on the day; re-read at ap
   point): a compromised instance can alter its own schema; a real split needs a separate migration execution
   path, deferred.
 - Secrets: the GKE managed Secret Manager CSI add-on mounts secrets as files; no Kubernetes Secret objects
-  carry a value, nothing in etcd or git or Terraform state. conde gets `*_FILE` variants of its secret
+  carry a value, nothing in etcd or git or Terraform state. Two exceptions, both listed in
+  infra/gcp/cluster/README.md: Argo CD's own credentials in its namespace (it reads only Kubernetes Secrets), and the
+  IAP OAuth client secret (S4), which GCPBackendPolicy reads only from a Kubernetes Secret in the backend's namespace,
+  `iap-admin` in `keycloak` and `argocd`, each written from Secret Manager by a hook Job scoped to that one secret. conde gets `*_FILE` variants of its secret
   variables (CONDE_ADMIN_KEY, OIDC client secret, CONDE_SLACK_BOT_TOKEN); DATABASE_URL carries no password.
 - Keycloak: the pinned official image as a Deployment with probes, one installation, realms `dakai` and
   `demo` managed with the keycloak/keycloak Terraform provider (bootstrap import only for the first start).
   The Gateway routes only /realms/<workspace>/*, /resources/* and /js/*; /admin/* and /realms/master/* are
   reachable only from the admin's allowlisted IP through a Cloud Armor rule, so the Terraform provider can
-  run from his machine and nobody else sees the admin console. Admin accounts with MFA. Management port
+  run from his machine and nobody else sees the admin console. Replaced by S4 (docs/infra-gcp-s4-iap.md): the
+  console and the master realm on admin-auth.conde.cloud behind Identity-Aware Proxy, the Terraform provider
+  through a port-forward, unconditional denies for the admin paths on auth.conde.cloud. Admin accounts with MFA. Management port
   9000 private.
 - Edge: Cloudflare DNS-only (grey cloud) records to the Google load balancer; Cloud Armor is the WAF and
   rate limiter. No second proxy. The application's own rate limits stay (the per-account code-guess limit

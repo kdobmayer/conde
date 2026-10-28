@@ -85,7 +85,7 @@ resource "google_secret_manager_secret_version" "terraform_client_secret" {
   }
 }
 
-# Managed for its outbound mail only (admin password resets and the console's test email); other settings stay Keycloak's.
+# Managed for its outbound mail (admin password resets and the console's test email) and its login theme; other settings stay Keycloak's.
 import {
   to = keycloak_realm.master
   id = "master"
@@ -94,6 +94,8 @@ import {
 resource "keycloak_realm" "master" {
   realm                       = "master"
   default_signature_algorithm = "RS256"
+  # The admin console's sign-in page in the conde theme (infra/keycloak/themes).
+  login_theme = "conde"
 
   smtp_server {
     host              = local.smtp.host

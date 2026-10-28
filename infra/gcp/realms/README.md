@@ -67,6 +67,8 @@ default requires them from the user), so an invited user gets no "complete your 
   needs egress to TCP 465, an egress rule of its NetworkPolicy in the cluster root. "Forgot password" is on in the realms
   that sign in with passwords (`passwords` in `local.realms`): demo. Demo's email theme `conde` (in the Keycloak image,
   `infra/keycloak/themes`) turns the execute-actions email into the invitation with the onboarding steps.
+- Sign-in pages: every realm, master included, uses the login theme `conde` (design B of the web app, in the Keycloak
+  image, `infra/keycloak/themes/conde/login`): keycloak.v2's templates with conde's stylesheet and wording.
 
 ## Adding a company
 

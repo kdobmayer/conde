@@ -1266,6 +1266,211 @@ fn launchd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
     Ok(())
 }
 
+/// The program of the `ExecStart=` line [`systemd_unit`] writes, unescaped as [`systemd_word`]
+/// escaped it; None without one.
+pub fn exec_start_program(unit: &str) -> Option<String> {
+    let exec = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+    let word = match exec.strip_prefix('"') {
+        Some(quoted) => {
+            let mut word = String::new();
+            let mut chars = quoted.chars();
+            loop {
+                match chars.next()? {
+                    '\\' => word.push(chars.next()?),
+                    '"' => break,
+                    c => word.push(c),
+                }
+            }
+            word
+        }
+        None => exec.split_whitespace().next()?.to_string(),
+    };
+    let word = word.replace("%%", "%").replace("$$", "$");
+    (!word.is_empty()).then_some(word)
+}
+
+/// The first `ProgramArguments` string [`launchd_plist`] writes, unescaped; None without one.
+pub fn plist_program(plist: &str) -> Option<String> {
+    let args = &plist[plist.find("<key>ProgramArguments</key>")?..];
+    let first = &args[args.find("<string>")? + "<string>".len()..];
+    let text = &first[..first.find("</string>")?];
+    let text = text
+        .replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&");
+    (!text.is_empty()).then_some(text)
+}
+
+/// The program systemd has loaded for the unit, from `systemctl --user show <unit> -p ExecStart`
+/// (`ExecStart={ path=<program> ; argv[]=<program> <args> ; ... }`): its `path=`, else the first
+/// word of `argv[]=`; None when nothing is loaded.
+pub fn systemd_loaded_program(show: &str) -> Option<String> {
+    let exec = show
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+    let field = |key: &str| {
+        let rest = &exec[exec.find(key)? + key.len()..];
+        let end = rest
+            .find(" ;")
+            .or_else(|| rest.find(" }"))
+            .unwrap_or(rest.len());
+        Some(rest[..end].trim().to_string())
+    };
+    let program = field("path=").or_else(|| {
+        field("argv[]=").and_then(|argv| argv.split_whitespace().next().map(str::to_string))
+    })?;
+    (!program.is_empty()).then_some(program)
+}
+
+/// The program launchd has loaded for the agent, from `launchctl print gui/<uid>/<label>`: its
+/// `program = ` line, else the first entry of `arguments = {`; None when neither is there.
+pub fn launchd_loaded_program(print: &str) -> Option<String> {
+    let mut lines = print.lines().map(str::trim);
+    let mut first_argument = None;
+    while let Some(line) = lines.next() {
+        if let Some(p) = line.strip_prefix("program = ") {
+            return (!p.is_empty()).then(|| p.to_string());
+        }
+        if line == "arguments = {" && first_argument.is_none() {
+            first_argument = lines
+                .by_ref()
+                .find(|l| !l.is_empty())
+                .filter(|l| *l != "}")
+                .map(str::to_string);
+        }
+    }
+    first_argument
+}
+
+/// Whether `a` and `b` both exist and are one file: the same canonical path (a symlink to it
+/// counts) or the same inode (a hard link).
+fn same_existing_file(a: &Path, b: &Path) -> bool {
+    let (Ok(x), Ok(y)) = (a.canonicalize(), b.canonicalize()) else {
+        return false;
+    };
+    if x == y {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(m), Ok(n)) = (std::fs::metadata(&x), std::fs::metadata(&y)) {
+            return (m.dev(), m.ino()) == (n.dev(), n.ino());
+        }
+    }
+    false
+}
+
+/// After `conde update` replaced `updated`: restart the bridge service setup installed, only when
+/// the program the service manager has loaded for it (and the one its unit or agent file names)
+/// is that file. Any other program, a missing one or none leaves the bridge running and says how
+/// to point it here; a machine without a service is told how to restart the bridge itself.
+pub fn restart_service(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    updated: &Path,
+) -> anyhow::Result<()> {
+    const NONE: &str = "service: no bridge service installed (conde setup installs one); restart a \
+running conde daemon yourself";
+    let (file, program): (PathBuf, fn(&str) -> Option<String>) = match env.os {
+        Os::Linux => (env.systemd_unit(), exec_start_program),
+        Os::MacOs => (env.launchd_plist(), plist_program),
+        // no Windows release exists, so conde update stops before this
+        Os::Windows => {
+            writeln!(
+                out,
+                "service: the scheduled task is not restarted on Windows"
+            )?;
+            return Ok(());
+        }
+    };
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        writeln!(out, "{NONE}")?;
+        return Ok(());
+    };
+    let Some(runs) = program(&text) else {
+        writeln!(
+            out,
+            "service: cannot tell which binary the bridge service runs ({}); run conde setup to \
+             point it here",
+            env.show(&file)
+        )?;
+        return Ok(());
+    };
+    let runs_other = |out: &mut dyn Write, runs: &str| {
+        writeln!(
+            out,
+            "service: the bridge service runs {runs}, not the updated binary; run conde setup to \
+             point it here"
+        )
+    };
+    let cannot_tell = |out: &mut dyn Write, source: &str| {
+        writeln!(
+            out,
+            "service: cannot tell which binary the bridge service runs ({source}); run conde setup \
+             to point it here"
+        )
+    };
+    // the file is a cheap pre-check; what the manager has loaded decides (a drop-in, a unit
+    // changed without daemon-reload, an agent loaded from another plist)
+    if !same_existing_file(Path::new(&runs), updated) {
+        runs_other(out, &runs)?;
+        return Ok(());
+    }
+    match env.os {
+        Os::Linux if host.which("systemctl").is_none() => writeln!(
+            out,
+            "service: systemctl not found; restart a running conde daemon yourself"
+        )?,
+        Os::Linux => {
+            let show = host.run(
+                "systemctl",
+                &["--user", "show", "conde.service", "-p", "ExecStart"],
+            )?;
+            match show
+                .ok
+                .then(|| systemd_loaded_program(&show.stdout))
+                .flatten()
+            {
+                None => cannot_tell(out, "systemctl --user show conde.service")?,
+                Some(loaded) if !same_existing_file(Path::new(&loaded), updated) => {
+                    runs_other(out, &loaded)?
+                }
+                Some(_) => {
+                    check(host, "systemctl", &["--user", "restart", "conde.service"])?;
+                    writeln!(out, "service: restarted conde.service onto the new build")?;
+                }
+            }
+        }
+        _ => {
+            let target = format!("gui/{}/{LAUNCHD_LABEL}", env.uid);
+            let print = host.run("launchctl", &["print", &target])?;
+            if !print.ok {
+                writeln!(
+                    out,
+                    "service: {LAUNCHD_LABEL} is installed but not loaded; conde setup loads it"
+                )?;
+                return Ok(());
+            }
+            match launchd_loaded_program(&print.stdout) {
+                None => cannot_tell(out, &format!("launchctl print {target}"))?,
+                Some(loaded) if !same_existing_file(Path::new(&loaded), updated) => {
+                    runs_other(out, &loaded)?
+                }
+                Some(_) => {
+                    check(host, "launchctl", &["kickstart", "-k", &target])?;
+                    writeln!(out, "service: restarted {LAUNCHD_LABEL} onto the new build")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn xml_utf16_decl(body: &str) -> String {
     format!("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n{body}")
 }

@@ -30,6 +30,7 @@ Every generated value is write-only: it is in Keycloak and in Secret Manager, no
 | `keycloak-admin-temp-password` | the temporary password of `admin` in the master realm |
 | `infra-krisztian-temp-password` | the temporary password of `krisztian` in the realm `infra` |
 | `keycloak-terraform-client-secret` | the secret of the master realm's `terraform` client |
+| `keycloak-admin-demo` | the secret of the demo realm's `conde-admin` client (client credentials, `manage-users`), read by the demo server |
 
 A conde server reads its client secret at start: after a new version, `kubectl -n ws-<name> rollout restart
 deployment/conde`. Two secrets this root reads are in its state, because their provider fields are not write-only:

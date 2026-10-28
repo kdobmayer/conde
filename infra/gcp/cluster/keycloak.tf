@@ -424,8 +424,8 @@ resource "kubernetes_manifest" "keycloak_backend" {
   }
 }
 
-# Deny by default; in from the load balancer only, out to DNS, the metadata server, the Cloud SQL PSC endpoint, public
-# HTTPS (the Cloud SQL Admin API, the federated identity providers) and public SMTPS.
+# Deny by default; in from the load balancer and the demo workspace, out to DNS, the metadata server, the Cloud SQL
+# PSC endpoint, public HTTPS (the Cloud SQL Admin API, the federated identity providers) and public SMTPS.
 resource "kubernetes_network_policy_v1" "keycloak" {
   metadata {
     name      = "keycloak"
@@ -452,6 +452,19 @@ resource "kubernetes_network_policy_v1" "keycloak" {
       ports {
         protocol = "TCP"
         port     = "9000"
+      }
+    }
+
+    # The demo workspace's server calls the admin API (user invites) on the Service, not through the load balancer.
+    ingress {
+      from {
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = "ws-demo" }
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "8080"
       }
     }
 

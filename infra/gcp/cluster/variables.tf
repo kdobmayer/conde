@@ -1,7 +1,7 @@
-# Argo CD's local admin; set false once sign-in through the infra realm is verified (README: Argo CD).
+# Argo CD's local admin; off since sign-in through the infra realm is verified (README: Argo CD).
 variable "argocd_local_admin" {
   type    = bool
-  default = true
+  default = false
 }
 
 variable "argocd_oidc_issuer" {

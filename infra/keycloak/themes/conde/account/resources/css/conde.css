@@ -1,0 +1,790 @@
+/* conde account console, design B (web/src/app.css): keycloak.v3's PatternFly markup restyled; tokens shared with the sign-in pages. */
+/* The fonts are the sign-in theme's (login/resources/fonts), reached through Keycloak's /resources/<version>/<type>/<theme>/ layout. */
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/source-serif-4-v5.3.1-latin-ext-400-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/source-serif-4-v5.3.1-latin-400-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/source-serif-4-v5.3.1-latin-ext-600-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/source-serif-4-v5.3.1-latin-600-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: italic;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/source-serif-4-v5.3.1-latin-ext-400-italic.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: italic;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/source-serif-4-v5.3.1-latin-400-italic.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/inter-v5.3.0-latin-ext-400-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/inter-v5.3.0-latin-400-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/inter-v5.3.0-latin-ext-600-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../../../login/conde/fonts/inter-v5.3.0-latin-600-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+/* Tokens (login/resources/css/conde.css); PatternFly's globals point at them so every component it draws follows. */
+html.pf-v5-theme-dark,
+html {
+	--bg: #131518;
+	--panel: #191c20;
+	--soft: #20242a;
+	--line: #2a2e34;
+	--fg: #ebe6dc;
+	--muted: #b8b2a7;
+	--faint: #8e887e;
+	--accent: #d4886b;
+	--on-accent: #131518;
+	--serif: 'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+	--sans: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	--mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	color-scheme: dark;
+
+	--pf-v5-global--FontFamily--text: var(--sans);
+	--pf-v5-global--FontFamily--heading: var(--serif);
+	--pf-v5-global--FontFamily--monospace: var(--mono);
+	--pf-v5-global--BackgroundColor--100: var(--bg);
+	--pf-v5-global--BackgroundColor--200: var(--panel);
+	--pf-v5-global--BackgroundColor--300: var(--bg);
+	--pf-v5-global--BackgroundColor--400: var(--soft);
+	--pf-v5-global--BackgroundColor--light-100: var(--bg);
+	--pf-v5-global--BackgroundColor--light-300: var(--bg);
+	--pf-v5-global--BackgroundColor--dark-100: var(--bg);
+	--pf-v5-global--BackgroundColor--dark-200: var(--panel);
+	--pf-v5-global--BackgroundColor--dark-300: var(--bg);
+	--pf-v5-global--BackgroundColor--dark-400: var(--soft);
+	--pf-v5-global--Color--100: var(--fg);
+	--pf-v5-global--Color--200: var(--muted);
+	--pf-v5-global--Color--300: var(--faint);
+	--pf-v5-global--Color--light-100: var(--fg);
+	--pf-v5-global--Color--light-200: var(--muted);
+	--pf-v5-global--BorderColor--100: var(--line);
+	--pf-v5-global--BorderColor--200: var(--line);
+	--pf-v5-global--BorderColor--300: var(--line);
+	--pf-v5-global--BorderColor--dark-100: var(--line);
+	--pf-v5-global--primary-color--100: var(--accent);
+	--pf-v5-global--primary-color--200: var(--accent);
+	--pf-v5-global--active-color--100: var(--accent);
+	--pf-v5-global--active-color--400: var(--accent);
+	--pf-v5-global--link--Color: var(--accent);
+	--pf-v5-global--link--Color--hover: var(--accent);
+	--pf-v5-global--danger-color--100: var(--accent);
+	--pf-v5-global--danger-color--200: var(--accent);
+	--pf-v5-global--BorderRadius--sm: 6px;
+	--pf-v5-global--BoxShadow--sm: none;
+	--pf-v5-global--BoxShadow--md: none;
+	--pf-v5-global--BoxShadow--lg: none;
+	--pf-v5-global--BoxShadow--xl: none;
+	background: var(--bg);
+}
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	font: 15px/1.55 var(--sans);
+	-webkit-text-size-adjust: 100%;
+}
+a {
+	color: var(--accent);
+}
+a:hover {
+	color: var(--accent);
+	text-decoration-thickness: 2px;
+}
+:is(a, button, input, select, textarea):focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
+}
+.keycloak__loading-container {
+	background: var(--bg) !important;
+	color: var(--muted) !important;
+}
+
+/* The page: masthead across the top, the sections in a quiet column on the left (web/src/lib/Shell.svelte). */
+.pf-v5-c-page {
+	--pf-v5-c-page--BackgroundColor: var(--bg);
+	--pf-v5-c-page__sidebar--BackgroundColor: var(--bg);
+	--pf-v5-c-page__sidebar--Width: 260px;
+	--pf-v5-c-page__sidebar--BoxShadow: none;
+	--pf-v5-c-page__main-section--BackgroundColor: var(--bg);
+	--pf-v5-c-page__main-section--m-light--BackgroundColor: var(--bg);
+	background: var(--bg);
+}
+.pf-v5-c-page__sidebar {
+	border-right: 1px solid var(--line);
+}
+
+/* Masthead: the wordmark with "Account" as the kicker underneath, as the sign-in pages show the workspace. */
+.pf-v5-c-masthead {
+	--pf-v5-c-masthead--BackgroundColor: var(--bg);
+	--pf-v5-c-masthead--m-display-inline--GridTemplateColumns: auto 1fr;
+	background: var(--bg);
+	border-bottom: 1px solid var(--line);
+	padding: 22px 28px 20px 30px;
+	column-gap: 18px;
+	row-gap: 0;
+}
+.pf-v5-c-masthead__toggle {
+	margin: 0;
+}
+.pf-v5-c-masthead__toggle .pf-v5-c-button {
+	color: var(--muted);
+	padding: 6px;
+}
+.pf-v5-c-masthead__brand {
+	display: grid !important;
+	grid-template-columns: auto auto;
+	align-items: center;
+	justify-content: start;
+	justify-self: start;
+	width: max-content;
+	column-gap: 10px;
+	color: var(--fg) !important;
+	text-decoration: none !important;
+}
+.pf-v5-c-masthead__brand img {
+	grid-row: 1;
+	width: 22px;
+	height: 22px !important;
+}
+.pf-v5-c-masthead__brand::after {
+	content: 'conde';
+	grid-row: 1;
+	font: 600 30px/1 var(--serif);
+	letter-spacing: -0.01em;
+}
+.pf-v5-c-masthead__brand::before {
+	content: 'Account';
+	grid-row: 2;
+	grid-column: 1 / span 2;
+	margin-top: 10px;
+	font: 400 10.5px/1.4 var(--sans);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--faint);
+}
+.pf-v5-c-masthead__content {
+	--pf-v5-c-masthead__content--MinHeight: 0;
+	align-self: center;
+}
+.pf-v5-c-masthead .pf-v5-c-toolbar {
+	--pf-v5-c-toolbar--BackgroundColor: transparent;
+	background: transparent;
+	padding: 0;
+}
+
+/* The account menu (the name and the avatar): quiet, like the app's owner menu. */
+.pf-v5-c-menu-toggle {
+	--pf-v5-c-menu-toggle--BackgroundColor: transparent;
+	--pf-v5-c-menu-toggle--Color: var(--fg);
+	--pf-v5-c-menu-toggle--FontSize: 14px;
+	--pf-v5-c-menu-toggle--hover--Color: var(--fg);
+	--pf-v5-c-menu-toggle--expanded--Color: var(--fg);
+	--pf-v5-c-menu-toggle--before--BorderColor: var(--line);
+	--pf-v5-c-menu-toggle--before--BorderTopColor: var(--line);
+	--pf-v5-c-menu-toggle--before--BorderRightColor: var(--line);
+	--pf-v5-c-menu-toggle--before--BorderBottomColor: var(--line);
+	--pf-v5-c-menu-toggle--before--BorderLeftColor: var(--line);
+	--pf-v5-c-menu-toggle--before--BorderBottomColor: var(--line);
+	--pf-v5-c-menu-toggle--hover--before--BorderBottomColor: var(--faint);
+	--pf-v5-c-menu-toggle--active--before--BorderBottomColor: var(--accent);
+	--pf-v5-c-menu-toggle--expanded--before--BorderBottomColor: var(--accent);
+	--pf-v5-c-menu-toggle--focus--before--BorderBottomColor: var(--accent);
+	background: transparent;
+	border-radius: 6px;
+	font-family: var(--sans);
+}
+.pf-v5-c-menu-toggle:not(.pf-m-plain)::before {
+	border: 1px solid var(--line);
+	border-radius: 6px;
+}
+.pf-v5-c-menu-toggle::after {
+	border-bottom-color: transparent !important;
+	border-radius: 6px;
+}
+.pf-v5-c-menu-toggle:not(.pf-m-plain):is(:hover, .pf-m-expanded)::before {
+	border-color: var(--faint);
+}
+.pf-v5-c-menu-toggle.pf-m-plain {
+	color: var(--muted);
+}
+.pf-v5-c-menu,
+.pf-v5-c-dropdown__menu {
+	--pf-v5-c-menu--BackgroundColor: var(--panel);
+	--pf-v5-c-menu__item--hover--BackgroundColor: var(--soft);
+	--pf-v5-c-menu__item--Color: var(--fg);
+	--pf-v5-c-menu__item--FontSize: 14px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 6px;
+	box-shadow: none;
+}
+/* PatternFly's stock avatar says nothing the name beside it does not. */
+.pf-v5-c-masthead .pf-v5-c-toolbar__item:has(> .pf-v5-c-avatar),
+.pf-v5-c-masthead .pf-v5-c-avatar {
+	display: none;
+}
+
+/* Sections: serif links, the current one in the foreground with the accent rule (Shell.svelte .sections). */
+.pf-v5-c-nav {
+	--pf-v5-c-nav--BackgroundColor: transparent;
+	--pf-v5-c-nav__item--before--BorderColor: transparent;
+	--pf-v5-c-nav__item--before--BorderWidth: 0;
+	--pf-v5-c-nav__link--BackgroundColor: transparent;
+	--pf-v5-c-nav__link--hover--BackgroundColor: transparent;
+	--pf-v5-c-nav__link--focus--BackgroundColor: transparent;
+	--pf-v5-c-nav__link--active--BackgroundColor: transparent;
+	--pf-v5-c-nav__link--m-current--BackgroundColor: transparent;
+	--pf-v5-c-nav__link--Color: var(--muted);
+	--pf-v5-c-nav__link--hover--Color: var(--fg);
+	--pf-v5-c-nav__link--focus--Color: var(--fg);
+	--pf-v5-c-nav__link--active--Color: var(--fg);
+	--pf-v5-c-nav__link--m-current--Color: var(--fg);
+	--pf-v5-c-nav__link--before--BorderColor: transparent;
+	--pf-v5-c-nav__link--after--BorderColor: var(--accent);
+	--pf-v5-c-nav__link--after--BorderLeftWidth: 2px;
+	--pf-v5-c-nav__link--m-current--after--BorderColor: var(--accent);
+	--pf-v5-c-nav__link--m-current--after--BorderLeftWidth: 2px;
+	--pf-v5-c-nav__link--hover--after--BorderColor: transparent;
+	--pf-v5-c-nav__link--focus--after--BorderColor: transparent;
+	--pf-v5-c-nav__link--active--after--BorderColor: transparent;
+	--pf-v5-c-nav__subnav--MarginTop: 0;
+	--pf-v5-c-nav__subnav--PaddingBottom: 6px;
+	--pf-v5-c-nav__subnav--xl--PaddingLeft: 0;
+	--pf-v5-c-nav__subnav--PaddingLeft: 0;
+	--pf-v5-c-nav__subnav__link--FontSize: 17px;
+	--pf-v5-c-nav__toggle-icon--Color: var(--faint);
+	background: transparent;
+	padding: 34px 26px 22px 30px;
+}
+.pf-v5-c-page__sidebar-body {
+	padding: 0;
+}
+.pf-v5-c-nav__item::before,
+.pf-v5-c-nav__item::after {
+	display: none;
+}
+.pf-v5-c-nav__link {
+	margin-left: -14px;
+	padding: 9px 0 9px 14px;
+	font: 400 20px/1.2 var(--serif);
+	color: var(--muted);
+	background: transparent !important;
+	border-left: 2px solid transparent;
+	border-radius: 0;
+}
+.pf-v5-c-nav__link::before,
+.pf-v5-c-nav__link::after {
+	display: none;
+}
+.pf-v5-c-nav__link:hover,
+.pf-v5-c-nav__link:focus-visible,
+.pf-v5-c-nav__link.pf-m-current {
+	color: var(--fg);
+}
+.pf-v5-c-nav__link.pf-m-current {
+	border-left-color: var(--accent);
+}
+.pf-v5-c-nav__subnav .pf-v5-c-nav__link {
+	margin-left: 0;
+	padding: 7px 0 7px 16px;
+	font-size: 17px;
+}
+.pf-v5-c-nav__toggle {
+	color: var(--faint);
+	padding-right: 0;
+}
+
+/* The reading column: serif title and lede as on the sign-in pages, Inter for the working parts. */
+.pf-v5-c-page__main {
+	background: var(--bg);
+}
+.pf-v5-c-page__main-section {
+	background: var(--bg) !important;
+	--pf-v5-c-page__main-section--PaddingTop: 0;
+	--pf-v5-c-page__main-section--PaddingRight: 48px;
+	--pf-v5-c-page__main-section--PaddingBottom: 0;
+	--pf-v5-c-page__main-section--PaddingLeft: 48px;
+	--pf-v5-c-page__main-section--xl--PaddingTop: 0;
+	--pf-v5-c-page__main-section--xl--PaddingRight: 48px;
+	--pf-v5-c-page__main-section--xl--PaddingBottom: 0;
+	--pf-v5-c-page__main-section--xl--PaddingLeft: 48px;
+}
+.pf-v5-c-page__main > .pf-v5-c-page__main-section {
+	max-width: 960px;
+}
+.pf-v5-c-page__main > .pf-v5-c-page__main-section:first-child {
+	padding-top: 44px;
+	padding-bottom: 28px;
+}
+.pf-v5-c-page__main > .pf-v5-c-page__main-section:last-child {
+	padding-bottom: 56px;
+}
+.pf-v5-c-page__main-section .pf-v5-c-page__main-section {
+	padding-left: 0;
+	padding-right: 0;
+}
+.pf-v5-c-content {
+	--pf-v5-c-content--Color: var(--fg);
+	--pf-v5-c-content--FontSize: 17px;
+	--pf-v5-c-content--LineHeight: 1.55;
+	--pf-v5-c-content--a--Color: var(--accent);
+}
+.pf-v5-c-page__main-section:first-child .pf-v5-c-title.pf-m-2xl,
+.pf-v5-c-content h1 {
+	margin: 0 0 10px;
+	font: 600 34px/1.15 var(--serif);
+	letter-spacing: -0.01em;
+	color: var(--fg);
+}
+.pf-v5-c-content p,
+.pf-v5-c-page__main-section:first-child p {
+	font: 17px/1.55 var(--serif);
+	color: var(--muted);
+}
+.pf-v5-c-title {
+	font-family: var(--serif);
+	color: var(--fg);
+}
+.pf-v5-c-title.pf-m-xl {
+	font: 600 22px/1.25 var(--serif);
+	letter-spacing: -0.005em;
+}
+.pf-v5-c-title.pf-m-lg {
+	font: 600 19px/1.3 var(--serif);
+}
+.pf-v5-c-title.pf-m-md,
+.cred-title {
+	font: 600 15px/1.4 var(--sans);
+	color: var(--fg);
+}
+.pf-v5-c-page__main-section .pf-v5-l-split span,
+.pf-v5-c-data-list__cell {
+	color: var(--muted);
+}
+
+/* Forms: Inter labels above or beside quiet fields, the accent only on focus and the primary action. */
+.pf-v5-c-form {
+	--pf-v5-c-form--GridGap: 20px;
+	--pf-v5-c-form--m-horizontal__group-label--md--GridColumnWidth: 140px;
+	--pf-v5-c-form__label--Color: var(--muted);
+	--pf-v5-c-form__label--FontSize: 13px;
+	--pf-v5-c-form__label--FontWeight: 400;
+	--pf-v5-c-form__label-required--Color: var(--accent);
+}
+.pf-v5-c-form section > .pf-v5-c-title {
+	margin-bottom: 20px;
+}
+.pf-v5-c-form__label,
+.pf-v5-c-form__label-text {
+	font: 400 13px/1.4 var(--sans);
+	color: var(--muted);
+}
+.pf-v5-c-form__label-required {
+	color: var(--accent);
+}
+.pf-v5-c-form-control {
+	--pf-v5-c-form-control--BackgroundColor: var(--panel);
+	--pf-v5-c-form-control--Color: var(--fg);
+	--pf-v5-c-form-control--FontSize: 15px;
+	--pf-v5-c-form-control--PaddingTop: 9px;
+	--pf-v5-c-form-control--PaddingBottom: 9px;
+	--pf-v5-c-form-control--PaddingLeft: 11px;
+	--pf-v5-c-form-control--PaddingRight: 11px;
+	--pf-v5-c-form-control--before--BorderTopColor: var(--line);
+	--pf-v5-c-form-control--before--BorderRightColor: var(--line);
+	--pf-v5-c-form-control--before--BorderBottomColor: var(--line);
+	--pf-v5-c-form-control--before--BorderLeftColor: var(--line);
+	--pf-v5-c-form-control--before--BorderBottomWidth: 1px;
+	--pf-v5-c-form-control--after--BorderBottomColor: transparent;
+	--pf-v5-c-form-control--hover--after--BorderBottomColor: var(--faint);
+	--pf-v5-c-form-control--focus--after--BorderBottomColor: var(--accent);
+	--pf-v5-c-form-control--focus--after--BorderBottomWidth: 2px;
+	--pf-v5-c-form-control--m-disabled--BackgroundColor: var(--soft);
+	--pf-v5-c-form-control--m-disabled--Color: var(--muted);
+	--pf-v5-c-form-control--m-readonly--BackgroundColor: var(--soft);
+	border-radius: 6px;
+}
+.pf-v5-c-form-control::before,
+.pf-v5-c-form-control::after {
+	border-radius: 6px;
+}
+.pf-v5-c-form-control > input,
+.pf-v5-c-form-control > select,
+.pf-v5-c-form-control > textarea {
+	font: 15px/1.4 var(--sans);
+	color: var(--fg);
+	caret-color: var(--accent);
+}
+.pf-v5-c-form-control.pf-m-disabled > input {
+	color: var(--muted);
+}
+.pf-v5-c-form-control > input:focus-visible {
+	outline: none;
+}
+.pf-v5-c-form-control:focus-within::after {
+	border: 1px solid var(--accent);
+	border-bottom-width: 2px;
+}
+input:-webkit-autofill {
+	-webkit-text-fill-color: var(--fg);
+	-webkit-box-shadow: 0 0 0 40px var(--panel) inset;
+	caret-color: var(--accent);
+}
+.pf-v5-c-form-control.pf-m-error {
+	--pf-v5-c-form-control--before--BorderTopColor: var(--accent);
+	--pf-v5-c-form-control--before--BorderRightColor: var(--accent);
+	--pf-v5-c-form-control--before--BorderBottomColor: var(--accent);
+	--pf-v5-c-form-control--before--BorderLeftColor: var(--accent);
+}
+.pf-v5-c-helper-text,
+.pf-v5-c-form__helper-text {
+	font-size: 13px;
+	color: var(--muted);
+}
+.pf-v5-c-helper-text__item.pf-m-error {
+	color: var(--accent);
+}
+
+/* Buttons: one filled accent action, the rest quiet (app.css button and button.quiet). */
+.pf-v5-c-button {
+	--pf-v5-c-button--FontSize: 15px;
+	--pf-v5-c-button--FontWeight: 600;
+	--pf-v5-c-button--PaddingTop: 9px;
+	--pf-v5-c-button--PaddingBottom: 9px;
+	--pf-v5-c-button--BorderRadius: 6px;
+	--pf-v5-c-button--after--BorderRadius: 6px;
+	--pf-v5-c-button--m-primary--BackgroundColor: var(--accent);
+	--pf-v5-c-button--m-primary--Color: var(--on-accent);
+	--pf-v5-c-button--m-primary--hover--BackgroundColor: #dd9a80;
+	--pf-v5-c-button--m-primary--hover--Color: var(--on-accent);
+	--pf-v5-c-button--m-primary--focus--BackgroundColor: #dd9a80;
+	--pf-v5-c-button--m-primary--focus--Color: var(--on-accent);
+	--pf-v5-c-button--m-primary--active--BackgroundColor: #c47a5e;
+	--pf-v5-c-button--m-primary--active--Color: var(--on-accent);
+	--pf-v5-c-button--m-secondary--BackgroundColor: transparent;
+	--pf-v5-c-button--m-secondary--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--after--BorderColor: var(--line);
+	--pf-v5-c-button--m-secondary--hover--BackgroundColor: transparent;
+	--pf-v5-c-button--m-secondary--hover--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--hover--after--BorderColor: var(--faint);
+	--pf-v5-c-button--m-secondary--focus--BackgroundColor: transparent;
+	--pf-v5-c-button--m-secondary--focus--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--focus--after--BorderColor: var(--faint);
+	--pf-v5-c-button--m-secondary--active--BackgroundColor: transparent;
+	--pf-v5-c-button--m-secondary--active--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--active--after--BorderColor: var(--faint);
+	--pf-v5-c-button--m-secondary--m-danger--BackgroundColor: transparent;
+	--pf-v5-c-button--m-secondary--m-danger--Color: var(--accent);
+	--pf-v5-c-button--m-secondary--m-danger--after--BorderColor: var(--accent);
+	--pf-v5-c-button--m-tertiary--Color: var(--fg);
+	--pf-v5-c-button--m-tertiary--after--BorderColor: var(--line);
+	--pf-v5-c-button--m-link--Color: var(--accent);
+	--pf-v5-c-button--m-link--hover--Color: var(--accent);
+	--pf-v5-c-button--m-link--focus--Color: var(--accent);
+	--pf-v5-c-button--m-link--active--Color: var(--accent);
+	--pf-v5-c-button--m-danger--BackgroundColor: var(--accent);
+	--pf-v5-c-button--m-danger--Color: var(--on-accent);
+	--pf-v5-c-button--m-plain--Color: var(--muted);
+	--pf-v5-c-button--m-plain--hover--Color: var(--fg);
+	--pf-v5-c-button--disabled--BackgroundColor: var(--accent);
+	--pf-v5-c-button--disabled--Color: var(--on-accent);
+	font-family: var(--sans);
+}
+.pf-v5-c-button.pf-m-link {
+	--pf-v5-c-button--FontWeight: 400;
+}
+.pf-v5-c-button:disabled,
+.pf-v5-c-button.pf-m-disabled,
+.pf-v5-c-button.pf-m-aria-disabled {
+	opacity: 0.55;
+}
+.pf-v5-c-button.pf-m-primary {
+	min-height: 40px;
+	padding-left: 18px;
+	padding-right: 18px;
+}
+.pf-v5-c-button.pf-m-secondary::after {
+	border: 1px solid var(--line);
+	border-radius: 6px;
+}
+.pf-v5-c-button.pf-m-secondary:hover::after {
+	border-color: var(--faint);
+}
+.pf-v5-c-form__actions {
+	gap: 12px;
+}
+
+/* Lists of credentials, sessions and applications: hairlines, no panels. The React app loads these components'
+   stylesheets after this one, so their rules carry html in front to win on specificity. */
+html .pf-v5-c-data-list {
+	--pf-v5-c-data-list--BackgroundColor: transparent;
+	--pf-v5-c-data-list__item--BackgroundColor: transparent;
+	--pf-v5-c-data-list__item--BorderBlockEndColor: var(--line);
+	--pf-v5-c-data-list__item--BorderBlockEndWidth: 1px;
+	--pf-v5-c-data-list--BorderTopColor: var(--line);
+	--pf-v5-c-data-list--BorderTopWidth: 1px;
+	--pf-v5-c-data-list__item--m-selectable--hover--BackgroundColor: var(--panel);
+	--pf-v5-c-data-list__item--m-expanded--BackgroundColor: var(--panel);
+	--pf-v5-c-data-list__expandable-content--BackgroundColor: var(--panel);
+	--pf-v5-c-data-list__cell--FontSize: 14px;
+	--pf-v5-c-data-list__item-row--PaddingLeft: 0;
+	--pf-v5-c-data-list__item-row--md--PaddingLeft: 0;
+	--pf-v5-c-data-list__item-row--xl--PaddingLeft: 0;
+	--pf-v5-c-data-list__item-row--PaddingRight: 0;
+	--pf-v5-c-data-list__item-row--md--PaddingRight: 0;
+	--pf-v5-c-data-list__item-row--xl--PaddingRight: 0;
+	background: transparent;
+	border-block-start: 1px solid var(--line);
+}
+html .pf-v5-c-data-list__item {
+	background: transparent;
+	border-block-end: 1px solid var(--line);
+}
+@media (max-width: 767px) {
+	html .pf-v5-c-data-list__item-action {
+		margin-left: 0;
+	}
+}
+/* Device activity on a phone: keycloak.v3 gives "Sign out" one twelfth of the row, so it runs off the screen; the
+   name, the button and the details stack beside the icon instead. */
+@media (max-width: 575px) {
+	html .pf-v5-c-data-list .pf-v5-l-grid > .pf-v5-l-grid__item:not(.pf-m-2-row) {
+		grid-column: 2 / -1;
+	}
+	html .pf-v5-c-data-list .pf-v5-l-grid > .pf-v5-l-grid__item.pf-v5-u-text-align-right {
+		text-align: left !important;
+	}
+	html .pf-v5-c-data-list .pf-v5-l-grid > .pf-v5-l-grid__item.pf-v5-u-text-align-right:empty {
+		display: none;
+	}
+}
+html .pf-v5-c-data-list__cell strong,
+html .pf-v5-c-data-list__cell b {
+	font-weight: 400;
+	color: var(--faint);
+}
+html .pf-v5-c-data-list__cell > div:first-child,
+html .pf-v5-c-data-list__cell.pf-v5-u-max-width {
+	color: var(--fg);
+}
+html .pf-v5-c-description-list {
+	--pf-v5-c-description-list__term--Color: var(--faint);
+	--pf-v5-c-description-list__term--FontWeight: 400;
+	--pf-v5-c-description-list__term--FontSize: 13px;
+	--pf-v5-c-description-list__description--Color: var(--fg);
+	--pf-v5-c-description-list__term--LineHeight: 1.4;
+}
+html .pf-v5-c-description-list__term,
+html .pf-v5-c-description-list__term .pf-v5-c-description-list__text {
+	font: 400 13px/1.4 var(--sans);
+	color: var(--faint);
+}
+html .pf-v5-c-description-list__description {
+	font-size: 14px;
+	color: var(--fg);
+}
+
+/* "Jump to section": the kicker style of the app, the current entry on the accent rule. */
+.pf-v5-c-jump-links {
+	--pf-v5-c-jump-links__link--Color: var(--muted);
+	--pf-v5-c-jump-links__link--hover--Color: var(--fg);
+	--pf-v5-c-jump-links__item--m-current__link--Color: var(--fg);
+	--pf-v5-c-jump-links__list--before--BorderColor: var(--line);
+	--pf-v5-c-jump-links__link--before--BorderColor: transparent;
+	--pf-v5-c-jump-links__link--hover__link--before--BorderColor: var(--faint);
+	--pf-v5-c-jump-links__item--m-current__link--before--BorderColor: var(--accent);
+	--pf-v5-c-jump-links__link--before--BorderLeftWidth: 2px;
+	--pf-v5-c-jump-links__label--Color: var(--faint);
+}
+.pf-v5-c-jump-links__label {
+	font: 400 10.5px/1.4 var(--sans);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--faint);
+}
+.pf-v5-c-jump-links__link-text {
+	font: 400 15px/1.4 var(--serif);
+}
+
+/* Notices: a hairline in the accent, as on the sign-in pages, not PatternFly's coloured boxes. */
+.pf-v5-c-alert {
+	--pf-v5-c-alert--BackgroundColor: var(--panel);
+	--pf-v5-c-alert--BorderTopWidth: 0;
+	--pf-v5-c-alert--BoxShadow: none;
+	--pf-v5-c-alert__icon--Color: var(--muted);
+	--pf-v5-c-alert__title--Color: var(--fg);
+	--pf-v5-c-alert__title--FontWeight: 400;
+	--pf-v5-c-alert__FontSize: 14px;
+	--pf-v5-c-alert--m-success__icon--Color: var(--muted);
+	--pf-v5-c-alert--m-success__title--Color: var(--fg);
+	--pf-v5-c-alert--m-info__icon--Color: var(--muted);
+	--pf-v5-c-alert--m-info__title--Color: var(--fg);
+	--pf-v5-c-alert--m-warning__icon--Color: var(--accent);
+	--pf-v5-c-alert--m-warning__title--Color: var(--fg);
+	--pf-v5-c-alert--m-danger__icon--Color: var(--accent);
+	--pf-v5-c-alert--m-danger__title--Color: var(--fg);
+	border: 1px solid var(--line);
+	border-left: 2px solid var(--faint);
+	border-radius: 6px;
+	box-shadow: none;
+}
+.pf-v5-c-alert:is(.pf-m-danger, .pf-m-warning) {
+	border-left-color: var(--accent);
+}
+
+/* Dialogs (delete account, sign out a session, remove a credential). */
+.pf-v5-c-modal-box {
+	--pf-v5-c-modal-box--BackgroundColor: var(--panel);
+	--pf-v5-c-modal-box--BoxShadow: none;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+}
+.pf-v5-c-modal-box__title {
+	font: 600 22px/1.25 var(--serif);
+}
+.pf-v5-c-backdrop {
+	--pf-v5-c-backdrop--BackgroundColor: rgba(10, 11, 13, 0.75);
+}
+/* Labels ("Current session"): an outline in the accent instead of PatternFly's green and blue fills. */
+html .pf-v5-c-label,
+html .pf-v5-c-label:is(.pf-m-green, .pf-m-blue, .pf-m-cyan, .pf-m-purple, .pf-m-gold, .pf-m-orange, .pf-m-red, .pf-m-grey) {
+	--pf-v5-c-label--BackgroundColor: transparent;
+	--pf-v5-c-label__content--Color: var(--accent);
+	--pf-v5-c-label__content--before--BorderColor: var(--accent);
+	--pf-v5-c-label__icon--Color: var(--accent);
+	--pf-v5-c-label--FontSize: 12px;
+}
+.pf-v5-c-expandable-section__toggle {
+	color: var(--accent);
+}
+.pf-v5-c-empty-state {
+	color: var(--muted);
+}
+code,
+pre,
+kbd {
+	font-family: var(--mono);
+	background: var(--soft);
+	border-radius: 4px;
+}
+hr,
+.pf-v5-c-divider {
+	border-color: var(--line);
+}
+
+/* The phone: one masthead row, the sections over the page when opened, the kicker left out. */
+/* The sections are always shown from the xl breakpoint on, so the toggle has nothing to do there. */
+@media (min-width: 1200px) {
+	.pf-v5-c-masthead__toggle {
+		display: none;
+	}
+}
+@media (max-width: 720px) {
+	.pf-v5-c-masthead {
+		display: flex;
+		flex-wrap: nowrap;
+		align-items: center;
+		padding: 14px 16px;
+		column-gap: 10px;
+	}
+	.pf-v5-c-masthead__brand::before {
+		display: none;
+	}
+	.pf-v5-c-masthead__brand::after {
+		font-size: 26px;
+	}
+	.pf-v5-c-masthead__brand img {
+		width: 19px;
+		height: 19px !important;
+	}
+	.pf-v5-c-masthead__content {
+		margin-left: auto;
+		flex: 0 1 auto;
+	}
+	.pf-v5-c-nav {
+		padding: 24px 18px 18px 22px;
+	}
+	.pf-v5-c-page__main-section {
+		--pf-v5-c-page__main-section--PaddingRight: 18px;
+		--pf-v5-c-page__main-section--PaddingLeft: 18px;
+		padding-left: 18px;
+		padding-right: 18px;
+	}
+	.pf-v5-c-page__main > .pf-v5-c-page__main-section:first-child {
+		padding-top: 28px;
+		padding-bottom: 20px;
+	}
+	.pf-v5-c-page__main-section:first-child .pf-v5-c-title.pf-m-2xl,
+	.pf-v5-c-content h1 {
+		font-size: 28px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		transition: none !important;
+		animation: none !important;
+		scroll-behavior: auto !important;
+	}
+}

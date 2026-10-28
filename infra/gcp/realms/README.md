@@ -3,7 +3,9 @@
 The configuration of the Keycloak at https://auth.conde.cloud: the realms `demo` (local users with passwords) and
 `clearscale` (Google sign-in only, for clearscale.com accounts), one conde workspace each, while `dakai` signs in
 directly against its Entra tenant; the realm `infra` for platform tools (Argo CD, group `infra-admins`, MFA
-required); and in the master realm the permanent admin `admin` and the client `terraform`.
+required); and in the master realm the permanent admin `admin` and the client `terraform`. The realms `infra` and
+`master` sign in with password and OTP for every user (the `mfa-browser` flow; a user without OTP enrols at the first
+sign-in); `clearscale` and `infra` refuse the password grant at the token endpoint (flows.tf).
 Apply after the cluster and workspaces roots, from a machine on the admin allowlist: the provider calls `/admin`
 and `/realms/master`, which Cloud Armor refuses from anywhere else.
 
@@ -45,13 +47,15 @@ deployment/conde`. Two secrets this root reads are in its state, because their p
    user only while the master realm has no user at all, so it does not come back on a restart.
 4. In the cluster root, drop `KC_BOOTSTRAP_ADMIN_USERNAME`, the `bootstrap-admin-password` mount and the
    `keycloak-bootstrap-admin` secret; they are unused from step 3 on.
+5. Add `"master"` to `no_password_grant` in flows.tf and apply: the first-apply path above was the last user of the
+   master realm's password grant.
 
 ## Later switches
 
 - MFA for a password realm: `require_mfa = { demo = true, clearscale = false }` makes Configure OTP a default
   action; Keycloak assigns it to users created after the change, so existing users get it by hand (Users, the user,
   Required user actions). A Google realm has no password form; its MFA is the company's Google Workspace policy.
-- Local passwords back on in a Google realm: in its `google browser` flow, set the `google browser forms` subflow to
+- Local passwords back on in a Google realm: in its `google-browser` flow, set the `google-browser-forms` subflow to
   ALTERNATIVE and the password form in it to REQUIRED (`keycloak_authentication_subflow.google_forms` and
   `keycloak_authentication_execution.google_password`). The login page then shows both the form and the Google button.
 - Email: every realm, master included, sends through Resend (`local.smtp` in main.tf: smtp.resend.com, SMTPS on 465,
@@ -78,7 +82,7 @@ database and the empty secret `<name>-oidc-client-secret`. How its people sign i
 
 3. Here, one entry in each of `local.tenants` (display name, hostname), `var.require_mfa` (false) and
    `local.google_sign_in` (the company's Workspace domain as `hosted_domain`, the OAuth client id). The entry in
-   `google_sign_in` gives the realm the Google identity provider and the `google browser` flow, so every sign-in goes
+   `google_sign_in` gives the realm the Google identity provider and the `google-browser` flow, so every sign-in goes
    straight to Google and Keycloak refuses accounts of other domains. Then `terraform apply`; it writes the realm's
    `conde` client secret into `<name>-oidc-client-secret`.
 

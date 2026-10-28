@@ -822,10 +822,7 @@ pub fn verify(
                 )?;
             }
             let skill = env.claude_skill_for(&name);
-            match file(
-                &skill,
-                skill_text(CLAUDE_SKILL, &name, board_alias(env).as_deref()).as_bytes(),
-            )? {
+            match file(&skill, skill_for(env, CLAUDE_SKILL, &name).as_bytes())? {
                 None => line(
                     "ok",
                     format!("claude: skill {} up to date", env.show(&skill)),
@@ -892,10 +889,7 @@ pub fn verify(
                 )?;
             }
             let skill = env.codex_skill_for(&name);
-            match file(
-                &skill,
-                skill_text(CODEX_SKILL, &name, board_alias(env).as_deref()).as_bytes(),
-            )? {
+            match file(&skill, skill_for(env, CODEX_SKILL, &name).as_bytes())? {
                 None => line(
                     "ok",
                     format!("codex: skill {} up to date", env.show(&skill)),
@@ -2242,12 +2236,29 @@ fn mcp_name(
     Ok((pick, displaced))
 }
 
+/// The skill as `conde setup` writes it on this host for MCP server `mcp`.
+fn skill_for(env: &Env, skill: &str, mcp: &str) -> String {
+    let enrolled = boards::enrolled_in(&env.boards_dir()).unwrap_or_default();
+    skill_text(skill, mcp, board_alias(env).as_deref(), &enrolled)
+}
+
 /// The skill as written for an MCP server registered as `mcp`: under a second name it is
 /// a skill of that name (`skills/<mcp>/`), beside the other instance's `conde` skill; its
-/// shared-board examples name `board`, or `<alias>` on a host with none enrolled.
-pub fn skill_text(skill: &str, mcp: &str, board: Option<&str>) -> String {
+/// shared-board examples name `board` (`<alias>` with none), and its introduction every
+/// `enrolled` alias.
+pub fn skill_text(skill: &str, mcp: &str, board: Option<&str>, enrolled: &[String]) -> String {
+    let board = board.unwrap_or("<alias>");
+    let aliases = match enrolled {
+        [] => format!("alias `{board}`"),
+        [one] => format!("alias `{one}`"),
+        many => {
+            let quoted: Vec<String> = many.iter().map(|a| format!("`{a}`")).collect();
+            format!("aliases {}", quoted.join(", "))
+        }
+    };
     skill
-        .replace("{board}", board.unwrap_or("<alias>"))
+        .replace("{aliases}", &aliases)
+        .replace("{board}", board)
         .replacen(
             &format!("---\nname: {MCP_NAME}\n"),
             &format!("---\nname: {mcp}\n"),
@@ -2297,7 +2308,7 @@ fn claude(
         )?;
     }
     let skill = env.claude_skill_for(&name);
-    let text = skill_text(CLAUDE_SKILL, &name, board_alias(env).as_deref());
+    let text = skill_for(env, CLAUDE_SKILL, &name);
     writeln!(
         out,
         "claude: skill {} {}",
@@ -2484,7 +2495,7 @@ fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {
         )?;
     }
     let skill = env.codex_skill_for(&name);
-    let skill_body = skill_text(CODEX_SKILL, &name, board_alias(env).as_deref());
+    let skill_body = skill_for(env, CODEX_SKILL, &name);
     writeln!(
         out,
         "codex: skill {} {}",

@@ -296,11 +296,11 @@ fn linux_full_setup_then_idempotent_rerun() {
     assert!(unit.contains("Restart=always"), "{unit}");
     assert_eq!(
         read(&env.claude_skill()),
-        setup::skill_text(setup::CLAUDE_SKILL, "conde", None)
+        setup::skill_text(setup::CLAUDE_SKILL, "conde", None, &[])
     );
     assert_eq!(
         read(&env.codex_skill()),
-        setup::skill_text(setup::CODEX_SKILL, "conde", None)
+        setup::skill_text(setup::CODEX_SKILL, "conde", None, &[])
     );
     assert!(
         setup::CLAUDE_SKILL.starts_with("---\nname: conde\n")
@@ -1009,7 +1009,12 @@ fn our_own_or_a_dead_conde_entry_is_updated_in_place() {
     assert!(!out.contains("another conde instance"), "{out}");
     assert_eq!(
         read(&env.claude_skill()),
-        setup::skill_text(setup::CLAUDE_SKILL, "conde", Some("dakai"))
+        setup::skill_text(
+            setup::CLAUDE_SKILL,
+            "conde",
+            Some("dakai"),
+            &["dakai".into()]
+        )
     );
 
     // a bare command not on PATH is a dead entry: reclaimed
@@ -1084,7 +1089,7 @@ fn an_entry_without_conde_sock_means_the_default_socket_and_a_bare_name_is_found
 fn both_skills_name_the_mcp_server_in_one_rewritable_place() {
     for skill in [setup::CLAUDE_SKILL, setup::CODEX_SKILL] {
         assert_eq!(skill.matches("tools of the `conde` MCP server").count(), 1);
-        let renamed = setup::skill_text(skill, "conde-dakai", None);
+        let renamed = setup::skill_text(skill, "conde-dakai", None, &[]);
         assert!(
             renamed.contains("tools of the `conde-dakai` MCP server")
                 && renamed.starts_with("---\nname: conde-dakai\n")
@@ -1096,9 +1101,21 @@ fn both_skills_name_the_mcp_server_in_one_rewritable_place() {
 #[test]
 fn skills_name_the_enrolled_board_or_a_placeholder() {
     for skill in [setup::CLAUDE_SKILL, setup::CODEX_SKILL] {
-        let none = setup::skill_text(skill, "conde", None);
-        let acme = setup::skill_text(skill, "conde", Some("acme"));
-        assert!(none.contains("--board <alias>") && !none.contains("{board}"));
+        let none = setup::skill_text(skill, "conde", None, &[]);
+        let acme = setup::skill_text(skill, "conde", Some("acme"), &["acme".into()]);
+        assert!(none.contains("(alias `<alias>`)") && none.contains("--board <alias>"));
+        // two boards: the introduction lists both, the examples name the default (or first) one
+        let two = setup::skill_text(
+            skill,
+            "conde",
+            Some("dakai"),
+            &["clearscale".into(), "dakai".into()],
+        );
+        assert!(two.contains("(aliases `clearscale`, `dakai`)") && two.contains("--board dakai"));
+        assert!(!two.contains("--board clearscale"));
+        for text in [&none, &two] {
+            assert!(!text.contains("{board}") && !text.contains("{aliases}"));
+        }
         assert!(
             acme.contains("(alias `acme`)")
                 && acme.contains("acme:01M4")
@@ -1112,7 +1129,12 @@ fn skills_name_the_enrolled_board_or_a_placeholder() {
     let opts = Options::select(true, true, false, false);
     let mut host = Fake::new(&env, &["claude", "codex"]);
     enrolled(&env);
-    let old = setup::skill_text(setup::CLAUDE_SKILL, "conde", Some("other"));
+    let old = setup::skill_text(
+        setup::CLAUDE_SKILL,
+        "conde",
+        Some("other"),
+        &["other".into()],
+    );
     std::fs::create_dir_all(env.claude_skill().parent().unwrap()).unwrap();
     std::fs::write(env.claude_skill(), &old).unwrap();
     let (_, out) = verify(&env, &opts, &mut host);
@@ -1128,7 +1150,7 @@ fn skills_name_the_enrolled_board_or_a_placeholder() {
     ] {
         assert_eq!(
             read(&path),
-            setup::skill_text(skill, "conde", Some("dakai"))
+            setup::skill_text(skill, "conde", Some("dakai"), &["dakai".into()])
         );
     }
     let (ok, out) = verify(&env, &opts, &mut host);
@@ -1162,8 +1184,14 @@ fn skills_name_the_enrolled_board_or_a_placeholder() {
     assert!(ok, "{out}");
     assert_eq!(
         read(&env.claude_skill()),
-        setup::skill_text(setup::CLAUDE_SKILL, "conde", Some("dakai"))
+        setup::skill_text(
+            setup::CLAUDE_SKILL,
+            "conde",
+            Some("dakai"),
+            &["acme".into(), "dakai".into()]
+        )
     );
+    assert!(read(&env.codex_skill()).contains("(aliases `acme`, `dakai`)"));
     let (ok, out) = verify(&env, &with_default, &mut host);
     assert!(ok, "{out}");
     for want in [
@@ -1358,7 +1386,7 @@ fn setup_and_check_agree_on_whether_codex_is_installed() {
         );
         assert_eq!(
             read(&env.codex_skill()),
-            setup::skill_text(setup::CODEX_SKILL, "conde", None)
+            setup::skill_text(setup::CODEX_SKILL, "conde", None, &[])
         );
         let (ok, out) = verify(&env, &opts, &mut host);
         assert!(ok && !out.contains("skip"), "{out}");
@@ -1412,7 +1440,7 @@ fn setup_and_check_agree_on_whether_claude_code_is_installed() {
         assert!(ok && !out.contains("skip"), "{out}");
         assert_eq!(
             read(&env.claude_skill()),
-            setup::skill_text(setup::CLAUDE_SKILL, "conde", None)
+            setup::skill_text(setup::CLAUDE_SKILL, "conde", None, &[])
         );
         let (ok, out) = verify(&env, &opts, &mut host);
         assert!(ok && !out.contains("skip"), "{out}");

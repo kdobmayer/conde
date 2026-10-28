@@ -1,0 +1,37 @@
+# The workspaces' project: this repository only, into ws-* namespaces only, and only the kinds the chart renders.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: conde
+  namespace: argocd
+spec:
+  description: conde workspaces (charts/conde-workspace)
+  sourceRepos:
+    - git@github.com:kdobmayer/conde.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: ws-*
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: ServiceAccount
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
+    - group: batch
+      kind: Job
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+    - group: networking.gke.io
+      kind: HealthCheckPolicy
+    - group: networking.gke.io
+      kind: GCPBackendPolicy
+    - group: secrets-store.csi.x-k8s.io
+      kind: SecretProviderClass

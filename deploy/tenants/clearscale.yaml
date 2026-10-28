@@ -1,0 +1,13 @@
+# Values of the conde-workspace chart for https://clearscale.conde.cloud; signs in against its Keycloak realm.
+name: clearscale
+hostname: clearscale.conde.cloud
+boardName: clearscale
+oidc:
+  issuer: https://auth.conde.cloud/realms/clearscale
+  clientId: conde
+gcp:
+  serviceAccount: conde-clearscale@conde-prod.iam.gserviceaccount.com
+  secrets:
+    adminKey: clearscale-admin-key
+    oidcClientSecret: clearscale-oidc-client-secret
+    slackBotToken: clearscale-slack-bot-token

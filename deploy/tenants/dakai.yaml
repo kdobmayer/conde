@@ -1,0 +1,13 @@
+# Values of the conde-workspace chart for https://dakai.conde.cloud; signs in directly against the Dakai Entra tenant.
+name: dakai
+hostname: dakai.conde.cloud
+boardName: dakai
+oidc:
+  issuer: https://login.microsoftonline.com/2e51b484-b008-4fc0-8f70-555c1317b555/v2.0
+  clientId: d87a5254-3121-4d3b-bd1e-b902b3bcbba0
+gcp:
+  serviceAccount: conde-dakai@conde-prod.iam.gserviceaccount.com
+  secrets:
+    adminKey: dakai-admin-key
+    oidcClientSecret: dakai-oidc-client-secret
+    slackBotToken: dakai-slack-bot-token

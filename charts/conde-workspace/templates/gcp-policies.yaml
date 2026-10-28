@@ -1,0 +1,41 @@
+{{- if .Values.gcp.enabled }}
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: conde
+  namespace: {{ .Release.Namespace }}
+spec:
+  default:
+    checkIntervalSec: 10
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8080
+        requestPath: /healthz
+  targetRef:
+    group: ""
+    kind: Service
+    name: conde
+---
+# The backend timeout outlasts the SSE and WebSocket streams' usual life; the client reconnects when it closes.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: conde
+  namespace: {{ .Release.Namespace }}
+spec:
+  default:
+    timeoutSec: {{ .Values.gcp.backendTimeoutSec }}
+    {{- with .Values.gcp.securityPolicy }}
+    securityPolicy: {{ . }}
+    {{- end }}
+    connectionDraining:
+      drainingTimeoutSec: 30
+  targetRef:
+    group: ""
+    kind: Service
+    name: conde
+{{- end }}

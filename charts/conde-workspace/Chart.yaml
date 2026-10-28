@@ -1,0 +1,9 @@
+apiVersion: v2
+name: conde-workspace
+description: One conde server for one workspace (board), with its route, policies and database bootstrap.
+type: application
+version: 0.1.0
+kubeVersion: ">=1.29.0-0"
+home: https://conde.cloud
+sources:
+  - https://github.com/kdobmayer/conde

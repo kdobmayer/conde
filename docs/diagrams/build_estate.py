@@ -19,6 +19,8 @@ BRAND.update({"cloudflare": "#F38020", "cloudflarepages": "#F38020", "github": "
               "terraform": "#844FBA"})
 
 APP, EXT, DATA, DEPLOY = C["app"], C["carrier"], C["data"], C["deploy"]
+LOCAL = C["muted"]                       # in-cluster call, neither egress nor the edge path
+FLOW["incluster"] = LOCAL
 DASH = "6 4"
 LS, NS = 16, 14.5
 ICON = 44
@@ -33,8 +35,8 @@ VX0, VX1 = PX0 + 24, PX1 - 24            # VPC
 CX0, CX1 = VX0 + 24, 2214                # cluster
 NAT_CX = (CX1 + VX1) / 2
 # Namespace columns
-WSX0, WSX1 = CX0 + 24, 1250
-KCX0, KCX1 = WSX1 + 90, 1840
+WSX0, WSX1 = CX0 + 24, 1220
+KCX0, KCX1 = WSX1 + 120, 1840
 AGX0, AGX1 = KCX1 + 24, CX1 - 24
 # Edge stripe columns
 DNX0, DNX1 = 330, 600                    # GKE DNS endpoint
@@ -83,9 +85,9 @@ card(OWX0, TB_Y, OWX1 - OWX0, TB_H, "Owner", note="kdobmayer.devops@gmail.com")
 TF_X = 380                          # Terraform sits over the GKE DNS endpoint
 TF_ROWS = ["as terraform@conde-prod,", "state in conde-tfstate"]
 hnode(TF_X - half, IT_Y, "si:terraform", "Terraform", TF_ROWS, ICON, LS, NS)
-OB_X = 690
+OB_X = 660
 hnode(OWX0 + 20, IT_Y, "glyph:users", "Owner", ["runs Terraform,", "admin consoles"], ICON, LS, NS)
-hnode(OB_X - half, IT_Y, "glyph:browser", "Browser", ["console, Argo CD"], ICON, LS, NS)
+hnode(OB_X - half, IT_Y, "glyph:browser", "Browser", ["console, Argo CD,", "IAP: Google sign-in"], ICON, LS, NS)
 
 TMX0, TMX1 = OWX1 + 24, OWX1 + 24 + 724
 card(TMX0, TB_Y, TMX1 - TMX0, TB_H, "Teammate")
@@ -134,29 +136,30 @@ host(PUX1 - 16, PC_Y0 + 100, "auth.conde.cloud", "end")
 card(ADX0, PC_Y0, ADX1 - ADX0, PC_H, "Admin hosts", fill="#FFFFFF")
 hnode(ADX0 + 16, PC_Y0 + 56, "gcp:cloud_armor", "Cloud Armor", ["conde-keycloak-admin,", "conde-argocd: per-IP throttle"],
       ICON, LS, NS)
-hnode(ADX0 + 330, PC_Y0 + 56, "gcp:identity-aware_proxy", "Identity-Aware Proxy", ["only the owner's Google", "account passes"],
+hnode(ADX0 + 330, PC_Y0 + 56, "gcp:identity-aware_proxy", "Identity-Aware Proxy", ["owner's Google account only,", "Google signs the browser in"],
       ICON, LS, NS)
 
 # ── Namespace columns ────────────────────────────────────────────────────────────────────────────────────────────
 section(WSX0, COL_Y, WSX1 - WSX0, COL_H, "One namespace per workspace", "Workspaces, charts/conde-workspace",
         "#FFFFFF", C["cluster"], kcolor=C["cluster"])
-WS = [("ws-dakai", "dakai.conde.cloud", ["Dakai Entra tenant", "database conde_dakai"]),
-      ("ws-demo", "demo.conde.cloud", ["realm demo", "database conde_demo"]),
-      ("ws-clearscale", "clearscale.conde.cloud", ["realm clearscale", "database conde_clearscale"])]
+WS = [("ws-dakai", "dakai.conde.cloud", ["Dakai Entra tenant", "database conde_dakai"], 2, []),
+      ("ws-demo", "demo.conde.cloud", ["realm demo", "database conde_demo"], 1, ["Keycloak admin client secret"]),
+      ("ws-clearscale", "clearscale.conde.cloud", ["realm clearscale", "database conde_clearscale"], 1, [])]
 WCW = (WSX1 - WSX0 - 2 * 18 - 2 * 18) / 3
 WC_Y = COL_Y + 74
 WC_H = COL_H - 74 - 18
-for i, (ns, hostname, notes) in enumerate(WS):
+for i, (ns, hostname, notes, replicas, extra) in enumerate(WS):
     x = WSX0 + 18 + i * (WCW + 18)
     cx = x + WCW / 2
     card(x, WC_Y, WCW, WC_H, ns, fill=C["web_fill"], stroke=C["web_stroke"])
     host(cx, WC_Y + 64, hostname, "middle", 13.5)
-    glyph_pod(cx - 70, WC_Y + 90, "conde", "2 replicas", "box", stack=1, lsize=LS, nsize=NS)
+    glyph_pod(cx - 70, WC_Y + 90, "conde", f"{replicas} replica" + ("s" if replicas > 1 else ""), "box", stack=replicas - 1,
+              lsize=LS, nsize=NS)
     glyph_pod(cx + 80, WC_Y + 96, "Auth Proxy", ["IAM database", "auth"], "link", r=17, lsize=14, nsize=12.5)
-    yy = lines_at(x + 20, WC_Y + 244, "Secrets as CSI files", ["admin key, OIDC client secret,", "Slack token, Resend key"],
+    yy = lines_at(x + 20, WC_Y + 244, "Secrets as CSI files", ["admin key, OIDC client secret,", "Slack token, Resend key" + ("," if extra else "")] + extra,
                   15, 13.5)
-    lines_at(x + 20, yy + 34, "Sign-in", [notes[0]], 15, 13.5)
-    lines_at(x + 20, yy + 112, "Database", [notes[1].replace("database ", "")], 15, 13.5)
+    lines_at(x + 20, WC_Y + 370, "Sign-in", [notes[0]], 15, 13.5)
+    lines_at(x + 20, WC_Y + 430, "Database", [notes[1].replace("database ", "")], 15, 13.5)
 
 card(KCX0, COL_Y, KCX1 - KCX0, COL_H, "Keycloak")
 KP_X = KCX0 + 130                          # Service keycloak entry, from the public hosts
@@ -197,14 +200,24 @@ for i, (lab, note) in enumerate(pods):
     gx = AGX0 + step / 2 + col * step
     glyph_pod(gx, COL_Y + 200 + row * 110, lab, note, "box", r=18, lsize=14, nsize=12.5)
 lines_at(AGX0 + 20, COL_Y + 456, "ApplicationSet", ["conde-workspaces: one ws-<name>", "per deploy/tenants file,",
-                                                    "sign-in: realm infra"], LS, NS)
+                                                    "sign-in: realm infra via the Gateway"], LS, NS)
 
 # ── VPC: Cloud NAT and Private Service Connect ───────────────────────────────────────────────────────────────────
 NAT_CY = COL_Y + 120
-node(NAT_CX, NAT_CY - 24, "gcp:cloud_nat", "Cloud NAT", ["egress of", "every pod"], 48, lsize=LS, nsize=NS)
+node(NAT_CX, NAT_CY - 24, "gcp:cloud_nat", "Cloud NAT", ["public internet", "egress"], 48, lsize=LS, nsize=NS)
 PSC_X = CX0 + 820
 hnode(PSC_X - half, PSC_Y, "gcp:private_service_connect", "Private Service Connect",
       ["psc-conde-pg, private DNS zone"], ICON, LS, NS)
+
+# Kubernetes Secrets that hold values: the two exceptions to CSI files (infra/gcp/cluster/README.md).
+SX_X0, SX_Y0 = WSX0, CY1 + 18
+SX_ROWS = ["iap-admin in keycloak and argocd: Terraform writes it", "write-only from Secret Manager (cluster/iap.tf)",
+           "Argo CD: its session and Redis credentials, repo SSH key"]
+SX_W = max(tw(r_, 13.5) for r_ in SX_ROWS) + 32
+rect(SX_X0, SX_Y0, SX_W, VY1 - 14 - SX_Y0, "#FFFFFF", C["line"], 1.1, 8)
+text(SX_X0 + 16, SX_Y0 + 24, "KUBERNETES SECRETS WITH VALUES", 12.5, 700, C["card_title"], spacing=1.0)
+for i, r_ in enumerate(SX_ROWS):
+    text(SX_X0 + 16, SX_Y0 + 48 + i * 20, r_, 13.5, 400, C["muted"])
 
 # ── Managed services ─────────────────────────────────────────────────────────────────────────────────────────────
 DA_X0, DA_X1 = PX0 + 24, PSC_X + 240
@@ -234,7 +247,7 @@ hnode(WIF_X, WIF_CY - half, "gcp:workload_identity_pool", "Workload Identity", W
 
 # ── Right column: internet services, legend, GitHub ──────────────────────────────────────────────────────────────
 EXTS = [("az:App-Registrations", "Dakai Entra tenant", ["conde of dakai: OIDC", "sign-in, app registration"]),
-        ("si:google", "Google", ["Keycloak: clearscale sign-in,", "also the IAP sign-in"]),
+        ("si:google", "Google", ["Keycloak: clearscale sign-in,", "broker back-channel"]),
         ("si:resend", "Resend", ["Keycloak: SMTPS 465,", "conde: invite email API"]),
         ("glyph:cloud", "Slack", ["conde: bot messages"])]
 EXT_Y0 = PY0
@@ -249,11 +262,11 @@ for i, (ico, lab, note) in enumerate(EXTS):
     ext_cy.append(y + half)
 GH_H = 360
 GH_Y0 = MY1 - GH_H
-LG_H = 236
+LG_H = 268
 LG_Y = (EXT_Y0 + EX_H + GH_Y0 - LG_H) / 2
 legend(RX0, LG_Y, RX1 - RX0, LG_H, [("Requests from the internet", "app"), ("Calls out, through Cloud NAT", "carrier"),
                                      ("Database and secrets", "data"), ("Build, deploy, Terraform", "deploy"),
-                                     ("Trust boundary", "boundary")])
+                                     ("In-cluster call", "incluster"), ("Trust boundary", "boundary")])
 section(RX0, GH_Y0, RX1 - RX0, GH_H, "kdobmayer/conde", "GitHub", "#FFFFFF", C["legend"], kcolor=C["legend"])
 REPO_Y = GH_Y0 + 90
 hnode(RX0 + 26, REPO_Y, "si:github", "Repository", ["Argo CD pulls it over SSH:", "charts, deploy/tenants,",
@@ -282,9 +295,13 @@ edge([(AG_X, PC_Y0 + PC_H), (AG_X, COL_Y + 46)], APP)
 edge([(TF_X, it_bottom), (TF_X, ES_Y0 + 94)], DEPLOY, dash=DASH)
 edge([(TF_X, ES_Y0 + 100 + ICON + 6), (TF_X, CY0)], DEPLOY, dash=DASH)
 
-# conde to Keycloak: OIDC through auth.conde.cloud (demo, clearscale), the admin API of demo.
-for y, lab in ((COL_Y + 300, "OIDC"), (COL_Y + 360, "admin API")):
-    edge([(WSX1, y), (KCX0, y)], EXT, lab, label_at=((WSX1 + KCX0) / 2, y - 10))
+# conde to Keycloak: OIDC of demo and clearscale out to auth.conde.cloud, back in through the Gateway and conde-web;
+# only demo's admin API stays in the cluster (http://keycloak.keycloak.svc.cluster.local:8080).
+OI_X = 1130
+edge([(OI_X, COL_Y), (OI_X, PC_Y0 + PC_H)], EXT, ["OIDC to auth.conde.cloud,", "demo and clearscale"],
+     label_at=(OI_X + 12, VY0 + 30), anchor="start")
+AD_Y = COL_Y + 330
+edge([(WSX1, AD_Y), (KCX0, AD_Y)], LOCAL, ["demo only,", "internal HTTP"], label_at=((WSX1 + KCX0) / 2, AD_Y - 30))
 
 # Egress through Cloud NAT.
 edge([(CX1, NAT_CY), (NAT_CX - 30, NAT_CY)], EXT)

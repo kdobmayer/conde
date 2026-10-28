@@ -1,6 +1,6 @@
 # Components of the estate drawing
 
-Every element drawn, grouped as drawn, with the source it was read from at `3458a3e` (branch `s4-iap`).
+Every element drawn, grouped as drawn, with the source it was read from at master `45a8f57`.
 Paths are relative to the repository root.
 
 ## Owner, teammate, Cloudflare (top band)
@@ -8,7 +8,8 @@ Paths are relative to the repository root.
 - Owner, kdobmayer.devops@gmail.com: `infra/gcp/cluster/iap.tf` (`iap_member`), `infra/gcp/realms/main.tf` (`owner_email`).
 - Terraform as terraform@conde-prod, state in conde-tfstate: `infra/gcp/*/versions.tf` (gcs backend
   `conde-tfstate-476201321288`, `impersonate_service_account`).
-- Owner's browser to the Keycloak console and Argo CD: `infra/gcp/cluster/README.md` (Argo CD), `infra/gcp/realms/README.md`.
+- Owner's browser to the Keycloak console and Argo CD, signed in to IAP by Google: `infra/gcp/cluster/README.md` (Argo CD),
+  `infra/gcp/realms/README.md`, `docs/infra-gcp-s4-iap.md`.
 - Teammate: conde CLI and agent (board, MCP server, skill), browser (web app, sign-in): `docs/infra-plan-gcp.md`
   (invite flow, `conde setup`).
 - Installer: install.sh from conde.cloud, binary from conde-cloud-dist: `.github/workflows/site.yml` (install.sh
@@ -32,7 +33,7 @@ Paths are relative to the repository root.
   `charts/conde-workspace/templates/gcp-policies.yaml`, to Keycloak: `infra/gcp/cluster/keycloak.tf` (`keycloak_backend`).
 - Admin hosts, Cloud Armor conde-keycloak-admin and conde-argocd (per-IP throttle): `infra/gcp/platform/edge.tf`
   (`admin_policies`).
-- Identity-Aware Proxy, only the owner's Google account: `infra/gcp/cluster/iap.tf`; on keycloak-admin:
+- Identity-Aware Proxy, only the owner's Google account, Google signs the browser in: `infra/gcp/cluster/iap.tf`; on keycloak-admin:
   `infra/gcp/cluster/keycloak.tf` (`keycloak_admin_backend`); on argocd-server: `infra/gcp/cluster/argocd.tf`
   (GCPBackendPolicy in `extraObjects`).
 
@@ -43,10 +44,11 @@ Paths are relative to the repository root.
   `docs/infra-plan-gcp.md` (Revisit after the cutover). Deny-by-default NetworkPolicy: `infra/gcp/cluster/keycloak.tf`,
   `infra/gcp/cluster/argocd.tf`, `charts/conde-workspace/templates/networkpolicy.yaml`.
 - Workspaces ws-dakai, ws-demo, ws-clearscale from charts/conde-workspace: `deploy/tenants/*.yaml`,
-  `deploy/argocd/workspaces.yaml.tftpl`. Hosts: same files. conde, 2 replicas: `charts/conde-workspace/values.yaml`
-  (`replicas: 2`, no override in the tenant files). Auth Proxy sidecar with IAM database auth:
+  `deploy/argocd/workspaces.yaml.tftpl`. Hosts: same files. conde replicas: dakai 2 (`charts/conde-workspace/values.yaml`
+  default, no override), demo and clearscale 1 (`replicas: 1` in `deploy/tenants/demo.yaml`, `clearscale.yaml`). Auth Proxy sidecar with IAM database auth:
   `charts/conde-workspace/templates/_helpers.tpl` (`--auto-iam-authn`). Secrets as CSI files (admin key, OIDC client
-  secret, Slack token, Resend key): `charts/conde-workspace/templates/secretproviderclass.yaml`. Sign-in: Dakai Entra
+  secret, Slack token, Resend key, and on demo the Keycloak admin client secret):
+  `charts/conde-workspace/templates/secretproviderclass.yaml`, `deploy/argocd/workspaces.yaml.tftpl`. Sign-in: Dakai Entra
   tenant, realm demo, realm clearscale: `deploy/tenants/*.yaml`. Databases conde_<name>:
   `infra/gcp/modules/workspace/main.tf`.
 - Keycloak, Service keycloak on auth.conde.cloud (workspace realms, infra), Service keycloak-admin on
@@ -56,10 +58,14 @@ Paths are relative to the repository root.
   (console, Terraform client, MFA), mail through Resend SMTPS: `infra/gcp/realms/main.tf`, `realms.tf`, `infra.tf`,
   `master.tf`, `README.md`.
 - Argo CD, chart 10.10.3, argocd-server on argocd.conde.cloud, server, repo-server, controller, applicationset,
-  redis, sign-in through realm infra: `infra/gcp/cluster/argocd.tf`. ApplicationSet conde-workspaces, one ws-<name>
+  redis, sign-in through realm infra via the Gateway: `infra/gcp/cluster/argocd.tf` (`argocd_oidc_issuer`, egress to
+  the Gateway address). ApplicationSet conde-workspaces, one ws-<name>
   per deploy/tenants file: `deploy/argocd/workspaces.yaml.tftpl`.
-- Cloud NAT conde, egress of every pod: `infra/gcp/foundation/main.tf` (`google_compute_router_nat.conde`,
-  `ALL_SUBNETWORKS_ALL_IP_RANGES`).
+- Cloud NAT conde, public internet egress: `infra/gcp/foundation/main.tf` (`google_compute_router_nat.conde`); Google
+  APIs go through Private Google Access (`private_ip_google_access` on the subnet), the database through PSC.
+- Kubernetes Secrets with values: `iap-admin` in keycloak and argocd, written by Terraform as write-only data from
+  Secret Manager (`infra/gcp/cluster/iap.tf`); Argo CD's `argocd-secret`, `argocd-redis` and `repo-conde`:
+  `infra/gcp/cluster/README.md` (Kubernetes Secrets that hold values).
 - Private Service Connect psc-conde-pg, private DNS zone: `infra/gcp/platform/sql.tf`.
 
 ## Managed services
@@ -78,8 +84,8 @@ Paths are relative to the repository root.
 ## Internet services and GitHub
 
 - Dakai Entra tenant, OIDC sign-in of dakai: `deploy/tenants/dakai.yaml`, `infra/gcp/workspaces/main.tf`.
-- Google: Keycloak's clearscale sign-in: `infra/gcp/realms/realms.tf` (`keycloak_oidc_google_identity_provider`);
-  IAP sign-in: `infra/gcp/cluster/iap.tf`.
+- Google: Keycloak's clearscale sign-in, the broker back-channel: `infra/gcp/realms/realms.tf`
+  (`keycloak_oidc_google_identity_provider`).
 - Resend: Keycloak SMTPS 465: `infra/gcp/realms/main.tf` (`smtp`), `infra/gcp/cluster/keycloak.tf` (egress 465);
   conde invite email API: `charts/conde-workspace/values.yaml` (`invite`), `crates/conde-remote/src/web/invite.rs`.
 - Slack: conde bot messages: `charts/conde-workspace/templates/deployment.yaml` (`CONDE_SLACK_BOT_TOKEN_FILE`),
@@ -96,8 +102,11 @@ Paths are relative to the repository root.
   `infra/gcp/cluster/keycloak.tf`, `argocd.tf`, `charts/conde-workspace/templates/httproute.yaml`.
 - Installer to Pages (install.sh): `.github/workflows/site.yml`.
 - Terraform to the GKE DNS endpoint to the cluster: `infra/gcp/cluster/main.tf`, `infra/gcp/realms/run.sh`.
-- Workspaces to Keycloak, OIDC: `deploy/tenants/demo.yaml`, `clearscale.yaml`; admin API (demo):
-  `charts/conde-workspace/values.yaml` (`invite.keycloakAdmin`), `infra/gcp/cluster/keycloak.tf` (ingress from ws-demo).
+- Workspaces to Keycloak, OIDC of demo and clearscale out to auth.conde.cloud and back through the Gateway and
+  conde-web: issuers in `deploy/tenants/demo.yaml`, `clearscale.yaml`, discovery from the issuer in
+  `crates/conde-remote/src/web/auth.rs`. Demo's admin API, in-cluster HTTP to
+  `http://keycloak.keycloak.svc.cluster.local:8080`: `charts/conde-workspace/values.yaml` (`invite.keycloakAdmin`),
+  `charts/conde-workspace/templates/networkpolicy.yaml`, `infra/gcp/cluster/keycloak.tf` (ingress from ws-demo).
 - Cluster to Cloud NAT to the internet services and GitHub: the egress lists in `infra/gcp/cluster/main.tf`
   (`network_policy_egress`), `keycloak.tf` (465), `argocd.tf` (GitHub ranges on 22 and 443).
 - Auth Proxy sidecars to Private Service Connect to Cloud SQL: `infra/gcp/platform/sql.tf`, the `--psc` proxy flag.

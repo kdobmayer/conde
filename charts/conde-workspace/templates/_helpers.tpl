@@ -57,10 +57,11 @@ conde.cloud/workspace: {{ include "conde.name" . }}
       port: 9090
     periodSeconds: 2
     failureThreshold: 60
+  # 50m is Autopilot's per-Pod CPU minimum; the proxy idles near 10Mi; the kubelet counts its logs as ephemeral storage.
   resources:
     requests:
-      cpu: 250m
-      memory: 256Mi
+      cpu: 50m
+      memory: 64Mi
       ephemeral-storage: 100Mi
     limits:
       ephemeral-storage: 100Mi

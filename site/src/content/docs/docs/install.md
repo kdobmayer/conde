@@ -56,7 +56,7 @@ conde update
 conde setup
 ```
 
-`conde update` downloads the latest release for this machine from the same files the installer reads, checks it against its `SHA256SUMS` line and renames it over the running binary, so a failed download or check leaves the old binary in place. It prints `conde <old> -> <new>`, or `conde <version> is current`, and restarts the bridge service when `conde setup` installed one. `--check` only reports; `--version 0.3.0` installs a specific release. `CONDE_DIST_BASE_URL` works as for the installer.
+`conde update` downloads the latest release for this machine from the same files the installer reads, checks it against its `SHA256SUMS` line and renames it over the running binary, so a failed download or check leaves the old binary in place. It prints `conde <old> -> <new>`, or `conde <version> is current`, and restarts the bridge service when that service runs the binary it just replaced; a service that runs another conde is left alone, with the hint to run `conde setup`. `--check` only reports; `--version 0.3.0` installs a specific release. `CONDE_DIST_BASE_URL` works as for the installer.
 
 Then `conde setup` rewrites what the new release changed (the skills, the MCP entries, the service file). Your enrollment, names and messages stay; no sign-in is needed. A conde without `conde update` (0.2.0 and older) upgrades by running the installer again.
 

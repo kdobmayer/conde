@@ -37,8 +37,7 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S1b (desk, after S1): small follow-ups from the S1 review: the Keycloak `conde` email theme hard-codes the demo
   workspace name and URL (a second password realm needs a realm-aware template); every realms apply that changes
   the demo realm drops and re-adds the `conde-admin` manage-users role for a few seconds (invites fail in that
-  window; a dependency fix in infra/gcp/realms); an admin call to clear a user's recorded realm account (today a
-  documented SQL statement); inviting a pre-existing realm account is unsupported.
+  window; a dependency fix in infra/gcp/realms); inviting a pre-existing realm account is unsupported.
 - S2c (desk, small): Keycloak account console theme (React-based, not covered by the login theme); master realm
   display name "conde admin" (today the label under the wordmark reads KEYCLOAK); the unused image 26.8.1-conde3 in
   Artifact Registry can go with the next registry cleanup.
@@ -57,6 +56,19 @@ Owner's own steps, at his pace, none blocking the above:
   in Secret Manager infra-krisztian-temp-password); then desk flips `argocd_local_admin` to false and
   deletes argocd-initial-admin-secret.
 - D4: Cloudflare account 2FA (profile, Authentication); it holds the domain.
+- D6 (after S5): the realms Terraform state no longer holds the Google client secret and the Resend key, but the
+  state bucket keeps old object versions that do. Cheapest fix: rotate both (Resend dashboard: new API key, then
+  `pass insert -f conde/resend-api-key` and a new Secret Manager version of `resend-api-key`; Google Auth Platform:
+  add a new secret on the client keycloak-clearscale, same for `clearscale-google-oauth-client-secret`); Keycloak
+  picks up new versions within two minutes, no restart. The alternative is deleting the old state versions in
+  gs://conde-tfstate-476201321288 (destructive; desk shows the list first).
+- D5 (for S4, IAP): create the IAP OAuth client in the Google Auth Platform of conde-prod, because its secret is
+  shown once: https://console.cloud.google.com/auth/clients?project=conde-prod, Create client, Web application,
+  name `iap-admin`, Create; copy the client ID and the secret; edit the client and add the redirect URI
+  `https://iap.googleapis.com/v1/oauth/clientIds/<client ID>:handleRedirect`, Save. Then in a terminal:
+  `read -rs S && printf '%s' "$S" | pass insert -m conde/iap-admin-client-secret && unset S` and
+  `pass show conde/iap-admin-client-secret | gcloud secrets create iap-admin-client-secret --replication-policy=user-managed --locations=europe-west3 --data-file=- --project conde-prod`.
+  Send desk the client ID (not the secret). The audience of the "conde" app must be External (it is).
 
 ## Standing items (no claim needed)
 

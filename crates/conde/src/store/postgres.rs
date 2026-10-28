@@ -1286,6 +1286,14 @@ impl Tx for PgTx {
         )? > 0)
     }
 
+    fn clear_user_keycloak(&self, user_id: i64) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE users SET keycloak_id = NULL, keycloak_invite = NULL
+                 WHERE user_id = $1 AND (keycloak_id IS NOT NULL OR keycloak_invite IS NOT NULL)",
+            &[&user_id],
+        )? > 0)
+    }
+
     fn backfill_emails(&self) -> StoreResult<u64> {
         self.execute(
             "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i

@@ -33,8 +33,10 @@ Every generated value is write-only: it is in Keycloak and in Secret Manager, no
 | `keycloak-admin-demo` | the secret of the demo realm's `conde-admin` client (client credentials, `manage-users`), read by the demo server |
 
 A conde server reads its client secret at start: after a new version, `kubectl -n ws-<name> rollout restart
-deployment/conde`. Two secrets this root reads are in its state, because their provider fields are not write-only:
-`resend-api-key` (the SMTP password of every realm) and `<name>-google-oauth-client-secret`.
+deployment/conde`. Two secrets this root never reads: `resend-api-key` (the SMTP password of every realm) and
+`<name>-google-oauth-client-secret`. Their provider fields are not write-only, so the realms carry Keycloak vault
+references instead (`${vault.smtp-password}`, `${vault.google-client-secret}`), and Keycloak reads the values from its
+file vault: the cluster root mounts them at `/vault` as `<realm>_<key>` (`local.keycloak_vault` there).
 
 Demo's user profile (`demo.tf`) deviates from Keycloak's default on purpose: first and last name are optional (the
 default requires them from the user), so an invited user gets no "complete your profile" form at first sign-in.
@@ -63,7 +65,7 @@ default requires them from the user), so an invited user gets no "complete your 
   ALTERNATIVE and the password form in it to REQUIRED (`keycloak_authentication_subflow.google_forms` and
   `keycloak_authentication_execution.google_password`). The login page then shows both the form and the Google button.
 - Email: every realm, master included, sends through Resend (`local.smtp` in main.tf: smtp.resend.com, SMTPS on 465,
-  user `resend`, the API key from `resend-api-key`), from `no-reply@conde.cloud` with replies to the owner. Keycloak
+  user `resend`, the API key from `resend-api-key` through the vault), from `no-reply@conde.cloud` with replies to the owner. Keycloak
   needs egress to TCP 465, an egress rule of its NetworkPolicy in the cluster root. "Forgot password" is on in the realms
   that sign in with passwords (`passwords` in `local.realms`): demo. Demo's email theme `conde` (in the Keycloak image,
   `infra/keycloak/themes`) turns the execute-actions email into the invitation with the onboarding steps.
@@ -90,8 +92,9 @@ database and the empty secret `<name>-oidc-client-secret`. How its people sign i
 3. Here, one entry in each of `local.tenants` (display name, hostname), `var.require_mfa` (false) and
    `local.google_sign_in` (the company's Workspace domain as `hosted_domain`, the OAuth client id). The entry in
    `google_sign_in` gives the realm the Google identity provider and the `google-browser` flow, so every sign-in goes
-   straight to Google and Keycloak refuses accounts of other domains. Then `terraform apply`; it writes the realm's
-   `conde` client secret into `<name>-oidc-client-secret`.
+   straight to Google and Keycloak refuses accounts of other domains. In the cluster root, the realm's vault files in
+   `local.keycloak_vault` (`<name>_smtp-password` and `<name>_google-client-secret`) and an apply there first. Then
+   `terraform apply` here; it writes the realm's `conde` client secret into `<name>-oidc-client-secret`.
 
 **A company on Microsoft Entra** gets no realm: its workspace signs in directly against its tenant, as dakai does.
 

@@ -294,6 +294,38 @@ pub fn list_users(server: &str, key: &str) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+/// `conde admin user realm-clear <name> --server <url>`.
+pub fn user_realm_clear(server: &str, name: &str) -> anyhow::Result<i32> {
+    let key = admin_key(
+        server,
+        "admin user realm-clear needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+    )?;
+    println!("{}", realm_clear(server, &key, name)?);
+    Ok(0)
+}
+
+/// `POST /v1/admin/users/<name>/realm-account/clear` with the admin key; the line to print.
+pub fn realm_clear(server: &str, key: &str, name: &str) -> anyhow::Result<String> {
+    let name = name.trim().to_lowercase();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("a user name is [a-z0-9_-]");
+    }
+    let path = format!("/v1/admin/users/{name}/realm-account/clear");
+    let answer = admin_request(server, key, &path, Some(serde_json::json!({})))?;
+    let user = answer["user"].as_str().unwrap_or(&name);
+    Ok(if answer["cleared"] == true {
+        format!(
+            "cleared the recorded sign-in account of {user} on {server}: the next invite creates a new one"
+        )
+    } else {
+        format!("{user} on {server} has no recorded sign-in account: nothing to clear")
+    })
+}
+
 pub fn key_revoke(
     data: Option<PathBuf>,
     host: Option<&str>,

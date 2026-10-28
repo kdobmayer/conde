@@ -518,6 +518,15 @@ enum UserCmd {
         #[arg(long, value_name = "URL")]
         server: String,
     },
+    /// Forget the sign-in account a password workspace's invite recorded for NAME (when it was
+    /// deleted in the sign-in server), so the next invite creates a new one; the user's email
+    /// and identities stay.
+    RealmClear {
+        name: String,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -827,6 +836,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     server,
                 } => admin::user_invite(&server, &name, &email, by.as_deref()),
                 UserCmd::List { server } => admin::user_list(&server),
+                UserCmd::RealmClear { name, server } => admin::user_realm_clear(&server, &name),
             };
         }
         Cmd::Admin {

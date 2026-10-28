@@ -106,8 +106,10 @@ A user who has signed in already, or is disabled, gets no email. A mail or Keycl
 the user was created answers 502 with the user in place; run the invite again once it is fixed.
 
 When a user's realm account was deleted in Keycloak, a re-invite answers "the recorded sign-in account
-no longer matches". Clear the record through the job, then invite again, which creates a new account:
-`UPDATE users SET keycloak_id = NULL, keycloak_invite = NULL WHERE name = '<name>';`
+no longer matches". Clear the record with `conde admin user realm-clear <name> --server <url>` (or
+`POST /v1/admin/users/<name>/realm-account/clear`), then invite again, which creates a new account; the
+clear keeps the user's email and identities. Without the CLI, the same through the job: `UPDATE users SET
+keycloak_id = NULL, keycloak_invite = NULL WHERE name = '<name>';`.
 
 ## Moving a board to a new address
 

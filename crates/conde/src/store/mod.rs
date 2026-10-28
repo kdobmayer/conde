@@ -827,6 +827,8 @@ pub trait Tx {
     /// Records the realm account id when the stored correlation value is `invite` and no id is
     /// recorded yet; whether it was recorded.
     fn record_user_keycloak_id(&self, user_id: i64, invite: &str, id: &str) -> StoreResult<bool>;
+    /// Forgets the realm account id and the invite correlation value; whether either was stored.
+    fn clear_user_keycloak(&self, user_id: i64) -> StoreResult<bool>;
     /// Fills every NULL email from the user's Entra identity by the sign-in rule
     /// (`preferred_username`, the tenant-controlled UPN, when it holds an `@`; another issuer's
     /// is unverified); a stored email is never replaced. The number filled.

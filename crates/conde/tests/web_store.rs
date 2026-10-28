@@ -167,6 +167,8 @@ on_both!(
     a_microsoft_invite_names_the_microsoft_account,
     a_password_workspace_needs_three_character_names,
     the_realm_record_is_claimed_and_recorded_once,
+    the_realm_record_is_cleared_and_claimed_anew,
+    a_cleared_user_is_invited_again_with_a_new_realm_account,
     a_slow_sign_in_server_is_cut_off_at_the_deadline,
 );
 
@@ -2333,6 +2335,152 @@ async fn the_realm_record_is_claimed_and_recorded_once(d: Arc<Dispatcher>) {
         );
     })
     .await;
+}
+
+/// The clear forgets one user's realm record (the id and a lone correlation value alike) and
+/// answers whether there was one, None for an unknown user; a new value is claimed after it.
+async fn the_realm_record_is_cleared_and_claimed_anew(d: Arc<Dispatcher>) {
+    let board = Arc::new(WebBoard::new(d.clone()));
+    blocking(move || {
+        let uid = board.ensure_user("ann").unwrap().user_id;
+        let bob = board.ensure_user("bob").unwrap().user_id;
+        let claimed = |invite: &str| web::RealmAccount {
+            id: None,
+            invite: Some(invite.to_string()),
+        };
+        assert_eq!(board.clear_realm_account("ann").unwrap(), Some(false));
+        board.claim_realm_invite(uid, "v1").unwrap();
+        board.record_realm_id(uid, "v1", "kc-1").unwrap();
+        board.claim_realm_invite(bob, "vb").unwrap();
+        assert_eq!(board.clear_realm_account("ann").unwrap(), Some(true));
+        assert_eq!(
+            board.realm_account(uid).unwrap(),
+            web::RealmAccount::default()
+        );
+        assert_eq!(
+            board.realm_account(bob).unwrap(),
+            claimed("vb"),
+            "another user's record stays"
+        );
+        assert_eq!(board.clear_realm_account("ann").unwrap(), Some(false));
+        assert_eq!(board.claim_realm_invite(uid, "v2").unwrap(), claimed("v2"));
+        assert_eq!(board.clear_realm_account("ann").unwrap(), Some(true));
+        assert_eq!(
+            board.realm_account(uid).unwrap(),
+            web::RealmAccount::default()
+        );
+        assert_eq!(board.clear_realm_account("nobody").unwrap(), None);
+    })
+    .await;
+}
+
+/// A user whose realm account was deleted in Keycloak: the re-invite is refused until the admin
+/// clears the record; the next invite then creates a new account (the create answers 201) and
+/// records it. The clear keeps the user's email and identities, answers false when nothing is
+/// recorded, 404 for no such user, and needs the admin key.
+async fn a_cleared_user_is_invited_again_with_a_new_realm_account(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    let k = Some(ADMIN_KEY);
+    let invite = json!({"name": "ann", "email": "ann@demo.example"});
+    let (status, got) = invite_req(&env, invite.clone()).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    let (id, first_mark) = realm_record(&d, "ann").await;
+    assert_eq!(id.as_deref(), Some("kc-1"));
+    let s = env.store.clone();
+    blocking(move || {
+        let other = web::Identity {
+            issuer: "https://other.example/realms/x".into(),
+            subject: "sub-ann".into(),
+            display_name: None,
+            preferred_username: None,
+            email: None,
+            verified_email: None,
+        };
+        s.bind_identity("ann", &other).unwrap()
+    })
+    .await;
+    let ann = |env: &Env<WebBoard>| {
+        let s = env.store.clone();
+        async move {
+            blocking(move || s.list_users().unwrap())
+                .await
+                .into_iter()
+                .find(|u| u.name == "ann")
+                .unwrap()
+        }
+    };
+    let before = ann(&env).await;
+    assert_eq!(
+        (before.email.as_deref(), before.issuers.len()),
+        (Some("ann@demo.example"), 1)
+    );
+
+    // deleted in Keycloak; the new account gets the next id
+    *kc.accounts.lock().unwrap() =
+        vec![json!({"id": "kc-other", "username": "zed", "email": "zed@demo.example"})];
+    let (status, got) = invite_req(&env, invite.clone()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{got}");
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("the recorded sign-in account no longer matches"),
+        "{got}"
+    );
+
+    let clear = "/v1/admin/users/ann/realm-account/clear";
+    assert_eq!(
+        admin(&env, clear, Some(json!({})), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(realm_record(&d, "ann").await.0.as_deref(), Some("kc-1"));
+    let (status, got) = admin(&env, clear, Some(json!({})), k).await;
+    assert_eq!(
+        (status, got),
+        (StatusCode::OK, json!({"user": "ann", "cleared": true}))
+    );
+    assert_eq!(realm_record(&d, "ann").await, (None, None));
+    let (status, got) = admin(&env, clear, Some(json!({})), k).await;
+    assert_eq!(
+        (status, got),
+        (StatusCode::OK, json!({"user": "ann", "cleared": false}))
+    );
+    let (status, got) = admin(
+        &env,
+        "/v1/admin/users/nobody/realm-account/clear",
+        Some(json!({})),
+        k,
+    )
+    .await;
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("not_found"))
+    );
+    assert_eq!(ann(&env).await, before, "the email and identities stay");
+
+    let (status, got) = invite_req(&env, invite).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    let creates = kc.creates.lock().unwrap().clone();
+    assert_eq!(creates.len(), 2);
+    let (id, mark) = realm_record(&d, "ann").await;
+    let mark = mark.unwrap();
+    assert_eq!(id.as_deref(), Some("kc-2"));
+    assert_ne!(Some(&mark), first_mark.as_ref(), "a new correlation value");
+    assert_eq!(creates[1]["attributes"][INVITE_ATTRIBUTE][0], mark.as_str());
+    assert_eq!(
+        kc.actions.lock().unwrap().last().unwrap().0,
+        "kc-2",
+        "the setup email goes to the new account"
+    );
 }
 
 /// A sign-in server that does not answer is cut off at the invite's deadline: 502, user created.

@@ -56,6 +56,12 @@ Owner's own steps, at his pace, none blocking the above:
   in Secret Manager infra-krisztian-temp-password); then desk flips `argocd_local_admin` to false and
   deletes argocd-initial-admin-secret.
 - D4: Cloudflare account 2FA (profile, Authentication); it holds the domain.
+- D6 (after S5): the realms Terraform state no longer holds the Google client secret and the Resend key, but the
+  state bucket keeps old object versions that do. Cheapest fix: rotate both (Resend dashboard: new API key, then
+  `pass insert -f conde/resend-api-key` and a new Secret Manager version of `resend-api-key`; Google Auth Platform:
+  add a new secret on the client keycloak-clearscale, same for `clearscale-google-oauth-client-secret`); Keycloak
+  picks up new versions within two minutes, no restart. The alternative is deleting the old state versions in
+  gs://conde-tfstate-476201321288 (destructive; desk shows the list first).
 - D5 (for S4, IAP): create the IAP OAuth client in the Google Auth Platform of conde-prod, because its secret is
   shown once: https://console.cloud.google.com/auth/clients?project=conde-prod, Create client, Web application,
   name `iap-admin`, Create; copy the client ID and the secret; edit the client and add the redirect URI

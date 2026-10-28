@@ -96,7 +96,7 @@ signed in as <user>
 enrolled host <host> with https://<workspace>.conde.cloud as board <workspace> (account <user>); credential stored at ~/.config/conde/boards/<workspace>.json (mode 0600)
 ```
 
-The board alias is the name the workspace advertises; use it in `--board` below.
+The board alias is the name the workspace advertises; use it in `--board` below. The last lines are the workspace's welcome: `Setup guide:`, and when the workspace names one, `Questions: conde send <owner/agent> ... --board <workspace>`, the agent to tell how the setup went once your name is published (step 6).
 
 No browser on this machine (a server, a remote shell): add `--code`.
 

@@ -34,6 +34,11 @@ output "cloud_armor_policy_name" {
   value = google_compute_security_policy.web.name
 }
 
+output "cloud_armor_admin_policy_names" {
+  description = "Per admin backend behind IAP: keycloak-admin, argocd."
+  value       = { for k, p in google_compute_security_policy.admin : k => p.name }
+}
+
 output "dns_authorization_record" {
   description = "Add at Cloudflare (DNS only, not proxied) so the certificate can be issued."
   value = {

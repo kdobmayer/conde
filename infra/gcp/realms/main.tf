@@ -1,6 +1,6 @@
 # Keycloak configuration of conde on GCP (docs/infra-plan-gcp.md): a realm per workspace that signs in through
-# Keycloak, the `infra` realm for platform tools, and the permanent admins of the master realm. Applied locally from
-# the admin allowlist, since the provider calls /admin and /realms/master (README.md).
+# Keycloak, the `infra` realm for platform tools, and the permanent admins of the master realm. Applied through
+# run.sh, which reaches the Keycloak Service over a port-forward (README.md).
 provider "google" {
   project                     = local.project
   region                      = local.region
@@ -9,7 +9,7 @@ provider "google" {
 
 # Client id and credentials come from the environment at run time (README.md).
 provider "keycloak" {
-  url   = local.keycloak_url
+  url   = var.provider_url
   realm = "master"
 }
 
@@ -17,7 +17,9 @@ locals {
   project      = "conde-prod"
   region       = "europe-west3"
   keycloak_url = "https://auth.conde.cloud"
-  owner_email  = "kdobmayer.devops@gmail.com"
+  # The master realm's own URL (its sign-in and the admin console, behind IAP); the other realms stay on auth.conde.cloud.
+  master_url  = "https://admin-auth.conde.cloud"
+  owner_email = "kdobmayer.devops@gmail.com"
 
   # Workspaces that sign in through Keycloak; dakai signs in directly against its Entra tenant.
   tenants = {

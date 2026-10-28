@@ -52,6 +52,8 @@ locals {
   cloud_sql_proxy   = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.3@sha256:f333a9c59890c3c67b8505166c5dbdcc0b29fca9173a2e09ca0446ab6997a736"
   keycloak_image    = "${local.foundation.registry_url}/keycloak:26.8.1-conde5@sha256:c2f393f2c62985c58d268c69b3336bdbf2e9dbe1ded23f6cc54a85c660d06278"
   keycloak_hostname = "auth.conde.cloud"
+  # The admin console and the master realm, behind IAP; the wildcard certificate covers one label only.
+  keycloak_admin_hostname = "admin-auth.conde.cloud"
   network_policy_egress = [
     # NodeLocal DNSCache, the pods' resolver; it runs on the host network, so no pod selector matches it.
     { cidr = "169.254.20.10/32", except = [], ports = [{ protocol = "UDP", port = "53" }, { protocol = "TCP", port = "53" }] },

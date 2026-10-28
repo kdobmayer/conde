@@ -136,3 +136,52 @@ resource "google_compute_security_policy" "web" {
     }
   }
 }
+
+# The admin backends (Keycloak console on admin-auth.conde.cloud, Argo CD) sit behind Identity-Aware Proxy; Cloud Armor,
+# evaluated before IAP, only throttles each client IP there. A UI page load is tens of requests.
+locals {
+  admin_policies = {
+    keycloak-admin = { name = "conde-keycloak-admin", description = "Keycloak admin console backend (behind IAP): per-IP throttle", per_minute = 300 }
+    argocd         = { name = "conde-argocd", description = "Argo CD backend (behind IAP): per-IP throttle", per_minute = 600 }
+  }
+}
+
+resource "google_compute_security_policy" "admin" {
+  for_each = local.admin_policies
+
+  name        = each.value.name
+  description = each.value.description
+
+  rule {
+    priority    = 1000
+    action      = "throttle"
+    description = "Over ${each.value.per_minute} requests a minute from one IP get 429"
+    match {
+      versioned_expr = "SRC_IPS_V1"
+      config {
+        src_ip_ranges = ["*"]
+      }
+    }
+    rate_limit_options {
+      conform_action = "allow"
+      exceed_action  = "deny(429)"
+      enforce_on_key = "IP"
+      rate_limit_threshold {
+        count        = each.value.per_minute
+        interval_sec = 60
+      }
+    }
+  }
+
+  rule {
+    priority    = 2147483647
+    action      = "allow"
+    description = "Default allow"
+    match {
+      versioned_expr = "SRC_IPS_V1"
+      config {
+        src_ip_ranges = ["*"]
+      }
+    }
+  }
+}

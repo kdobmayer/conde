@@ -30,6 +30,9 @@ resource "google_container_cluster" "conde" {
     }
   }
 
+  # Hostname egress policies (FQDNNetworkPolicy); Autopilot enables it only on an existing cluster and restarts the nodes.
+  enable_fqdn_network_policy = true
+
   gateway_api_config {
     channel = "CHANNEL_STANDARD"
   }

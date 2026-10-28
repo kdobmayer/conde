@@ -64,6 +64,7 @@ fn usable(conn: &BoardConn) -> Result<(), Refusal> {
         Status::Running => Ok(()),
         Status::NotMigrated => Err(refuse(ErrorCode::Conflict, format!("{}: not migrated (run conde setup)", conn.alias))),
         Status::Stopped(why) | Status::Broken(why) => Err(refuse(ErrorCode::Conflict, format!("{}: {why}", conn.alias))),
+        Status::Moved(url) => Err(refuse(ErrorCode::Conflict, boards::moved_message(&conn.alias, &url))),
     }
 }
 

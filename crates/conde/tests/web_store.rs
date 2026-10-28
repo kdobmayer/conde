@@ -1,5 +1,5 @@
-//! The web surface over the board's real stores: Entra sign-in, browser sessions, the keys
-//! page, the `conde login` leg, the admin API and disabled users, each case on SQLite and,
+//! The web surface over the board's real stores: OIDC sign-in and the invite gate, browser
+//! sessions, the keys page, the `conde login` leg, the admin API and disabled users, each case on SQLite and,
 //! when CONDE_TEST_PG is set, on a fresh Postgres database. The fake provider and browser are
 //! conde-remote's web test harness.
 
@@ -138,6 +138,9 @@ on_both!(
     a_late_confirm_is_told_the_login_expired_whatever_the_session,
     admin_binds_existing_users_and_disables_them,
     sign_in_stores_the_email_and_the_admin_sets_the_slack_id,
+    the_invite_gate_binds_exactly_one_verified_email_match,
+    a_generic_issuer_needs_a_verified_email,
+    an_entra_sign_in_lands_on_its_migrated_binding_by_oid,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -148,22 +151,133 @@ async fn sign_in_binds_the_identity_and_reuses_it(d: Arc<Dispatcher>) {
     let env = env(&d).await;
     let page = Browser::new().sign_in(&env).await;
     assert!(page.contains("Krisztián Dobmayer"), "{page}");
-    let s = env.store.clone();
-    let user = blocking(move || s.user_by_identity(TENANT, "oid-krisztian").unwrap()).await.unwrap();
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
+    let user = blocking(move || s.user_by_identity(&issuer, "oid-krisztian").unwrap()).await.unwrap();
     assert_eq!(user.name, "krisztian-dobmayer");
     env.idp.person.lock().unwrap().name = "K. D.".into();
     let page = Browser::new().sign_in(&env).await;
     assert!(page.contains("K. D."));
-    let s = env.store.clone();
-    let again = blocking(move || s.user_by_identity(TENANT, "oid-krisztian").unwrap()).await.unwrap();
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
+    let again = blocking(move || s.user_by_identity(&issuer, "oid-krisztian").unwrap()).await.unwrap();
     assert_eq!(again.user_id, user.user_id);
 
-    env.idp.person.lock().unwrap().tid = "00000000-0000-0000-0000-000000000000".into();
-    env.idp.person.lock().unwrap().oid = "oid-stranger".into();
-    let (status, _, _) = Browser::new().get(&env.url("/keys")).await;
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.oid = "oid-stranger".into();
+        p.upn = "stranger@dakai.example".into();
+    }
+    let (status, _, body) = Browser::new().get(&env.url("/keys")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let s = env.store.clone();
-    assert!(blocking(move || s.user_by_identity("00000000-0000-0000-0000-000000000000", "oid-stranger").unwrap()).await.is_none());
+    assert!(body.contains("This account is not invited to this board."), "{body}");
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
+    assert!(blocking(move || s.user_by_identity(&issuer, "oid-stranger").unwrap()).await.is_none());
+}
+
+/// The invite gate on the real stores: an identity bound to no user is let in only when its
+/// verified email is the email of exactly one user who holds no identity of this issuer.
+async fn the_invite_gate_binds_exactly_one_verified_email_match(d: Arc<Dispatcher>) {
+    let env = Env::uninvited(Arc::new(WebBoard::new(d.clone())), |_| {}).await;
+    let refused = || async {
+        let (status, _, body) = Browser::new().get(&env.url("/keys")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("This account is not invited to this board. Ask the board admin."), "{body}");
+    };
+    let issuers = |name: &'static str| {
+        let d = d.clone();
+        blocking(move || d.with_conn(|t| t.identity_issuers(t.user_id(name)?.unwrap())).unwrap())
+    };
+    // none: nobody has the address
+    refused().await;
+    // ambiguous: two users share the address (an invite refuses that, a sign-in's email does not)
+    let k = Some(ADMIN_KEY);
+    let (status, got) =
+        admin(&env, "/v1/admin/users", Some(json!({"name": "kd", "email": "krisztian.dobmayer@dakai.example"})), k).await;
+    assert_eq!((status, got["status"].as_str()), (StatusCode::OK, Some("invited")), "{got}");
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            let other = t.ensure_user("kd-2")?;
+            Ok(t.set_user_email(other, Some("Krisztian.Dobmayer@DAKAI.example"))?)
+        })
+        .unwrap()
+    })
+    .await;
+    refused().await;
+    assert!(issuers("kd").await.is_empty() && issuers("kd-2").await.is_empty());
+    // exactly one: bound, and the session starts
+    let d2 = d.clone();
+    blocking(move || d2.with_tx(|t| Ok(t.set_user_email(t.user_id("kd-2")?.unwrap(), Some("kd2@dakai.example"))?)).unwrap())
+        .await;
+    let page = Browser::new().sign_in(&env).await;
+    assert!(page.contains("Krisztián Dobmayer"), "{page}");
+    assert_eq!(issuers("kd").await, vec![env.idp.issuer.clone()]);
+    // the user holds an identity of this issuer: another one with the address is refused
+    env.idp.person.lock().unwrap().oid = "oid-recreated".into();
+    refused().await;
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
+    assert!(blocking(move || s.user_by_identity(&issuer, "oid-recreated").unwrap()).await.is_none());
+    let (_, list) = admin(&env, "/v1/admin/users", None, k).await;
+    assert_eq!(
+        list,
+        json!({"users": [
+            {"name": "kd", "email": "Krisztian.Dobmayer@dakai.example", "issuers": [env.idp.issuer], "disabled": false},
+            {"name": "kd-2", "email": "kd2@dakai.example", "issuers": [], "disabled": false},
+        ]})
+    );
+}
+
+/// A user bound as migration 0017 leaves an Entra row, (the tenant's issuer, oid), with no email
+/// and no invite: an Entra sign-in lands on it by oid, never by the per-app sub.
+async fn an_entra_sign_in_lands_on_its_migrated_binding_by_oid(d: Arc<Dispatcher>) {
+    let env = Env::uninvited(Arc::new(WebBoard::new(d.clone())), |_| {}).await;
+    let (d2, issuer) = (d.clone(), env.idp.issuer.clone());
+    let krisz = blocking(move || {
+        d2.with_tx(|t| {
+            let id = t.ensure_user("krisz")?;
+            Ok(t.bind_identity(id, &issuer, "oid-krisztian", None, None).map(|_| id)?)
+        })
+        .unwrap()
+    })
+    .await;
+    Browser::new().sign_in(&env).await;
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
+    let user = blocking(move || s.user_by_identity(&issuer, "oid-krisztian").unwrap()).await.unwrap();
+    assert_eq!((user.user_id, user.name.as_str()), (krisz, "krisz"));
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
+    assert!(blocking(move || s.user_by_identity(&issuer, "pairwise-oid-krisztian").unwrap()).await.is_none());
+    let (_, list) = admin(&env, "/v1/admin/users", None, Some(ADMIN_KEY)).await;
+    assert_eq!(list["users"].as_array().unwrap().len(), 1, "{list}");
+}
+
+/// A Keycloak-style issuer on the real stores: the subject is `sub`, and the email must be marked
+/// verified; preferred_username is never matched.
+async fn a_generic_issuer_needs_a_verified_email(d: Arc<Dispatcher>) {
+    let env = Env::with_config(Arc::new(WebBoard::new(d.clone())), |c| c.entra_tenant = None).await;
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.entra = false;
+        p.upn = "krisztian.dobmayer@dakai.example".into();
+        p.email = Some("krisztian.dobmayer@dakai.example".into());
+        p.email_verified = Some(false);
+    }
+    let (status, _, body) = Browser::new().get(&env.url("/keys")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    env.idp.person.lock().unwrap().email_verified = Some(true);
+    Browser::new().sign_in(&env).await;
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
+    let user = blocking(move || s.user_by_identity(&issuer, "pairwise-oid-krisztian").unwrap()).await.unwrap();
+    assert_eq!(user.name, "krisztian-dobmayer");
+    // bound: a later unverified email claim is never stored, whatever preferred_username says
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.email = Some("attacker@evil.example".into());
+        p.email_verified = None;
+        p.upn = "attacker@evil.example".into();
+    }
+    Browser::new().sign_in(&env).await;
+    let d2 = d.clone();
+    let email = blocking(move || d2.with_conn(|t| t.user_by_name("krisztian-dobmayer")).unwrap().unwrap().email).await;
+    assert_eq!(email.as_deref(), Some("krisztian.dobmayer@dakai.example"));
 }
 
 async fn sessions_expire_and_disabled_users_are_signed_out(d: Arc<Dispatcher>) {
@@ -269,9 +383,9 @@ async fn a_re_enrolled_host_keeps_one_live_key(d: Arc<Dispatcher>) {
     for old in older {
         assert!(!authenticates(&d, old).await, "a previous key is revoked");
     }
-    let s = env.store.clone();
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
     let stored = blocking(move || {
-        let user = s.user_by_identity(TENANT, "oid-krisztian").unwrap().unwrap();
+        let user = s.user_by_identity(&issuer, "oid-krisztian").unwrap().unwrap();
         s.host_keys(user.user_id).unwrap()
     })
     .await;
@@ -290,9 +404,9 @@ async fn a_re_enrolled_host_keeps_one_live_key(d: Arc<Dispatcher>) {
     assert_eq!(got["replaced"].as_bool(), Some(false), "{got}");
 
     // a host whose keys were all revoked earlier: re-enrolled, but no live key was replaced
-    let s = env.store.clone();
+    let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
     blocking(move || {
-        let user = s.user_by_identity(TENANT, "oid-krisztian").unwrap().unwrap();
+        let user = s.user_by_identity(&issuer, "oid-krisztian").unwrap().unwrap();
         assert_eq!(s.revoke_host(user.user_id, "nuc", START).unwrap(), 1);
     })
     .await;
@@ -331,12 +445,12 @@ async fn pasted_login_codes_count_tries_and_redeem_once(d: Arc<Dispatcher>) {
 }
 
 async fn admin_binds_existing_users_and_disables_them(d: Arc<Dispatcher>) {
-    let env = env(&d).await;
+    let env = Env::uninvited(Arc::new(WebBoard::new(d.clone())), |_| {}).await;
     let k = Some(ADMIN_KEY);
     let key = admin_cli_key(&d, "krisztian-dobmayer", "laptop").await;
-    // Sign-in refuses to adopt the unbound user; the admin binds it once.
+    // Sign-in refuses to adopt the user without an email; the admin binds it once (Entra's form).
     let (status, _, body) = Browser::new().get(&env.url("/keys")).await;
-    assert!(status == StatusCode::FORBIDDEN && body.contains("not linked"), "{body}");
+    assert!(status == StatusCode::FORBIDDEN && body.contains("not invited"), "{body}");
     let bind = json!({"tid": TENANT, "oid": "oid-krisztian", "name": "krisztian-dobmayer"});
     let (status, got) = admin(&env, "/v1/admin/users", Some(bind.clone()), k).await;
     assert_eq!((status, got["status"].as_str()), (StatusCode::OK, Some("bound")));
@@ -358,8 +472,8 @@ async fn admin_binds_existing_users_and_disables_them(d: Arc<Dispatcher>) {
     assert!(authenticates(&d, &key).await);
 }
 
-/// Sign-in stores the email (preferred_username, the UPN; the `email` claim only when the UPN is
-/// not an address) and asks the Slack
+/// Sign-in stores the verified email (preferred_username, the UPN; the `email` claim only when the
+/// UPN is not an address and the claim is marked verified) and asks the Slack
 /// worker to look its member id up; the user gets a human name; the admin key alone sets the
 /// member id, which a lookup never replaces.
 async fn sign_in_stores_the_email_and_the_admin_sets_the_slack_id(d: Arc<Dispatcher>) {
@@ -379,7 +493,14 @@ async fn sign_in_stores_the_email_and_the_admin_sets_the_slack_id(d: Arc<Dispatc
     assert!(d.take_slack_lookups().contains(&u.user_id), "every sign-in asks again");
     env.idp.person.lock().unwrap().upn = "krisztian".into();
     Browser::new().sign_in(&env).await;
-    assert_eq!(user(&d).await.email.as_deref(), Some("someone-else@dakai.io"), "a UPN without an @: the email claim, refreshed");
+    assert_eq!(
+        user(&d).await.email.as_deref(),
+        Some("Krisztian.Dobmayer@dakai.example"),
+        "a UPN without an @: the unverified email claim is not stored, the address stays"
+    );
+    env.idp.person.lock().unwrap().email_verified = Some(true);
+    Browser::new().sign_in(&env).await;
+    assert_eq!(user(&d).await.email.as_deref(), Some("someone-else@dakai.io"), "a verified email claim is stored");
     let d2 = d.clone();
     let humans = blocking(move || d2.with_conn(|t| t.owner_agents(u.user_id)).unwrap()).await;
     assert_eq!(humans.iter().filter(|a| a.is_human()).map(|a| a.canonical()).collect::<Vec<_>>(), ["krisztian-dobmayer/human"]);
@@ -697,6 +818,7 @@ async fn a_late_confirm_is_told_the_login_expired_whatever_the_session(d: Arc<Di
         p.name = "Bob".into();
     }
     let bob = Browser::new();
+    env.invite("bob", "bob@dakai.example").await;
     let (status, bob_page) = paste_confirm_page(&env, &bob, &run).await;
     assert_eq!(status, StatusCode::OK, "{bob_page}");
     env.advance(301);

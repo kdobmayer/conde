@@ -2165,3 +2165,68 @@ fn the_daemon_names_the_human_and_keeps_humans_from_sending_on_a_board() {
     // the local board is the human's own
     h.ok(&h.human(), "message.send", json!({"to": {"agent": "desk"}, "text": "a local note"}), Some("local"));
 }
+
+/// A board that moved (the server runs with `moved_to`): the bridge stops on the 308 instead of
+/// reconnecting, every request on that board is refused with the move and the command that
+/// follows it (the CLI prints it and exits non-zero), and `conde board move` points the board
+/// file at the new address, credential and account kept, after which the board connects again.
+#[test]
+fn a_moved_board_stops_the_bridge_and_names_the_move_command() {
+    let board = FakeBoard::start();
+    let (a, actor) = published_host(&board, "kdobmayer", "homepc", "worker", "s-moved", fast());
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let new_url = board.url();
+    let old = rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let d = Arc::new(conde::dispatch::Dispatcher::open_in_memory().unwrap());
+        let config = conde_remote::ServerConfig { moved_to: Some(new_url.clone()), ..Default::default() };
+        conde::cloud::start_on(d, listener, config).await.unwrap()
+    });
+    let old_url = format!("http://{}", old.local_addr());
+    // the host still points at the old address, which now answers with the move
+    let path = boards::path_in(&a.config(), "dakai");
+    let mut cfg = boards::load(&path).unwrap();
+    let fake_url = std::mem::replace(&mut cfg.server, old_url.clone());
+    std::fs::write(&path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai reloaded");
+    let moved = format!("board dakai moved to {new_url}; run: conde board move dakai {new_url}");
+    wait_for("the moved status", || a.status().starts_with("moved to").then_some(()));
+    assert_eq!(a.status(), format!("moved to {new_url} (run: conde board move dakai {new_url})"));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(a.status().starts_with("moved to"), "no reconnect: {}", a.status());
+    let e = a.send(&actor, "kdobmayer/worker", "hi", Some("dakai")).unwrap_err();
+    assert_eq!(e.1, moved);
+    let e = a.request(&a.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker"}), Some("dakai")).unwrap_err();
+    assert_eq!(e.1, moved);
+    // the CLI prints it and exits non-zero
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_conde"))
+        .env_clear()
+        .env("PATH", a.dir.path())
+        .env("HOME", a.dir.path())
+        .env("USER", "kdobmayer")
+        .env("CONDE_HOST", "homepc")
+        .env("CONDE_SOCK", a.sock())
+        .args(["--board", "dakai", "publish", "worker"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), format!("conde: {moved}"));
+
+    // `conde board move`: the old address says the board moved to the new one, which answers as the
+    // same board, so the file is re-pointed
+    let mut asked = Vec::new();
+    let (before, after) = boards::move_board(&a.config(), "dakai", &fake_url, false, &mut boards::moved_probe, &mut |server, key| {
+        asked.push(server.to_string());
+        assert_eq!(key, cfg.key);
+        Ok(conde::protocol::v2::BoardInfo { name: "dakai".into(), owner: "kdobmayer".into(), host: "homepc".into(), mailbox_only: true })
+    })
+    .unwrap();
+    assert_eq!(asked, std::slice::from_ref(&fake_url), "the key went only to the address the old server named");
+    assert_eq!((before.server.as_str(), after.server.as_str()), (old_url.as_str(), fake_url.as_str()));
+    assert_eq!(boards::load(&path).unwrap(), BoardConfig { server: fake_url.clone(), ..cfg.clone() });
+    assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai reloaded");
+    wait_for("connected at the new address", || (a.status() == "connected").then_some(()));
+    let p = a.request(&a.human(), op::MAILBOX_PUBLISH, json!({"agent": "worker", "name": "worker"}), Some("dakai")).unwrap();
+    assert_eq!(p["state"], "published", "the publication survived the move: {p}");
+    rt.block_on(old.shutdown()).unwrap();
+}

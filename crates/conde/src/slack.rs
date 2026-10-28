@@ -86,11 +86,12 @@ pub struct SlackConfig {
 }
 
 impl SlackConfig {
-    /// From `CONDE_SLACK_BOT_TOKEN` (and `CONDE_SLACK_NOTIFY` for the import); `Ok(None)`
-    /// (feature off) without a token.
+    /// From `CONDE_SLACK_BOT_TOKEN` (or `CONDE_SLACK_BOT_TOKEN_FILE`; and `CONDE_SLACK_NOTIFY`
+    /// for the import); `Ok(None)` (feature off) without a token.
     pub fn from_env(board: &str, public_url: Option<String>) -> anyhow::Result<Option<SlackConfig>> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        SlackConfig::from_vars(var("CONDE_SLACK_BOT_TOKEN"), var("CONDE_SLACK_NOTIFY"), board, public_url)
+        let token = conde_remote::secret_env("CONDE_SLACK_BOT_TOKEN")?.filter(|v| !v.trim().is_empty());
+        SlackConfig::from_vars(token, var("CONDE_SLACK_NOTIFY"), board, public_url)
     }
 
     pub fn from_vars(

@@ -7,8 +7,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use conde::boards::{self, BoardConfig};
 use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_conde");
@@ -999,6 +1001,75 @@ fn admin_slack_sets_the_member_id_with_the_admin_key() {
     assert!(request.ends_with(r#"{"member_id":"U0ADMIN"}"#), "{request}");
 }
 
+/// A one-request admin API on loopback answering `body`; the thread returns the raw request.
+fn one_admin_answer(body: Value) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = conn.read(&mut chunk).unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                    .unwrap_or(0);
+                if buf.len() >= end + 4 + len || n == 0 {
+                    break;
+                }
+            }
+        }
+        let body = body.to_string();
+        let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        conn.write_all(reply.as_bytes()).unwrap();
+        String::from_utf8(buf).unwrap()
+    });
+    (url, seen)
+}
+
+/// `conde admin user invite` posts `{name, email}` and `conde admin user list` reads the users,
+/// both with the admin key; an agent's shell is refused before anything is sent.
+#[test]
+fn admin_user_invites_and_lists_with_the_admin_key() {
+    let r = Root::new();
+    let key = "q7Zx2Lm9Vt4Rk8Wp3Ny6Hb1Jc5Fd0GsUe";
+    for args in [&["admin", "user", "invite", "ann", "ann@dakai.io", "--server", "https://x.example"][..], &["admin", "user", "list", "--server", "https://x.example"]] {
+        let out = r.cmd(Path::new(BIN)).env("CODEX_THREAD_ID", "t-1").env("CONDE_ADMIN_KEY", key).args(args).output().unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("admin commands are for the human only"), "{args:?}");
+    }
+
+    let (url, seen) = one_admin_answer(json!({"user": "ann", "email": "ann@dakai.io", "status": "invited", "disabled": false}));
+    let line = conde::admin::invite(&url, key, "Ann", "ann@dakai.io").unwrap();
+    assert_eq!(line, format!("ann <ann@dakai.io> on {url}: invited"));
+    let request = seen.join().unwrap();
+    assert!(request.starts_with("POST /v1/admin/users HTTP/1.1\r\n"), "{request}");
+    assert!(request.to_ascii_lowercase().contains(&format!("authorization: bearer {}", key.to_ascii_lowercase())), "{request}");
+    assert!(request.ends_with(r#"{"email":"ann@dakai.io","name":"Ann"}"#), "{request}");
+
+    let users = json!({"users": [
+        {"name": "ann", "email": "ann@dakai.io", "issuers": ["https://auth.conde.cloud/realms/dakai"], "disabled": false},
+        {"name": "bob", "email": null, "issuers": [], "disabled": true},
+    ]});
+    let (url, seen) = one_admin_answer(users);
+    let lines = conde::admin::list_users(&url, key).unwrap();
+    assert_eq!(
+        lines,
+        [
+            "ann\tann@dakai.io\thttps://auth.conde.cloud/realms/dakai\tenabled",
+            "bob\t-\tnot signed in yet\tdisabled",
+        ]
+    );
+    assert!(seen.join().unwrap().starts_with("GET /v1/admin/users HTTP/1.1\r\n"));
+    let e = conde::admin::invite("http://conde.example", key, "ann", "ann@dakai.io").unwrap_err().to_string();
+    assert!(e.starts_with("refusing to send the admin key over plain http"), "{e}");
+}
+
 /// The admin key never travels over plain http, except to this machine.
 #[test]
 fn admin_slack_refuses_plain_http_off_this_machine() {
@@ -1006,4 +1077,86 @@ fn admin_slack_refuses_plain_http_off_this_machine() {
         let e = conde::admin::set_slack(server, "k", "krisz", "U0ADMIN").unwrap_err().to_string();
         assert!(e.starts_with("refusing to send the admin key over plain http"), "{server}: {e}");
     }
+}
+
+/// `conde board move` against a real server: it refuses an alias that is not enrolled, an
+/// address that answers as another board (or does not know this host's key), and re-points an
+/// enrolled board whose old address answers with the move, keeping its key, host and account.
+#[test]
+fn board_move_repoints_an_enrolled_board_after_the_new_address_answers_as_it() {
+    let r = Root::new();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let d = Arc::new(conde::dispatch::Dispatcher::open_in_memory().unwrap());
+    let key = "conde_movetest0123456789abcdef0123456789abcdef";
+    let digest = conde_remote::token_digest(key);
+    d.with_tx(|c| conde::ops::hosts::insert_key(c, "tester", "testhost", &digest, "cli", "2026-10-28T00:00:00.000Z")).unwrap();
+    let (new, old) = rt.block_on(async {
+        let bind = || async { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap() };
+        // the board this test serves advertises the default name, `shared`
+        let new = conde::cloud::start_on(d.clone(), bind().await, conde_remote::ServerConfig::default()).await.unwrap();
+        let moved = conde_remote::ServerConfig { moved_to: Some(format!("http://{}", new.local_addr())), ..Default::default() };
+        let blank = Arc::new(conde::dispatch::Dispatcher::open_in_memory().unwrap());
+        let old = conde::cloud::start_on(blank, bind().await, moved).await.unwrap();
+        (new, old)
+    });
+    let (new_url, old_url) = (format!("http://{}", new.local_addr()), format!("http://{}", old.local_addr()));
+    let config = r.root.join("home/.config/conde");
+
+    let (ok, _, err) = r.conde(&["board", "move", "shared", &new_url]);
+    assert!(!ok);
+    assert!(err.starts_with("conde: no board 'shared' is enrolled on this host"), "{err}");
+
+    let enrolled = BoardConfig { server: old_url.clone(), host_id: "testhost".into(), owner: "tester".into(), key: key.into() };
+    boards::store(&boards::path_in(&config, "shared"), "shared", &enrolled).unwrap();
+    boards::store(&boards::path_in(&config, "dakai"), "dakai", &enrolled).unwrap();
+    // the old address answers only with the move, so the alias is the name to find; `dakai` is not
+    let (ok, _, err) = r.conde(&["board", "move", "dakai", &new_url]);
+    assert!(!ok);
+    assert!(err.contains(&format!("{new_url} is board 'shared', not 'dakai'; nothing changed")), "{err}");
+    assert_eq!(boards::load(&boards::path_in(&config, "dakai")).unwrap(), enrolled);
+    // an address that does not know the key
+    let stranger = BoardConfig { key: "conde_unknown".into(), ..enrolled.clone() };
+    boards::store(&boards::path_in(&config, "other"), "other", &stranger).unwrap();
+    let (ok, _, err) = r.conde(&["board", "move", "other", &new_url]);
+    assert!(!ok && err.contains("did not answer as board other with this host's key; nothing changed"), "{err}");
+
+    // a destination other than the one the old server names gets nothing, not even a connection
+    let decoy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    decoy.set_nonblocking(true).unwrap();
+    let decoy_url = format!("http://{}", decoy.local_addr().unwrap());
+    let (ok, _, err) = r.conde(&["board", "move", "shared", &decoy_url]);
+    assert!(!ok);
+    assert!(
+        err.contains(&format!("{old_url} says the board moved to {new_url}, not that it moved to {decoy_url}; nothing was sent to {decoy_url}")),
+        "{err}"
+    );
+    assert!(decoy.accept().is_err(), "the decoy was never contacted");
+    // an old address that does not answer with a move: refused unless the human trusts the new one
+    let (plain, other_rt) = {
+        let rt2 = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let d2 = d.clone();
+        let h = rt2.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            conde::cloud::start_on(d2, listener, conde_remote::ServerConfig::default()).await.unwrap()
+        });
+        (h, rt2)
+    };
+    let plain_url = format!("http://{}", plain.local_addr());
+    boards::store(&boards::path_in(&config, "plain"), "plain", &BoardConfig { server: plain_url.clone(), ..enrolled.clone() }).unwrap();
+    let (ok, _, err) = r.conde(&["board", "move", "plain", &new_url]);
+    assert!(!ok && err.contains("does not say the board moved") && err.contains("--trust-new-address"), "{err}");
+    let (ok, out, err) = r.conde(&["board", "move", "plain", &new_url, "--trust-new-address"]);
+    assert!(ok && out.starts_with(&format!("board plain moved: {plain_url} -> {new_url}")), "{out}{err}");
+    other_rt.block_on(plain.shutdown()).unwrap();
+
+    let (ok, out, err) = r.conde(&["board", "move", "shared", &new_url]);
+    assert!(ok, "{err}");
+    assert!(out.starts_with(&format!("board shared moved: {old_url} -> {new_url} (credential, account tester and host testhost kept)\n")), "{out}");
+    assert_eq!(boards::load(&boards::path_in(&config, "shared")).unwrap(), BoardConfig { server: new_url.clone(), ..enrolled.clone() });
+    let (ok, _, err) = r.conde(&["board", "move", "shared", &new_url]);
+    assert!(!ok && err.contains("is at") && err.contains("already; nothing changed"), "{err}");
+    rt.block_on(async {
+        new.shutdown().await.unwrap();
+        old.shutdown().await.unwrap();
+    });
 }

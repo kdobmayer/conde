@@ -560,8 +560,10 @@ pub struct UserRow {
     pub user_id: i64,
     pub name: String,
     pub disabled: bool,
-    /// Whether an Entra identity is bound to the user.
+    /// Whether any sign-in identity is bound to the user.
     pub bound: bool,
+    /// The sign-in email (the invite's, or the one sign-in reported).
+    pub email: Option<String>,
 }
 
 /// A browser session (unix seconds).
@@ -716,14 +718,28 @@ pub trait Tx {
     /// an agent of another owner posted or is a member. By agent, then message order.
     fn host_evidence(&self, owner_id: i64, host: &str) -> StoreResult<Vec<EvidenceRow>>;
 
-    // users, Entra identities and browser sign-in (times in unix seconds)
-    fn user_by_identity(&self, tid: &str, oid: &str) -> StoreResult<Option<UserRow>>;
+    // users, sign-in identities and browser sign-in (times in unix seconds)
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> StoreResult<Option<UserRow>>;
     fn user_by_name(&self, name: &str) -> StoreResult<Option<UserRow>>;
     fn user_by_id(&self, user_id: i64) -> StoreResult<Option<UserRow>>;
-    /// Binds (tid, oid) to the user, with the display-only profile.
-    fn bind_identity(&self, user_id: i64, tid: &str, oid: &str, display: Option<&str>, upn: Option<&str>)
+    /// The users whose email is `email`, compared ASCII case-insensitively; by user id.
+    fn users_by_email(&self, email: &str) -> StoreResult<Vec<UserRow>>;
+    /// Every user, by name.
+    fn users(&self) -> StoreResult<Vec<UserRow>>;
+    /// The issuers the user holds an identity of, sorted.
+    fn identity_issuers(&self, user_id: i64) -> StoreResult<Vec<String>>;
+    /// Binds (issuer, subject) to the user, with the display-only profile; a user holds at most
+    /// one identity per issuer.
+    fn bind_identity(
+        &self,
+        user_id: i64,
+        issuer: &str,
+        subject: &str,
+        display: Option<&str>,
+        upn: Option<&str>,
+    ) -> StoreResult<()>;
+    fn set_identity_profile(&self, issuer: &str, subject: &str, display: Option<&str>, upn: Option<&str>)
     -> StoreResult<()>;
-    fn set_identity_profile(&self, user_id: i64, display: Option<&str>, upn: Option<&str>) -> StoreResult<()>;
     /// Sets the user's disabled flag; returns the user's hosts. Disabling also deletes the
     /// user's browser sessions and announces the hosts as revoked on commit.
     fn set_user_disabled(&self, user_id: i64, disabled: bool) -> StoreResult<Vec<String>>;
@@ -746,8 +762,9 @@ pub trait Tx {
     fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>>;
     /// The sign-in email (`preferred_username`, else the `email` claim when that is no address).
     fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()>;
-    /// Fills every NULL email from the user's identity by the sign-in rule (`preferred_username`
-    /// when it holds an `@`); a stored email is never replaced. The number filled.
+    /// Fills every NULL email from the user's Entra identity by the sign-in rule
+    /// (`preferred_username`, the tenant-controlled UPN, when it holds an `@`; another issuer's
+    /// is unverified); a stored email is never replaced. The number filled.
     fn backfill_emails(&self) -> StoreResult<u64>;
     /// The Slack member id and its source (`env`, `lookup`, `admin`).
     fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()>;

@@ -11,7 +11,7 @@ use conde_remote::{BridgeClient, BridgeConfig, BridgeState, CallError, Inbound, 
 use serde_json::{Value, json};
 
 use super::Core;
-use crate::boards::BoardConfig;
+use crate::boards::{self, BoardConfig};
 use crate::protocol::v2::{BoardInfo, Mine, Published, op};
 use crate::protocol::{ErrorCode, Response};
 use crate::store::Tx;
@@ -32,6 +32,9 @@ pub enum Status {
     Stopped(String),
     /// The board file cannot be used.
     Broken(String),
+    /// The board answered that it moved to this URL; nothing is retried until the board file
+    /// points there (`conde board move`).
+    Moved(String),
 }
 
 pub struct BoardConn {
@@ -125,6 +128,7 @@ impl BoardConn {
             return Err(match self.status() {
                 Status::NotMigrated => format!("{}: not migrated (run conde setup)", self.alias),
                 Status::Stopped(why) | Status::Broken(why) => format!("{}: {why}", self.alias),
+                Status::Moved(url) => boards::moved_message(&self.alias, &url),
                 Status::Running => format!("{}: not connected", self.alias),
             });
         };
@@ -132,9 +136,18 @@ impl BoardConn {
             Ok(Ok((v, seq))) => serde_json::from_value(v)
                 .map(|r| (r, seq))
                 .map_err(|e| format!("{}: bad response frame: {e}", self.alias)),
-            Ok(Err(e)) => Err(format!("{}: {}", self.alias, describe_call(&e))),
+            Ok(Err(e)) => Err(call_failure(&self.alias, &e)),
             Err(_) => Err(format!("{}: no answer within {wait:?}", self.alias)),
         }
+    }
+}
+
+/// A failed call as the caller is told it: a moved board names its new address and the command
+/// that follows it.
+fn call_failure(alias: &str, e: &CallError) -> String {
+    match e {
+        CallError::Stopped(StopReason::Moved(url)) => boards::moved_message(alias, url),
+        other => format!("{alias}: {}", describe_call(other)),
     }
 }
 
@@ -152,6 +165,7 @@ pub fn describe_stop(reason: &StopReason) -> String {
         StopReason::Unauthorized => "stopped: the board rejected this host's credential (revoked?); re-enroll with conde login".into(),
         StopReason::Rejected { code, message } => format!("stopped: the board refused the connection ({code}: {message})"),
         StopReason::Shutdown => "stopped".into(),
+        StopReason::Moved(url) => format!("stopped: the board moved to {url}"),
     }
 }
 
@@ -254,7 +268,10 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
             let why = describe_stop(&reason);
             tracing::warn!(board = conn.alias, "{why}");
             core.mux.stop_client(&conn.alias, &client, &why);
-            conn.set_status(Status::Stopped(why));
+            conn.set_status(match reason {
+                StopReason::Moved(url) => Status::Moved(url),
+                _ => Status::Stopped(why),
+            });
             return;
         }
         if client.state() == BridgeState::Connected && client.connects() != seen_connects {
@@ -428,7 +445,7 @@ pub async fn rpc(conn: &BoardConn, request: Value, wait: Duration) -> Result<Res
     let url = crate::credentials::rpc_url(&cfg.server).map_err(|e| format!("{e:#}"))?;
     match conde_remote::rpc(&url, &cfg.key, request, wait).await {
         Ok(v) => serde_json::from_value(v).map_err(|e| format!("{}: bad response: {e}", conn.alias)),
-        Err(e) => Err(format!("{}: {}", conn.alias, describe_call(&e))),
+        Err(e) => Err(call_failure(&conn.alias, &e)),
     }
 }
 

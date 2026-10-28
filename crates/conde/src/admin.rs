@@ -1,5 +1,6 @@
-//! Commands that do not go through the daemon: `conde server`, `conde enroll`
-//! and `conde admin key` (run on the board directly, by the human only).
+//! Commands that do not go through the daemon: `conde server`, `conde enroll`, `conde admin key`
+//! (run on the board directly) and `conde admin slack` and `conde admin user` (through the
+//! server's admin API), by the human only.
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -72,22 +73,18 @@ pub fn key_create(data: Option<PathBuf>, user: &str, host: &str, label: &str) ->
     Ok(0)
 }
 
-/// `conde admin slack <owner> <member-id> --server <url>`: the admin API sets the owner's Slack
-/// member id (`slack_source = admin`) with the admin key from `CONDE_ADMIN_KEY` or a prompt.
-pub fn slack(server: &str, owner: &str, member_id: &str) -> anyhow::Result<i32> {
-    let key = match std::env::var("CONDE_ADMIN_KEY").ok().filter(|k| !k.trim().is_empty()) {
-        Some(k) => k.trim().to_string(),
-        None => credentials::prompt_secret(
-            &format!("admin key for {server}: "),
-            "admin slack needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
-        )?,
-    };
-    println!("{}", set_slack(server, &key, owner, member_id)?);
-    Ok(0)
+/// The admin key for `server`: `CONDE_ADMIN_KEY` (or the file `CONDE_ADMIN_KEY_FILE` names), else
+/// a prompt at a terminal.
+fn admin_key(server: &str, no_tty: &'static str) -> anyhow::Result<String> {
+    match conde_remote::secret_env("CONDE_ADMIN_KEY")?.filter(|k| !k.trim().is_empty()) {
+        Some(k) => Ok(k.trim().to_string()),
+        None => credentials::prompt_secret(&format!("admin key for {server}: "), no_tty),
+    }
 }
 
-/// `POST /v1/admin/users/<owner>/slack {member_id}` with the admin key; the line to print.
-pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyhow::Result<String> {
+/// One admin API request (`path` under the server's origin) with the admin key: the answer's
+/// JSON, or its message as the error. The key never travels over plain http off this machine.
+fn admin_request(server: &str, key: &str, path: &str, body: Option<serde_json::Value>) -> anyhow::Result<serde_json::Value> {
     let base = credentials::rpc_url(server)?;
     let parsed = reqwest::Url::parse(&base)?;
     let host = parsed.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
@@ -96,24 +93,92 @@ pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyho
     if parsed.scheme() == "http" && !loopback {
         bail!("refusing to send the admin key over plain http to {server}; use https://");
     }
-    let origin = base.trim_end_matches("/v1/rpc");
-    let url = format!("{origin}/v1/admin/users/{}/slack", owner.trim().to_lowercase());
+    let url = format!("{}{path}", base.trim_end_matches("/v1/rpc"));
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let (status, body) = runtime.block_on(async {
+    let (status, answer) = runtime.block_on(async {
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(crate::login::tls()?)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let r = client.post(&url).bearer_auth(key).json(&serde_json::json!({"member_id": member_id})).send().await?;
+        let request = match body {
+            Some(b) => client.post(&url).json(&b),
+            None => client.get(&url),
+        };
+        let r = request.bearer_auth(key).send().await?;
         let status = r.status();
         anyhow::Ok((status, r.json::<serde_json::Value>().await.unwrap_or_default()))
     })?;
     if !status.is_success() {
-        bail!("{} ({status})", body["message"].as_str().unwrap_or("the server refused"));
+        bail!("{} ({status})", answer["message"].as_str().unwrap_or("the server refused"));
     }
-    let user = body["user"].as_str().unwrap_or(owner);
+    Ok(answer)
+}
+
+/// `conde admin slack <owner> <member-id> --server <url>`: the admin API sets the owner's Slack
+/// member id (`slack_source = admin`) with the admin key from `CONDE_ADMIN_KEY` or a prompt.
+pub fn slack(server: &str, owner: &str, member_id: &str) -> anyhow::Result<i32> {
+    let key = admin_key(server, "admin slack needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal")?;
+    println!("{}", set_slack(server, &key, owner, member_id)?);
+    Ok(0)
+}
+
+/// `POST /v1/admin/users/<owner>/slack {member_id}` with the admin key; the line to print.
+pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyhow::Result<String> {
+    let path = format!("/v1/admin/users/{}/slack", owner.trim().to_lowercase());
+    let answer = admin_request(server, key, &path, Some(serde_json::json!({"member_id": member_id})))?;
+    let user = answer["user"].as_str().unwrap_or(owner);
     Ok(format!("slack member id of {user} on {server}: {member_id} (set by the admin)"))
+}
+
+/// `conde admin user invite <name> <email> --server <url>`: creates the user the first sign-in
+/// with this verified email lands on.
+pub fn user_invite(server: &str, name: &str, email: &str) -> anyhow::Result<i32> {
+    let key = admin_key(server, "admin user invite needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal")?;
+    println!("{}", invite(server, &key, name, email)?);
+    Ok(0)
+}
+
+/// `POST /v1/admin/users {name, email}` with the admin key; the line to print.
+pub fn invite(server: &str, key: &str, name: &str, email: &str) -> anyhow::Result<String> {
+    let body = serde_json::json!({"name": name, "email": email});
+    let answer = admin_request(server, key, "/v1/admin/users", Some(body))?;
+    let user = answer["user"].as_str().unwrap_or(name);
+    let email = answer["email"].as_str().unwrap_or(email);
+    let status = answer["status"].as_str().unwrap_or("invited");
+    Ok(format!("{user} <{email}> on {server}: {status}"))
+}
+
+/// `conde admin user list --server <url>`.
+pub fn user_list(server: &str) -> anyhow::Result<i32> {
+    let key = admin_key(server, "admin user list needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal")?;
+    let lines = list_users(server, &key)?;
+    if lines.is_empty() {
+        eprintln!("(no users)");
+    }
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(0)
+}
+
+/// `GET /v1/admin/users` with the admin key: one line per user, `name  email  issuers  state`.
+pub fn list_users(server: &str, key: &str) -> anyhow::Result<Vec<String>> {
+    let answer = admin_request(server, key, "/v1/admin/users", None)?;
+    let users = answer["users"].as_array().cloned().unwrap_or_default();
+    Ok(users
+        .iter()
+        .map(|u| {
+            let issuers: Vec<&str> = u["issuers"].as_array().into_iter().flatten().filter_map(|i| i.as_str()).collect();
+            format!(
+                "{}\t{}\t{}\t{}",
+                u["name"].as_str().unwrap_or(""),
+                u["email"].as_str().unwrap_or("-"),
+                if issuers.is_empty() { "not signed in yet".to_string() } else { issuers.join(",") },
+                if u["disabled"].as_bool() == Some(true) { "disabled" } else { "enabled" },
+            )
+        })
+        .collect())
 }
 
 pub fn key_revoke(data: Option<PathBuf>, host: Option<&str>, id: Option<&str>) -> anyhow::Result<i32> {
@@ -147,6 +212,21 @@ pub fn key_list(data: Option<PathBuf>) -> anyhow::Result<i32> {
     if keys.is_empty() {
         eprintln!("(no keys)");
     }
+    Ok(0)
+}
+
+/// `conde board move <alias> <url>`: re-points an enrolled board at its new address (see
+/// [`boards::move_board`]) and has the running bridge reconnect there.
+pub fn board_move(alias: &str, url: &str, trust_new: bool) -> anyhow::Result<i32> {
+    let config = boards::config_dir()?;
+    let (old, new) = boards::move_board(&config, alias, url, trust_new, &mut boards::moved_probe, &mut |server, key| {
+        boards::board_info(server, key)
+    })?;
+    println!(
+        "board {alias} moved: {} -> {} (credential, account {} and host {} kept)",
+        old.server, new.server, new.owner, new.host_id
+    );
+    println!("{}", reload_bridge(&paths::socket_path(), alias));
     Ok(0)
 }
 

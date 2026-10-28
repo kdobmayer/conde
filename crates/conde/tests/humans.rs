@@ -154,7 +154,7 @@ fn race(boards: Vec<Arc<Dispatcher>>, uid: i64) {
 }
 
 #[test]
-fn a_user_made_by_the_admin_key_or_a_sign_in_gets_a_human_name() {
+fn a_user_made_by_the_admin_key_an_invite_or_a_sign_in_gets_a_human_name() {
     let b = Board::new();
     b.d.share("dakai");
     // `conde admin key create` and the admin API's key mint
@@ -170,15 +170,18 @@ fn a_user_made_by_the_admin_key_or_a_sign_in_gets_a_human_name() {
     web.ensure_user("bela").unwrap();
     assert_eq!(humans_of(&b.d, "bela").len(), 1);
     let person = |oid: &str| Identity {
-        tid: "t".into(),
-        oid: oid.into(),
+        issuer: "https://login.microsoftonline.com/t/v2.0".into(),
+        subject: oid.into(),
         display_name: None,
         preferred_username: Some(format!("{oid}@dakai.io")),
         email: Some(format!("{oid}@dakai.io")),
+        verified_email: Some(format!("{oid}@dakai.io")),
     };
     web.create_user(&person("cili"), "cili").unwrap();
     web.bind_identity("dora", &person("dora")).unwrap();
-    for owner in ["cili", "dora"] {
+    // the admin API's invite
+    web.invite_user("ema", "ema@dakai.io").unwrap();
+    for owner in ["cili", "dora", "ema"] {
         assert_eq!(humans_of(&b.d, owner).len(), 1, "{owner}");
     }
     // the sign-in stored the email and asked for a lookup
@@ -199,6 +202,36 @@ fn the_server_start_gives_every_owner_a_human_name() {
     });
     assert_eq!(humans_of(&b.d, "krisz").len(), 1);
     assert_eq!(humans_of(&b.d, "zed").len(), 1);
+    rt.block_on(handle.shutdown()).unwrap();
+}
+
+/// A server that moved serves nobody, so its start writes nothing: no human names, no emails.
+#[test]
+fn a_moved_server_start_writes_nothing() {
+    let b = Board::new();
+    b.other("zed", "zbox");
+    b.d.with_tx(|tx| {
+        let zed = tx.user_id("zed")?.unwrap();
+        Ok(tx.bind_identity(zed, "https://login.microsoftonline.com/t/v2.0", "oid-zed", None, Some("zed@dakai.io"))?)
+    })
+    .unwrap();
+    let email = |d: &std::sync::Arc<conde::dispatch::Dispatcher>| d.with_conn(|tx| tx.user_by_name("zed")).unwrap().unwrap().email;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let moved = conde_remote::ServerConfig { moved_to: Some("https://dakai.conde.cloud".into()), ..Default::default() };
+    let handle = rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        conde::cloud::start_on(b.d.clone(), listener, moved).await.unwrap()
+    });
+    assert!(humans_of(&b.d, "zed").is_empty());
+    assert_eq!(email(&b.d), None);
+    rt.block_on(handle.shutdown()).unwrap();
+    // the same board started unmoved does both
+    let handle = rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        conde::cloud::start_on(b.d.clone(), listener, conde_remote::ServerConfig::default()).await.unwrap()
+    });
+    assert_eq!(humans_of(&b.d, "zed").len(), 1);
+    assert_eq!(email(&b.d).as_deref(), Some("zed@dakai.io"));
     rt.block_on(handle.shutdown()).unwrap();
 }
 

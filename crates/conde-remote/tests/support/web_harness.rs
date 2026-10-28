@@ -58,6 +58,10 @@ struct Person {
     name: String,
     /// The `email` claim, when the token carries one.
     email: Option<String>,
+    /// The `email_verified` claim, when the token carries one.
+    email_verified: Option<bool>,
+    /// Whether the token carries Entra's `tid` and `oid` claims (a Keycloak token does not).
+    entra: bool,
 }
 
 struct Grant {
@@ -241,11 +245,18 @@ async fn token(
         "sub": format!("pairwise-{}", p.oid),
         "iat": now - 5, "nbf": now - 5, "exp": exp,
         "nonce": if spoil == Spoil::Nonce { "replayed".to_string() } else { grant.nonce },
-        "tid": p.tid, "oid": p.oid, "name": p.name, "preferred_username": p.upn,
-        "ver": "2.0",
+        "name": p.name, "preferred_username": p.upn,
     });
+    if p.entra {
+        claims["tid"] = json!(p.tid);
+        claims["oid"] = json!(p.oid);
+        claims["ver"] = json!("2.0");
+    }
     if let Some(email) = &p.email {
         claims["email"] = json!(email);
+    }
+    if let Some(verified) = p.email_verified {
+        claims["email_verified"] = json!(verified);
     }
     axum::Json(json!({
         "access_token": "at", "token_type": "Bearer", "expires_in": 3600, "scope": "openid profile email",
@@ -266,6 +277,8 @@ async fn start_idp() -> Arc<Idp> {
             upn: "Krisztian.Dobmayer@dakai.example".into(),
             name: "Krisztián Dobmayer".into(),
             email: None,
+            email_verified: None,
+            entra: true,
         }),
         spoil: Mutex::new(Spoil::None),
         grants: Mutex::new(HashMap::new()),
@@ -305,15 +318,32 @@ struct Env<S> {
     clock: Arc<AtomicI64>,
 }
 
+/// The provider's default person, invited by [`Env::with`] under this name.
+const INVITED: (&str, &str) = ("krisztian-dobmayer", "krisztian.dobmayer@dakai.example");
+
 impl<S: WebStore + 'static> Env<S> {
     /// The sign-in and keys routes plus the admin API over `store`, against a fresh fake
-    /// provider, with a test clock starting at [`START`].
+    /// provider (an Entra tenant) whose default person is invited, with a test clock starting at
+    /// [`START`].
     async fn with(store: Arc<S>) -> Env<S> {
         Env::with_config(store, |_| {}).await
     }
 
     /// [`Env::with`] with the configuration tweaked first.
     async fn with_config(store: Arc<S>, tweak: impl FnOnce(&mut WebConfig)) -> Env<S> {
+        let env = Env::uninvited(store, tweak).await;
+        env.invite(INVITED.0, INVITED.1).await;
+        env
+    }
+
+    /// Invites `name` with `email`, as the admin API does.
+    async fn invite(&self, name: &str, email: &str) {
+        let (store, name, email) = (self.store.clone(), name.to_string(), email.to_string());
+        tokio::task::spawn_blocking(move || store.invite_user(&name, &email).unwrap()).await.unwrap();
+    }
+
+    /// [`Env::with_config`] without the invite: nobody may sign in yet.
+    async fn uninvited(store: Arc<S>, tweak: impl FnOnce(&mut WebConfig)) -> Env<S> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let idp = start_idp().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -330,20 +360,20 @@ impl<S: WebStore + 'static> Env<S> {
         let registry = Arc::new(FakeRegistry::default());
         let clock = Arc::new(AtomicI64::new(START));
         let c = clock.clone();
+        let admin = web::AdminState::with_clock(
+            store.clone(),
+            registry.clone(),
+            ADMIN_KEY,
+            Some(&config),
+            Arc::new(|| START),
+        )
+        .unwrap();
         let state = WebState::with_clock(
             config,
             store.clone(),
             registry.clone(),
             Arc::new(move || c.load(Ordering::SeqCst)),
         );
-        let admin = web::AdminState::with_clock(
-            store.clone(),
-            registry.clone(),
-            ADMIN_KEY,
-            Some(TENANT.into()),
-            Arc::new(|| START),
-        )
-        .unwrap();
         let app = web::router(state).merge(web::admin_router(admin));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Env {

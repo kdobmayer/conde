@@ -125,12 +125,13 @@ CREATE TABLE IF NOT EXISTS endpoints(
     PRIMARY KEY (host_id, kind, target)
 );
 CREATE TABLE IF NOT EXISTS identities(
-    tid TEXT NOT NULL,
-    oid TEXT NOT NULL,
-    user_id INTEGER NOT NULL UNIQUE REFERENCES users(user_id),
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(user_id),
     display_name TEXT,
     preferred_username TEXT,
-    PRIMARY KEY (tid, oid)
+    PRIMARY KEY (issuer, subject),
+    UNIQUE (user_id, issuer)
 );
 CREATE TABLE IF NOT EXISTS web_sessions(
     id_digest TEXT PRIMARY KEY,

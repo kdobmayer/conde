@@ -131,6 +131,11 @@ pub fn check_pin(path: &Path, alias: &str, server: &str, owner: Option<&str>) ->
 /// pinned alias.
 pub fn store(path: &Path, alias: &str, cfg: &BoardConfig) -> anyhow::Result<()> {
     check_pin(path, alias, &cfg.server, Some(&cfg.owner))?;
+    write(path, alias, cfg)
+}
+
+/// Write a board file atomically, mode 0600 in a 0700 directory.
+fn write(path: &Path, alias: &str, cfg: &BoardConfig) -> anyhow::Result<()> {
     let dir = path.parent().context("board path has no directory")?;
     crate::private::create_dir(dir)?;
     let tmp = dir.join(format!(".{alias}.json.{}", std::process::id()));
@@ -201,7 +206,12 @@ pub fn board_info(server: &str, key: &str) -> anyhow::Result<BoardInfo> {
             .await
             .with_context(|| format!("asking {server} for board.info"))?;
         let status = response.status();
-        let body: Value = response.json().await.unwrap_or_default();
+        let location = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let bytes = response.bytes().await.unwrap_or_default();
+        if let Some(url) = conde_remote::moved_to(status.as_u16(), location.as_deref(), &bytes) {
+            bail!("{server} answered that the board moved to {url}");
+        }
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
         if !status.is_success() && body["error"].is_null() {
             bail!("{server} refused board.info: HTTP {status}");
         }
@@ -212,6 +222,95 @@ pub fn board_info(server: &str, key: &str) -> anyhow::Result<BoardInfo> {
         bail!("{server} refused board.info: {message}");
     }
     serde_json::from_value(answer["result"].clone()).map_err(|e| anyhow!("{server} answered board.info without its fields: {e}"))
+}
+
+/// What a host is told when its board answered that it moved.
+pub fn moved_message(alias: &str, url: &str) -> String {
+    format!("board {alias} moved to {url}; run: conde board move {alias} {url}")
+}
+
+/// Where `server` says its board moved: `POST /v1/rpc` without any credential, so nothing secret
+/// leaves this host; the 308's address, or None for any other answer.
+pub fn moved_probe(server: &str) -> anyhow::Result<Option<String>> {
+    let url = format!("{}/v1/rpc", crate::login::origin(server)?);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(crate::login::tls()?)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let response = client.post(&url).json(&json!({})).send().await.with_context(|| format!("asking {server} whether it moved"))?;
+        let status = response.status();
+        let location = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let bytes = response.bytes().await.unwrap_or_default();
+        anyhow::Ok(conde_remote::moved_to(status.as_u16(), location.as_deref(), &bytes))
+    })
+}
+
+/// `conde board move <alias> <url>`: points the enrolled board `alias` (under `config`) at
+/// `new_server`, keeping its credential, host and account, so this host's publications (kept
+/// by alias) stay. The host key goes to `new_server` only once the old server answered, without
+/// it, that the board moved there (same scheme, host and port), unless `trust_new` (the human's
+/// `--trust-new-address`). Saved only when the new server then answers `board.info` with the key
+/// as the same board: the alias (the name the old server advertises, when trusted and it still
+/// answers), this account and this host. Returns the old and the new configuration.
+pub fn move_board(
+    config: &Path,
+    alias: &str,
+    new_server: &str,
+    trust_new: bool,
+    probe: &mut dyn FnMut(&str) -> anyhow::Result<Option<String>>,
+    info: &mut dyn FnMut(&str, &str) -> anyhow::Result<BoardInfo>,
+) -> anyhow::Result<(BoardConfig, BoardConfig)> {
+    check_shared_alias(alias)?;
+    let path = path_in(config, alias);
+    if !path.exists() {
+        bail!(
+            "no board '{alias}' is enrolled on this host (enrolled: {}); conde board move only re-points an enrolled board",
+            list_or_none(&config.join("boards"))?
+        );
+    }
+    let old = load(&path)?;
+    crate::login::origin(new_server)?;
+    if credentials::same_server(&old.server, new_server)? {
+        bail!("{alias} is at {} already; nothing changed", old.server);
+    }
+    let probed = probe(&old.server);
+    let moved_here = matches!(&probed, Ok(Some(url)) if credentials::same_server(url, new_server).unwrap_or(false));
+    let said = match probed {
+        Ok(Some(url)) => format!("says the board moved to {url}"),
+        Ok(None) => "does not say the board moved".to_string(),
+        Err(e) => format!("did not answer ({e:#})"),
+    };
+    let expected = if moved_here {
+        alias.to_string()
+    } else if trust_new {
+        info(&old.server, &old.key).map(|i| i.name).unwrap_or_else(|_| alias.to_string())
+    } else {
+        bail!(
+            "{} {said}, not that it moved to {new_server}; nothing was sent to {new_server} and nothing changed (to point \
+             {alias} there anyway, add --trust-new-address)",
+            old.server
+        );
+    };
+    let found = info(new_server, &old.key)
+        .with_context(|| format!("{new_server} did not answer as board {expected} with this host's key; nothing changed"))?;
+    if found.name != expected {
+        bail!("{new_server} is board '{}', not '{expected}'; nothing changed", found.name);
+    }
+    if !found.owner.eq_ignore_ascii_case(&old.owner) || found.host != old.host_id {
+        bail!(
+            "{new_server} knows this host's key as {}@{}, not {}@{}; nothing changed",
+            found.owner,
+            found.host,
+            old.owner,
+            old.host_id
+        );
+    }
+    let new = BoardConfig { server: new_server.to_string(), ..old.clone() };
+    write(&path, alias, &new)?;
+    Ok((old, new))
 }
 
 // --- the same files under an explicit config directory (the daemon, in-process tests) ----

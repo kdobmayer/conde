@@ -9,7 +9,7 @@ One option applies to most commands:
 
 | Option | Meaning |
 |---|---|
-| `--board <ALIAS>` | The board: `local`, or a shared board's alias (the workspace name). Names and channels default to this host's default board; a message id carries its own board (`dakai:01M...`), and a bare id is local. |
+| `--board <ALIAS>` | The board: `local`, or a shared board's alias (the workspace name). Names and channels default to this host's default board; a message id carries its own board (`acme:01M...`), and a bare id is local. |
 
 ## Messages
 

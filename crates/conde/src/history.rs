@@ -2321,6 +2321,25 @@ fn validate(
     Ok(())
 }
 
+/// The host credential under `config`: the default board's file when that is a shared board,
+/// else the only enrolled board's, else the v1 credentials file.
+fn default_credentials(config: &Path) -> Option<PathBuf> {
+    let enrolled = crate::boards::enrolled_in(&config.join("boards")).unwrap_or_default();
+    let default = crate::boards::default_in(config);
+    let shared = if enrolled.contains(&default) {
+        Some(default)
+    } else if enrolled.len() == 1 {
+        enrolled.into_iter().next()
+    } else {
+        None
+    };
+    shared
+        .map(|alias| crate::boards::path_in(config, &alias))
+        .into_iter()
+        .chain([crate::boards::legacy_path(config)])
+        .find(|p| p.exists())
+}
+
 /// `conde history copy`: the H3 copy from the purge's saved rows into the local board. The
 /// retained class (b) rows are verified on the board of `credentials` (default: the enrolled
 /// one) as `verify_as` (default: this session's address).
@@ -2335,11 +2354,7 @@ pub fn copy_main(
 ) -> anyhow::Result<i32> {
     let creds_path = match credentials {
         Some(p) => Some(p),
-        None => {
-            let dakai = crate::boards::path("dakai")?;
-            let legacy = crate::credentials::path()?;
-            [dakai, legacy].into_iter().find(|p| p.exists())
-        }
+        None => default_credentials(&crate::boards::config_dir()?),
     };
     let actor = verify_as.or_else(|| {
         crate::identity::derive_address(
@@ -2439,4 +2454,29 @@ pub fn prune_main(snapshot: &Path, out: Option<&Path>) -> anyhow::Result<i32> {
         );
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_credentials;
+
+    #[test]
+    fn default_credentials_follow_the_default_then_the_only_board_then_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = dir.path();
+        assert_eq!(default_credentials(c), None);
+        fs_write(&c.join("credentials"));
+        assert_eq!(default_credentials(c), Some(c.join("credentials")));
+        fs_write(&c.join("boards/acme.json"));
+        assert_eq!(default_credentials(c), Some(c.join("boards/acme.json")));
+        fs_write(&c.join("boards/beta.json"));
+        assert_eq!(default_credentials(c), Some(c.join("credentials")));
+        std::fs::write(c.join("default-board"), "beta\n").unwrap();
+        assert_eq!(default_credentials(c), Some(c.join("boards/beta.json")));
+    }
+
+    fn fs_write(p: &std::path::Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "{}").unwrap();
+    }
 }

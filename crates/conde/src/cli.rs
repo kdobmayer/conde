@@ -24,8 +24,8 @@ struct Cli {
     /// Act as this registered name (the human only, local socket only).
     #[arg(long = "from", global = true, hide = true)]
     from: Option<String>,
-    /// The board: `local`, or a shared board's alias (e.g. dakai). Names and channels default
-    /// to this host's default board; a message id carries its own board (dakai:01M...), and a
+    /// The board: `local`, or a shared board's alias (e.g. acme). Names and channels default
+    /// to this host's default board; a message id carries its own board (acme:01M...), and a
     /// bare id is local.
     #[arg(long = "board", global = true, value_name = "ALIAS")]
     board: Option<String>,
@@ -430,7 +430,8 @@ enum HistoryCmd {
         #[arg(long, value_name = "FILE")]
         skip_agents: Option<PathBuf>,
         /// Host credential for verifying the class (b) rows kept on the shared board (default:
-        /// boards/dakai.json, else the v1 credentials file).
+        /// the default board's file when it is a shared one, else the only enrolled board's, else
+        /// the v1 credentials file).
         #[arg(long, value_name = "FILE")]
         credentials: Option<PathBuf>,
         /// The actor that reads them back, a party to every kept DM (default: this session).

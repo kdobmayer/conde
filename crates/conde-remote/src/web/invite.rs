@@ -94,7 +94,7 @@ const NOT_OURS: &str =
 const NOT_OURS_EMAIL: &str =
     "the sign-in server already has an account with this email that this invitation did not create";
 
-/// The public origin's first host label (`https://dakai.conde.cloud` gives `dakai`).
+/// The public origin's first host label (`https://acme.conde.cloud` gives `acme`).
 pub(crate) fn workspace_of(public_url: &str) -> String {
     let host = public_url
         .split_once("://")

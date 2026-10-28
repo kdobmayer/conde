@@ -70,7 +70,7 @@ pub fn is_alias(alias: &str) -> bool {
 pub fn check_shared_alias(alias: &str) -> anyhow::Result<()> {
     if alias == LOCAL_BOARD {
         bail!(
-            "'local' names this machine's own board; enroll a shared board under another alias (e.g. --board dakai)"
+            "'local' names this machine's own board; enroll a shared board under another alias (e.g. --board acme)"
         );
     }
     if !is_alias(alias) {

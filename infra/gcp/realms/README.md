@@ -36,6 +36,9 @@ A conde server reads its client secret at start: after a new version, `kubectl -
 deployment/conde`. Two secrets this root reads are in its state, because their provider fields are not write-only:
 `resend-api-key` (the SMTP password of every realm) and `<name>-google-oauth-client-secret`.
 
+Demo's user profile (`demo.tf`) deviates from Keycloak's default on purpose: first and last name are optional (the
+default requires them from the user), so an invited user gets no "complete your profile" form at first sign-in.
+
 ## Replacing the bootstrap admin
 
 1. Read the temporary password: `gcloud secrets versions access latest --secret keycloak-admin-temp-password

@@ -42,8 +42,9 @@ resource "google_secret_manager_secret_version" "conde_admin_demo" {
   }
 }
 
-# Keycloak 26's default profile as the realm had it, plus conde_invite: with unmanaged attributes disabled, Keycloak
-# drops an attribute the profile does not declare. Admins only, so the account console neither shows nor edits it.
+# Keycloak 26's default profile, plus conde_invite: with unmanaged attributes disabled, Keycloak drops an attribute the
+# profile does not declare. Admins only, so the account console neither shows nor edits it. First and last name are
+# optional, so an invited user goes from the password straight to the board.
 resource "keycloak_realm_user_profile" "demo" {
   realm_id = keycloak_realm.this["demo"].id
 
@@ -88,9 +89,8 @@ resource "keycloak_realm_user_profile" "demo" {
   }
 
   attribute {
-    name               = "firstName"
-    display_name       = "$${firstName}"
-    required_for_roles = ["user"]
+    name         = "firstName"
+    display_name = "$${firstName}"
 
     validator {
       name   = "length"
@@ -107,9 +107,8 @@ resource "keycloak_realm_user_profile" "demo" {
   }
 
   attribute {
-    name               = "lastName"
-    display_name       = "$${lastName}"
-    required_for_roles = ["user"]
+    name         = "lastName"
+    display_name = "$${lastName}"
 
     validator {
       name   = "length"

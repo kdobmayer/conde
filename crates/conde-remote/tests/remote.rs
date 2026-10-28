@@ -1862,3 +1862,109 @@ fn a_move_is_read_from_the_body_else_the_location() {
         None
     );
 }
+
+/// A TCP relay to `upstream` whose first `lose` connections pass the WebSocket handshake and
+/// then lose every frame the client sends: the hello never reaches the server, as on the
+/// reconnects of a server rollout.
+async fn hello_losing_relay(upstream: SocketAddr, lose: usize) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind(local()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        for n in 0.. {
+            let Ok((client, _)) = listener.accept().await else {
+                return;
+            };
+            let server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+            let (mut client_rd, mut client_wr) = client.into_split();
+            let (mut server_rd, mut server_wr) = server.into_split();
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut server_rd, &mut client_wr).await;
+            });
+            tokio::spawn(async move {
+                if n >= lose {
+                    let _ = tokio::io::copy(&mut client_rd, &mut server_wr).await;
+                    return;
+                }
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match client_rd.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => head.extend_from_slice(&buf[..k]),
+                    }
+                }
+                let end = head.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                server_wr.write_all(&head[..end]).await.unwrap();
+                while let Ok(k) = client_rd.read(&mut buf).await {
+                    if k == 0 {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_hello_is_closed_as_a_timeout_not_a_refusal() {
+    let source = Arc::new(FakeSource::default());
+    let config = ServerConfig {
+        hello_timeout: Duration::from_millis(200),
+        ..test_config()
+    };
+    let server = start_server(local(), config, source.clone()).await;
+    let mut ws = raw_ws(server.local_addr(), "tok-a").await.unwrap();
+    let err = recv_json(&mut ws).await.expect("error frame");
+    assert_eq!(
+        (err["type"].as_str(), err["code"].as_str()),
+        (Some("error"), Some("hello_timeout")),
+        "{err}"
+    );
+    assert_eq!(recv_json(&mut ws).await, None, "closed after the error");
+    server.shutdown().await.unwrap();
+}
+
+/// The incident of a rollout: the reconnect's hello is lost, the server times it out, and the
+/// bridge reconnects instead of stopping for good.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_hello_is_retried_until_the_bridge_connects() {
+    let source = Arc::new(FakeSource::default());
+    let config = ServerConfig {
+        hello_timeout: Duration::from_millis(200),
+        ..test_config()
+    };
+    let server = start_server(local(), config, source.clone()).await;
+    let relay = hello_losing_relay(server.local_addr(), 2).await;
+    let (client, _rx) = start_client(client_config(relay, "tok-a", "host-a", "i-lost"));
+    wait_until("a hello that reached the server", || {
+        !source.state().fence_calls.is_empty()
+    })
+    .await;
+    assert_eq!(client.state(), BridgeState::Connected);
+    assert_eq!(
+        client.connects(),
+        3,
+        "two lost hellos, then the third connection"
+    );
+    server.shutdown().await.unwrap();
+}
+
+/// A refused protocol is a verdict: the bridge stops and does not retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_protocol_still_stops_the_bridge() {
+    let source = Arc::new(FakeSource::default());
+    let config = ServerConfig {
+        min_proto: 2,
+        ..test_config()
+    };
+    let server = start_server(local(), config, source.clone()).await;
+    let (client, _rx) = start_client(client_config(server.local_addr(), "tok-a", "host-a", "i-1"));
+    let reason = tokio::time::timeout(WAIT, client.stopped()).await.unwrap();
+    assert!(
+        matches!(reason, StopReason::Rejected { ref code, .. } if code == "bad_hello"),
+        "{reason:?}"
+    );
+    assert_eq!(client.connects(), 1, "not retried");
+    server.shutdown().await.unwrap();
+}

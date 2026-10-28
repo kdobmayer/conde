@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval_at, timeout};
 
-use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HOST_MISMATCH};
+use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HELLO_TIMEOUT, CODE_HOST_MISMATCH};
 use crate::{
     Admission, Authentication, Authenticator, Dispatcher, Endpoint, Hello, NotificationSource,
     Outcome, PROTO_V2, Polled, Principal, Recorded, Routes, SourceEvent,
@@ -702,7 +702,12 @@ async fn run_bridge(
             Err(e) => Err(e),
         },
         Ok(_) => Err("expected a hello text frame".to_owned()),
-        Err(_) => Err("no hello before the timeout".to_owned()),
+        Err(_) => {
+            // Not a verdict on the bridge: it reconnects, as after a lost connection.
+            tracing::warn!(host = %principal.host_id, "no hello within {:?}", shared.config.hello_timeout);
+            let why = "no hello before the timeout";
+            return close_with_error(&mut tx, CODE_HELLO_TIMEOUT, why).await;
+        }
     };
     let hello = match hello {
         Ok(h) => h,

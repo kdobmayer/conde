@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use semver::Version;
 use sha2::{Digest, Sha256};
 
 use crate::setup::{self, Env, Host};
@@ -50,29 +51,32 @@ pub fn asset_name(os: &str, arch: &str, translated: bool) -> Option<&'static str
     }
 }
 
-/// A release version without its `v`; Err unless it has install.sh's shape.
-pub fn normalize_version(raw: &str) -> anyhow::Result<String> {
+/// A release version, with or without its `v`; Err unless it is a SemVer version.
+pub fn parse_version(raw: &str) -> anyhow::Result<Version> {
     let v = raw.trim();
-    let v = v.strip_prefix('v').unwrap_or(v);
-    let shape = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$").unwrap();
-    if !shape.is_match(v) {
-        bail!("not a release version: '{raw}'");
-    }
-    Ok(v.to_string())
+    Version::parse(v.strip_prefix('v').unwrap_or(v))
+        .with_context(|| format!("not a release version: '{raw}'"))
 }
 
-/// The release number of a version (`0.2.0-rc.1` -> 0.2.0), for ordering.
-pub fn release_number(v: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = v.splitn(3, '.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let rest = parts.next()?;
-    let patch = rest
-        .split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()?;
-    Some((major, minor, patch))
+/// What `conde update` does about a release.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// The installed binary is that release.
+    Current,
+    /// The installed binary is newer than the latest release, and no version was named.
+    Newer,
+    Install,
+}
+
+/// By SemVer precedence (a prerelease before its release, build metadata ignored); `named`:
+/// the human asked for this version (`--version`), which may go anywhere.
+pub fn plan(installed: &str, wanted: &str, named: bool) -> anyhow::Result<Plan> {
+    let (installed, wanted) = (parse_version(installed)?, parse_version(wanted)?);
+    Ok(match wanted.cmp_precedence(&installed) {
+        std::cmp::Ordering::Equal => Plan::Current,
+        std::cmp::Ordering::Less if !named => Plan::Newer,
+        _ => Plan::Install,
+    })
 }
 
 /// The lowercase sha256 SHA256SUMS lists for `name` (`<hash>  <name>` or `<hash> *<name>`).
@@ -126,25 +130,27 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     };
 
     let wanted = match &opts.version {
-        Some(v) => normalize_version(v)?,
+        Some(v) => parse_version(v)?,
         None => {
             let latest = runtime.block_on(fetch(format!("{base}/latest")))?;
             let text = String::from_utf8_lossy(&latest);
-            normalize_version(text.lines().next().unwrap_or(""))
+            parse_version(text.lines().next().unwrap_or(""))
                 .with_context(|| format!("reading {base}/latest"))?
         }
     };
-    if wanted == current {
-        writeln!(out, "conde {current} is current")?;
-        return Ok(0);
-    }
-    // only a named --version goes back: a build newer than the latest release stays
-    if opts.version.is_none() && release_number(&wanted) < release_number(current) {
-        writeln!(
-            out,
-            "conde {current} is newer than the latest release {wanted}; nothing to do"
-        )?;
-        return Ok(0);
+    match plan(current, &wanted.to_string(), opts.version.is_some())? {
+        Plan::Current => {
+            writeln!(out, "conde {current} is current")?;
+            return Ok(0);
+        }
+        Plan::Newer => {
+            writeln!(
+                out,
+                "conde {current} is newer than the latest release {wanted}; nothing to do"
+            )?;
+            return Ok(0);
+        }
+        Plan::Install => {}
     }
     if opts.check {
         writeln!(

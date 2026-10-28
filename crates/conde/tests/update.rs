@@ -227,11 +227,51 @@ fn only_released_platforms_have_a_file() {
     ] {
         assert_eq!(asset_name(os, arch, false), None, "{os} {arch}");
     }
-    use conde::update::release_number;
-    assert_eq!(release_number("0.10.2"), Some((0, 10, 2)));
-    assert_eq!(release_number("1.2.3-rc.1"), Some((1, 2, 3)));
-    assert!(release_number("0.10.0") > release_number("0.9.9"));
     let line = format!("{}  {NAME}\r\n", "A".repeat(64));
     assert_eq!(conde::update::listed_sum(&line, NAME), Some("a".repeat(64)));
     assert_eq!(conde::update::listed_sum(&line, "conde-darwin-arm64"), None);
+}
+
+/// SemVer precedence: a prerelease is older than its release, and only a named version goes back.
+#[test]
+fn prereleases_order_by_semver_precedence() {
+    use conde::update::{Plan, plan};
+    let auto = |installed, wanted| plan(installed, wanted, false).unwrap();
+    assert_eq!(
+        auto("0.2.0", "0.2.0-rc.1"),
+        Plan::Newer,
+        "stable -> rc is not an update"
+    );
+    assert_eq!(
+        auto("0.2.0-rc.2", "0.2.0-rc.1"),
+        Plan::Newer,
+        "rc.2 -> rc.1 is not an update"
+    );
+    assert_eq!(
+        auto("0.2.0-rc.10", "0.2.0-rc.9"),
+        Plan::Newer,
+        "numeric identifiers compare as numbers"
+    );
+    assert_eq!(
+        auto("0.2.0-rc.1", "0.2.0"),
+        Plan::Install,
+        "rc -> stable is"
+    );
+    assert_eq!(auto("0.2.0-rc.1", "0.2.0-rc.2"), Plan::Install);
+    assert_eq!(auto("0.9.9", "0.10.0"), Plan::Install);
+    assert_eq!(auto("0.2.0", "0.2.0"), Plan::Current);
+    for (installed, wanted) in [
+        ("0.2.0", "0.2.0-rc.1"),
+        ("0.3.0", "0.1.0"),
+        ("0.2.0-rc.2", "0.2.0-rc.1"),
+    ] {
+        assert_eq!(
+            plan(installed, wanted, true).unwrap(),
+            Plan::Install,
+            "a named {wanted} over {installed}"
+        );
+    }
+    for bad in ["0.2", "0.2.0.1", "x.y.z", "0.2.0-"] {
+        assert!(plan("0.2.0", bad, true).is_err(), "{bad} must not parse");
+    }
 }

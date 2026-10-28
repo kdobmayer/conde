@@ -108,6 +108,10 @@ const PG_CASES: &[PgCase] = &[
         "entra_identities_from_before_migration_17_keep_their_users",
         entra_identities_from_before_migration_17_keep_their_users,
     ),
+    (
+        "users_with_hosts_before_migration_19_count_as_arrived",
+        users_with_hosts_before_migration_19_count_as_arrived,
+    ),
 ];
 
 fn main() {
@@ -2079,6 +2083,62 @@ fn entra_identities_from_before_migration_17_keep_their_users(c: &Cluster) {
         versions,
         MIGRATIONS.iter().map(|m| m.0).collect::<Vec<i32>>()
     );
+}
+
+/// Postgres: a board migrated to version 18 with users, hosts and credentials gets migration 19
+/// at the next start: a user with a host counts as arrived since their oldest credential (or the
+/// epoch without one), a user without a host has not arrived, and nobody is an admin.
+fn users_with_hosts_before_migration_19_count_as_arrived(c: &Cluster) {
+    let db = c.database();
+    let mut client = c.client(&db);
+    client
+        .batch_execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
+             applied_at TIMESTAMPTZ NOT NULL DEFAULT now());",
+        )
+        .unwrap();
+    let before: Vec<_> = MIGRATIONS.iter().filter(|m| m.0 <= 18).collect();
+    assert_eq!(before.len(), 18);
+    for (version, name, sql) in before {
+        client.batch_execute(sql).unwrap();
+        client
+            .execute(
+                "INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+                &[version, name, &conde::util::sha256_hex(sql.as_bytes())],
+            )
+            .unwrap();
+    }
+    client
+        .batch_execute(
+            "INSERT INTO users(user_id, name) VALUES (1, 'ann'), (2, 'bob'), (3, 'cid');
+             INSERT INTO hosts(host_id, user_id) VALUES ('laptop', 1), ('box', 3);
+             INSERT INTO device_credentials(token_digest, user_id, host_id, label, created_at) VALUES
+                 ('d1', 1, 'laptop', 'laptop', '2026-10-01T00:00:00.000Z'),
+                 ('d2', 1, 'laptop', 'laptop', '2026-09-01T00:00:00.000Z');",
+        )
+        .unwrap();
+    let store = PgStore::connect(&c.url(&db)).unwrap();
+    let arrived: Vec<(String, bool, Option<String>)> = client
+        .query(
+            "SELECT name, admin, arrived_at FROM users ORDER BY name",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    assert_eq!(
+        arrived,
+        [
+            ("ann".into(), false, Some("2026-09-01T00:00:00.000Z".into())),
+            ("bob".into(), false, None),
+            ("cid".into(), false, Some("1970-01-01T00:00:00Z".into())),
+        ]
+    );
+    write(&store, |tx| {
+        assert!(!tx.mark_user_arrived(1, "2026-10-28T10:00:00.000Z").unwrap());
+        assert!(tx.mark_user_arrived(2, "2026-10-28T10:00:00.000Z").unwrap());
+    });
 }
 
 /// A board file whose identities are keyed by (tid, oid), one per user: opening it rebuilds the

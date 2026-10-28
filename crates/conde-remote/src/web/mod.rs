@@ -29,7 +29,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use admin::{AdminState, router as admin_router};
+pub use admin::{AdminState, is_format, router as admin_router};
 pub use app::embedded as app_embedded;
 
 /// The host of a human the browser names (`human:<user>@web`): never minted as a real host, so
@@ -356,6 +356,78 @@ impl Welcome {
     }
 }
 
+/// An https URL a welcome may name: at most 512 characters, with no whitespace, control or
+/// format characters.
+pub fn welcome_url(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .is_some_and(|rest| !rest.is_empty())
+        && url.len() <= 512
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || is_format(c))
+}
+
+/// A change to the welcome (`POST /v1/admin/welcome`): a field present replaces the stored one
+/// (null clears it), an absent field stays as stored.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WelcomePatch {
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub admin_agent: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub lobby: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub guide: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub text: Option<Option<String>>,
+}
+
+/// A field that is present, null or not.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+impl WelcomePatch {
+    /// Every field cleared (`conde admin welcome clear`).
+    pub fn clear() -> WelcomePatch {
+        WelcomePatch {
+            admin_agent: Some(None),
+            lobby: Some(None),
+            guide: Some(None),
+            text: Some(None),
+        }
+    }
+
+    /// `stored` with this change.
+    pub fn apply(&self, stored: &Welcome) -> Welcome {
+        let pick = |change: &Option<Option<String>>, old: &Option<String>| match change {
+            Some(new) => new.clone(),
+            None => old.clone(),
+        };
+        Welcome {
+            admin_agent: pick(&self.admin_agent, &stored.admin_agent),
+            lobby: pick(&self.lobby, &stored.lobby),
+            guide: pick(&self.guide, &stored.guide),
+            text: pick(&self.text, &stored.text),
+        }
+    }
+}
+
 /// How a host was enrolled, as an arrival notice names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Enrollment {
@@ -618,9 +690,10 @@ pub trait WebStore: Send + Sync {
     fn welcome(&self) -> WebResult<Welcome> {
         Ok(Welcome::default())
     }
-    /// Stores the welcome after checking that its admin agent is a published agent of an admin
-    /// user and its lobby a channel on the board. Default: refused.
-    fn set_welcome(&self, _welcome: &Welcome) -> WebResult<SetWelcome> {
+    /// Applies the change to the stored welcome, in one transaction, after checking that the
+    /// admin agent it sets is a published agent of an admin user and the lobby it sets a channel
+    /// on the board. Default: refused.
+    fn set_welcome(&self, _change: &WelcomePatch) -> WebResult<SetWelcome> {
         Err(WebStoreError("this board has no welcome".into()))
     }
     /// A key was minted for a host new to the board: on the user's first enrollment, the

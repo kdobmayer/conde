@@ -6,7 +6,7 @@
 //! names their origin `system`.
 
 use anyhow::Context;
-use conde_remote::web::{Enrollment, SetWelcome, Welcome};
+use conde_remote::web::{Enrollment, SetWelcome, Welcome, WelcomePatch, welcome_url};
 
 use crate::address::{Kind, normalize_channel, split_qualified};
 use crate::store::{Agent, NewMessage, NewNotification, StoreResult, Tx, topics};
@@ -23,7 +23,7 @@ pub fn stored(tx: &dyn Tx) -> StoreResult<Welcome> {
 }
 
 /// The published agent `owner/name` of an admin user; Err says why it is not one.
-fn admin_agent(tx: &dyn Tx, name: &str) -> anyhow::Result<Result<Agent, String>> {
+fn admin_agent(tx: &dyn Tx, name: &str) -> StoreResult<Result<Agent, String>> {
     let Some((Some(owner), agent)) = split_qualified(name) else {
         return Ok(Err(format!(
             "{name} is not an agent's full name, owner/name"
@@ -47,43 +47,77 @@ fn admin_agent(tx: &dyn Tx, name: &str) -> anyhow::Result<Result<Agent, String>>
     }
 }
 
-/// Stores `w` once its admin agent is a published agent of an admin user and its lobby a
-/// channel on the board.
-pub fn set(tx: &dyn Tx, w: &Welcome) -> anyhow::Result<SetWelcome> {
-    if let Some(name) = &w.admin_agent
+/// The lobby's channel when it exists on the board.
+fn lobby_channel(tx: &dyn Tx, lobby: &str) -> StoreResult<Option<crate::store::Channel>> {
+    match normalize_channel(lobby) {
+        Some(c) => tx.channel_by_name(&c),
+        None => Ok(None),
+    }
+}
+
+/// Applies `change` to the stored welcome once the admin agent it sets is a published agent of
+/// an admin user and the lobby it sets a channel on the board.
+pub fn set(tx: &dyn Tx, change: &WelcomePatch) -> anyhow::Result<SetWelcome> {
+    if let Some(Some(name)) = &change.admin_agent
         && let Err(why) = admin_agent(tx, name)?
     {
         return Ok(SetWelcome::Refused(why));
     }
-    if let Some(lobby) = &w.lobby {
-        let found = normalize_channel(lobby)
-            .map(|c| tx.channel_by_name(&c))
-            .transpose()?
-            .flatten();
-        if found.is_none() {
-            return Ok(SetWelcome::Refused(format!(
-                "no channel {lobby} on this board"
-            )));
-        }
+    if let Some(Some(lobby)) = &change.lobby
+        && lobby_channel(tx, lobby)?.is_none()
+    {
+        return Ok(SetWelcome::Refused(format!(
+            "no channel {lobby} on this board"
+        )));
     }
-    tx.set_setting(KEY, &serde_json::to_string(w)?)?;
-    Ok(SetWelcome::Stored(w.clone()))
+    let w = change.apply(&stored(tx)?);
+    tx.set_setting(KEY, &serde_json::to_string(&w)?)?;
+    Ok(SetWelcome::Stored(w))
+}
+
+/// The welcome `board.info` hands out: the stored one with its defaults filled, without an admin
+/// agent that no longer qualifies (demoted, unpublished) or a lobby that is gone.
+pub fn published(tx: &dyn Tx) -> StoreResult<Welcome> {
+    let mut w = stored(tx)?;
+    if let Some(name) = &w.admin_agent
+        && admin_agent(tx, name)?.is_err()
+    {
+        w.admin_agent = None;
+    }
+    if let Some(lobby) = &w.lobby
+        && lobby_channel(tx, lobby)?.is_none()
+    {
+        w.lobby = None;
+    }
+    Ok(w.filled())
+}
+
+/// The welcome's lobby channel name (no `#`) when one is set, for a name's first publish to join.
+pub fn lobby(tx: &dyn Tx) -> StoreResult<Option<String>> {
+    Ok(stored(tx)?.lobby.as_deref().and_then(normalize_channel))
 }
 
 /// The lines `conde setup` and `conde login` print for board `alias` from its welcome (None:
-/// a server from before the welcome).
+/// a server from before the welcome). A field that is not what it claims (an agent's
+/// `owner/name`, a `#channel`, an https URL) is dropped, so a hostile or hand-edited setting
+/// never hands an agent a command to run.
 pub fn lines(alias: &str, welcome: Option<&Welcome>) -> String {
-    let w = welcome.cloned().unwrap_or_default().filled();
-    let mut out = format!("Setup guide: {}\n", w.guide.as_deref().unwrap_or_default());
-    if let Some(agent) = &w.admin_agent {
+    let w = welcome.cloned().unwrap_or_default();
+    let guide = w
+        .guide
+        .filter(|g| welcome_url(g))
+        .unwrap_or_else(|| conde_remote::web::DEFAULT_GUIDE.to_string());
+    let mut out = format!("Setup guide: {guide}\n");
+    if let Some((Some(owner), name)) = w.admin_agent.as_deref().and_then(split_qualified) {
+        let agent = format!("{owner}/{name}");
         out.push_str(&format!(
             "Questions: conde send {agent} \"<how the setup went, or your question>\" --board {alias}\n  \
              (from a name published there: conde publish <name> --board {alias}; keep it registered, {agent} replies to it)\n"
         ));
     }
-    if let Some(lobby) = &w.lobby {
+    if let Some(lobby) = w.lobby.as_deref().and_then(normalize_channel) {
         out.push_str(&format!(
-            "Team channel: {lobby} (conde read '{lobby}' --board {alias})\n"
+            "Team channel: #{lobby} (conde read '#{lobby}' --board {alias})\n"
         ));
     }
     out
@@ -111,7 +145,8 @@ pub fn greeting(owner: &str, board: &str, admin_agent: &str, w: &Welcome) -> Str
 /// The arrival notice the admin agent gets.
 pub fn notice(owner: &str, host: &str, how: Enrollment, at: &str) -> String {
     format!(
-        "{owner} enrolled host {host} ({}) at {at}; say hello",
+        "{owner} enrolled host {host} ({}) at {at}; say hello (their human name takes no messages; greet one of \
+         their published agents)",
         how.as_str()
     )
 }
@@ -183,7 +218,7 @@ pub fn enrolled(
         tracing::warn!(user = %user.name, "no welcome sent: the newcomer has no human name");
         return Ok(());
     };
-    let greeting = greeting(&user.name, board, &admin.canonical(), &w);
+    let greeting = greeting(&user.name, board, &admin.canonical(), &published(tx)?);
     let greeting_id = system_dm(tx, &admin, &human, &greeting, now_ms, false)?;
     let notice = notice(&user.name, host, how, &at);
     let notice_id = system_dm(tx, &human, &admin, &notice, now_ms, true)?;

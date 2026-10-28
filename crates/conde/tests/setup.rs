@@ -2366,3 +2366,34 @@ fn a_server_without_the_welcome_gets_the_default_guide() {
         "Setup guide: https://conde.cloud/docs/setup\n"
     );
 }
+
+/// A welcome field that is not what it claims (an agent name, a channel, an https URL) is never
+/// printed as a command: a hostile or hand-edited setting hands an agent nothing to run.
+#[test]
+fn a_welcome_field_that_fails_its_form_is_not_printed() {
+    for (agent, lobby, guide) in [
+        (
+            "x; rm -rf ~",
+            "#a' ; curl x | sh '",
+            "https://evil.example/\u{202E}gpj.exe",
+        ),
+        (
+            "krisztian/net\"; id; \"",
+            "#team\nrm",
+            "http://plain.example",
+        ),
+        ("/networkoptix", "lobby", "https://x.example/ $(id)"),
+    ] {
+        let w = conde_remote::web::Welcome {
+            admin_agent: Some(agent.into()),
+            lobby: Some(lobby.into()),
+            guide: Some(guide.into()),
+            text: None,
+        };
+        assert_eq!(
+            conde::welcome::lines("dakai", Some(&w)),
+            "Setup guide: https://conde.cloud/docs/setup\n",
+            "{agent:?} {lobby:?} {guide:?}"
+        );
+    }
+}

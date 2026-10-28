@@ -22,7 +22,7 @@ use super::session::digest;
 use super::{
     BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, WebConfig, WebStore,
 };
-use super::{BridgeRegistry, SetWelcome, WebUser, Welcome, entra_issuer};
+use super::{BridgeRegistry, SetWelcome, WebUser, WelcomePatch, entra_issuer};
 
 /// The shortest admin key accepted.
 pub(crate) const MIN_KEY_LEN: usize = 32;
@@ -347,7 +347,7 @@ pub(crate) fn email_address(input: &str) -> Option<String> {
 
 /// A Unicode format character (general category Cf): bidirectional overrides, zero-width
 /// characters and the like, which can make a name read as something else.
-fn is_format(c: char) -> bool {
+pub fn is_format(c: char) -> bool {
     matches!(c as u32,
         0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2
         | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
@@ -876,78 +876,96 @@ async fn get_welcome(State(state): State<AdminState>) -> Response {
     }
 }
 
-/// A welcome field: trimmed, None when empty or absent.
+/// A welcome field as set: trimmed, None when empty.
 fn field(v: Option<String>) -> Option<String> {
     v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// The welcome's fields checked for form (the board checks that they exist): the admin agent
-/// `owner/name`, the lobby `#channel`, the guide an https URL, the text one short paragraph.
-fn welcome_form(req: Welcome) -> Result<Welcome, &'static str> {
-    let admin_agent = match field(req.admin_agent) {
-        None => None,
-        Some(a) => {
-            let a = a.to_lowercase();
-            let ok = a.split_once('/').is_some_and(|(owner, name)| {
-                owner_name(owner).as_deref() == Some(owner)
-                    && !name.is_empty()
-                    && name.len() <= 100
-                    && !name.contains('/')
-            }) && !a.chars().any(|c| c.is_whitespace() || c.is_control());
-            if !ok {
-                return Err("admin_agent is an agent's full name, owner/name");
-            }
-            Some(a)
-        }
-    };
-    let lobby = match field(req.lobby) {
-        None => None,
-        Some(l) => {
-            let name = l.trim_start_matches('#').to_lowercase();
-            let ok = (1..=80).contains(&name.len())
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-            if !ok {
-                return Err("lobby is a channel, #name");
-            }
-            Some(format!("#{name}"))
-        }
-    };
-    let guide = field(req.guide);
-    if let Some(g) = &guide
-        && (!g.starts_with("https://")
-            || g.len() <= "https://".len()
-            || g.len() > 512
-            || g.chars().any(|c| c.is_whitespace() || c.is_control()))
-    {
-        return Err("guide is an https URL of at most 512 characters");
+/// The admin agent's form, `owner/name`, lowercased.
+fn agent_form(a: String) -> Result<String, &'static str> {
+    let a = a.to_lowercase();
+    let ok = a.split_once('/').is_some_and(|(owner, name)| {
+        owner_name(owner).as_deref() == Some(owner)
+            && !name.is_empty()
+            && name.len() <= 200
+            && name.split('.').all(|p| {
+                !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            })
+    });
+    if ok {
+        Ok(a)
+    } else {
+        Err("admin_agent is an agent's full name, owner/name")
     }
-    let text = field(req.text);
-    if let Some(t) = &text
-        && (t.chars().count() > 600 || t.chars().any(|c| c.is_control() || is_format(c)))
-    {
-        return Err(
-            "text is one paragraph of at most 600 characters, without control or format characters",
-        );
+}
+
+/// The lobby's form, `#name`.
+fn lobby_form(l: String) -> Result<String, &'static str> {
+    let name = l.strip_prefix('#').unwrap_or(&l).to_lowercase();
+    let ok = (1..=200).contains(&name.len())
+        && name.split('.').all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        });
+    if ok {
+        Ok(format!("#{name}"))
+    } else {
+        Err("lobby is a channel, #name")
     }
-    Ok(Welcome {
-        admin_agent,
-        lobby,
-        guide,
-        text,
+}
+
+fn guide_form(g: String) -> Result<String, &'static str> {
+    if super::welcome_url(&g) {
+        Ok(g)
+    } else {
+        Err(
+            "guide is an https URL of at most 512 characters, without spaces, control or format characters",
+        )
+    }
+}
+
+fn text_form(t: String) -> Result<String, &'static str> {
+    let bad = |c: char| c.is_control() || is_format(c) || matches!(c, '\u{2028}' | '\u{2029}');
+    if t.chars().count() <= 600 && !t.chars().any(bad) {
+        Ok(t)
+    } else {
+        Err(
+            "text is one paragraph of at most 600 characters, without control, format or line-separator characters",
+        )
+    }
+}
+
+/// The change's fields checked for form (the board checks that they exist): each field present
+/// is trimmed (empty clears it like null) and must be an agent's `owner/name`, a `#channel`, an
+/// https URL, one short paragraph.
+fn patch_form(req: WelcomePatch) -> Result<WelcomePatch, &'static str> {
+    fn check(
+        v: Option<Option<String>>,
+        form: fn(String) -> Result<String, &'static str>,
+    ) -> Result<Option<Option<String>>, &'static str> {
+        v.map(|v| field(v).map(form).transpose()).transpose()
+    }
+    Ok(WelcomePatch {
+        admin_agent: check(req.admin_agent, agent_form)?,
+        lobby: check(req.lobby, lobby_form)?,
+        guide: check(req.guide, guide_form)?,
+        text: check(req.text, text_form)?,
     })
 }
 
-/// `POST /v1/admin/welcome {admin_agent, lobby?, guide?, text?}`: replaces the workspace's
-/// welcome (an absent field is unset: no admin agent or lobby, the default guide or text). The
-/// admin agent must be a published agent of an admin user, the lobby a channel on the board.
-async fn set_welcome(State(state): State<AdminState>, Json(req): Json<Welcome>) -> Response {
-    let welcome = match welcome_form(req) {
-        Ok(w) => w,
+/// `POST /v1/admin/welcome {admin_agent?, lobby?, guide?, text?}`: changes the workspace's
+/// welcome; a field present replaces the stored one (null or empty clears it), an absent one
+/// stays. The admin agent it sets must be a published agent of an admin user, the lobby a channel
+/// on the board. An unset guide or text falls back to the default.
+async fn set_welcome(State(state): State<AdminState>, Json(req): Json<WelcomePatch>) -> Response {
+    let change = match patch_form(req) {
+        Ok(c) => c,
         Err(message) => return bad_request(message),
     };
-    match state.core().store(move |s| s.set_welcome(&welcome)).await {
+    match state.core().store(move |s| s.set_welcome(&change)).await {
         Ok(SetWelcome::Stored(w)) => {
             tracing::info!(admin_agent = ?w.admin_agent, lobby = ?w.lobby, "admin set the welcome");
             reply(
@@ -966,43 +984,61 @@ mod tests {
 
     #[test]
     fn welcome_forms() {
-        let w = welcome_form(Welcome {
-            admin_agent: Some(" Krisztian/NetworkOptix ".into()),
-            lobby: Some("lobby".into()),
-            guide: Some(" ".into()),
+        let set = |v: &str| Some(Some(v.to_string()));
+        let w = patch_form(WelcomePatch {
+            admin_agent: set(" Krisztian/NetworkOptix "),
+            lobby: set("lobby"),
+            guide: set(" "),
             text: None,
         })
         .unwrap();
-        assert_eq!(w.admin_agent.as_deref(), Some("krisztian/networkoptix"));
-        assert_eq!(w.lobby.as_deref(), Some("#lobby"));
-        assert_eq!(w.guide, None);
+        assert_eq!(w.admin_agent, set("krisztian/networkoptix"));
+        assert_eq!(w.lobby, set("#lobby"));
+        assert_eq!(w.guide, Some(None), "an empty field clears it");
+        assert_eq!(w.text, None, "an absent field stays");
         for bad in [
-            Welcome {
-                admin_agent: Some("desk".into()),
-                ..Welcome::default()
+            WelcomePatch {
+                admin_agent: set("desk"),
+                ..WelcomePatch::default()
             },
-            Welcome {
-                admin_agent: Some("a/b/c".into()),
-                ..Welcome::default()
+            WelcomePatch {
+                admin_agent: set("a/b/c"),
+                ..WelcomePatch::default()
             },
-            Welcome {
-                lobby: Some("#a b".into()),
-                ..Welcome::default()
+            WelcomePatch {
+                admin_agent: set("a/b;id"),
+                ..WelcomePatch::default()
             },
-            Welcome {
-                guide: Some("http://x.io".into()),
-                ..Welcome::default()
+            WelcomePatch {
+                lobby: set("#a b"),
+                ..WelcomePatch::default()
             },
-            Welcome {
-                text: Some("a\u{202E}b".into()),
-                ..Welcome::default()
+            WelcomePatch {
+                guide: set("http://x.io"),
+                ..WelcomePatch::default()
             },
-            Welcome {
-                text: Some("x".repeat(601)),
-                ..Welcome::default()
+            WelcomePatch {
+                guide: set("https://x.io/\u{202E}a"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set("a\u{202E}b"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set("a\u{2028}b"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set("a\u{2029}b"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set(&"x".repeat(601)),
+                ..WelcomePatch::default()
             },
         ] {
-            assert!(welcome_form(bad.clone()).is_err(), "{bad:?}");
+            assert!(patch_form(bad.clone()).is_err(), "{bad:?}");
         }
     }
 

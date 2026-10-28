@@ -491,12 +491,13 @@ enum AdminCmd {
 
 #[derive(Subcommand)]
 enum WelcomeCmd {
-    /// Set the welcome (replacing it): the admin's agent newcomers write to with questions, and
-    /// optionally the team channel, the setup guide and a short text.
+    /// Change the welcome: the admin's agent newcomers write to with questions (without
+    /// --agent, none), and the team channel, the setup guide and a short text, each kept as stored
+    /// unless given ('' clears it).
     Set {
         /// The admin's agent, owner/name: a published agent of an admin user.
         #[arg(long, value_name = "OWNER/NAME")]
-        agent: String,
+        agent: Option<String>,
         /// The team channel newcomers join, #name.
         #[arg(long, value_name = "#CHANNEL")]
         lobby: Option<String>,
@@ -506,6 +507,12 @@ enum WelcomeCmd {
         /// One short paragraph the greeting opens with.
         #[arg(long)]
         text: Option<String>,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
+    /// Reset the welcome: no admin agent and no lobby, the default guide and text.
+    Clear {
         /// The server URL (https://host).
         #[arg(long, value_name = "URL")]
         server: String,
@@ -905,13 +912,16 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     server,
                 } => admin::welcome_set(
                     &server,
-                    &conde_remote::web::Welcome {
+                    &conde_remote::web::WelcomePatch {
                         admin_agent: Some(agent),
-                        lobby,
-                        guide,
-                        text,
+                        lobby: lobby.map(Some),
+                        guide: guide.map(Some),
+                        text: text.map(Some),
                     },
                 ),
+                WelcomeCmd::Clear { server } => {
+                    admin::welcome_set(&server, &conde_remote::web::WelcomePatch::clear())
+                }
                 WelcomeCmd::Show { server } => admin::welcome_show(&server),
             };
         }

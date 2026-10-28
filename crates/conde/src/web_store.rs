@@ -8,7 +8,7 @@ use std::sync::Arc;
 use conde_remote::web::{
     AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrollment, HostKey, Identity,
     Invite, Invited, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount, SessionRecord, SetWelcome,
-    WebResult, WebStore, WebStoreError, WebUser, Welcome,
+    WebResult, WebStore, WebStoreError, WebUser, Welcome, WelcomePatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -543,12 +543,17 @@ impl WebStore for WebBoard {
         self.read(crate::welcome::stored)
     }
 
-    fn set_welcome(&self, welcome: &Welcome) -> WebResult<SetWelcome> {
-        self.write(|t| crate::welcome::set(t, welcome))
+    fn set_welcome(&self, change: &WelcomePatch) -> WebResult<SetWelcome> {
+        self.write(|t| crate::welcome::set(t, change))
     }
 
     fn enrolled(&self, user_id: i64, host_id: &str, how: Enrollment, _now: i64) -> WebResult<()> {
-        let board = self.d.shared_name().unwrap_or("this board").to_string();
+        // the greeting names the board in commands: never without its name
+        let board = self
+            .d
+            .shared_name()
+            .ok_or_else(|| WebStoreError("this board is not shared: no welcome".into()))?
+            .to_string();
         let now_ms = self.d.now_ms();
         self.write(|t| crate::welcome::enrolled(t, &board, user_id, host_id, how, now_ms))
     }

@@ -1782,8 +1782,9 @@ fn admin_roles_and_the_welcome_post_with_the_admin_key() {
         "welcome": {"admin_agent": "krisztian/networkoptix", "lobby": null,
                     "guide": "https://conde.cloud/docs/setup", "text": "Hi."}});
     let (url, seen) = one_admin_answer(answer);
-    let welcome = conde_remote::web::Welcome {
-        admin_agent: Some("krisztian/networkoptix".into()),
+    let welcome = conde_remote::web::WelcomePatch {
+        admin_agent: Some(Some("krisztian/networkoptix".into())),
+        guide: Some(Some("https://conde.cloud/docs/setup".into())),
         ..Default::default()
     };
     let text = conde::admin::set_welcome(&url, key, &welcome).unwrap();
@@ -1801,9 +1802,16 @@ fn admin_roles_and_the_welcome_post_with_the_admin_key() {
     );
     assert!(
         request.ends_with(
-            r#"{"admin_agent":"krisztian/networkoptix","guide":null,"lobby":null,"text":null}"#
+            r#"{"admin_agent":"krisztian/networkoptix","guide":"https://conde.cloud/docs/setup"}"#
         ),
-        "{request}"
+        "a set sends only what it changes: {request}"
+    );
+    let (url, seen) = one_admin_answer(json!({"welcome": {}}));
+    conde::admin::set_welcome(&url, key, &conde_remote::web::WelcomePatch::clear()).unwrap();
+    let request = seen.join().unwrap();
+    assert!(
+        request.ends_with(r#"{"admin_agent":null,"guide":null,"lobby":null,"text":null}"#),
+        "clear: {request}"
     );
 }
 

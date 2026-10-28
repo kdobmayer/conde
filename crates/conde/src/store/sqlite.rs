@@ -117,15 +117,34 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         let mut stmt = conn.prepare(&format!(
             "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
         ))?;
-        if !stmt.exists([column])? {
-            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
-            if *column == "arrived_at" {
-                // as Postgres migration 0019: users with a host before the welcome count as arrived
-                conn.execute_batch(
-                    "UPDATE users SET arrived_at = COALESCE((SELECT MIN(c.created_at) FROM device_credentials c
-                         WHERE c.user_id = users.user_id), '1970-01-01T00:00:00Z')
-                     WHERE EXISTS (SELECT 1 FROM hosts h WHERE h.user_id = users.user_id)",
-                )?;
+        if stmt.exists([column])? {
+            continue;
+        }
+        let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
+        if *column != "arrived_at" {
+            conn.execute_batch(&alter)?;
+            continue;
+        }
+        // as Postgres migration 0019, in the ALTER's transaction: users with a host before the
+        // welcome count as arrived
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mut steps = || -> rusqlite::Result<()> {
+            // another process may have added it while this one waited for the lock
+            if stmt.exists([column])? {
+                return Ok(());
+            }
+            conn.execute_batch(&alter)?;
+            conn.execute_batch(
+                "UPDATE users SET arrived_at = COALESCE((SELECT MIN(c.created_at) FROM device_credentials c
+                     WHERE c.user_id = users.user_id), '1970-01-01T00:00:00Z')
+                 WHERE EXISTS (SELECT 1 FROM hosts h WHERE h.user_id = users.user_id)",
+            )
+        };
+        match steps() {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
             }
         }
     }

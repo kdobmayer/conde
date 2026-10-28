@@ -324,8 +324,9 @@ pub fn set_role(server: &str, key: &str, name: &str, admin: bool) -> anyhow::Res
     })
 }
 
-/// `conde admin welcome set --agent <owner/name> [--lobby] [--guide] [--text] --server <url>`.
-pub fn welcome_set(server: &str, welcome: &conde_remote::web::Welcome) -> anyhow::Result<i32> {
+/// `conde admin welcome set [--agent <owner/name>] [--lobby] [--guide] [--text] --server <url>`
+/// and `conde admin welcome clear --server <url>`.
+pub fn welcome_set(server: &str, welcome: &conde_remote::web::WelcomePatch) -> anyhow::Result<i32> {
     let key = admin_key(
         server,
         "admin welcome set needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
@@ -338,7 +339,7 @@ pub fn welcome_set(server: &str, welcome: &conde_remote::web::Welcome) -> anyhow
 pub fn set_welcome(
     server: &str,
     key: &str,
-    welcome: &conde_remote::web::Welcome,
+    welcome: &conde_remote::web::WelcomePatch,
 ) -> anyhow::Result<String> {
     let body = serde_json::to_value(welcome)?;
     let answer = admin_request(server, key, "/v1/admin/welcome", Some(body))?;

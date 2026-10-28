@@ -50,8 +50,9 @@ and no Argo CD login, for example `argocd --core app sync ws-demo` after `kubect
 --namespace argocd`.
 
 The namespace `argocd` is deny-by-default (`kubernetes_network_policy_v1.argocd`): in from its own pods and from the
-load balancer to the server; out to its own pods, DNS, the API server, GitHub's address ranges on 22 and 443, and the
-Gateway address, through which the server reaches the `infra` realm.
+load balancer to the server; out to its own pods, DNS, the API server and the Gateway address, through which the
+server reaches the `infra` realm. An FQDN network policy (`kubernetes_manifest.argocd_fqdn_network_policy`) adds
+github.com on 22 and auth.conde.cloud on 443.
 
 ## Repository access
 
@@ -114,6 +115,11 @@ from three sources:
   reaches the chart);
 - `deploy/image.yaml`, written by the release workflow, and the platform values from this root (project, Cloud SQL,
   Gateway, Cloud Armor policy, egress list).
+
+Besides DNS, the metadata server and the Cloud SQL endpoint, a workspace reaches only the hosts of its FQDN network
+policy (the chart's `networkPolicy.fqdn`).
+The variable `workspaces_public_https` names workspaces that get port 443 to any public address back, which puts the
+old reach back for one workspace with an apply and no commit to the gitops branch; it is empty.
 
 A git files generator rather than a list in Terraform: adding or removing a workspace is a commit to
 `deploy/tenants/`, without a Terraform apply. A new workspace still needs its GCP side first (`infra/gcp/workspaces`,

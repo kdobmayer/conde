@@ -56,8 +56,11 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   `conde setup` (`<alias>` with none), and the README's board example is `acme` at `acme.conde.cloud` (s9b
   branch); CI's Postgres service and CONDE_TEST_PG, the Postgres-only skips, admins on the web view and the
   SIGTERM ordering (s9 branch).
-- S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
-  Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
+- S7: done 2026-10-28 (docs/infra-network-s7.md): FQDN network policy on the cluster; the workspaces, Keycloak and
+  Argo CD reach only named hosts, the any-public-443 and 465 rules and the GitHub ranges are gone; cluster-wide
+  policies, the mesh and the Cloudflare edge declined. Open: Autopilot had not yet restarted the nodes for the
+  feature (enforcement was proven on the node that runs every workload); demo and clearscale blip once when it does.
+  The owner's fork is open: keep the Google edge (recommended) or move to Cloudflare Tunnel plus Access. Revisit the Kubernetes ClusterNetworkPolicy when it is generally available on GKE.
 
 Owner's own steps, at his pace, none blocking the above:
 - D1: replace the GitHub Actions secret CLOUDFLARE_API_TOKEN (today the conde-terraform token: DNS edit +

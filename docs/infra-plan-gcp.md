@@ -178,6 +178,8 @@ Where the code under infra/gcp, charts and deploy differs from the plan above:
   installed (the chart keeps it only as an option for clusters outside GCP).
 - Mail goes through Resend, not a Gmail app password: Keycloak's SMTP for every realm and the conde server's invite
   email share the `resend-api-key` secret, and the `dns` root holds the Resend DKIM, SPF and bounce records.
+- Outbound traffic from the workspaces, Keycloak and Argo CD goes only to named hosts (GKE FQDN network policies,
+  docs/infra-network-s7.md), not to any public address on 443 and 465 or to hand-copied GitHub ranges.
 - The apex `conde.cloud` and `www.conde.cloud` are proxied CNAMEs to Cloudflare Pages, which serves the landing
   page, the documentation and install.sh; only the wildcard for the workspace and Keycloak hostnames points at the
   Google load balancer, DNS only.

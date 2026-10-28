@@ -85,7 +85,9 @@ resource "google_secret_manager_secret_version" "terraform_client_secret" {
   }
 }
 
-# Managed for its outbound mail (admin password resets and the console's test email) and its login theme; other settings stay Keycloak's.
+# Managed for its frontend URL, its login theme and its outbound mail (admin password resets and the console's test
+# email); other settings stay Keycloak's. The frontend URL moves the master realm's sign-in, and with it the console, to
+# the host behind IAP.
 import {
   to = keycloak_realm.master
   id = "master"
@@ -96,6 +98,10 @@ resource "keycloak_realm" "master" {
   default_signature_algorithm = "RS256"
   # The admin console's sign-in page in the conde theme (infra/keycloak/themes).
   login_theme = "conde"
+
+  attributes = {
+    frontendUrl = local.master_url
+  }
 
   smtp_server {
     host              = local.smtp.host

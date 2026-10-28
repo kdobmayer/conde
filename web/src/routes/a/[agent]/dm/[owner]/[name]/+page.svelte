@@ -5,8 +5,9 @@
 
 	const agent = $derived(`${board.session?.user}/${page.params.agent}`);
 	const target = $derived(`${page.params.owner}/${page.params.name}`);
+	const back = $derived({ href: `#/a/${encodeURIComponent(page.params.agent ?? '')}`, label: page.params.agent ?? '' });
 </script>
 
 {#key `${agent} ${target}`}
-	<Conversation {agent} {target} />
+	<Conversation {agent} {target} {back} />
 {/key}

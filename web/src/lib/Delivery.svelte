@@ -1,83 +1,116 @@
 <script lang="ts">
+	// A message's one delivery word; expanding it shows the per-recipient detail and the message
+	// id with a copy button (ia.md "DM"). The id is never printed inline.
 	import type { Message } from './types';
 	import { board, short } from './board.svelte';
-	import { ago, countdown } from './time';
+	import { deliveryWord } from './conversation';
+	import { ago, clock, countdown } from './time';
+	import Disclosure from './ui/Disclosure.svelte';
+	import StateWord from './ui/StateWord.svelte';
 
 	let { message }: { message: Message } = $props();
-	const delivery = $derived(message.delivery);
-	const recipients = $derived(delivery?.recipients ?? []);
+	const w = $derived(deliveryWord(message, board.now + board.skewMs));
+	const recipients = $derived(message.delivery?.recipients ?? []);
+	const readBy = $derived(message.delivery?.read_by ?? null);
 
-	const label: Record<string, string> = {
-		queued: 'queued',
-		sending: 'sending',
-		retrying: 'retrying',
-		notified: 'notified',
+	const stateLabel: Record<string, string> = {
 		held: 'held for approval',
-		delivered: 'delivered',
-		read: 'read',
-		unread: 'unread',
-		denied: 'denied',
-		refused: 'refused',
-		gone: 'recipient gone',
-		sent: 'sent'
+		gone: 'recipient gone'
 	};
-	const tone: Record<string, string> = {
-		read: 'ok',
-		delivered: 'ok',
-		held: 'warn',
-		retrying: 'warn',
-		denied: 'danger',
-		refused: 'danger',
-		gone: 'danger'
-	};
+
+	let copied = $state('');
+	let idEl: HTMLElement | undefined = $state();
+
+	async function copy() {
+		try {
+			await navigator.clipboard.writeText(message.message_id);
+			copied = 'Copied';
+		} catch {
+			// No clipboard (an insecure origin, a denied permission): select the id instead.
+			const sel = getSelection();
+			if (idEl && sel) sel.selectAllChildren(idEl);
+			copied = 'Selected; press Ctrl+C';
+		}
+		setTimeout(() => (copied = ''), 2500);
+	}
 </script>
 
-{#if delivery && (recipients.length > 0 || delivery.read_by)}
-	<ul class="delivery">
-		{#each recipients as r (r.recipient)}
-			<li>
-				<span class="who">{short(r.recipient)}</span>
-				<span class="tag {tone[r.state] ?? ''}">{label[r.state] ?? r.state}</span>
-				{#if r.state === 'read' && r.read_at}<span class="muted">{ago(r.read_at, board.now)}</span>{/if}
-				{#if r.retry_at && r.state === 'retrying'}
-					<span class="muted">next try {countdown(r.retry_at, board.now + board.skewMs)}</span>
-				{/if}
-				{#if r.attempts && r.attempts > 1}<span class="muted">{r.attempts} attempts</span>{/if}
-				{#if r.last_error}
-					<span class="err">last error: {r.last_error.status}{r.last_error.reason ? ` (${r.last_error.reason})` : ''}</span>
-				{/if}
+<div class="delivery">
+	<Disclosure>
+		{#snippet label()}
+			{#if w}
+				<span class="word"><StateWord {message} />{#if w.detail}{' '}<span class:bad={w.tone === 'problem'}>{w.detail}</span>{/if}</span>
+			{:else}
+				<span class="word">details</span>
+			{/if}
+		{/snippet}
+		<ul>
+			{#each recipients as r (r.recipient)}
+				<li>
+					to {short(r.recipient)}: <span class:bad={['retrying', 'held', 'denied', 'refused', 'gone'].includes(r.state)}>{stateLabel[r.state] ?? r.state}</span>
+					{#if r.state === 'read' && r.read_at}at {clock(r.read_at)}, {ago(r.read_at, board.now)}{/if}
+					{#if r.state === 'retrying' && r.retry_at}· next try {countdown(r.retry_at, board.now + board.skewMs)}{/if}
+					{#if r.attempts && r.attempts > 1}· {r.attempts} attempts{/if}
+					{#if r.last_error}· last error: {r.last_error.status}{r.last_error.reason ? ` (${r.last_error.reason})` : ''}{/if}
+				</li>
+			{/each}
+			{#if readBy}<li>Read by {readBy.read} of {readBy.total} members.</li>{/if}
+			<li class="id">
+				Message id <code bind:this={idEl}>{message.message_id}</code>
+				<button type="button" class="quiet" onclick={copy}>Copy</button>
+				<span role="status">{copied}</span>
 			</li>
-		{/each}
-		{#if delivery.read_by}
-			<li class="muted">read by {delivery.read_by.read} of {delivery.read_by.total} members</li>
-		{/if}
-	</ul>
-{/if}
+		</ul>
+	</Disclosure>
+</div>
 
 <style>
-	.delivery {
+	/* The toggle and its region join the message's foot line; the region takes a row of its own. */
+	.delivery,
+	.delivery :global(.disclosure) {
+		display: contents;
+	}
+	.delivery :global(.toggle) {
+		width: auto;
+		min-height: 28px;
+		margin-left: -6px;
+		padding: 0 6px;
+		font: 12.5px/1.4 var(--sans);
+		color: var(--faint);
+	}
+	.delivery :global(.region) {
+		flex-basis: 100%;
+		order: 1;
+		padding: 2px 0 4px;
+	}
+	.word {
+		color: var(--muted);
+		white-space: nowrap;
+	}
+	.bad {
+		color: var(--danger);
+	}
+	ul {
 		list-style: none;
-		margin: 4px 0 0;
-		padding: 0;
-		font-size: 12.5px;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
+		margin: 0;
+		padding: 8px 12px;
+		border-left: 2px solid var(--line);
+		font: 12.5px/1.6 var(--sans);
+		color: var(--muted);
 	}
 	li {
+		overflow-wrap: anywhere;
+	}
+	.id {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 6px;
+		gap: 4px 8px;
+		margin-top: 4px;
 	}
-	.who {
-		color: var(--muted);
-	}
-	.who::before {
-		content: 'to ';
-	}
-	.err {
-		color: var(--danger);
-		overflow-wrap: anywhere;
+	.id button {
+		min-height: 28px;
+		padding: 0 10px;
+		font-size: 12px;
 	}
 </style>

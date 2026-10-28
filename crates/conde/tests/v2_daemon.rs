@@ -2212,16 +2212,16 @@ fn a_moved_board_stops_the_bridge_and_names_the_move_command() {
     assert!(!out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), format!("conde: {moved}"));
 
-    // `conde board move`: the new address answers as the same board, so the file is re-pointed
+    // `conde board move`: the old address says the board moved to the new one, which answers as the
+    // same board, so the file is re-pointed
     let mut asked = Vec::new();
-    let name = |server: &str| if server == fake_url { Ok("dakai".to_string()) } else { Err(anyhow::anyhow!("{server} answered that the board moved")) };
-    let (before, after) = boards::move_board(&a.config(), "dakai", &fake_url, &mut |server, key| {
+    let (before, after) = boards::move_board(&a.config(), "dakai", &fake_url, false, &mut boards::moved_probe, &mut |server, key| {
         asked.push(server.to_string());
         assert_eq!(key, cfg.key);
-        Ok(conde::protocol::v2::BoardInfo { name: name(server)?, owner: "kdobmayer".into(), host: "homepc".into(), mailbox_only: true })
+        Ok(conde::protocol::v2::BoardInfo { name: "dakai".into(), owner: "kdobmayer".into(), host: "homepc".into(), mailbox_only: true })
     })
     .unwrap();
-    assert_eq!(asked, [old_url.clone(), fake_url.clone()]);
+    assert_eq!(asked, std::slice::from_ref(&fake_url), "the key went only to the address the old server named");
     assert_eq!((before.server.as_str(), after.server.as_str()), (old_url.as_str(), fake_url.as_str()));
     assert_eq!(boards::load(&path).unwrap(), BoardConfig { server: fake_url.clone(), ..cfg.clone() });
     assert_eq!(conde::admin::reload_bridge(&a.sock(), "dakai"), "bridge: dakai reloaded");

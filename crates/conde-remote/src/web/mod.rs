@@ -157,9 +157,10 @@ impl WebConfig {
         let secret = |name: &str| crate::secret_from(name, var);
         let issuer = var("OIDC_ISSUER").or_else(|| var("ENTRA_TENANT_ID").map(|t| entra_issuer(&t)));
         let client_id = var("OIDC_CLIENT_ID").or_else(|| var("ENTRA_CLIENT_ID"));
+        // a set OIDC_CLIENT_SECRET_FILE decides alone: an empty one is unset, never the Entra secret
         let client_secret = match secret("OIDC_CLIENT_SECRET")? {
-            Some(s) => Some(s),
-            None => secret("ENTRA_CLIENT_SECRET")?,
+            None if var("OIDC_CLIENT_SECRET_FILE").is_none() => secret("ENTRA_CLIENT_SECRET")?,
+            other => other,
         };
         let redirect_uri = var("OIDC_REDIRECT_URI").or_else(|| var("ENTRA_REDIRECT_URI"));
         let (Some(issuer), Some(client_id), Some(client_secret), Some(redirect_uri)) =

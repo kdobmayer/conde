@@ -88,6 +88,12 @@ fn main() {
     if wanted("sqlite::old_board_file_gains_grant_codes") {
         report.run("sqlite::old_board_file_gains_grant_codes", old_board_file_gains_grant_codes);
     }
+    if wanted("sqlite::an_identities_rebuild_another_process_finished_first_is_skipped") {
+        report.run(
+            "sqlite::an_identities_rebuild_another_process_finished_first_is_skipped",
+            an_identities_rebuild_another_process_finished_first_is_skipped,
+        );
+    }
     if wanted("sqlite::old_board_file_keeps_its_entra_identities") {
         report.run("sqlite::old_board_file_keeps_its_entra_identities", old_board_file_keeps_its_entra_identities);
     }
@@ -1360,6 +1366,43 @@ fn old_board_file_keeps_its_entra_identities() {
     assert_eq!(read(&s, |tx| tx.users().unwrap()).len(), 3, "reopening rebuilds nothing again");
 }
 
+/// Two processes open the same old board file: the second one checked the old shape, then waits
+/// for the lock while the first rebuilds; it must find the table rebuilt and do nothing.
+fn an_identities_rebuild_another_process_finished_first_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    drop(SqliteStore::open(&path).unwrap());
+    let old_shape = "DROP TABLE identities;
+         CREATE TABLE identities(tid TEXT NOT NULL, oid TEXT NOT NULL, user_id INTEGER NOT NULL UNIQUE REFERENCES users(user_id),
+             display_name TEXT, preferred_username TEXT, PRIMARY KEY (tid, oid));";
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(old_shape).unwrap();
+        c.execute_batch(ENTRA_IDENTITY_ROWS).unwrap();
+    }
+    // the first process holds the write lock and rebuilds, slowly
+    let first = rusqlite::Connection::open(&path).unwrap();
+    first.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let opener = {
+        let path = path.clone();
+        std::thread::spawn(move || SqliteStore::open(&path).map(|_| ()))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    first
+        .execute_batch(
+            "CREATE TABLE identities_rebuilt(issuer TEXT NOT NULL, subject TEXT NOT NULL, user_id INTEGER NOT NULL REFERENCES users(user_id),
+                 display_name TEXT, preferred_username TEXT, PRIMARY KEY (issuer, subject), UNIQUE (user_id, issuer));
+             INSERT INTO identities_rebuilt SELECT 'https://login.microsoftonline.com/' || tid || '/v2.0', oid, user_id, display_name, preferred_username FROM identities;
+             DROP TABLE identities;
+             ALTER TABLE identities_rebuilt RENAME TO identities;
+             COMMIT;",
+        )
+        .unwrap();
+    opener.join().unwrap().expect("the second open finds the table rebuilt");
+    let s = SqliteStore::open(&path).unwrap();
+    entra_identities_keep_their_users(&s);
+}
+
 /// A board file from before topics: opening it adds the column, data intact.
 fn old_board_file_gains_topics() {
     let dir = tempfile::tempdir().unwrap();
@@ -1487,6 +1530,19 @@ fn web_sign_in_and_disabled_users(store: &dyn Store) {
     assert_eq!(names(w.users_by_email("ann@example.com").unwrap()), vec!["ann", "bob"]);
     assert_eq!(names(w.users().unwrap()), vec!["ann", "bob"]);
     assert!(w.identity_issuers(bob).unwrap().is_empty());
+    // only ASCII letters fold: the Kelvin sign (U+212A) is no K, so its address is another one
+    let kim = w.ensure_user("kim").unwrap();
+    w.set_user_email(kim, Some("kelvin@example.com")).unwrap();
+    assert!(w.users_by_email("\u{212A}elvin@example.com").unwrap().is_empty());
+    assert_eq!(names(w.users_by_email("KELVIN@example.com").unwrap()), vec!["kim"]);
+    // the backfill takes Entra's UPN only, never another issuer's unverified preferred_username
+    let kc = w.ensure_user("kc").unwrap();
+    w.bind_identity(kc, REALM, "kc-1", None, Some("kc@evil.example")).unwrap();
+    let ent = w.ensure_user("ent").unwrap();
+    w.bind_identity(ent, ENTRA, "o-ent", None, Some("ent@dakai.io")).unwrap();
+    assert_eq!(w.backfill_emails().unwrap(), 1);
+    assert_eq!(w.user_by_name("kc").unwrap().unwrap().email, None);
+    assert_eq!(w.user_by_name("ent").unwrap().unwrap().email.as_deref(), Some("ent@dakai.io"));
     w.ensure_host("box", ann).unwrap();
     w.insert_credential("digest-1", ann, "box", "box", "2026-10-09T00:00:00.000Z").unwrap();
     assert_eq!(w.authenticate("digest-1").unwrap(), Some((ann, "box".to_string())));

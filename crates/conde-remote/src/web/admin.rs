@@ -370,13 +370,15 @@ async fn create_user(
         other => other.flatten(),
     };
     let preferred_username = req.preferred_username.filter(|u| !u.trim().is_empty());
+    // the admin vouches for the address it gives
+    let email = super::auth::lookup_email(preferred_username.as_deref(), None);
     let identity = Identity {
         issuer,
         subject,
         display_name: req.display.filter(|d| !d.trim().is_empty()),
-        email: super::auth::lookup_email(preferred_username.as_deref(), None),
+        verified_email: email.clone(),
+        email,
         preferred_username,
-        verified_email: None,
     };
     let result = state
         .core()

@@ -475,6 +475,10 @@ enum BoardCmd {
         alias: String,
         /// The board's new server URL (https://host).
         url: String,
+        /// Send this host's key to URL although the old address does not say the board moved
+        /// there (it is down, or not moved yet).
+        #[arg(long)]
+        trust_new_address: bool,
     },
 }
 
@@ -683,9 +687,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             admin::require_human()?;
             return admin::slack(&server, &owner, &member_id);
         }
-        Cmd::Board { cmd: BoardCmd::Move { alias, url } } => {
+        Cmd::Board { cmd: BoardCmd::Move { alias, url, trust_new_address } } => {
             no_board("board move", "; name the board as the first argument")?;
-            return admin::board_move(&alias, &url);
+            return admin::board_move(&alias, &url, trust_new_address);
         }
         Cmd::Admin { cmd: AdminCmd::User { cmd } } => {
             no_board("admin", "")?;

@@ -63,6 +63,11 @@ To bind explicitly: `POST /v1/admin/users {"issuer","subject","name":"<existing 
 `{"tid","oid",...}` still works; admin bearer key from the vault). To move a binding: `UPDATE
 identities SET user_id = <user id> WHERE issuer = ... AND subject = ...;` then `DELETE FROM
 web_sessions WHERE user_id = <old user id>;` through the job, and have the person sign in again.
+Never enable Keycloak's "Trust Email" on a brokered identity provider: conde matches invites on the
+email Keycloak marks verified, so trusting a provider's unverified address lets it claim an invite.
+Migration 0017 renames the identities columns, so this version is not rolling-safe beside an older
+replica: deploy with the old replicas drained (maxUnavailable 1 with one replica, or scale to zero
+first) or accept a short outage; a rollback needs a reverse migration, not just the old image.
 
 ## Moving a board to a new address
 
@@ -70,5 +75,6 @@ Set `CONDE_MOVED_TO=https://<new host>` on the old server: it then answers every
 `/healthz` with 308 to that address and `{"moved_to": ...}`. A host's bridge stops on it instead
 of reconnecting, and every command on that board says `board <alias> moved to <url>; run: conde
 board move <alias> <url>`. `conde board move` keeps the host's key, account and publications and
-saves the new address only after it answers `board.info` with that key as the same board (the
-name the old server advertised; the alias once the old server only answers with the move).
+sends the host key to the new address only after the old server answered, without the key, that
+the board moved exactly there (scheme, host and port), unless `--trust-new-address` is given, and
+saves it only after the new address answers `board.info` with that key as the same board.

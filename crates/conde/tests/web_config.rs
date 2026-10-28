@@ -163,6 +163,14 @@ fn secret_files_win_over_the_plain_variables() {
     env(&vars);
     let e = error(WebConfig::from_env());
     assert!(e.starts_with("OIDC_CLIENT_SECRET_FILE: cannot read"), "{e}");
+    // an empty OIDC_CLIENT_SECRET_FILE is "no OIDC secret", never the Entra secret
+    let empty = dir.path().join("empty-secret");
+    std::fs::write(&empty, "\n").unwrap();
+    let mut vars = OIDC.to_vec();
+    vars.retain(|(n, _)| *n != "OIDC_CLIENT_SECRET");
+    vars.extend([("OIDC_CLIENT_SECRET_FILE", empty.to_str().unwrap()), ("ENTRA_CLIENT_SECRET", "entra-secret")]);
+    env(&vars);
+    assert_eq!(error(WebConfig::from_env()), "OIDC_CLIENT_SECRET (or ENTRA_CLIENT_SECRET) is not set");
     // A short key from a file is refused like a short variable.
     std::fs::write(&key_file, "short\n").unwrap();
     env(&[("CONDE_ADMIN_KEY_FILE", key_path)]);
@@ -262,6 +270,10 @@ fn the_slack_token_may_come_from_a_file() {
     env(&[("CONDE_SLACK_BOT_TOKEN", "xoxb-plain"), ("CONDE_SLACK_BOT_TOKEN_FILE", gone.to_str().unwrap())]);
     let e = conde::slack::SlackConfig::from_env("dakai", None).unwrap_err().to_string();
     assert!(e.starts_with("CONDE_SLACK_BOT_TOKEN_FILE: cannot read"), "{e}");
+    // a board that moved pages nobody, whatever its token
+    env(&[("CONDE_SLACK_BOT_TOKEN", "xoxb-plain")]);
+    assert!(conde::cloud::slack_config(None, None).unwrap().is_some());
+    assert!(conde::cloud::slack_config(Some("https://dakai.conde.cloud"), None).unwrap().is_none());
     env(&[]);
 }
 

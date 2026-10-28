@@ -229,15 +229,38 @@ pub fn moved_message(alias: &str, url: &str) -> String {
     format!("board {alias} moved to {url}; run: conde board move {alias} {url}")
 }
 
+/// Where `server` says its board moved: `POST /v1/rpc` without any credential, so nothing secret
+/// leaves this host; the 308's address, or None for any other answer.
+pub fn moved_probe(server: &str) -> anyhow::Result<Option<String>> {
+    let url = format!("{}/v1/rpc", crate::login::origin(server)?);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(crate::login::tls()?)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let response = client.post(&url).json(&json!({})).send().await.with_context(|| format!("asking {server} whether it moved"))?;
+        let status = response.status();
+        let location = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let bytes = response.bytes().await.unwrap_or_default();
+        anyhow::Ok(conde_remote::moved_to(status.as_u16(), location.as_deref(), &bytes))
+    })
+}
+
 /// `conde board move <alias> <url>`: points the enrolled board `alias` (under `config`) at
 /// `new_server`, keeping its credential, host and account, so this host's publications (kept
-/// by alias) stay. Saved only when the new server answers `board.info` with this host's key as
-/// the same board: the name the old server advertises (the alias when the old server answers
-/// no more), this account and this host. Returns the old and the new configuration.
+/// by alias) stay. The host key goes to `new_server` only once the old server answered, without
+/// it, that the board moved there (same scheme, host and port), unless `trust_new` (the human's
+/// `--trust-new-address`). Saved only when the new server then answers `board.info` with the key
+/// as the same board: the alias (the name the old server advertises, when trusted and it still
+/// answers), this account and this host. Returns the old and the new configuration.
 pub fn move_board(
     config: &Path,
     alias: &str,
     new_server: &str,
+    trust_new: bool,
+    probe: &mut dyn FnMut(&str) -> anyhow::Result<Option<String>>,
     info: &mut dyn FnMut(&str, &str) -> anyhow::Result<BoardInfo>,
 ) -> anyhow::Result<(BoardConfig, BoardConfig)> {
     check_shared_alias(alias)?;
@@ -253,9 +276,23 @@ pub fn move_board(
     if credentials::same_server(&old.server, new_server)? {
         bail!("{alias} is at {} already; nothing changed", old.server);
     }
-    let expected = match info(&old.server, &old.key) {
-        Ok(i) => i.name,
-        Err(_) => alias.to_string(),
+    let probed = probe(&old.server);
+    let moved_here = matches!(&probed, Ok(Some(url)) if credentials::same_server(url, new_server).unwrap_or(false));
+    let said = match probed {
+        Ok(Some(url)) => format!("says the board moved to {url}"),
+        Ok(None) => "does not say the board moved".to_string(),
+        Err(e) => format!("did not answer ({e:#})"),
+    };
+    let expected = if moved_here {
+        alias.to_string()
+    } else if trust_new {
+        info(&old.server, &old.key).map(|i| i.name).unwrap_or_else(|_| alias.to_string())
+    } else {
+        bail!(
+            "{} {said}, not that it moved to {new_server}; nothing was sent to {new_server} and nothing changed (to point \
+             {alias} there anyway, add --trust-new-address)",
+            old.server
+        );
     };
     let found = info(new_server, &old.key)
         .with_context(|| format!("{new_server} did not answer as board {expected} with this host's key; nothing changed"))?;

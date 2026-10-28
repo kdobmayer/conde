@@ -165,6 +165,17 @@ struct Begin {
     nonce: String,
 }
 
+/// A failed token exchange for the log: a response that does not parse is named by its parse
+/// error only, never by its body (it may hold the tokens).
+fn exchange_failure<RE: std::error::Error + 'static, T: openidconnect::ErrorResponse + 'static>(
+    e: &openidconnect::RequestTokenError<RE, T>,
+) -> String {
+    match e {
+        openidconnect::RequestTokenError::Parse(parse, _) => format!("the token response does not parse: {parse}"),
+        other => format!("{other:?}"),
+    }
+}
+
 /// The id token's `iss` must be the configured issuer, character for character (OIDC Core 3.1.3.7).
 fn same_issuer(token: &str, configured: &str) -> Result<(), OidcError> {
     if token == configured {
@@ -177,9 +188,9 @@ fn same_issuer(token: &str, configured: &str) -> Result<(), OidcError> {
 }
 
 /// The Entra identity adapter: the subject an identity is bound by. Entra's `sub` is pairwise per
-/// app, so an Entra token (from the configured Entra tenant, or any token carrying `tid` and
-/// `oid`) binds by `oid`, the directory object an admin knows and migration 0017 kept; any other
-/// token binds by `sub`. A token of another tenant than the configured one is refused.
+/// app, so a token of the configured Entra issuer binds by `oid`, the directory object an admin
+/// knows and migration 0017 kept; any other issuer's token binds by `sub`, whatever claims it
+/// carries. A token of another tenant than the configured one is refused.
 pub(crate) fn binding_subject(
     entra_tenant: Option<&str>,
     sub: &str,
@@ -191,7 +202,7 @@ pub(crate) fn binding_subject(
             "the id token's tenant '{tid}' is not the configured tenant '{tenant}'"
         ))),
         (Some(_), _, None) => Err(OidcError::Verify("the id token has no oid claim".into())),
-        (Some(_), _, Some(oid)) | (None, Some(_), Some(oid)) => Ok(oid.to_string()),
+        (Some(_), _, Some(oid)) => Ok(oid.to_string()),
         (None, ..) => Ok(sub.to_string()),
     }
 }
@@ -292,7 +303,7 @@ impl Oidc {
             .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.to_string()))
             .request_async(&self.http)
             .await
-            .map_err(|e| OidcError::Exchange(format!("{e:?}")))?;
+            .map_err(|e| OidcError::Exchange(exchange_failure(&e)))?;
         let id_token = token
             .id_token()
             .ok_or_else(|| OidcError::Exchange("the token response has no id_token".into()))?;
@@ -321,6 +332,8 @@ impl Oidc {
         )?;
         let upn = claims.preferred_username().map(|u| u.as_str());
         let email = claims.email().map(|e| e.as_str());
+        let entra = self.entra_tenant.is_some();
+        let verified = verified_email(entra, upn, email, claims.email_verified());
         Ok(Identity {
             issuer: self.issuer.clone(),
             subject,
@@ -329,8 +342,9 @@ impl Oidc {
                 .and_then(|n| n.get(None))
                 .map(|n| n.as_str().to_string()),
             preferred_username: upn.map(str::to_string),
-            email: lookup_email(upn, email),
-            verified_email: verified_email(self.entra_tenant.is_some(), upn, email, claims.email_verified()),
+            // only Entra's tenant-controlled UPN may stand in; elsewhere an unverified claim is not stored
+            email: if entra { lookup_email(upn, email) } else { verified.clone() },
+            verified_email: verified,
         })
     }
 
@@ -1165,14 +1179,26 @@ mod tests {
     }
 
     #[test]
+    fn a_token_response_that_does_not_parse_is_logged_without_its_body() {
+        let body = br#"{"access_token":"at-SECRET","id_token":"it-SECRET","token_type":7}"#.to_vec();
+        let mut de = serde_json::Deserializer::from_slice(&body);
+        let parse = serde_path_to_error::deserialize::<_, EntraTokenResponse>(&mut de).unwrap_err();
+        let e: openidconnect::RequestTokenError<HttpError, StandardErrorResponse<CoreErrorResponseType>> =
+            openidconnect::RequestTokenError::Parse(parse, body);
+        let shown = exchange_failure(&e);
+        assert!(shown.starts_with("the token response does not parse: token_type"), "{shown}");
+        assert!(!shown.contains("SECRET") && !shown.contains("[123, 34"), "{shown}");
+    }
+
+    #[test]
     fn entra_binds_by_oid_and_any_other_issuer_by_sub() {
         const T: &str = "2e51b484-b008-4fc0-8f70-555c1317b555";
         let subject = |tenant, tid, oid| binding_subject(tenant, "pairwise-sub", tid, oid).map_err(|e| e.to_string());
         // Entra: the oid, never the per-app sub; a migrated (tid, oid) row is (issuer, oid).
         assert_eq!(subject(Some(T), Some(T), Some("oid-1")), Ok("oid-1".into()));
         assert_eq!(subject(Some(T), None, Some("oid-1")), Ok("oid-1".into()));
-        // a token carrying tid and oid is Entra's whatever the issuer
-        assert_eq!(subject(None, Some(T), Some("oid-1")), Ok("oid-1".into()));
+        // another issuer's tid and oid are its own claims: the sub still keys it
+        assert_eq!(subject(None, Some(T), Some("oid-1")), Ok("pairwise-sub".into()));
         // Keycloak (or any other issuer): the sub
         assert_eq!(subject(None, None, None), Ok("pairwise-sub".into()));
         assert_eq!(subject(None, None, Some("oid-1")), Ok("pairwise-sub".into()), "oid alone is no Entra token");

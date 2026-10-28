@@ -969,7 +969,7 @@ impl Tx for PgTx {
     }
 
     fn users_by_email(&self, email: &str) -> StoreResult<Vec<UserRow>> {
-        let sql = format!("{USER_SELECT} WHERE lower(u.email) = lower($1) ORDER BY u.user_id");
+        let sql = format!("{USER_SELECT} WHERE lower(u.email) = lower($1 COLLATE \"C\") ORDER BY u.user_id");
         Ok(self.query(&sql, &[&email])?.iter().map(user_row).collect())
     }
 
@@ -1024,9 +1024,11 @@ impl Tx for PgTx {
     fn backfill_emails(&self) -> StoreResult<u64> {
         self.execute(
             "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')
              WHERE email IS NULL AND EXISTS (SELECT 1 FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')",
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')",
             &[],
         )
     }

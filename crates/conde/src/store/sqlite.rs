@@ -126,7 +126,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
 /// user) gets the table rebuilt in the schema's shape, each row keeping its binding as
 /// (the tenant's v2.0 issuer URL, oid), as Postgres migration 0017 does. Runs once per file.
 fn rebuild_identities(conn: &Connection) -> rusqlite::Result<()> {
-    if !conn.prepare("SELECT 1 FROM pragma_table_info('identities') WHERE name = 'tid'")?.exists([])? {
+    let old_shape = || conn.prepare("SELECT 1 FROM pragma_table_info('identities') WHERE name = 'tid'")?.exists([]);
+    if !old_shape()? {
         return Ok(());
     }
     const START: &str = "CREATE TABLE IF NOT EXISTS identities(";
@@ -135,6 +136,10 @@ fn rebuild_identities(conn: &Connection) -> rusqlite::Result<()> {
     let create = SCHEMA[at..at + len].replacen(START, "CREATE TABLE identities_rebuilt(", 1);
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let steps = || -> rusqlite::Result<()> {
+        // another process may have rebuilt it while this one waited for the lock
+        if !old_shape()? {
+            return Ok(());
+        }
         conn.execute_batch(&create)?;
         conn.execute_batch(
             "INSERT INTO identities_rebuilt(issuer, subject, user_id, display_name, preferred_username)
@@ -619,9 +624,11 @@ impl Tx for SqliteTx<'_> {
     fn backfill_emails(&self) -> StoreResult<u64> {
         Ok(self.exec(
             "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')
              WHERE email IS NULL AND EXISTS (SELECT 1 FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')",
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')",
             [],
         )? as u64)
     }

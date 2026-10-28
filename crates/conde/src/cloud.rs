@@ -422,6 +422,15 @@ pub fn moved_to() -> anyhow::Result<Option<String>> {
     Ok(Some(url))
 }
 
+/// The Slack worker's configuration (`CONDE_SLACK_*`); none on a board that moved, which pages
+/// nobody.
+pub fn slack_config(moved_to: Option<&str>, public_url: Option<String>) -> anyhow::Result<Option<crate::slack::SlackConfig>> {
+    if moved_to.is_some() {
+        return Ok(None);
+    }
+    crate::slack::SlackConfig::from_env(&board_name()?, public_url)
+}
+
 /// The lowest bridge protocol the server takes (`CONDE_MIN_PROTO`, default 1); 2 once every
 /// enrolled host migrated.
 pub fn min_proto() -> anyhow::Result<u32> {
@@ -448,9 +457,14 @@ pub async fn start_on(
 ) -> std::io::Result<ServerHandle> {
     d.share(&board_name().map_err(std::io::Error::other)?);
     // Every owner has exactly one human name before the board answers anyone, and every user
-    // who signed in before emails were stored has one for the Slack worker's first lookups.
+    // who signed in before emails were stored has one for the Slack worker's first lookups; a
+    // board that moved serves nobody, so it writes nothing.
     let d2 = d.clone();
+    let moved = config.moved_to.is_some();
     tokio::task::spawn_blocking(move || {
+        if moved {
+            return Ok(());
+        }
         d2.with_tx(|tx| {
             crate::humans::ensure_all(tx)?;
             let filled = tx.backfill_emails()?;
@@ -477,9 +491,9 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
             tracing::info!(entra = w.entra.is_some(), admin = w.admin_key.is_some(), "web surface enabled");
         }
         let public_url = web.as_ref().and_then(|w| w.entra.as_ref()).map(|c| c.public_url.clone());
-        let slack = crate::slack::SlackConfig::from_env(&board_name()?, public_url)?;
         let min_proto = min_proto()?;
         let moved_to = moved_to()?;
+        let slack = slack_config(moved_to.as_deref(), public_url)?;
         if let Some(url) = &moved_to {
             tracing::warn!(%url, "the board moved: every request but /healthz is answered 308");
         }

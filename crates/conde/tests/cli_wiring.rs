@@ -1120,6 +1120,35 @@ fn board_move_repoints_an_enrolled_board_after_the_new_address_answers_as_it() {
     let (ok, _, err) = r.conde(&["board", "move", "other", &new_url]);
     assert!(!ok && err.contains("did not answer as board other with this host's key; nothing changed"), "{err}");
 
+    // a destination other than the one the old server names gets nothing, not even a connection
+    let decoy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    decoy.set_nonblocking(true).unwrap();
+    let decoy_url = format!("http://{}", decoy.local_addr().unwrap());
+    let (ok, _, err) = r.conde(&["board", "move", "shared", &decoy_url]);
+    assert!(!ok);
+    assert!(
+        err.contains(&format!("{old_url} says the board moved to {new_url}, not that it moved to {decoy_url}; nothing was sent to {decoy_url}")),
+        "{err}"
+    );
+    assert!(decoy.accept().is_err(), "the decoy was never contacted");
+    // an old address that does not answer with a move: refused unless the human trusts the new one
+    let (plain, other_rt) = {
+        let rt2 = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let d2 = d.clone();
+        let h = rt2.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            conde::cloud::start_on(d2, listener, conde_remote::ServerConfig::default()).await.unwrap()
+        });
+        (h, rt2)
+    };
+    let plain_url = format!("http://{}", plain.local_addr());
+    boards::store(&boards::path_in(&config, "plain"), "plain", &BoardConfig { server: plain_url.clone(), ..enrolled.clone() }).unwrap();
+    let (ok, _, err) = r.conde(&["board", "move", "plain", &new_url]);
+    assert!(!ok && err.contains("does not say the board moved") && err.contains("--trust-new-address"), "{err}");
+    let (ok, out, err) = r.conde(&["board", "move", "plain", &new_url, "--trust-new-address"]);
+    assert!(ok && out.starts_with(&format!("board plain moved: {plain_url} -> {new_url}")), "{out}{err}");
+    other_rt.block_on(plain.shutdown()).unwrap();
+
     let (ok, out, err) = r.conde(&["board", "move", "shared", &new_url]);
     assert!(ok, "{err}");
     assert!(out.starts_with(&format!("board shared moved: {old_url} -> {new_url} (credential, account tester and host testhost kept)\n")), "{out}");

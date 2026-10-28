@@ -64,8 +64,8 @@ fn web_user(u: UserRow) -> WebUser {
     WebUser { user_id: u.user_id, name: u.name, disabled: u.disabled }
 }
 
-/// Binds the identity to the user and records the sign-in email it carries (never clearing a
-/// stored one: the email is what an invite matches).
+/// Binds the identity to the user and records its verified email (never an unverified claim,
+/// never clearing a stored one: the email is what an invite matches).
 fn bind(t: &dyn Tx, user_id: i64, identity: &Identity) -> Result<(), StoreError> {
     t.bind_identity(
         user_id,
@@ -74,7 +74,7 @@ fn bind(t: &dyn Tx, user_id: i64, identity: &Identity) -> Result<(), StoreError>
         identity.display_name.as_deref(),
         identity.preferred_username.as_deref(),
     )?;
-    match identity.email.as_deref() {
+    match identity.verified_email.as_deref() {
         Some(email) => t.set_user_email(user_id, Some(email)),
         None => Ok(()),
     }
@@ -137,7 +137,7 @@ impl WebStore for WebBoard {
 
     fn set_profile(&self, user_id: i64, identity: &Identity) -> WebResult<()> {
         self.write(|t| {
-            if let Some(email) = identity.email.as_deref() {
+            if let Some(email) = identity.verified_email.as_deref() {
                 t.set_user_email(user_id, Some(email))?;
             }
             Ok(t.set_identity_profile(

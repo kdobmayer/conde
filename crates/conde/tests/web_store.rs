@@ -267,6 +267,17 @@ async fn a_generic_issuer_needs_a_verified_email(d: Arc<Dispatcher>) {
     let (s, issuer) = (env.store.clone(), env.idp.issuer.clone());
     let user = blocking(move || s.user_by_identity(&issuer, "pairwise-oid-krisztian").unwrap()).await.unwrap();
     assert_eq!(user.name, "krisztian-dobmayer");
+    // bound: a later unverified email claim is never stored, whatever preferred_username says
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.email = Some("attacker@evil.example".into());
+        p.email_verified = None;
+        p.upn = "attacker@evil.example".into();
+    }
+    Browser::new().sign_in(&env).await;
+    let d2 = d.clone();
+    let email = blocking(move || d2.with_conn(|t| t.user_by_name("krisztian-dobmayer")).unwrap().unwrap().email).await;
+    assert_eq!(email.as_deref(), Some("krisztian.dobmayer@dakai.example"));
 }
 
 async fn sessions_expire_and_disabled_users_are_signed_out(d: Arc<Dispatcher>) {
@@ -461,8 +472,8 @@ async fn admin_binds_existing_users_and_disables_them(d: Arc<Dispatcher>) {
     assert!(authenticates(&d, &key).await);
 }
 
-/// Sign-in stores the email (preferred_username, the UPN; the `email` claim only when the UPN is
-/// not an address) and asks the Slack
+/// Sign-in stores the verified email (preferred_username, the UPN; the `email` claim only when the
+/// UPN is not an address and the claim is marked verified) and asks the Slack
 /// worker to look its member id up; the user gets a human name; the admin key alone sets the
 /// member id, which a lookup never replaces.
 async fn sign_in_stores_the_email_and_the_admin_sets_the_slack_id(d: Arc<Dispatcher>) {
@@ -482,7 +493,14 @@ async fn sign_in_stores_the_email_and_the_admin_sets_the_slack_id(d: Arc<Dispatc
     assert!(d.take_slack_lookups().contains(&u.user_id), "every sign-in asks again");
     env.idp.person.lock().unwrap().upn = "krisztian".into();
     Browser::new().sign_in(&env).await;
-    assert_eq!(user(&d).await.email.as_deref(), Some("someone-else@dakai.io"), "a UPN without an @: the email claim, refreshed");
+    assert_eq!(
+        user(&d).await.email.as_deref(),
+        Some("Krisztian.Dobmayer@dakai.example"),
+        "a UPN without an @: the unverified email claim is not stored, the address stays"
+    );
+    env.idp.person.lock().unwrap().email_verified = Some(true);
+    Browser::new().sign_in(&env).await;
+    assert_eq!(user(&d).await.email.as_deref(), Some("someone-else@dakai.io"), "a verified email claim is stored");
     let d2 = d.clone();
     let humans = blocking(move || d2.with_conn(|t| t.owner_agents(u.user_id)).unwrap()).await;
     assert_eq!(humans.iter().filter(|a| a.is_human()).map(|a| a.canonical()).collect::<Vec<_>>(), ["krisztian-dobmayer/human"]);

@@ -217,9 +217,11 @@ pub fn key_list(data: Option<PathBuf>) -> anyhow::Result<i32> {
 
 /// `conde board move <alias> <url>`: re-points an enrolled board at its new address (see
 /// [`boards::move_board`]) and has the running bridge reconnect there.
-pub fn board_move(alias: &str, url: &str) -> anyhow::Result<i32> {
+pub fn board_move(alias: &str, url: &str, trust_new: bool) -> anyhow::Result<i32> {
     let config = boards::config_dir()?;
-    let (old, new) = boards::move_board(&config, alias, url, &mut |server, key| boards::board_info(server, key))?;
+    let (old, new) = boards::move_board(&config, alias, url, trust_new, &mut boards::moved_probe, &mut |server, key| {
+        boards::board_info(server, key)
+    })?;
     println!(
         "board {alias} moved: {} -> {} (credential, account {} and host {} kept)",
         old.server, new.server, new.owner, new.host_id

@@ -632,10 +632,12 @@ fn a_users_email_is_filled_from_the_identity_at_start_and_looked_up() {
         b.other("dora", "dbox");
         b.d.with_tx(|tx| {
             let id = |n: &str| tx.user_id(n).map(Option::unwrap);
-            tx.bind_identity(id("krisz")?, "t", "o-krisz", None, Some("krisz@dakai.io"))?;
-            tx.bind_identity(id("zed")?, "t", "o-zed", None, Some("zed@dakai.io"))?;
+            // as migration 0017 leaves Entra rows: the tenant's issuer
+            let t = "https://login.microsoftonline.com/t/v2.0";
+            tx.bind_identity(id("krisz")?, t, "o-krisz", None, Some("krisz@dakai.io"))?;
+            tx.bind_identity(id("zed")?, t, "o-zed", None, Some("zed@dakai.io"))?;
             tx.set_user_email(id("zed")?, Some("kept@dakai.io"))?;
-            tx.bind_identity(id("dora")?, "t", "o-dora", None, Some("dora"))?;
+            tx.bind_identity(id("dora")?, t, "o-dora", None, Some("dora"))?;
             Ok(())
         })
         .unwrap();

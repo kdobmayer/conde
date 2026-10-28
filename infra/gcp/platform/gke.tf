@@ -45,6 +45,14 @@ resource "google_container_cluster" "conde" {
     mode = "BASIC"
   }
 
+  # System metrics only (free, and Autopilot keeps them on); the metric packages bill per sample ingested.
+  monitoring_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+    managed_prometheus {
+      enabled = true
+    }
+  }
+
   # Daily 01:00-05:00 UTC; the dates only anchor the recurrence.
   maintenance_policy {
     recurring_window {

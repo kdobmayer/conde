@@ -192,22 +192,23 @@ function keysPage() {
 	const rows = fx.keys
 		.map(
 			(k) =>
-				`<tr>\n<td><code>${k.host_id}</code></td><td>${k.label}</td><td>${k.created}</td><td>${k.last_seen}</td>\n` +
+				`<tr>\n<td data-label="Host"><code>${k.host_id}</code></td><td data-label="Label">${k.label}</td><td data-label="Created">${k.created}</td><td data-label="Last seen">${k.last_seen}</td>\n` +
 				(k.revoked
-					? `<td class="muted">revoked ${k.revoked}</td><td></td>\n`
-					: `<td>live</td><td><form method="post" action="/keys/${k.host_id}/revoke" class="inline"><button class="danger">Revoke</button></form></td>`) +
+					? `<td class="muted" data-label="State">revoked ${k.revoked}</td><td></td>\n`
+					: `<td data-label="State">live</td><td><form method="post" action="/keys/${k.host_id}/revoke" class="inline"><input type="hidden" name="csrf" value="mock"><button class="danger">Revoke</button></form></td>`) +
 				`</tr>`
 		)
 		.join('\n');
 	const apps = fx.apps
 		.map(
 			(a) =>
-				`<tr>\n<td><code>${a.host}</code> <span class="muted">&#8220;${a.name}&#8221;</span></td><td>${a.created}</td><td>${a.last_used}</td><td>${a.expires}</td>\n<td><form class="inline"><button class="danger">Revoke</button></form></td>\n</tr>`
+				`<tr>\n<td data-label="App"><code>${a.host}</code> <span class="muted">&#8220;${a.name}&#8221;</span></td><td data-label="Created">${a.created}</td><td data-label="Last used">${a.last_used}</td><td data-label="Expires">${a.expires}</td>\n<td><form class="inline"><button class="danger">Revoke</button></form></td>\n</tr>`
 		)
 		.join('\n');
 	const body = `<h1>Host keys</h1>
 <p class="muted">One key per machine. The bridge on that machine holds it, and every Claude and Codex session it finds acts as you. Revoking a key cuts that machine off at once.</p>
 <form method="post" action="/keys" class="row">
+<input type="hidden" name="csrf" value="mock">
 <input type="text" name="label" required maxlength="64" placeholder="Machine name, e.g. work-laptop" aria-label="Machine name">
 <button>Create key</button>
 </form>
@@ -233,9 +234,10 @@ ${apps}</tbody>
 </head>
 <body>
 <header>
-<a class="brand" href="/keys">${mark}conde</a>
+<a class="brand" href="/">${mark}conde</a>
+<nav aria-label="Sections"><a href="/#/">Feed</a><a href="/#/agents">Agents</a><a href="/#/channels">Channels</a><a href="/#/fleet">Fleet</a><a href="/keys" aria-current="page">Keys</a></nav>
 <span class="who">${fx.session.display}</span>
-<form method="post" action="/auth/logout"><button class="quiet">Sign out</button></form>
+<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="mock"><button class="quiet">Sign out</button></form>
 </header>
 <main>
 ${body}

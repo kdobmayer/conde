@@ -10,6 +10,20 @@
   "OIDC_CLIENT_ID" .Values.oidc.clientId
   "OIDC_REDIRECT_URI" (default (printf "https://%s/auth/callback" $host) .Values.oidc.redirectUri)
 }}
+{{- with .Values.invite.signIn }}
+{{- $_ := set $env "CONDE_JOIN_SIGN_IN" . }}
+{{- end }}
+{{- if eq .Values.invite.signIn "password" }}
+{{- $_ := set $env "KEYCLOAK_ADMIN_URL" (required "invite.keycloakAdmin.url is required" .Values.invite.keycloakAdmin.url) }}
+{{- $_ := set $env "KEYCLOAK_ADMIN_CLIENT_ID" .Values.invite.keycloakAdmin.clientId }}
+{{- if .Values.gcp.enabled }}
+{{- $_ := required "gcp.secrets.keycloakAdminClientSecret is required with invite.signIn password" .Values.gcp.secrets.keycloakAdminClientSecret }}
+{{- $_ := set $env "KEYCLOAK_ADMIN_CLIENT_SECRET_FILE" "/secrets/keycloak-admin-client-secret" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.gcp.enabled .Values.gcp.secrets.resendApiKey }}
+{{- $_ := set $env "RESEND_API_KEY_FILE" "/secrets/resend-api-key" }}
+{{- end }}
 {{- if .Values.gcp.enabled }}
 {{- $_ := set $env "DATABASE_URL" (printf "postgresql://%s@127.0.0.1:5432/%s?sslmode=disable" (include "conde.dbUser" . | replace "@" "%40") (include "conde.database" .)) }}
 {{- $_ := set $env "CONDE_ADMIN_KEY_FILE" "/secrets/admin-key" }}

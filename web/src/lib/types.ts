@@ -104,7 +104,7 @@ export interface FleetAgent {
 	display: string | null;
 	kind: 'claude' | 'codex' | 'human';
 	host: string;
-	address: string;
+	address: string | null;
 	pinned: string | null;
 	discovered: string | null;
 	held: number | null;
@@ -127,4 +127,42 @@ export interface ChannelSummary {
 	topic: string | null;
 	members: number;
 	messages: number;
+}
+
+/** A Feed row: the history view with the row's direction and the own agents it is read through. */
+export interface FeedMessage extends Message {
+	direction: 'in' | 'out' | 'own';
+	via: string[];
+}
+
+/** `owner.feed`: newest first; `more` when matching rows remain below the last one, inside the bounds. */
+export interface FeedAnswer {
+	messages: FeedMessage[];
+	more: boolean;
+}
+
+/** `owner.thread`: the subtree under `top`, sorted by seq; `next` continues it. */
+export interface ThreadAnswer {
+	top: string;
+	start: string | null;
+	hidden_parent: boolean;
+	messages: Message[];
+	next: number | null;
+}
+
+export interface SearchHit {
+	place: string;
+	message_id: string;
+	seq: number;
+	from: string;
+	date: string;
+	line: string;
+}
+
+/** `owner.search`: hits oldest first; `partial` with `scanned` when the scan budget stopped it. */
+export interface SearchAnswer {
+	hits: SearchHit[];
+	next_cursor: number | string | null;
+	partial?: boolean;
+	scanned?: number;
 }

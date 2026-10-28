@@ -45,6 +45,14 @@ addition:
   the client re-reads its loaded window on either topic, at most once per 2 s (ia.md "The Feed
   window").
 
+## Owner's choice (2026-10-28): B only
+
+Design B (Editorial) is the one skin. Consequences for the items below, decided by desk: no skin registry, no
+skin switch, no `data-skin` tokens per skin (U6 builds the shell with B's tokens directly, the Console / Editorial
+control is not built); U12 (skin A) is not built; U13 is the shell, Feed row and Message in B over the skeleton
+components, not a second skin layer; U16 has no other skin to remove; `/keys` takes B's accent at U14. Everything
+else, gates included, stands.
+
 ## Items
 
 - U1. A conversation opens at its oldest loaded message instead of the newest (audit §4, live

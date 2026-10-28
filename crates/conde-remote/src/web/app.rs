@@ -373,12 +373,13 @@ fn app_file(path: &str) -> Option<rust_embed::EmbeddedFile> {
     Assets::get(&name)
 }
 
-/// `GET /app/{*path}`: one file of the build; hashed files are cached for good.
+/// `GET /app/{*path}`: one file of the build; hashed files and the fonts, whose names carry
+/// their version, are cached for good.
 pub(crate) async fn asset(Path(path): Path<String>) -> Response {
     let Some(file) = app_file(&path) else {
         return (StatusCode::NOT_FOUND, [no_store()], "not found\n").into_response();
     };
-    let cache = if path.starts_with("immutable/") {
+    let cache = if path.starts_with("immutable/") || path.starts_with("fonts/") {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"
@@ -555,6 +556,33 @@ mod tests {
         match app_files().iter().next() {
             Some(name) => assert!(app_file(&name["app/".len()..]).is_some(), "{name}"),
             None => eprintln!("no web build embedded: the lookup of a real file is not checked"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_font_the_styles_name_is_served_as_woff2_for_good() {
+        let mut fonts = HashSet::new();
+        for css in app_files().iter().filter(|n| n.ends_with(".css")) {
+            let text = String::from_utf8_lossy(&Assets::get(css).unwrap().data).into_owned();
+            for (at, _) in text.match_indices("/app/fonts/") {
+                let rest = &text[at + "/app/".len()..];
+                fonts.insert(rest[..rest.find(['\'', '"', ')']).unwrap()].to_string());
+            }
+        }
+        if fonts.is_empty() {
+            eprintln!("no web build with fonts embedded: the font checks are skipped");
+            return;
+        }
+        assert_eq!(fonts.len(), 10, "{fonts:?}");
+        for font in fonts {
+            let r = asset(Path(font.clone())).await;
+            assert_eq!(r.status(), StatusCode::OK, "{font}");
+            assert_eq!(r.headers()[header::CONTENT_TYPE], "font/woff2", "{font}");
+            assert_eq!(
+                r.headers()[header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable",
+                "{font}"
+            );
         }
     }
 

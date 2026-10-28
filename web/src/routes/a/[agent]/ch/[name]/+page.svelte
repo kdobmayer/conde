@@ -1,12 +1,9 @@
 <script lang="ts">
+	// Old links to an agent's channel open the channel's own page (ia.md "Navigation").
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import Conversation from '#lib/Conversation.svelte';
-	import { board } from '#lib/board.svelte.ts';
 
-	const agent = $derived(`${board.session?.user}/${page.params.agent}`);
-	const target = $derived(`#${page.params.name}`);
+	$effect(() => {
+		void goto(`#/c/${encodeURIComponent(page.params.name ?? '')}`, { replaceState: true });
+	});
 </script>
-
-{#key `${agent} ${target}`}
-	<Conversation {agent} {target} />
-{/key}

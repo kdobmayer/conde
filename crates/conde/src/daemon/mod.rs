@@ -239,6 +239,7 @@ impl Core {
         match conn.status() {
             Status::NotMigrated => "not migrated".into(),
             Status::Stopped(why) | Status::Broken(why) => why,
+            Status::Moved(url) => format!("moved to {url} (run: conde board move {} {url})", conn.alias),
             Status::Running => match conn.client().map(|c| c.state()) {
                 Some(conde_remote::BridgeState::Connected) if self.mux.is_reconciled(&conn.alias) => "connected".into(),
                 Some(conde_remote::BridgeState::Connected) => "connected (reconciling)".into(),
@@ -425,7 +426,7 @@ pub(crate) fn reload_board(core: &Arc<Core>, alias: &str, refused: Option<&Arc<B
     };
     if let Some(old) = &old {
         let unchanged = matches!((&old.config, &config), (Some(a), Ok(b)) if a == b);
-        let live = !matches!(old.status(), Status::Stopped(_) | Status::Broken(_));
+        let live = !matches!(old.status(), Status::Stopped(_) | Status::Broken(_) | Status::Moved(_));
         if unchanged && (live || refused.is_some()) {
             return Ok(Reloaded::Unchanged);
         }
@@ -1022,6 +1023,8 @@ async fn forward(conn: &BoardConn, req: &Request, actor: Option<String>, wait: D
             }
             resp
         }
+        // a move is final and names its own next step
+        Err(why) if why.starts_with(&format!("board {} moved to ", conn.alias)) => Response::err(&id, ErrorCode::Conflict, why),
         Err(why) => Response::err(&id, ErrorCode::Internal, format!("{why}; the local board is unaffected")),
     }
 }

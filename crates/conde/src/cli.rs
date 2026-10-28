@@ -186,6 +186,11 @@ enum Cmd {
     },
     /// Withdraw an agent's publication from a shared board.
     Unpublish { agent: String },
+    /// One enrolled shared board.
+    Board {
+        #[command(subcommand)]
+        cmd: BoardCmd,
+    },
     /// List this host's boards: the local one and every enrolled shared board.
     Boards {
         /// Forget an enrolled board on this host: its credential, publications and pending
@@ -455,6 +460,40 @@ enum AdminCmd {
         #[arg(long, value_name = "URL")]
         server: String,
     },
+    /// Board users on a shared board (the admin key; CONDE_ADMIN_KEY or a prompt).
+    User {
+        #[command(subcommand)]
+        cmd: UserCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BoardCmd {
+    /// Point an enrolled board at the address it moved to: its credential, host, account and
+    /// publications are kept; the new address must answer as the same board first.
+    Move {
+        alias: String,
+        /// The board's new server URL (https://host).
+        url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum UserCmd {
+    /// Invite a user: the first sign-in whose verified email is EMAIL becomes NAME.
+    Invite {
+        name: String,
+        email: String,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
+    /// List users: name, email, the identity issuers they signed in with, enabled or disabled.
+    List {
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -644,6 +683,18 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             admin::require_human()?;
             return admin::slack(&server, &owner, &member_id);
         }
+        Cmd::Board { cmd: BoardCmd::Move { alias, url } } => {
+            no_board("board move", "; name the board as the first argument")?;
+            return admin::board_move(&alias, &url);
+        }
+        Cmd::Admin { cmd: AdminCmd::User { cmd } } => {
+            no_board("admin", "")?;
+            admin::require_human()?;
+            return match cmd {
+                UserCmd::Invite { name, email, server } => admin::user_invite(&server, &name, &email),
+                UserCmd::List { server } => admin::user_list(&server),
+            };
+        }
         Cmd::Admin { cmd: AdminCmd::Key { cmd } } => {
             no_board("admin", "")?;
             admin::require_human()?;
@@ -693,6 +744,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         | Cmd::Enroll { .. }
         | Cmd::Login { .. }
         | Cmd::Admin { .. }
+        | Cmd::Board { .. }
         | Cmd::History { .. } => {
             unreachable!()
         }

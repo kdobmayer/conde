@@ -58,6 +58,7 @@ const PG_CASES: &[PgCase] = &[
     ("dropping_a_board_on_an_async_worker", dropping_a_board_on_an_async_worker),
     ("replicas_share_idempotency_and_claims", replicas_share_idempotency_and_claims),
     ("deliveries_from_before_migration_5_still_count_as_reached", deliveries_from_before_migration_5_still_count_as_reached),
+    ("entra_identities_from_before_migration_17_keep_their_users", entra_identities_from_before_migration_17_keep_their_users),
 ];
 
 fn main() {
@@ -86,6 +87,9 @@ fn main() {
     }
     if wanted("sqlite::old_board_file_gains_grant_codes") {
         report.run("sqlite::old_board_file_gains_grant_codes", old_board_file_gains_grant_codes);
+    }
+    if wanted("sqlite::old_board_file_keeps_its_entra_identities") {
+        report.run("sqlite::old_board_file_keeps_its_entra_identities", old_board_file_keeps_its_entra_identities);
     }
     if wanted("sqlite::deliveries_without_a_settled_time_still_count_as_reached") {
         report.run(
@@ -1250,6 +1254,112 @@ fn deliveries_from_before_migration_5_still_count_as_reached(c: &Cluster) {
     reach_without_time(&store, |sql| client.batch_execute(sql).unwrap());
 }
 
+/// What a board signed in with Entra holds before identities carry an issuer: two users bound by
+/// (tid, oid), one with a display name and UPN, and an invite-less admin user.
+const ENTRA_IDENTITY_ROWS: &str = "
+    INSERT INTO users(name) VALUES ('krisz'), ('david'), ('admin-made');
+    INSERT INTO identities(tid, oid, user_id, display_name, preferred_username)
+        SELECT '2e51b484-b008-4fc0-8f70-555c1317b555', 'oid-krisz', user_id, 'Krisztián', 'krisz@dakai.io'
+        FROM users WHERE name = 'krisz';
+    INSERT INTO identities(tid, oid, user_id)
+        SELECT '2e51b484-b008-4fc0-8f70-555c1317b555', 'oid-david', user_id FROM users WHERE name = 'david';";
+
+/// After the identities migration: each (tid, oid) is (the tenant's v2.0 issuer, oid) of the same
+/// user, profile kept, and a user may add one identity of another issuer, never a second of the
+/// same issuer.
+fn entra_identities_keep_their_users(store: &dyn Store) {
+    const ENTRA: &str = "https://login.microsoftonline.com/2e51b484-b008-4fc0-8f70-555c1317b555/v2.0";
+    const REALM: &str = "https://auth.conde.cloud/realms/dakai";
+    let (krisz, david) = read(store, |tx| {
+        assert_eq!(tx.user_by_identity("2e51b484-b008-4fc0-8f70-555c1317b555", "oid-krisz").unwrap(), None);
+        let krisz = tx.user_by_identity(ENTRA, "oid-krisz").unwrap().expect("krisz keeps the binding");
+        let david = tx.user_by_identity(ENTRA, "oid-david").unwrap().expect("david keeps the binding");
+        assert_eq!((krisz.name.as_str(), krisz.bound, david.name.as_str()), ("krisz", true, "david"));
+        assert!(!tx.user_by_name("admin-made").unwrap().unwrap().bound);
+        (krisz.user_id, david.user_id)
+    });
+    write(store, |tx| {
+        assert_eq!(tx.backfill_emails().unwrap(), 1, "the UPN still fills the email");
+        tx.bind_identity(krisz, REALM, "kc-krisz", Some("Krisztián"), None).unwrap();
+        tx.set_identity_profile(ENTRA, "oid-david", Some("Dávid"), Some("david@dakai.io")).unwrap();
+    });
+    read(store, |tx| {
+        assert_eq!(tx.user_by_identity(REALM, "kc-krisz").unwrap().unwrap().user_id, krisz);
+        assert_eq!(tx.identity_issuers(krisz).unwrap(), vec![REALM.to_string(), ENTRA.to_string()]);
+        assert_eq!(tx.identity_issuers(david).unwrap(), vec![ENTRA.to_string()]);
+    });
+    let w = store.begin(Mode::Write).unwrap();
+    assert!(w.bind_identity(david, ENTRA, "oid-david-2", None, None).is_err(), "one identity per issuer per user");
+}
+
+/// Postgres: a board migrated to version 16 with Entra-bound users gets migration 17 at the next
+/// start, every binding kept.
+fn entra_identities_from_before_migration_17_keep_their_users(c: &Cluster) {
+    let db = c.database();
+    let mut client = c.client(&db);
+    client
+        .batch_execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
+             applied_at TIMESTAMPTZ NOT NULL DEFAULT now());",
+        )
+        .unwrap();
+    let before: Vec<_> = MIGRATIONS.iter().filter(|m| m.0 <= 16).collect();
+    assert_eq!(before.len(), 16);
+    for (version, name, sql) in before {
+        client.batch_execute(sql).unwrap();
+        client
+            .execute(
+                "INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+                &[version, name, &conde::util::sha256_hex(sql.as_bytes())],
+            )
+            .unwrap();
+    }
+    client.batch_execute(ENTRA_IDENTITY_ROWS).unwrap();
+    let store = PgStore::connect(&c.url(&db)).unwrap();
+    entra_identities_keep_their_users(&store);
+    let versions: Vec<i32> =
+        client.query("SELECT version FROM schema_migrations ORDER BY version", &[]).unwrap().iter().map(|r| r.get(0)).collect();
+    assert_eq!(versions, MIGRATIONS.iter().map(|m| m.0).collect::<Vec<i32>>());
+}
+
+/// A board file whose identities are keyed by (tid, oid), one per user: opening it rebuilds the
+/// table with every binding kept.
+fn old_board_file_keeps_its_entra_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    drop(SqliteStore::open(&path).unwrap());
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "DROP TABLE identities;
+             CREATE TABLE identities(
+                 tid TEXT NOT NULL,
+                 oid TEXT NOT NULL,
+                 user_id INTEGER NOT NULL UNIQUE REFERENCES users(user_id),
+                 display_name TEXT,
+                 preferred_username TEXT,
+                 PRIMARY KEY (tid, oid)
+             );",
+        )
+        .unwrap();
+        c.execute_batch(ENTRA_IDENTITY_ROWS).unwrap();
+    }
+    let s = SqliteStore::open(&path).unwrap();
+    entra_identities_keep_their_users(&s);
+    drop(s);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let columns: Vec<String> = c
+        .prepare("SELECT name FROM pragma_table_info('identities')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(columns, ["issuer", "subject", "user_id", "display_name", "preferred_username"]);
+    let s = SqliteStore::open(&path).unwrap();
+    assert_eq!(read(&s, |tx| tx.users().unwrap()).len(), 3, "reopening rebuilds nothing again");
+}
+
 /// A board file from before topics: opening it adds the column, data intact.
 fn old_board_file_gains_topics() {
     let dir = tempfile::tempdir().unwrap();
@@ -1344,24 +1454,45 @@ fn phase_one_database_gains_topics(c: &Cluster) {
     assert_eq!(versions, MIGRATIONS.iter().map(|m| m.0).collect::<Vec<i32>>());
 }
 
-/// Entra identities, disabled users, browser sessions and one-time records; revocations and
-/// disables announce their hosts on commit.
+/// Sign-in identities (one per issuer per user), invites by email, disabled users, browser
+/// sessions and one-time records; revocations and disables announce their hosts on commit.
 fn web_sign_in_and_disabled_users(store: &dyn Store) {
+    const ENTRA: &str = "https://login.microsoftonline.com/t-1/v2.0";
+    const REALM: &str = "https://auth.conde.cloud/realms/dakai";
     let mut events = store.pending().events();
     let w = store.begin(Mode::Write).unwrap();
     let ann = w.ensure_user("ann").unwrap();
-    let row = |bound, disabled| UserRow { user_id: ann, name: "ann".into(), disabled, bound };
+    let row = |bound, disabled| UserRow { user_id: ann, name: "ann".into(), disabled, bound, email: None };
     assert_eq!(w.user_by_name("ann").unwrap(), Some(row(false, false)));
-    assert_eq!(w.user_by_identity("t-1", "o-1").unwrap(), None);
-    w.bind_identity(ann, "t-1", "o-1", Some("Ann"), Some("ann@example.com")).unwrap();
-    assert_eq!(w.user_by_identity("t-1", "o-1").unwrap(), Some(row(true, false)));
+    assert_eq!(w.user_by_identity(ENTRA, "o-1").unwrap(), None);
+    w.bind_identity(ann, ENTRA, "o-1", Some("Ann"), Some("ann@example.com")).unwrap();
+    assert_eq!(w.user_by_identity(ENTRA, "o-1").unwrap(), Some(row(true, false)));
+    assert_eq!(w.user_by_identity(REALM, "o-1").unwrap(), None, "the subject is per issuer");
+    // A second issuer's identity for the same user: one row per user, two issuers.
+    w.bind_identity(ann, REALM, "kc-ann", None, None).unwrap();
+    assert_eq!(w.user_by_identity(REALM, "kc-ann").unwrap(), Some(row(true, false)));
     assert_eq!(w.user_by_id(ann).unwrap(), Some(row(true, false)));
-    w.set_identity_profile(ann, Some("Ann B."), None).unwrap();
+    assert_eq!(w.users().unwrap(), vec![row(true, false)]);
+    assert_eq!(w.identity_issuers(ann).unwrap(), vec![REALM.to_string(), ENTRA.to_string()]);
+    w.set_identity_profile(ENTRA, "o-1", Some("Ann B."), None).unwrap();
+    // Invites match the email ASCII case-insensitively.
+    assert!(w.users_by_email("ann@example.com").unwrap().is_empty());
+    w.set_user_email(ann, Some("Ann@Example.com")).unwrap();
+    let bob = w.ensure_user("bob").unwrap();
+    w.set_user_email(bob, Some("bob@example.com")).unwrap();
+    let names = |rows: Vec<UserRow>| rows.into_iter().map(|u| u.name).collect::<Vec<_>>();
+    assert_eq!(names(w.users_by_email("ANN@example.COM").unwrap()), vec!["ann"]);
+    assert_eq!(w.user_by_name("ann").unwrap().unwrap().email.as_deref(), Some("Ann@Example.com"));
+    w.set_user_email(bob, Some("ann@example.com")).unwrap();
+    assert_eq!(names(w.users_by_email("ann@example.com").unwrap()), vec!["ann", "bob"]);
+    assert_eq!(names(w.users().unwrap()), vec!["ann", "bob"]);
+    assert!(w.identity_issuers(bob).unwrap().is_empty());
     w.ensure_host("box", ann).unwrap();
     w.insert_credential("digest-1", ann, "box", "box", "2026-10-09T00:00:00.000Z").unwrap();
     assert_eq!(w.authenticate("digest-1").unwrap(), Some((ann, "box".to_string())));
     assert_eq!(w.set_user_disabled(ann, true).unwrap(), vec!["box".to_string()]);
-    assert_eq!(w.user_by_id(ann).unwrap(), Some(row(true, true)));
+    let email = Some("Ann@Example.com".to_string());
+    assert_eq!(w.user_by_id(ann).unwrap(), Some(UserRow { email, ..row(true, true) }));
     assert_eq!(w.authenticate("digest-1").unwrap(), None, "a disabled user's key does not authenticate");
     w.set_user_disabled(ann, false).unwrap();
     assert_eq!(w.authenticate("digest-1").unwrap(), Some((ann, "box".to_string())));
@@ -1410,6 +1541,16 @@ fn web_sign_in_and_disabled_users(store: &dyn Store) {
         }
         assert!(!revoked.is_empty() && revoked.iter().all(|h| h == "box"), "{revoked:?}");
     }
+
+    // A second identity of the same issuer for one user, or one identity for two users, is refused.
+    let w = store.begin(Mode::Write).unwrap();
+    assert!(w.bind_identity(ann, ENTRA, "o-2", None, None).is_err(), "one identity per issuer per user");
+    drop(w);
+    let w = store.begin(Mode::Write).unwrap();
+    let bob = w.user_id("bob").unwrap().unwrap();
+    assert!(w.bind_identity(bob, ENTRA, "o-1", None, None).is_err(), "an identity binds one user");
+    drop(w);
+    assert_eq!(read(store, |tx| tx.identity_issuers(ann).unwrap()).len(), 2);
 }
 
 fn register_frame(name: &str) -> serde_json::Value {

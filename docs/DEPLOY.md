@@ -49,14 +49,26 @@ Two replicas (min = max = 2) since 2026-10-09; Postgres B1ms single zone,
 no HA; no NAT gateway; Entra client secret valid until 2028-10-08. Infra code
 lives in infra/ locally (not pushed; owner decides).
 
-## Binding an admin-created user to an Entra identity
+## Users: invites and identity bindings
 
-A user created by the admin API or the import (for example the owner at cutover) has no
-Entra identity. If that person signs in BEFORE the admin binds them, the login creates a
-second user from the UPN (`krisztian-dobmayer` on 2026-10-09) and the owner view is empty.
-Bind first: `POST /v1/admin/users {"tid","oid","name":"<existing user>"}` (admin bearer key
-from the vault; oid = `az ad signed-in-user show --query id`). If the sign-in already
-happened, move the binding in one transaction on the database (through the job, never from
-a workstation): `UPDATE identities SET user_id = <existing user id> WHERE tid = ... AND oid =
-...;` then `DELETE FROM web_sessions WHERE user_id = <stray user id>;` and have the person
-sign in again. Leave the stray user row.
+Sign-in is gated by invites: an identity bound to no user gets in only when its verified email
+(Entra: the UPN; any other issuer: `email` with `email_verified`) is the email of exactly one
+user who holds no identity of that issuer yet; that user is then bound to (issuer, subject).
+Anyone else gets 403 "not invited". Invite first: `conde admin user invite <name> <email>
+--server <url>` (or `POST /v1/admin/users {"name","email"}`); `conde admin user list` shows each
+user's email, bound issuers and state. Existing users keep their Entra binding (migration 0017:
+issuer `https://login.microsoftonline.com/<tenant>/v2.0`, subject = oid) and their email, so a
+move to another issuer binds them again by email on first sign-in.
+To bind explicitly: `POST /v1/admin/users {"issuer","subject","name":"<existing user>"}` (Entra's
+`{"tid","oid",...}` still works; admin bearer key from the vault). To move a binding: `UPDATE
+identities SET user_id = <user id> WHERE issuer = ... AND subject = ...;` then `DELETE FROM
+web_sessions WHERE user_id = <old user id>;` through the job, and have the person sign in again.
+
+## Moving a board to a new address
+
+Set `CONDE_MOVED_TO=https://<new host>` on the old server: it then answers every request but
+`/healthz` with 308 to that address and `{"moved_to": ...}`. A host's bridge stops on it instead
+of reconnecting, and every command on that board says `board <alias> moved to <url>; run: conde
+board move <alias> <url>`. `conde board move` keeps the host's key, account and publications and
+saves the new address only after it answers `board.info` with that key as the same board (the
+name the old server advertised; the alias once the old server only answers with the move).

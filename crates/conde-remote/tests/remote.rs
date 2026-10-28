@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use conde_remote::{
-    Authenticator, BridgeClient, BridgeConfig, BridgeState, Dispatcher, Endpoint, FenceResult,
+    Authenticator, BridgeClient, BridgeConfig, BridgeState, CallError, Dispatcher, Endpoint, FenceResult,
     NotificationSource, Notify, Outcome, Principal, Recorded, ServerConfig, ServerHandle,
     StopReason,
 };
@@ -1699,4 +1699,50 @@ async fn an_endpoint_change_goes_out_before_an_outcome_reported_after_it() {
     }
     assert_eq!(order, ["endpoints", "outcome"]);
     client.shutdown();
+}
+
+/// A board that moved (`moved_to`): `/healthz` still answers, every other request is a 308 to
+/// the new address with `{"moved_to"}`; a bridge stops for good on it (no reconnect) and an RPC
+/// call reports it, both as [`StopReason::Moved`].
+#[tokio::test(flavor = "multi_thread")]
+async fn a_moved_board_answers_308_everywhere_but_healthz_and_clients_stop() {
+    const NEW: &str = "https://dakai.conde.cloud";
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = ServerConfig { moved_to: Some(NEW.into()), ..test_config() };
+    let server = start_server(local(), config, Arc::default()).await;
+    let addr = server.local_addr();
+    assert_eq!(http(addr, "GET", "/healthz", None, "").await, (200, "ok".into()));
+    let web = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    for (method, path) in [("POST", "/v1/rpc"), ("GET", "/v1/bridge"), ("GET", "/keys"), ("POST", "/v1/admin/users"), ("GET", "/install.sh"), ("GET", "/no/such/path")] {
+        let r = web
+            .request(method.parse().unwrap(), format!("http://{addr}{path}"))
+            .bearer_auth("tok-a")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 308, "{method} {path}");
+        assert_eq!(r.headers()["location"], NEW, "{method} {path}");
+        assert_eq!(r.json::<Value>().await.unwrap(), json!({"moved_to": NEW}), "{method} {path}");
+    }
+    match raw_ws(addr, "tok-a").await {
+        Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 308),
+        other => panic!("expected a 308 handshake, got {:?}", other.map(|_| ())),
+    }
+    let called = conde_remote::rpc(&format!("http://{addr}/v1/rpc"), "tok-a", json!({"op": "board.info", "body": {}}), WAIT).await;
+    assert!(matches!(&called, Err(CallError::Stopped(StopReason::Moved(url))) if url == NEW), "{called:?}");
+
+    let (client, _rx) = start_client(client_config(addr, "tok-a", "host-a", "i-moved"));
+    let reason = tokio::time::timeout(WAIT, client.stopped()).await.unwrap();
+    assert_eq!(reason, StopReason::Moved(NEW.into()));
+    assert_eq!(client.connects(), 0, "never connected, never retried");
+    server.shutdown().await.unwrap();
+}
+
+#[test]
+fn a_move_is_read_from_the_body_else_the_location() {
+    assert_eq!(conde_remote::moved_to(308, Some("https://b"), br#"{"moved_to":"https://a"}"#).as_deref(), Some("https://a"));
+    assert_eq!(conde_remote::moved_to(308, Some("https://b"), b"not json").as_deref(), Some("https://b"));
+    assert_eq!(conde_remote::moved_to(308, None, b""), None);
+    assert_eq!(conde_remote::moved_to(307, Some("https://b"), br#"{"moved_to":"https://a"}"#), None);
 }

@@ -410,6 +410,18 @@ pub fn board_name() -> anyhow::Result<String> {
     Ok(name)
 }
 
+/// Where the board moved (`CONDE_MOVED_TO`, an http(s) URL): the server then answers every
+/// request but `/healthz` with a 308 there.
+pub fn moved_to() -> anyhow::Result<Option<String>> {
+    let Some(url) = std::env::var("CONDE_MOVED_TO").ok().filter(|v| !v.trim().is_empty()) else { return Ok(None) };
+    let url = url.trim().to_string();
+    let parsed = reqwest::Url::parse(&url).map_err(|e| anyhow::anyhow!("CONDE_MOVED_TO '{url}' is not a URL: {e}"))?;
+    if !matches!(parsed.scheme(), "https" | "http") || parsed.host_str().is_none() {
+        anyhow::bail!("CONDE_MOVED_TO '{url}' must be an http(s) URL");
+    }
+    Ok(Some(url))
+}
+
 /// The lowest bridge protocol the server takes (`CONDE_MIN_PROTO`, default 1); 2 once every
 /// enrolled host migrated.
 pub fn min_proto() -> anyhow::Result<u32> {
@@ -467,9 +479,13 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
         let public_url = web.as_ref().and_then(|w| w.entra.as_ref()).map(|c| c.public_url.clone());
         let slack = crate::slack::SlackConfig::from_env(&board_name()?, public_url)?;
         let min_proto = min_proto()?;
+        let moved_to = moved_to()?;
+        if let Some(url) = &moved_to {
+            tracing::warn!(%url, "the board moved: every request but /healthz is answered 308");
+        }
         tracing::info!(board = %board_name()?, min_proto, "shared board");
-        let handle =
-            start(d.clone(), listen, ServerConfig { dist_base_url, web, min_proto, ..ServerConfig::default() }).await?;
+        let config = ServerConfig { dist_base_url, web, min_proto, moved_to, ..ServerConfig::default() };
+        let handle = start(d.clone(), listen, config).await?;
         if let Some(config) = slack {
             tracing::info!(import = config.import.len(), "slack notifications on");
             crate::slack::spawn(d, Arc::new(config)).await?;

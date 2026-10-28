@@ -1,5 +1,5 @@
-//! The web surface (Entra sign-in, keys page, `conde login` browser leg) against an
-//! in-process fake OpenID provider, an in-memory store and a fake bridge registry.
+//! The web surface (OIDC sign-in and the invite gate, keys page, `conde login` browser leg)
+//! against an in-process fake OpenID provider, an in-memory store and a fake bridge registry.
 
 use conde_remote::token_digest;
 use conde_remote::web;
@@ -25,9 +25,9 @@ use sha2::Digest;
 use tokio::net::TcpListener;
 
 use web::{
-    AdminKey, BindUser, BridgeRegistry, CliCode, CliIssued, CreateUser, HostKey, Identity, KeyDisplay, Limits,
-    LoginTxn, Minted, SessionRecord, WebConfig,
-    WebResult, WebState, WebStore, WebStoreError, WebUser,
+    AdminKey, AdminUser, BindUser, BridgeRegistry, CliCode, CliIssued, CreateUser, HostKey, Identity, Invite, Invited,
+    KeyDisplay, Limits, LoginTxn, Minted, SessionRecord, WebConfig, WebResult, WebState, WebStore, WebStoreError,
+    WebUser,
 };
 
 include!("support/web_harness.rs");
@@ -37,7 +37,9 @@ include!("support/web_harness.rs");
 struct User {
     id: i64,
     name: String,
-    identity: Option<(String, String)>,
+    /// (issuer, subject), at most one per issuer.
+    identities: Vec<(String, String)>,
+    email: Option<String>,
     display: Option<String>,
     disabled: bool,
 }
@@ -106,19 +108,20 @@ impl MemStore {
         m.users.push(User {
             id,
             name: name.into(),
-            identity: None,
+            identities: Vec::new(),
+            email: None,
             display: None,
             disabled: false,
         });
         id
     }
-    /// (user id, bound identity, display name) of the user named `name`.
+    /// (user id, first bound identity, display name) of the user named `name`.
     fn user(&self, name: &str) -> Option<UserRow> {
         self.m()
             .users
             .iter()
             .find(|u| u.name == name)
-            .map(|u| (u.id, u.identity.clone(), u.display.clone()))
+            .map(|u| (u.id, u.identities.first().cloned(), u.display.clone()))
     }
     fn live_host_of(&self, key: &str) -> Option<String> {
         let d = token_digest(key);
@@ -127,6 +130,10 @@ impl MemStore {
             .iter()
             .find(|c| c.digest == d && c.revoked_at.is_none())
             .map(|c| c.host.clone())
+    }
+    /// Sets a user's email directly (a store may hold one address on two users).
+    fn set_email(&self, name: &str, email: &str) {
+        self.m().users.iter_mut().find(|u| u.name == name).unwrap().email = Some(email.into());
     }
     fn creds_of(&self, host: &str) -> Vec<(String, Option<i64>)> {
         self.m()
@@ -139,27 +146,48 @@ impl MemStore {
 }
 
 impl WebStore for MemStore {
-    fn user_by_identity(&self, tid: &str, oid: &str) -> WebResult<Option<WebUser>> {
-        let id = Some((tid.to_string(), oid.to_string()));
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> WebResult<Option<WebUser>> {
+        let id = (issuer.to_string(), subject.to_string());
         Ok(self
             .m()
             .users
             .iter()
-            .find(|u| u.identity == id)
+            .find(|u| u.identities.contains(&id))
             .map(User::web))
+    }
+    fn claim_invite(&self, identity: &Identity, email: &str) -> WebResult<Invite> {
+        let key = (identity.issuer.clone(), identity.subject.clone());
+        let mut m = self.m();
+        if let Some(u) = m.users.iter().find(|u| u.identities.contains(&key)) {
+            return Ok(Invite::Bound(u.web()));
+        }
+        let hits: Vec<usize> = (0..m.users.len())
+            .filter(|&i| m.users[i].email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(email)))
+            .collect();
+        let [i] = hits[..] else {
+            return Ok(if hits.is_empty() { Invite::NoUser } else { Invite::Ambiguous });
+        };
+        let user = &mut m.users[i];
+        if user.identities.iter().any(|(i, _)| *i == identity.issuer) {
+            return Ok(Invite::IssuerBound);
+        }
+        user.identities.push(key);
+        user.display = identity.display_name.clone();
+        Ok(Invite::Bound(user.web()))
     }
     fn create_user(&self, identity: &Identity, name: &str) -> WebResult<CreateUser> {
         let mut m = self.m();
         if let Some(u) = m.users.iter().find(|u| u.name == name) {
             return Ok(CreateUser::NameTaken {
-                bound: u.identity.is_some(),
+                bound: !u.identities.is_empty(),
             });
         }
         let id = m.users.len() as i64 + 1;
         m.users.push(User {
             id,
             name: name.into(),
-            identity: Some((identity.tid.clone(), identity.oid.clone())),
+            identities: vec![(identity.issuer.clone(), identity.subject.clone())],
+            email: identity.email.clone(),
             display: identity.display_name.clone(),
             disabled: false,
         });
@@ -364,9 +392,9 @@ impl WebStore for MemStore {
     fn bind_identity(&self, name: &str, identity: &Identity) -> WebResult<BindUser> {
         let mut m = self.m();
         match m.users.iter_mut().find(|u| u.name == name) {
-            Some(u) if u.identity.is_some() => Ok(BindUser::NameBound),
+            Some(u) if u.identities.iter().any(|(i, _)| *i == identity.issuer) => Ok(BindUser::NameBound),
             Some(u) => {
-                u.identity = Some((identity.tid.clone(), identity.oid.clone()));
+                u.identities.push((identity.issuer.clone(), identity.subject.clone()));
                 Ok(BindUser::Bound(u.web()))
             }
             None => {
@@ -377,6 +405,44 @@ impl WebStore for MemStore {
                 }
             }
         }
+    }
+    fn invite_user(&self, name: &str, email: &str) -> WebResult<Invited> {
+        let mut m = self.m();
+        let same = |e: &Option<String>| e.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(email));
+        if let Some(other) = m.users.iter().find(|u| u.name != name && same(&u.email)) {
+            return Ok(Invited::EmailTaken(other.name.clone()));
+        }
+        if let Some(u) = m.users.iter_mut().find(|u| u.name == name) {
+            return Ok(match u.email.clone() {
+                Some(_) if same(&u.email) => Invited::Exists(u.web()),
+                Some(have) => Invited::OtherEmail(have),
+                None => {
+                    u.email = Some(email.into());
+                    Invited::EmailSet(u.web())
+                }
+            });
+        }
+        drop(m);
+        let id = self.add_plain_user(name);
+        let mut m = self.m();
+        let u = m.users.iter_mut().find(|u| u.id == id).unwrap();
+        u.email = Some(email.into());
+        Ok(Invited::Created(u.web()))
+    }
+    fn list_users(&self) -> WebResult<Vec<AdminUser>> {
+        let mut users: Vec<AdminUser> = self
+            .m()
+            .users
+            .iter()
+            .map(|u| AdminUser {
+                name: u.name.clone(),
+                email: u.email.clone(),
+                issuers: u.identities.iter().map(|(i, _)| i.clone()).collect(),
+                disabled: u.disabled,
+            })
+            .collect();
+        users.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(users)
     }
     fn all_keys(&self) -> WebResult<Vec<AdminKey>> {
         let ids: Vec<(i64, String)> = self
@@ -450,22 +516,24 @@ impl conde_remote::Authenticator for MemAuth {
 // --- sign-in ----------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn sign_in_creates_the_user_on_first_login_and_reuses_it() {
+async fn an_invited_user_is_bound_on_first_sign_in_and_reused() {
     let env = Env::with(Arc::new(MemStore::default())).await;
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None, "invited, not bound");
     let page = Browser::new().sign_in(&env).await;
     assert!(
         page.contains("Host keys") && page.contains("Krisztián Dobmayer"),
         "{page}"
     );
     assert!(page.contains("No host keys yet"));
-    let (id, identity, display) = env.store.user("krisztian-dobmayer").expect("user created");
+    let (id, identity, display) = env.store.user("krisztian-dobmayer").expect("the invited user");
+    // Entra: the issuer is the configured one, the subject the oid (not the per-app sub).
     assert_eq!(
         identity,
-        Some((TENANT.to_string(), "oid-krisztian".to_string()))
+        Some((env.idp.issuer.clone(), "oid-krisztian".to_string()))
     );
     assert_eq!(display.as_deref(), Some("Krisztián Dobmayer"));
 
-    // Same (tid, oid), new display name and upn: same user, profile updated, no new user.
+    // Same (issuer, subject), new display name and upn: same user, profile updated, no new user.
     {
         let mut p = env.idp.person.lock().unwrap();
         p.name = "K. Dobmayer".into();
@@ -474,7 +542,7 @@ async fn sign_in_creates_the_user_on_first_login_and_reuses_it() {
     let page = Browser::new().sign_in(&env).await;
     assert!(page.contains("K. Dobmayer"));
     assert_eq!(env.store.user("krisztian-dobmayer").unwrap().0, id);
-    assert!(env.store.user("renamed").is_none());
+    assert_eq!(env.store.m().users.len(), 1);
     assert_eq!(
         env.idp.discoveries.load(Ordering::SeqCst),
         1,
@@ -482,19 +550,95 @@ async fn sign_in_creates_the_user_on_first_login_and_reuses_it() {
     );
 }
 
+/// Signs in through the fake provider and expects the invite gate's refusal.
+async fn refused_as_uninvited<S>(env: &Env<S>) {
+    let b = Browser::new();
+    let (status, _, body) = b.get(&env.url("/keys")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("This account is not invited to this board. Ask the board admin."), "{body}");
+    let (status, loc) = b.peek(&env.url("/keys")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "no session");
+    assert!(loc.starts_with("/auth/login"), "{loc}");
+}
+
 #[tokio::test]
-async fn another_tenant_is_refused_and_no_user_is_created() {
+async fn an_entra_token_of_another_tenant_is_refused_and_nothing_is_bound() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     env.idp.person.lock().unwrap().tid = "00000000-0000-0000-0000-000000000000".into();
     let b = Browser::new();
     let (status, _, body) = b.get(&env.url("/keys")).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert!(body.contains("another directory"), "{body}");
+    assert!(body.contains("could not be verified"), "{body}");
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None);
+    assert!(env.store.m().sessions.is_empty());
+}
+
+#[tokio::test]
+async fn an_identity_no_user_has_the_email_of_is_refused_and_nothing_is_created() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    refused_as_uninvited(&env).await;
     assert!(env.store.m().users.is_empty());
     assert!(env.store.m().sessions.is_empty());
-    let (status, loc) = b.peek(&env.url("/keys")).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(loc.starts_with("/auth/login"), "{loc}");
+    // another user's invite admits nobody else
+    env.invite("bob", "bob@dakai.example").await;
+    refused_as_uninvited(&env).await;
+    assert_eq!(env.store.user("bob").unwrap().1, None);
+}
+
+#[tokio::test]
+async fn an_email_two_users_share_admits_neither() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    env.invite("krisztian-dobmayer", "krisztian.dobmayer@dakai.example").await;
+    env.store.add_plain_user("kd");
+    env.store.set_email("kd", "KRISZTIAN.DOBMAYER@dakai.example");
+    refused_as_uninvited(&env).await;
+    assert!(env.store.m().users.iter().all(|u| u.identities.is_empty()));
+    assert!(env.store.m().sessions.is_empty());
+}
+
+#[tokio::test]
+async fn the_invite_matches_the_email_whatever_its_case() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    env.invite("kd", "KRISZTIAN.DOBMAYER@DAKAI.EXAMPLE").await;
+    Browser::new().sign_in(&env).await;
+    assert_eq!(env.store.user("kd").unwrap().1, Some((env.idp.issuer.clone(), "oid-krisztian".into())));
+}
+
+#[tokio::test]
+async fn a_user_bound_to_this_issuer_is_not_claimed_by_another_identity() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    Browser::new().sign_in(&env).await;
+    // Another account of the same directory with the same address (a re-created account).
+    env.idp.person.lock().unwrap().oid = "oid-impostor".into();
+    refused_as_uninvited(&env).await;
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, Some((env.idp.issuer.clone(), "oid-krisztian".into())));
+    assert_eq!(env.store.m().users[0].identities.len(), 1);
+}
+
+/// A Keycloak realm: no Entra claims, the subject is `sub`, and only an `email` the provider marks
+/// verified is matched (never preferred_username).
+#[tokio::test]
+async fn a_generic_issuer_matches_only_a_verified_email_and_keys_on_sub() {
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.entra_tenant = None).await;
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.entra = false;
+        p.upn = "krisztian.dobmayer@dakai.example".into();
+        p.email = Some("krisztian.dobmayer@dakai.example".into());
+    }
+    refused_as_uninvited(&env).await;
+    env.idp.person.lock().unwrap().email_verified = Some(false);
+    refused_as_uninvited(&env).await;
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None);
+    env.idp.person.lock().unwrap().email_verified = Some(true);
+    Browser::new().sign_in(&env).await;
+    assert_eq!(
+        env.store.user("krisztian-dobmayer").unwrap().1,
+        Some((env.idp.issuer.clone(), "pairwise-oid-krisztian".into()))
+    );
+    // Bound: the next sign-in is by (issuer, sub), whatever the email says now.
+    env.idp.person.lock().unwrap().email_verified = None;
+    Browser::new().sign_in(&env).await;
 }
 
 #[tokio::test]
@@ -512,7 +656,8 @@ async fn spoiled_id_tokens_are_refused() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{spoil:?}: {body}");
         assert!(body.contains("could not be verified"), "{spoil:?}: {body}");
     }
-    assert!(env.store.m().users.is_empty());
+    assert_eq!(env.store.m().users.len(), 1, "the invited user only");
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None, "nothing bound");
     assert!(env.store.m().sessions.is_empty());
     *env.idp.spoil.lock().unwrap() = Spoil::None;
     Browser::new().sign_in(&env).await;
@@ -809,16 +954,12 @@ async fn provider_errors_are_shown() {
 }
 
 #[tokio::test]
-async fn an_unlinked_admin_user_with_the_same_name_is_not_adopted() {
-    let env = Env::with(Arc::new(MemStore::default())).await;
+async fn an_admin_user_without_the_email_is_not_adopted_by_its_name() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
     env.store.add_plain_user("krisztian-dobmayer");
-    let (status, _, body) = Browser::new().get(&env.url("/keys")).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        body.contains("not linked") && body.contains("oid-krisztian"),
-        "{body}"
-    );
+    refused_as_uninvited(&env).await;
     assert_eq!(env.store.m().users.len(), 1);
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None);
 }
 
 #[tokio::test]
@@ -1288,6 +1429,7 @@ async fn the_last_wrong_try_leaves_no_other_accounts_record() {
         assert_eq!(paste_redeem(&env, &run, wrong).await.0, StatusCode::BAD_REQUEST);
     }
     // bob signs in and opens the confirm page of the same login
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1365,6 +1507,7 @@ async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_th
     assert_ne!(first, second);
 
     // another account may see the question but cannot take the login over
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1392,6 +1535,7 @@ async fn another_account_confirming_an_expired_login_is_told_it_expired() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     let run = cli_run();
     paste_leg(&env, &Browser::new(), &run).await;
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1430,6 +1574,7 @@ async fn an_expired_redeem_leaves_no_other_accounts_record() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     let run = cli_run();
     let shown = paste_leg(&env, &Browser::new(), &run).await;
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1634,7 +1779,7 @@ async fn the_admin_mints_lists_and_revokes_keys() {
 
 #[tokio::test]
 async fn the_admin_pre_creates_and_binds_users() {
-    let env = Env::with(Arc::new(MemStore::default())).await;
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
     let k = Some(ADMIN_KEY);
     let x = json!({"tid": TENANT, "oid": "oid-x", "display": "Xavier Ys"});
     let (status, got) = admin(&env, "/v1/admin/users", Some(x.clone()), k).await;
@@ -1670,6 +1815,64 @@ async fn the_admin_pre_creates_and_binds_users() {
         admin(&env, "/v1/admin/users", Some(steal), k).await.0,
         StatusCode::CONFLICT
     );
+}
+
+#[tokio::test]
+async fn the_admin_invites_lists_and_binds_by_issuer_and_subject() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    let k = Some(ADMIN_KEY);
+    let post = |body: Value| admin(&env, "/v1/admin/users", Some(body), k);
+    let (status, got) = post(json!({"name": "Ann", "email": " ann@dakai.example "})).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got, json!({"user": "ann", "email": "ann@dakai.example", "status": "invited", "disabled": false}));
+    assert_eq!(post(json!({"name": "ann", "email": "ANN@dakai.example"})).await.1["status"], "exists");
+    let (status, got) = post(json!({"name": "ann", "email": "ann@elsewhere.example"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+    let (status, got) = post(json!({"name": "bob", "email": "Ann@Dakai.example"})).await;
+    assert_eq!((status, got["message"].as_str()), (StatusCode::CONFLICT, Some("user 'ann' has this email already")));
+    env.store.add_plain_user("carl");
+    assert_eq!(post(json!({"name": "carl", "email": "carl@dakai.example"})).await.1["status"], "email set");
+    for bad in [
+        json!({"name": "dan", "email": "not-an-address"}),
+        json!({"name": "a/b", "email": "dan@dakai.example"}),
+        json!({"email": "dan@dakai.example"}),
+        json!({}),
+        json!({"name": "dan", "email": "dan@dakai.example", "tid": TENANT, "oid": "o"}),
+        json!({"issuer": env.idp.issuer, "subject": "s", "tid": TENANT, "oid": "o"}),
+        json!({"issuer": "https://login.microsoftonline.com/other/v2.0", "subject": "s", "name": "ann"}),
+        json!({"issuer": env.idp.issuer, "subject": "has space", "name": "ann"}),
+    ] {
+        let (status, got) = post(bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {got}");
+    }
+    assert!(env.store.user("dan").is_none());
+
+    // {issuer, subject} binds once per issuer.
+    let bind = json!({"issuer": env.idp.issuer, "subject": "sub-ann", "name": "ann"});
+    assert_eq!(post(bind.clone()).await.1["status"], "bound");
+    assert_eq!(post(bind).await.1["status"], "exists");
+    let again = json!({"issuer": env.idp.issuer, "subject": "sub-ann-2", "name": "ann"});
+    assert_eq!(post(again).await.0, StatusCode::CONFLICT);
+    // one identity binds one user: ann's identity is not given to carl
+    let (status, got) = post(json!({"issuer": env.idp.issuer, "subject": "sub-ann", "name": "carl"})).await;
+    assert_eq!((status, got["message"].as_str()), (StatusCode::CONFLICT, Some("the identity is already bound to 'ann'")));
+
+    let (status, list) = admin(&env, "/v1/admin/users", None, k).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        list,
+        json!({"users": [
+            {"name": "ann", "email": "ann@dakai.example", "issuers": [env.idp.issuer], "disabled": false},
+            {"name": "carl", "email": "carl@dakai.example", "issuers": [], "disabled": false},
+        ]})
+    );
+    assert_eq!(admin(&env, "/v1/admin/users", None, Some("wrong")).await.0, StatusCode::UNAUTHORIZED);
+
+    // A board signing in with a non-Entra issuer takes no {tid, oid}.
+    let realm = Env::uninvited(Arc::new(MemStore::default()), |c| c.entra_tenant = None).await;
+    let (status, got) = admin(&realm, "/v1/admin/users", Some(json!({"tid": TENANT, "oid": "o", "name": "x"})), k).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
+    assert!(got["message"].as_str().unwrap().contains("not Entra; pass issuer and subject"), "{got}");
 }
 
 #[tokio::test]
@@ -2055,6 +2258,7 @@ async fn a_wrong_guess_gets_the_login_back_from_another_accounts_confirm() {
     let run = cli_run();
     let shown = paste_leg(&env, &Browser::new(), &run).await;
     let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -2119,6 +2323,9 @@ impl WebStore for Minimal {
     fn revoke_host(&self, _: i64, _: &str, _: i64) -> WebResult<u64> { unreachable!() }
     fn ensure_user(&self, _: &str) -> WebResult<WebUser> { unreachable!() }
     fn bind_identity(&self, _: &str, _: &Identity) -> WebResult<BindUser> { unreachable!() }
+    fn claim_invite(&self, _: &Identity, _: &str) -> WebResult<Invite> { unreachable!() }
+    fn invite_user(&self, _: &str, _: &str) -> WebResult<Invited> { unreachable!() }
+    fn list_users(&self) -> WebResult<Vec<AdminUser>> { unreachable!() }
     fn all_keys(&self) -> WebResult<Vec<AdminKey>> { unreachable!() }
     fn revoke_key(&self, _: &str, _: i64) -> WebResult<Option<String>> { unreachable!() }
     fn set_disabled(&self, _: &str, _: bool) -> WebResult<Option<Vec<String>>> { unreachable!() }

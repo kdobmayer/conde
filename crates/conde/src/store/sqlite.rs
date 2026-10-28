@@ -118,7 +118,39 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS messages_dm_by_sender ON messages(sender_agent_id, commit_seq) WHERE channel_id IS NULL;
          CREATE INDEX IF NOT EXISTS messages_by_reply_to ON messages(reply_to, commit_seq);",
     )?;
-    rebuild_agents(conn)
+    rebuild_agents(conn)?;
+    rebuild_identities(conn)
+}
+
+/// A file from before sign-in by any issuer (identities keyed by Entra's `tid`, `oid`, one per
+/// user) gets the table rebuilt in the schema's shape, each row keeping its binding as
+/// (the tenant's v2.0 issuer URL, oid), as Postgres migration 0017 does. Runs once per file.
+fn rebuild_identities(conn: &Connection) -> rusqlite::Result<()> {
+    if !conn.prepare("SELECT 1 FROM pragma_table_info('identities') WHERE name = 'tid'")?.exists([])? {
+        return Ok(());
+    }
+    const START: &str = "CREATE TABLE IF NOT EXISTS identities(";
+    let at = SCHEMA.find(START).expect("the schema defines identities");
+    let len = SCHEMA[at..].find(");").expect("the identities definition ends") + 2;
+    let create = SCHEMA[at..at + len].replacen(START, "CREATE TABLE identities_rebuilt(", 1);
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let steps = || -> rusqlite::Result<()> {
+        conn.execute_batch(&create)?;
+        conn.execute_batch(
+            "INSERT INTO identities_rebuilt(issuer, subject, user_id, display_name, preferred_username)
+                 SELECT 'https://login.microsoftonline.com/' || tid || '/v2.0', oid, user_id, display_name,
+                        preferred_username FROM identities;
+             DROP TABLE identities;
+             ALTER TABLE identities_rebuilt RENAME TO identities;",
+        )
+    };
+    match steps() {
+        Ok(()) => conn.execute_batch("COMMIT"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// A file created before `address_kind` accepted 'mailbox' (DESIGN-v2.md §4) gets the agents
@@ -293,11 +325,11 @@ fn user_slack_row(r: &Row) -> rusqlite::Result<UserSlack> {
     })
 }
 
-const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled, i.user_id IS NOT NULL
-    FROM users u LEFT JOIN identities i ON i.user_id = u.user_id";
+const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled,
+    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email FROM users u";
 
 fn user_row(r: &Row) -> rusqlite::Result<UserRow> {
-    Ok(UserRow { user_id: r.get(0)?, name: r.get(1)?, disabled: r.get(2)?, bound: r.get(3)? })
+    Ok(UserRow { user_id: r.get(0)?, name: r.get(1)?, disabled: r.get(2)?, bound: r.get(3)?, email: r.get(4)? })
 }
 
 fn pair<A: FromSql, B: FromSql>(r: &Row) -> rusqlite::Result<(A, B)> {
@@ -516,12 +548,14 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    // users, Entra identities and browser sign-in
+    // users, sign-in identities and browser sign-in
 
-    fn user_by_identity(&self, tid: &str, oid: &str) -> StoreResult<Option<UserRow>> {
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> StoreResult<Option<UserRow>> {
         self.opt(
-            &format!("{USER_SELECT} WHERE i.tid = ?1 AND i.oid = ?2"),
-            params![tid, oid],
+            &format!(
+                "{USER_SELECT} WHERE u.user_id = (SELECT user_id FROM identities WHERE issuer = ?1 AND subject = ?2)"
+            ),
+            params![issuer, subject],
             user_row,
         )
     }
@@ -534,25 +568,37 @@ impl Tx for SqliteTx<'_> {
         self.opt(&format!("{USER_SELECT} WHERE u.user_id = ?1"), [user_id], user_row)
     }
 
+    fn users_by_email(&self, email: &str) -> StoreResult<Vec<UserRow>> {
+        self.rows(&format!("{USER_SELECT} WHERE lower(u.email) = lower(?1) ORDER BY u.user_id"), [email], user_row)
+    }
+
+    fn users(&self) -> StoreResult<Vec<UserRow>> {
+        self.rows(&format!("{USER_SELECT} ORDER BY u.name"), [], user_row)
+    }
+
+    fn identity_issuers(&self, user_id: i64) -> StoreResult<Vec<String>> {
+        self.rows("SELECT issuer FROM identities WHERE user_id = ?1 ORDER BY issuer", [user_id], |r| r.get(0))
+    }
+
     fn bind_identity(
         &self,
         user_id: i64,
-        tid: &str,
-        oid: &str,
+        issuer: &str,
+        subject: &str,
         display: Option<&str>,
         upn: Option<&str>,
     ) -> StoreResult<()> {
         self.exec(
-            "INSERT INTO identities(tid, oid, user_id, display_name, preferred_username) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![tid, oid, user_id, display, upn],
+            "INSERT INTO identities(issuer, subject, user_id, display_name, preferred_username) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![issuer, subject, user_id, display, upn],
         )?;
         Ok(())
     }
 
-    fn set_identity_profile(&self, user_id: i64, display: Option<&str>, upn: Option<&str>) -> StoreResult<()> {
+    fn set_identity_profile(&self, issuer: &str, subject: &str, display: Option<&str>, upn: Option<&str>) -> StoreResult<()> {
         self.exec(
-            "UPDATE identities SET display_name = ?2, preferred_username = ?3 WHERE user_id = ?1",
-            params![user_id, display, upn],
+            "UPDATE identities SET display_name = ?3, preferred_username = ?4 WHERE issuer = ?1 AND subject = ?2",
+            params![issuer, subject, display, upn],
         )?;
         Ok(())
     }

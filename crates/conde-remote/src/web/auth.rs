@@ -1,5 +1,5 @@
-//! Entra ID sign-in (OIDC authorization code + PKCE, state and nonce, confidential client)
-//! and the browser leg of `conde login`.
+//! OIDC sign-in (authorization code + PKCE, state and nonce, confidential client) against the
+//! configured issuer, the invite gate, and the browser leg of `conde login`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -33,13 +33,14 @@ use super::ratelimit::ClientIp;
 use super::session::{
     self, WebError, digest, login_cookie, login_retry_cookie, random_token, removal, same_secret,
 };
-use super::{CliCode, CliIssued, CreateUser, Identity, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
+use super::{CliCode, CliIssued, Identity, Invite, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
 
 /// Discovery and JWKS are re-read after this long (and at once when a token's key is unknown).
 const METADATA_MAX_AGE: Duration = Duration::from_secs(3600);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The Entra claims the board keys users on.
+/// The Entra claims an Entra identity is keyed on: the tenant and the directory object (`sub`
+/// is pairwise per app).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EntraClaims {
     #[serde(default)]
@@ -164,10 +165,43 @@ struct Begin {
     nonce: String,
 }
 
+/// The id token's `iss` must be the configured issuer, character for character (OIDC Core 3.1.3.7).
+fn same_issuer(token: &str, configured: &str) -> Result<(), OidcError> {
+    if token == configured {
+        Ok(())
+    } else {
+        Err(OidcError::Verify(format!(
+            "the id token's issuer '{token}' is not the configured issuer '{configured}'"
+        )))
+    }
+}
+
+/// The Entra identity adapter: the subject an identity is bound by. Entra's `sub` is pairwise per
+/// app, so an Entra token (from the configured Entra tenant, or any token carrying `tid` and
+/// `oid`) binds by `oid`, the directory object an admin knows and migration 0017 kept; any other
+/// token binds by `sub`. A token of another tenant than the configured one is refused.
+pub(crate) fn binding_subject(
+    entra_tenant: Option<&str>,
+    sub: &str,
+    tid: Option<&str>,
+    oid: Option<&str>,
+) -> Result<String, OidcError> {
+    match (entra_tenant, tid, oid) {
+        (Some(tenant), Some(tid), _) if tid != tenant => Err(OidcError::Verify(format!(
+            "the id token's tenant '{tid}' is not the configured tenant '{tenant}'"
+        ))),
+        (Some(_), _, None) => Err(OidcError::Verify("the id token has no oid claim".into())),
+        (Some(_), _, Some(oid)) | (None, Some(_), Some(oid)) => Ok(oid.to_string()),
+        (None, ..) => Ok(sub.to_string()),
+    }
+}
+
 /// The OIDC relying party: provider metadata cached in memory (re-readable at any time, so
 /// the server stays stateless), the confidential client built from it per request.
 pub struct Oidc {
     issuer: String,
+    /// The tenant, when the issuer is an Entra tenant.
+    entra_tenant: Option<String>,
     client_id: String,
     client_secret: String,
     redirect_uri: String,
@@ -180,6 +214,7 @@ impl Oidc {
     pub fn new(config: &WebConfig) -> Oidc {
         Oidc {
             issuer: config.issuer.clone(),
+            entra_tenant: config.entra_tenant.clone(),
             client_id: config.client_id.clone(),
             client_secret: config.client_secret.clone(),
             redirect_uri: config.redirect_uri.clone(),
@@ -214,7 +249,7 @@ impl Oidc {
             ClientId::new(self.client_id.clone()),
             Some(ClientSecret::new(self.client_secret.clone())),
         )
-        // client_secret_post: the secret goes in the form body, as Entra documents it.
+        // client_secret_post: the secret goes in the form body (Entra documents it; Keycloak takes it).
         .set_auth_type(AuthType::RequestBody)
         .set_redirect_uri(redirect))
     }
@@ -241,7 +276,9 @@ impl Oidc {
     }
 
     /// Redeems the code on the token endpoint and validates the id token (signature against
-    /// the JWKS, issuer, audience, expiry, nonce).
+    /// the JWKS, issuer, audience, expiry, nonce). Discovery was read from the configured issuer
+    /// and refuses metadata naming another, and the library checks `iss` against the metadata;
+    /// [`same_issuer`] checks it against the configuration once more.
     async fn finish(
         &self,
         code: &str,
@@ -274,24 +311,26 @@ impl Oidc {
             }
             Err(e) => return Err(OidcError::Verify(e.to_string())),
         };
+        same_issuer(claims.issuer().as_str(), &self.issuer)?;
         let extra = claims.additional_claims();
-        let (Some(tid), Some(oid)) = (extra.tid.clone(), extra.oid.clone()) else {
-            return Err(OidcError::Verify(
-                "the id token has no tid or oid claim".into(),
-            ));
-        };
+        let subject = binding_subject(
+            self.entra_tenant.as_deref(),
+            claims.subject().as_str(),
+            extra.tid.as_deref(),
+            extra.oid.as_deref(),
+        )?;
+        let upn = claims.preferred_username().map(|u| u.as_str());
+        let email = claims.email().map(|e| e.as_str());
         Ok(Identity {
-            tid,
-            oid,
+            issuer: self.issuer.clone(),
+            subject,
             display_name: claims
                 .name()
                 .and_then(|n| n.get(None))
                 .map(|n| n.as_str().to_string()),
-            preferred_username: claims.preferred_username().map(|u| u.as_str().to_string()),
-            email: lookup_email(
-                claims.preferred_username().map(|u| u.as_str()),
-                claims.email().map(|e| e.as_str()),
-            ),
+            preferred_username: upn.map(str::to_string),
+            email: lookup_email(upn, email),
+            verified_email: verified_email(self.entra_tenant.is_some(), upn, email, claims.email_verified()),
         })
     }
 
@@ -461,7 +500,7 @@ pub(crate) async fn callback(
         let detail = q.error_description.unwrap_or(error);
         return Ok((
             jar,
-            WebError::Forbidden(format!("Entra ID refused the sign-in: {detail}")),
+            WebError::Forbidden(format!("The identity provider refused the sign-in: {detail}")),
         )
             .into_response());
     }
@@ -498,13 +537,6 @@ pub(crate) async fn callback(
             tracing::warn!(error = %e, "sign-in refused");
             WebError::Forbidden("The sign-in could not be verified. Start again.".into())
         })?;
-    if identity.tid != state.config().tenant_id {
-        tracing::warn!(tid = %identity.tid, "sign-in from another tenant refused");
-        return Err(WebError::Forbidden(
-            "This account belongs to another directory. Sign in with your organization account."
-                .into(),
-        ));
-    }
     let user = resolve_user(&state, identity.clone()).await?;
     if user.disabled {
         tracing::warn!(user = %user.name, "sign-in of a disabled user refused");
@@ -558,6 +590,27 @@ pub(crate) fn lookup_email(upn: Option<&str>, email: Option<&str>) -> Option<Str
     address(upn).or_else(|| address(email))
 }
 
+/// The address the invite gate matches: on Entra the UPN when it is an address (the tenant
+/// controls it), else the `email` claim when the provider marks it verified.
+pub(crate) fn verified_email(
+    entra: bool,
+    upn: Option<&str>,
+    email: Option<&str>,
+    email_verified: Option<bool>,
+) -> Option<String> {
+    let address = |v: Option<&str>| v.map(str::trim).filter(|v| v.contains('@')).map(str::to_string);
+    let upn = if entra { address(upn) } else { None };
+    upn.or_else(|| address(email).filter(|_| email_verified == Some(true)))
+}
+
+/// An email for the log: the first character of the local part, then the domain.
+fn masked(email: &str) -> String {
+    match email.split_once('@') {
+        Some((local, domain)) => format!("{}***@{domain}", local.chars().next().unwrap_or('*')),
+        None => "***".into(),
+    }
+}
+
 /// An owner name from the identity: the local part of preferred_username (else the display
 /// name), lowercased to `[a-z0-9_-]`.
 pub(crate) fn base_name(identity: &Identity) -> String {
@@ -580,41 +633,38 @@ pub(crate) fn base_name(identity: &Identity) -> String {
     if out.is_empty() { "user".into() } else { out }
 }
 
-/// The board user of the identity; created on first sign-in. A taken name that no identity
-/// owns is refused, not adopted: binding an admin-created user is an explicit admin step.
+const NOT_INVITED: &str = "This account is not invited to this board. Ask the board admin.";
+
+/// The board user of the identity. An identity bound to no user is let in only by the invite
+/// gate: its verified email must be the email of exactly one user, who holds no identity of
+/// this issuer yet; that user is then bound to it.
 async fn resolve_user(state: &WebState, identity: Identity) -> Result<WebUser, WebError> {
-    let base = base_name(&identity);
+    let (issuer, email) = (identity.issuer.clone(), identity.verified_email.clone());
     let outcome = state
         .store(move |s| {
-            if let Some(user) = s.user_by_identity(&identity.tid, &identity.oid)? {
+            if let Some(user) = s.user_by_identity(&identity.issuer, &identity.subject)? {
                 s.set_profile(user.user_id, &identity)?;
                 return Ok(Ok(user));
             }
-            for n in 1..=9 {
-                let name = if n == 1 {
-                    base.clone()
-                } else {
-                    format!("{base}-{n}")
-                };
-                match s.create_user(&identity, &name)? {
-                    CreateUser::Created(user) => return Ok(Ok(user)),
-                    CreateUser::NameTaken { bound: false } if n == 1 => {
-                        return Ok(Err(format!(
-                            "A board user named '{name}' already exists and is not linked to an \
-                             Entra account. Ask the board admin to link it to your account \
-                             (object id {}).",
-                            identity.oid
-                        )));
-                    }
-                    CreateUser::NameTaken { .. } => continue,
+            let Some(email) = identity.verified_email.clone() else {
+                return Ok(Err("no verified email"));
+            };
+            Ok(match s.claim_invite(&identity, &email)? {
+                Invite::Bound(user) => {
+                    tracing::info!(user = %user.name, issuer = %identity.issuer, "invite claimed");
+                    Ok(user)
                 }
-            }
-            Ok(Err(format!(
-                "No free user name derived from '{base}'. Ask the board admin."
-            )))
+                Invite::NoUser => Err("no user has the email"),
+                Invite::Ambiguous => Err("more than one user has the email"),
+                Invite::IssuerBound => Err("the user is bound to another identity of this issuer"),
+            })
         })
         .await?;
-    outcome.map_err(WebError::Forbidden)
+    outcome.map_err(|reason| {
+        let email = email.as_deref().map_or_else(|| "none".to_string(), masked);
+        tracing::warn!(%issuer, %email, reason, "sign-in of an uninvited identity refused");
+        WebError::Forbidden(NOT_INVITED.into())
+    })
 }
 
 #[derive(Deserialize)]
@@ -623,7 +673,7 @@ pub(crate) struct LogoutForm {
     csrf: String,
 }
 
-/// `POST /auth/logout`: ends the board session, then the Entra session.
+/// `POST /auth/logout`: ends the board session, then the provider's session.
 pub(crate) async fn logout(
     State(state): State<WebState>,
     jar: CookieJar,
@@ -1090,12 +1140,62 @@ mod tests {
 
     fn identity(upn: Option<&str>, name: Option<&str>) -> Identity {
         Identity {
-            tid: "t".into(),
-            oid: "o".into(),
+            issuer: "https://auth.example/realms/r".into(),
+            subject: "s".into(),
             display_name: name.map(Into::into),
             preferred_username: upn.map(Into::into),
             email: upn.map(Into::into),
+            verified_email: None,
         }
+    }
+
+    #[test]
+    fn the_token_issuer_must_be_the_configured_one_exactly() {
+        let realm = "https://auth.conde.cloud/realms/dakai";
+        assert!(same_issuer(realm, realm).is_ok());
+        for other in [
+            "https://auth.conde.cloud/realms/demo",
+            "https://auth.conde.cloud/realms/dakai/",
+            "https://AUTH.conde.cloud/realms/dakai",
+            "https://login.microsoftonline.com/2e51b484-b008-4fc0-8f70-555c1317b555/v2.0",
+        ] {
+            let e = same_issuer(other, realm).unwrap_err().to_string();
+            assert_eq!(e, format!("id token rejected: the id token's issuer '{other}' is not the configured issuer '{realm}'"));
+        }
+    }
+
+    #[test]
+    fn entra_binds_by_oid_and_any_other_issuer_by_sub() {
+        const T: &str = "2e51b484-b008-4fc0-8f70-555c1317b555";
+        let subject = |tenant, tid, oid| binding_subject(tenant, "pairwise-sub", tid, oid).map_err(|e| e.to_string());
+        // Entra: the oid, never the per-app sub; a migrated (tid, oid) row is (issuer, oid).
+        assert_eq!(subject(Some(T), Some(T), Some("oid-1")), Ok("oid-1".into()));
+        assert_eq!(subject(Some(T), None, Some("oid-1")), Ok("oid-1".into()));
+        // a token carrying tid and oid is Entra's whatever the issuer
+        assert_eq!(subject(None, Some(T), Some("oid-1")), Ok("oid-1".into()));
+        // Keycloak (or any other issuer): the sub
+        assert_eq!(subject(None, None, None), Ok("pairwise-sub".into()));
+        assert_eq!(subject(None, None, Some("oid-1")), Ok("pairwise-sub".into()), "oid alone is no Entra token");
+        // refused: another tenant, or an Entra token without oid
+        assert_eq!(
+            subject(Some(T), Some("other-tenant"), Some("oid-1")),
+            Err(format!("id token rejected: the id token's tenant 'other-tenant' is not the configured tenant '{T}'"))
+        );
+        assert_eq!(subject(Some(T), Some(T), None), Err("id token rejected: the id token has no oid claim".into()));
+    }
+
+    #[test]
+    fn the_verified_email_is_entras_upn_or_a_verified_email_claim() {
+        // Entra: the UPN when it is an address; the email claim only when marked verified.
+        assert_eq!(verified_email(true, Some("k@dakai.io"), Some("x@y.io"), None).as_deref(), Some("k@dakai.io"));
+        assert_eq!(verified_email(true, Some("krisz"), Some("x@y.io"), None), None);
+        assert_eq!(verified_email(true, Some("krisz"), Some("x@y.io"), Some(true)).as_deref(), Some("x@y.io"));
+        // Any other issuer: never the UPN, only a verified email claim.
+        assert_eq!(verified_email(false, Some("k@dakai.io"), None, None), None);
+        assert_eq!(verified_email(false, Some("k@dakai.io"), Some("k@dakai.io"), Some(false)), None);
+        assert_eq!(verified_email(false, Some("krisz"), Some(" k@dakai.io "), Some(true)).as_deref(), Some("k@dakai.io"));
+        assert_eq!(verified_email(false, None, Some("krisz"), Some(true)), None);
+        assert_eq!(masked("krisztian@dakai.io"), "k***@dakai.io");
     }
 
     #[test]

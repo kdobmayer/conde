@@ -153,6 +153,7 @@ async fn ui_with(d: &Arc<Dispatcher>, config: ServerConfig) -> Ui {
         registry: Arc::new(FakeRegistry::default()),
         clock: Arc::new(AtomicI64::new(START)),
     };
+    env.invite(INVITED.0, INVITED.1).await;
     Ui { env, server, d: d.clone() }
 }
 
@@ -604,6 +605,7 @@ async fn the_feed_is_what_the_owners_agents_can_read(d: Arc<Dispatcher>) {
 
     // A teammate signed in: an owner with no agents reads nothing; with one, never a DM between
     // two other owners' agents (G9).
+    ui.env.invite("dpacsuta", "dpacsuta@dakai.example").await;
     ui.env.idp.person.lock().unwrap().oid = "oid-dp".into();
     ui.env.idp.person.lock().unwrap().upn = "dpacsuta@dakai.example".into();
     let (b2, csrf2) = ui.browser().await;
@@ -756,6 +758,7 @@ async fn the_feed_lists_delivery_problems(d: Arc<Dispatcher>) {
     assert_eq!(team, json!({"messages": [], "more": false}), "scout's post: only another owner's recipient has a problem");
 
     // An owner without problems: an empty page, no `more`.
+    ui.env.invite("dpacsuta", "dpacsuta@dakai.example").await;
     ui.env.idp.person.lock().unwrap().oid = "oid-dp".into();
     ui.env.idp.person.lock().unwrap().upn = "dpacsuta@dakai.example".into();
     let (b2, csrf2) = ui.browser().await;
@@ -960,6 +963,7 @@ async fn another_owner_sees_only_their_own_agents(d: Arc<Dispatcher>) {
     ui.browser().await;
     let c = cast(&ui).await;
     // A second owner signs in; their agent `probe` writes to worker and joins #team.
+    ui.env.invite("dpacsuta", "dpacsuta@dakai.example").await;
     ui.env.idp.person.lock().unwrap().oid = "oid-dp".into();
     ui.env.idp.person.lock().unwrap().upn = "dpacsuta@dakai.example".into();
     let (b, csrf) = ui.browser().await;

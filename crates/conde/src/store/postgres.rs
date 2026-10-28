@@ -76,6 +76,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (14, "agents_retired_at", include_str!("migrations/0014_agents_retired_at.sql")),
     (15, "attempt_not_before", include_str!("migrations/0015_attempt_not_before.sql")),
     (16, "human_paging", include_str!("migrations/0016_human_paging.sql")),
+    (17, "identity_issuer", include_str!("migrations/0017_identity_issuer.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -729,11 +730,11 @@ fn user_slack_row(r: &Row) -> UserSlack {
     }
 }
 
-const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled, i.user_id IS NOT NULL
-    FROM users u LEFT JOIN identities i ON i.user_id = u.user_id";
+const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled,
+    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email FROM users u";
 
 fn user_row(r: &Row) -> UserRow {
-    UserRow { user_id: r.get(0), name: r.get(1), disabled: r.get(2), bound: r.get(3) }
+    UserRow { user_id: r.get(0), name: r.get(1), disabled: r.get(2), bound: r.get(3), email: r.get(4) }
 }
 
 impl PgTx {
@@ -950,10 +951,13 @@ impl Tx for PgTx {
             .map(|r| (r.get(0), r.get(1))))
     }
 
-    // users, Entra identities and browser sign-in
+    // users, sign-in identities and browser sign-in
 
-    fn user_by_identity(&self, tid: &str, oid: &str) -> StoreResult<Option<UserRow>> {
-        Ok(self.query_opt(&format!("{USER_SELECT} WHERE i.tid = $1 AND i.oid = $2"), &[&tid, &oid])?.map(|r| user_row(&r)))
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> StoreResult<Option<UserRow>> {
+        let sql = format!(
+            "{USER_SELECT} WHERE u.user_id = (SELECT user_id FROM identities WHERE issuer = $1 AND subject = $2)"
+        );
+        Ok(self.query_opt(&sql, &[&issuer, &subject])?.map(|r| user_row(&r)))
     }
 
     fn user_by_name(&self, name: &str) -> StoreResult<Option<UserRow>> {
@@ -964,25 +968,42 @@ impl Tx for PgTx {
         Ok(self.query_opt(&format!("{USER_SELECT} WHERE u.user_id = $1"), &[&user_id])?.map(|r| user_row(&r)))
     }
 
+    fn users_by_email(&self, email: &str) -> StoreResult<Vec<UserRow>> {
+        let sql = format!("{USER_SELECT} WHERE lower(u.email) = lower($1) ORDER BY u.user_id");
+        Ok(self.query(&sql, &[&email])?.iter().map(user_row).collect())
+    }
+
+    fn users(&self) -> StoreResult<Vec<UserRow>> {
+        Ok(self.query(&format!("{USER_SELECT} ORDER BY u.name"), &[])?.iter().map(user_row).collect())
+    }
+
+    fn identity_issuers(&self, user_id: i64) -> StoreResult<Vec<String>> {
+        Ok(self
+            .query("SELECT issuer FROM identities WHERE user_id = $1 ORDER BY issuer", &[&user_id])?
+            .iter()
+            .map(|r| r.get(0))
+            .collect())
+    }
+
     fn bind_identity(
         &self,
         user_id: i64,
-        tid: &str,
-        oid: &str,
+        issuer: &str,
+        subject: &str,
         display: Option<&str>,
         upn: Option<&str>,
     ) -> StoreResult<()> {
         self.execute(
-            "INSERT INTO identities(tid, oid, user_id, display_name, preferred_username) VALUES ($1, $2, $3, $4, $5)",
-            &[&tid, &oid, &user_id, &display, &upn],
+            "INSERT INTO identities(issuer, subject, user_id, display_name, preferred_username) VALUES ($1, $2, $3, $4, $5)",
+            &[&issuer, &subject, &user_id, &display, &upn],
         )?;
         Ok(())
     }
 
-    fn set_identity_profile(&self, user_id: i64, display: Option<&str>, upn: Option<&str>) -> StoreResult<()> {
+    fn set_identity_profile(&self, issuer: &str, subject: &str, display: Option<&str>, upn: Option<&str>) -> StoreResult<()> {
         self.execute(
-            "UPDATE identities SET display_name = $2, preferred_username = $3 WHERE user_id = $1",
-            &[&user_id, &display, &upn],
+            "UPDATE identities SET display_name = $3, preferred_username = $4 WHERE issuer = $1 AND subject = $2",
+            &[&issuer, &subject, &display, &upn],
         )?;
         Ok(())
     }
@@ -2683,6 +2704,20 @@ mod tests {
         assert_eq!(u.root_cert.as_deref(), Some(Path::new("/a b/ca.pem")));
         assert!(u.config.get_options().unwrap().starts_with("-c x=1"));
         assert!(parse_url("host=/tmp/pg dbname='unterminated").is_err());
+    }
+
+    /// The Cloud SQL Auth Proxy shape: IAM database authentication, so a user and no password,
+    /// plaintext to the sidecar on loopback (the proxy holds the TLS to the instance).
+    #[test]
+    fn a_proxy_url_without_a_password_parses() {
+        let u = parse_url("postgresql://conde-dakai%40conde-prod.iam@127.0.0.1:5432/conde_dakai?sslmode=disable").unwrap();
+        let c = &u.config;
+        assert_eq!(c.get_user(), Some("conde-dakai@conde-prod.iam"));
+        assert_eq!(c.get_password(), None);
+        assert_eq!(c.get_dbname(), Some("conde_dakai"));
+        assert_eq!(c.get_ssl_mode(), SslMode::Disable);
+        let k = parse_url("host=127.0.0.1 port=5432 user=conde-dakai@conde-prod.iam dbname=conde_dakai sslmode=disable").unwrap();
+        assert_eq!(k.config.get_password(), None);
     }
 
     #[test]

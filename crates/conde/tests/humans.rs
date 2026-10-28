@@ -154,7 +154,7 @@ fn race(boards: Vec<Arc<Dispatcher>>, uid: i64) {
 }
 
 #[test]
-fn a_user_made_by_the_admin_key_or_a_sign_in_gets_a_human_name() {
+fn a_user_made_by_the_admin_key_an_invite_or_a_sign_in_gets_a_human_name() {
     let b = Board::new();
     b.d.share("dakai");
     // `conde admin key create` and the admin API's key mint
@@ -170,15 +170,18 @@ fn a_user_made_by_the_admin_key_or_a_sign_in_gets_a_human_name() {
     web.ensure_user("bela").unwrap();
     assert_eq!(humans_of(&b.d, "bela").len(), 1);
     let person = |oid: &str| Identity {
-        tid: "t".into(),
-        oid: oid.into(),
+        issuer: "https://login.microsoftonline.com/t/v2.0".into(),
+        subject: oid.into(),
         display_name: None,
         preferred_username: Some(format!("{oid}@dakai.io")),
         email: Some(format!("{oid}@dakai.io")),
+        verified_email: None,
     };
     web.create_user(&person("cili"), "cili").unwrap();
     web.bind_identity("dora", &person("dora")).unwrap();
-    for owner in ["cili", "dora"] {
+    // the admin API's invite
+    web.invite_user("ema", "ema@dakai.io").unwrap();
+    for owner in ["cili", "dora", "ema"] {
         assert_eq!(humans_of(&b.d, owner).len(), 1, "{owner}");
     }
     // the sign-in stored the email and asked for a lookup

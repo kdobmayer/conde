@@ -124,6 +124,9 @@ pub enum StopReason {
     Rejected { code: String, message: String },
     /// [`BridgeClient::shutdown`] was called.
     Shutdown,
+    /// The server answered that the board moved to this URL (308 with `moved_to`); it is not
+    /// retried, the host's board file must point there first.
+    Moved(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -179,11 +182,25 @@ pub async fn rpc(rpc_url: &str, token: &str, request: Value, timeout: Duration) 
         return Err(CallError::Stopped(StopReason::Unauthorized));
     }
     let status = response.status();
+    let location = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).map(str::to_string);
     let bytes = response.bytes().await.map_err(|e| CallError::Transport(format!("{rpc_url}: {e}")))?;
+    if let Some(url) = moved_to(status.as_u16(), location.as_deref(), &bytes) {
+        return Err(CallError::Stopped(StopReason::Moved(url)));
+    }
     match serde_json::from_slice::<Value>(&bytes) {
         Ok(v @ Value::Object(_)) => Ok(v),
         _ => Err(CallError::Transport(format!("{rpc_url}: HTTP {status} without a response object"))),
     }
+}
+
+/// The address a moved board names: a 308 answer's `moved_to`, else its Location; None for any
+/// other answer.
+pub fn moved_to(status: u16, location: Option<&str>, body: &[u8]) -> Option<String> {
+    if status != 308 {
+        return None;
+    }
+    let named = serde_json::from_slice::<Value>(body).ok().and_then(|v| v["moved_to"].as_str().map(str::to_string));
+    named.or(location.map(str::to_string)).filter(|u| !u.is_empty())
 }
 
 /// Cuts a reason to [`MAX_REASON_BYTES`] on a character boundary, marking the cut.
@@ -541,6 +558,7 @@ impl BridgeClient {
 
 enum ConnectError {
     Unauthorized,
+    Moved(String),
     Other(String),
 }
 
@@ -574,6 +592,13 @@ async fn connect(inner: &Inner) -> Result<Ws, ConnectError> {
         Ok(Ok((ws, _))) => Ok(ws),
         Ok(Err(tungstenite::Error::Http(resp))) if resp.status() == StatusCode::UNAUTHORIZED => {
             Err(ConnectError::Unauthorized)
+        }
+        Ok(Err(tungstenite::Error::Http(resp))) if resp.status() == StatusCode::PERMANENT_REDIRECT => {
+            let location = resp.headers().get(header::LOCATION).and_then(|v| v.to_str().ok());
+            match moved_to(resp.status().as_u16(), location, resp.body().as_deref().unwrap_or_default()) {
+                Some(url) => Err(ConnectError::Moved(url)),
+                None => Err(ConnectError::Other("HTTP 308 without a moved_to address".into())),
+            }
         }
         Ok(Err(e)) => Err(ConnectError::Other(e.to_string())),
         Err(_) => Err(ConnectError::Other("connect timed out".into())),
@@ -669,6 +694,7 @@ async fn supervise(
                 }
             }
             Err(ConnectError::Unauthorized) => break StopReason::Unauthorized,
+            Err(ConnectError::Moved(url)) => break StopReason::Moved(url),
             Err(ConnectError::Other(e)) => tracing::warn!(error = %e, "bridge connect failed"),
         }
         inner.state.send_replace(BridgeState::Backoff);

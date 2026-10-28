@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::Router;
+use axum::{Json, Router};
 use axum::body::Bytes;
 use axum::extract::ws::{
     CloseFrame, Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection,
 };
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::stream::SplitSink;
@@ -48,11 +48,14 @@ pub struct ServerConfig {
     /// Public release files (`https://.../dist`, no trailing slash): `/install.sh`,
     /// `/install.ps1` and `/dist/<file>` redirect there; None answers 404.
     pub dist_base_url: Option<String>,
-    /// Entra sign-in, the keys page and the admin API, when configured.
+    /// OIDC sign-in, the keys page and the admin API, when configured.
     pub web: Option<crate::web::WebSetup>,
     /// The lowest bridge protocol accepted (`CONDE_MIN_PROTO`); an older hello is refused with
     /// `bad_hello`, which a v1 bridge takes as final.
     pub min_proto: u32,
+    /// The board moved to this URL (`CONDE_MOVED_TO`): every request but `GET /healthz` is
+    /// answered 308 with it as Location and `{"moved_to": <url>}`, nothing else is served.
+    pub moved_to: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -66,6 +69,7 @@ impl Default for ServerConfig {
             dist_base_url: None,
             web: None,
             min_proto: crate::PROTO_V1,
+            moved_to: None,
         }
     }
 }
@@ -83,7 +87,7 @@ struct Shared {
     shutdown: watch::Receiver<bool>,
     /// Board changes for the browsers' event sockets (topic bits).
     board: tokio::sync::broadcast::Sender<u8>,
-    /// The web app, when Entra sign-in is configured.
+    /// The web app, when sign-in is configured.
     app: Mutex<Option<crate::web::app::AppState>>,
 }
 
@@ -362,6 +366,22 @@ pub async fn start_on(
     if let Some(events) = shared.source.events() {
         tokio::spawn(route_events(shared.clone(), events));
     }
+    if let Some(url) = shared.config.moved_to.clone() {
+        let location = HeaderValue::from_str(&url).map_err(|_| std::io::Error::other(format!("moved_to '{url}' is not a header value")))?;
+        let app = Router::new()
+            .route("/healthz", get(healthz))
+            .fallback(move || {
+                let (url, location) = (url.clone(), location.clone());
+                async move {
+                    let mut r = (StatusCode::PERMANENT_REDIRECT, Json(json!({"moved_to": url}))).into_response();
+                    r.headers_mut().insert(header::LOCATION, location);
+                    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                    r
+                }
+            })
+            .with_state(shared.clone());
+        return serve_app(listener, app, shutdown_tx, shutdown_rx, local_addr);
+    }
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/install.sh", get(install_sh))
@@ -396,7 +416,16 @@ pub async fn start_on(
         }
         None => app,
     };
-    let mut stop = shutdown_rx;
+    serve_app(listener, app, shutdown_tx, shutdown_rx, local_addr)
+}
+
+fn serve_app(
+    listener: TcpListener,
+    app: Router,
+    shutdown_tx: watch::Sender<bool>,
+    mut stop: watch::Receiver<bool>,
+    local_addr: SocketAddr,
+) -> std::io::Result<ServerHandle> {
     let task = tokio::spawn(async move {
         axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(async move { protocol::shutdown_signal(&mut stop).await })

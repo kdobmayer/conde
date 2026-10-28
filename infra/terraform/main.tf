@@ -291,7 +291,7 @@ locals {
     ENTRA_CLIENT_ID     = azuread_application.sso.client_id
     ENTRA_REDIRECT_URI  = local.sso_redirect
     # Slack DM notifications: owner=Slack user id pairs; the worker runs only with this and the token both set.
-  }, var.slack_notify != "" ? { CONDE_SLACK_NOTIFY = var.slack_notify } : {})
+  }, var.slack_notify != "" ? { CONDE_SLACK_NOTIFY = var.slack_notify } : {}, var.moved_to != "" ? { CONDE_MOVED_TO = var.moved_to } : {})
 }
 
 # ── The server: public HTTPS + WebSocket ingress, one replica until the app is proven stateless ────────────────────

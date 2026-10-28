@@ -28,7 +28,8 @@ spec:
         path: charts/conde-workspace
         helm:
           releaseName: conde
-          # The tenant file is not a values file: only its boardName and oidc keys reach the chart, as parameters below.
+          # The tenant file is not a values file: only its boardName, oidc and replicas keys reach the chart, as
+          # parameters below.
           valueFiles:
             - ../../deploy/image.yaml
           valuesObject: ${platform_values}
@@ -45,6 +46,9 @@ spec:
               value: '{{ .oidc.issuer }}'
             - name: oidc.clientId
               value: '{{ .oidc.clientId }}'
+            # Optional; 0 stops the server, as for a database restore (docs/CUTOVER-dakai.md). 2 is the chart default.
+            - name: replicas
+              value: '{{ dig "replicas" 2 . }}'
             - name: gcp.serviceAccount
               value: 'conde-{{ trimSuffix ".yaml" .path.filename }}@${project}.iam.gserviceaccount.com'
             - name: gcp.database

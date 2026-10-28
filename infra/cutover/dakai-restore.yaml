@@ -1,0 +1,134 @@
+# One-off restore of a conde_dakai dump (docs/CUTOVER-dakai.md), adapted from the chart's dbinit Job as rendered for
+# ws-dakai: same service account, admin secret and Cloud SQL Auth Proxy sidecar. It waits for the dump to be copied in,
+# replaces the database's content with it, reapplies the dbinit grants and prints owners and infra/cutover/counts.sql.
+# Not part of the chart; Argo CD does not manage it. Delete the Job after the move.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: restore
+  namespace: ws-dakai
+  labels:
+    app.kubernetes.io/name: restore
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: restore
+    spec:
+      serviceAccountName: dbinit
+      restartPolicy: Never
+      tolerations:
+      - effect: NoSchedule
+        key: kubernetes.io/arch
+        operator: Equal
+        value: amd64
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      - name: cloud-sql-proxy
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.3@sha256:f333a9c59890c3c67b8505166c5dbdcc0b29fca9173a2e09ca0446ab6997a736
+        restartPolicy: Always
+        args:
+        - --psc
+        - --structured-logs
+        - --address=127.0.0.1
+        - --port=5432
+        - --health-check
+        - --http-address=0.0.0.0
+        - --http-port=9090
+        - conde-prod:europe-west3:conde-pg
+        startupProbe:
+          httpGet:
+            path: /startup
+            port: 9090
+          periodSeconds: 2
+          failureThreshold: 60
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+            ephemeral-storage: 100Mi
+          limits:
+            ephemeral-storage: 100Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      containers:
+      - name: restore
+        image: docker.io/library/postgres:18.6-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+        command:
+        - /bin/sh
+        - -c
+        args:
+        - |
+          set -eu -o pipefail
+          PGPASSWORD=$(cat /secrets/pg-admin-password)
+          export PGPASSWORD PGHOST=127.0.0.1 PGUSER=postgres
+          echo "waiting: kubectl cp conde.dump and counts.sql into /work, then touch /work/ready"
+          until [ -f /work/ready ]; do sleep 2; done
+          cd /work
+          sha256sum conde.dump
+          s=$(date +%s)
+          psql -X -q -v ON_ERROR_STOP=1 -d postgres -c "GRANT \"$ROLE\" TO postgres"
+          # Empty the database as its owner, so nothing of the previous content survives.
+          psql -X -q -v ON_ERROR_STOP=1 -d "$DB" -c "SET ROLE \"$ROLE\"" -c "DROP SCHEMA public CASCADE" -c "CREATE SCHEMA public"
+          # --role creates every object as the workspace's IAM user, so the server owns what it migrates.
+          pg_restore -d "$DB" --role="$ROLE" --no-owner --no-acl --exit-on-error --single-transaction conde.dump
+          # The dbinit grants, unchanged.
+          psql -X -q -v ON_ERROR_STOP=1 -d postgres \
+            -c "ALTER DATABASE \"$DB\" OWNER TO \"$ROLE\"" \
+            -c "REVOKE CONNECT, TEMPORARY ON DATABASE \"$DB\" FROM PUBLIC"
+          psql -X -q -v ON_ERROR_STOP=1 -d "$DB" -c "ALTER SCHEMA public OWNER TO \"$ROLE\""
+          echo "restore seconds $(( $(date +%s) - s ))"
+          psql -X -q -At -v ON_ERROR_STOP=1 -d "$DB" \
+            -c "SELECT 'OWNER tables:' || tableowner, count(*) FROM pg_tables WHERE schemaname = 'public' GROUP BY 1" \
+            -c "SELECT 'OWNER relkind ' || c.relkind::text || ':' || pg_get_userbyid(c.relowner), count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' GROUP BY 1 ORDER BY 1" \
+            -c "SELECT 'OWNER schema:' || pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'public'" \
+            -c "SELECT 'OWNER database:' || pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()"
+          psql -X -q -At -v ON_ERROR_STOP=1 -d "$DB" -c "SET ROLE \"$ROLE\"" -f counts.sql | sed 's/^/COUNT /'
+        env:
+        - name: ROLE
+          value: conde-dakai@conde-prod.iam
+        - name: DB
+          value: conde_dakai
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+            ephemeral-storage: 1Gi
+          limits:
+            ephemeral-storage: 1Gi
+        securityContext:
+          runAsUser: 70
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: secrets
+          mountPath: /secrets
+          readOnly: true
+        - name: work
+          mountPath: /work
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: secrets
+        csi:
+          driver: secrets-store-gke.csi.k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: dbinit
+      - name: work
+        emptyDir:
+          sizeLimit: 900Mi
+      - name: tmp
+        emptyDir: {}
+  activeDeadlineSeconds: 3600

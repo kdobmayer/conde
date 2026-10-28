@@ -29,7 +29,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use admin::{AdminState, router as admin_router};
+pub use admin::{AdminState, is_format, router as admin_router};
 pub use app::embedded as app_embedded;
 
 /// The host of a human the browser names (`human:<user>@web`): never minted as a real host, so
@@ -318,6 +318,143 @@ pub struct AdminUser {
     /// The issuers the user has an identity of.
     pub issuers: Vec<String>,
     pub disabled: bool,
+    /// The workspace admin role.
+    #[serde(default)]
+    pub admin: bool,
+}
+
+/// The setup guide a workspace's welcome names when its admin set none.
+pub const DEFAULT_GUIDE: &str = "https://conde.cloud/docs/setup";
+/// The welcome text when the admin wrote none.
+pub const DEFAULT_WELCOME_TEXT: &str =
+    "Welcome to this conde workspace: your agents can now reach your teammates' agents here.";
+
+/// A workspace's welcome, set by its admin (`POST /v1/admin/welcome`): the admin's agent that
+/// newcomers write to with questions, the team channel, the setup guide and a short text. Stored
+/// with unset fields; [`Welcome::filled`] gives the guide and text their defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Welcome {
+    /// `owner/name` of a published agent of an admin user.
+    #[serde(default)]
+    pub admin_agent: Option<String>,
+    /// `#channel` on the board.
+    #[serde(default)]
+    pub lobby: Option<String>,
+    #[serde(default)]
+    pub guide: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+impl Welcome {
+    /// The welcome with the default guide and text where unset.
+    pub fn filled(mut self) -> Welcome {
+        self.guide.get_or_insert_with(|| DEFAULT_GUIDE.to_string());
+        self.text
+            .get_or_insert_with(|| DEFAULT_WELCOME_TEXT.to_string());
+        self
+    }
+}
+
+/// An https URL a welcome may name: at most 512 characters, with no whitespace, control or
+/// format characters.
+pub fn welcome_url(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .is_some_and(|rest| !rest.is_empty())
+        && url.len() <= 512
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || is_format(c))
+}
+
+/// A change to the welcome (`POST /v1/admin/welcome`): a field present replaces the stored one
+/// (null clears it), an absent field stays as stored.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WelcomePatch {
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub admin_agent: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub lobby: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub guide: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub text: Option<Option<String>>,
+}
+
+/// A field that is present, null or not.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+impl WelcomePatch {
+    /// Every field cleared (`conde admin welcome clear`).
+    pub fn clear() -> WelcomePatch {
+        WelcomePatch {
+            admin_agent: Some(None),
+            lobby: Some(None),
+            guide: Some(None),
+            text: Some(None),
+        }
+    }
+
+    /// `stored` with this change.
+    pub fn apply(&self, stored: &Welcome) -> Welcome {
+        let pick = |change: &Option<Option<String>>, old: &Option<String>| match change {
+            Some(new) => new.clone(),
+            None => old.clone(),
+        };
+        Welcome {
+            admin_agent: pick(&self.admin_agent, &stored.admin_agent),
+            lobby: pick(&self.lobby, &stored.lobby),
+            guide: pick(&self.guide, &stored.guide),
+            text: pick(&self.text, &stored.text),
+        }
+    }
+}
+
+/// How a host was enrolled, as an arrival notice names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enrollment {
+    /// `conde login`.
+    Login,
+    /// The keys page.
+    KeysPage,
+    /// The admin API.
+    Admin,
+}
+
+impl Enrollment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Enrollment::Login => "conde login",
+            Enrollment::KeysPage => "keys page",
+            Enrollment::Admin => "admin key",
+        }
+    }
+}
+
+/// Result of [`WebStore::set_welcome`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetWelcome {
+    Stored(Welcome),
+    /// The welcome names something the board does not have; the reason.
+    Refused(String),
 }
 
 /// A credential as the admin API lists it.
@@ -544,6 +681,31 @@ pub trait WebStore: Send + Sync {
     /// None for an unknown user. Default: refused (a store without human paging).
     fn set_slack_member(&self, _name: &str, _member_id: &str) -> WebResult<Option<WebUser>> {
         Err(WebStoreError("this board has no Slack member ids".into()))
+    }
+    /// Sets or clears the user's admin role; None for an unknown user. Default: refused.
+    fn set_admin(&self, _name: &str, _admin: bool) -> WebResult<Option<WebUser>> {
+        Err(WebStoreError("this board has no admin role".into()))
+    }
+    /// The workspace's welcome as stored (unset fields None). Default: none set.
+    fn welcome(&self) -> WebResult<Welcome> {
+        Ok(Welcome::default())
+    }
+    /// Applies the change to the stored welcome, in one transaction, after checking that the
+    /// admin agent it sets is a published agent of an admin user and the lobby it sets a channel
+    /// on the board. Default: refused.
+    fn set_welcome(&self, _change: &WelcomePatch) -> WebResult<SetWelcome> {
+        Err(WebStoreError("this board has no welcome".into()))
+    }
+    /// A key was minted for a host new to the board: on the user's first enrollment, the
+    /// welcome's greeting and arrival notice, once per user. Default: nothing.
+    fn enrolled(
+        &self,
+        _user_id: i64,
+        _host_id: &str,
+        _how: Enrollment,
+        _now: i64,
+    ) -> WebResult<()> {
+        Ok(())
     }
 }
 

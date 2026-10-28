@@ -24,6 +24,7 @@ type Case = (&'static str, fn(&dyn Store));
 
 const CASES: &[Case] = &[
     ("principals", principals),
+    ("settings_and_arrival", settings_and_arrival),
     ("credentials", credentials),
     ("idempotency", idempotency),
     ("agents_and_byte_order", agents_and_byte_order),
@@ -107,6 +108,10 @@ const PG_CASES: &[PgCase] = &[
         "entra_identities_from_before_migration_17_keep_their_users",
         entra_identities_from_before_migration_17_keep_their_users,
     ),
+    (
+        "users_with_hosts_before_migration_19_count_as_arrived",
+        users_with_hosts_before_migration_19_count_as_arrived,
+    ),
 ];
 
 fn main() {
@@ -134,6 +139,12 @@ fn main() {
         report.run(
             "sqlite::old_board_file_gains_topics",
             old_board_file_gains_topics,
+        );
+    }
+    if wanted("sqlite::old_board_file_counts_enrolled_users_as_arrived") {
+        report.run(
+            "sqlite::old_board_file_counts_enrolled_users_as_arrived",
+            old_board_file_counts_enrolled_users_as_arrived,
         );
     }
     if wanted("sqlite::old_board_file_gains_grant_codes") {
@@ -2074,6 +2085,62 @@ fn entra_identities_from_before_migration_17_keep_their_users(c: &Cluster) {
     );
 }
 
+/// Postgres: a board migrated to version 18 with users, hosts and credentials gets migration 19
+/// at the next start: a user with a host counts as arrived since their oldest credential (or the
+/// epoch without one), a user without a host has not arrived, and nobody is an admin.
+fn users_with_hosts_before_migration_19_count_as_arrived(c: &Cluster) {
+    let db = c.database();
+    let mut client = c.client(&db);
+    client
+        .batch_execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
+             applied_at TIMESTAMPTZ NOT NULL DEFAULT now());",
+        )
+        .unwrap();
+    let before: Vec<_> = MIGRATIONS.iter().filter(|m| m.0 <= 18).collect();
+    assert_eq!(before.len(), 18);
+    for (version, name, sql) in before {
+        client.batch_execute(sql).unwrap();
+        client
+            .execute(
+                "INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+                &[version, name, &conde::util::sha256_hex(sql.as_bytes())],
+            )
+            .unwrap();
+    }
+    client
+        .batch_execute(
+            "INSERT INTO users(user_id, name) VALUES (1, 'ann'), (2, 'bob'), (3, 'cid');
+             INSERT INTO hosts(host_id, user_id) VALUES ('laptop', 1), ('box', 3);
+             INSERT INTO device_credentials(token_digest, user_id, host_id, label, created_at) VALUES
+                 ('d1', 1, 'laptop', 'laptop', '2026-10-01T00:00:00.000Z'),
+                 ('d2', 1, 'laptop', 'laptop', '2026-09-01T00:00:00.000Z');",
+        )
+        .unwrap();
+    let store = PgStore::connect(&c.url(&db)).unwrap();
+    let arrived: Vec<(String, bool, Option<String>)> = client
+        .query(
+            "SELECT name, admin, arrived_at FROM users ORDER BY name",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    assert_eq!(
+        arrived,
+        [
+            ("ann".into(), false, Some("2026-09-01T00:00:00.000Z".into())),
+            ("bob".into(), false, None),
+            ("cid".into(), false, Some("1970-01-01T00:00:00Z".into())),
+        ]
+    );
+    write(&store, |tx| {
+        assert!(!tx.mark_user_arrived(1, "2026-10-28T10:00:00.000Z").unwrap());
+        assert!(tx.mark_user_arrived(2, "2026-10-28T10:00:00.000Z").unwrap());
+    });
+}
+
 /// A board file whose identities are keyed by (tid, oid), one per user: opening it rebuilds the
 /// table with every binding kept.
 fn old_board_file_keeps_its_entra_identities() {
@@ -2163,6 +2230,64 @@ fn an_identities_rebuild_another_process_finished_first_is_skipped() {
         .expect("the second open finds the table rebuilt");
     let s = SqliteStore::open(&path).unwrap();
     entra_identities_keep_their_users(&s);
+}
+
+/// Settings replace their value; the admin role is set and cleared; a user's arrival is
+/// recorded once.
+fn settings_and_arrival(s: &dyn Store) {
+    write(s, |tx| {
+        assert_eq!(tx.setting("welcome").unwrap(), None);
+        tx.set_setting("welcome", "a").unwrap();
+        tx.set_setting("welcome", "b").unwrap();
+        assert_eq!(tx.setting("welcome").unwrap().as_deref(), Some("b"));
+        let ann = tx.ensure_user("ann").unwrap();
+        assert!(!tx.user_by_id(ann).unwrap().unwrap().admin);
+        tx.set_user_admin(ann, true).unwrap();
+        assert!(tx.user_by_name("ann").unwrap().unwrap().admin);
+        tx.set_user_admin(ann, false).unwrap();
+        assert!(!tx.user_by_name("ann").unwrap().unwrap().admin);
+        assert!(
+            tx.mark_user_arrived(ann, "2026-10-28T10:00:00.000Z")
+                .unwrap()
+        );
+        assert!(
+            !tx.mark_user_arrived(ann, "2026-10-28T11:00:00.000Z")
+                .unwrap()
+        );
+    });
+}
+
+/// A board file from before the welcome: opening it adds the admin role and the arrival time,
+/// and a user who had a host counts as arrived (no welcome for them later).
+fn old_board_file_counts_enrolled_users_as_arrived() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    let (ann, bob) = {
+        let s = SqliteStore::open(&path).unwrap();
+        write(&s, |tx| {
+            let ann = tx.ensure_user("ann").unwrap();
+            tx.ensure_host("laptop", ann).unwrap();
+            (ann, tx.ensure_user("bob").unwrap())
+        })
+    };
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE users DROP COLUMN admin; ALTER TABLE users DROP COLUMN arrived_at",
+        )
+        .unwrap();
+    let s = SqliteStore::open(&path).unwrap();
+    write(&s, |tx| {
+        assert!(!tx.user_by_id(ann).unwrap().unwrap().admin);
+        assert!(
+            !tx.mark_user_arrived(ann, "2026-10-28T10:00:00.000Z")
+                .unwrap()
+        );
+        assert!(
+            tx.mark_user_arrived(bob, "2026-10-28T10:00:00.000Z")
+                .unwrap()
+        );
+    });
 }
 
 /// A board file from before topics: opening it adds the column, data intact.
@@ -2307,6 +2432,7 @@ fn web_sign_in_and_disabled_users(store: &dyn Store) {
         disabled,
         bound,
         email: None,
+        admin: false,
     };
     assert_eq!(w.user_by_name("ann").unwrap(), Some(row(false, false)));
     assert_eq!(w.user_by_identity(ENTRA, "o-1").unwrap(), None);

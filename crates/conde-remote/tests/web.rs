@@ -468,6 +468,7 @@ impl WebStore for MemStore {
                 email: u.email.clone(),
                 issuers: u.identities.iter().map(|(i, _)| i.clone()).collect(),
                 disabled: u.disabled,
+                admin: false,
             })
             .collect();
         users.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2181,8 +2182,9 @@ async fn the_admin_invites_lists_and_binds_by_issuer_and_subject() {
     assert_eq!(
         list,
         json!({"users": [
-            {"name": "ann", "email": "ann@dakai.example", "issuers": [env.idp.issuer], "disabled": false},
-            {"name": "carl", "email": "carl@dakai.example", "issuers": [], "disabled": false},
+            {"name": "ann", "email": "ann@dakai.example", "issuers": [env.idp.issuer], "disabled": false,
+             "admin": false},
+            {"name": "carl", "email": "carl@dakai.example", "issuers": [], "disabled": false, "admin": false},
         ]})
     );
     assert_eq!(

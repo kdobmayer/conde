@@ -597,6 +597,8 @@ pub struct UserRow {
     pub bound: bool,
     /// The sign-in email (the invite's, or the one sign-in reported).
     pub email: Option<String>,
+    /// The workspace admin role (set with the admin key).
+    pub admin: bool,
 }
 
 /// A browser session (unix seconds).
@@ -787,6 +789,13 @@ pub trait Tx {
     /// Sets the user's disabled flag; returns the user's hosts. Disabling also deletes the
     /// user's browser sessions and announces the hosts as revoked on commit.
     fn set_user_disabled(&self, user_id: i64, disabled: bool) -> StoreResult<Vec<String>>;
+    fn set_user_admin(&self, user_id: i64, admin: bool) -> StoreResult<()>;
+    /// Records the user's first host enrollment at `at` unless one is recorded; whether this
+    /// call recorded it (the welcome runs then, once per user).
+    fn mark_user_arrived(&self, user_id: i64, at: &str) -> StoreResult<bool>;
+    /// A workspace setting the admin set (`settings`), by key.
+    fn setting(&self, key: &str) -> StoreResult<Option<String>>;
+    fn set_setting(&self, key: &str, value: &str) -> StoreResult<()>;
     fn insert_web_session(&self, id_digest: &str, s: &WebSessionRow) -> StoreResult<()>;
     fn web_session(&self, id_digest: &str) -> StoreResult<Option<WebSessionRow>>;
     fn touch_web_session(&self, id_digest: &str, at: i64) -> StoreResult<()>;

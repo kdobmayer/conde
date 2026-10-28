@@ -93,6 +93,7 @@ on_both!(
     listings_show_kind_and_host_never_a_target,
     a_mailbox_row_is_reached_only_when_delivered,
     board_info_names_the_board_account_and_host,
+    publishing_joins_the_welcomes_lobby,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -1597,10 +1598,58 @@ async fn a_mailbox_row_is_reached_only_when_delivered(d: Arc<Dispatcher>) {
 async fn board_info_names_the_board_account_and_host(d: Arc<Dispatcher>) {
     let fx = fixture(&d, config()).await;
     let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
+    let default = json!({"admin_agent": null, "lobby": null, "guide": "https://conde.cloud/docs/setup",
+                         "text": conde_remote::web::DEFAULT_WELCOME_TEXT});
     assert_eq!(
         info,
-        json!({"name": "shared", "owner": "kd", "host": "homepc", "mailbox_only": false})
+        json!({"name": "shared", "owner": "kd", "host": "homepc", "mailbox_only": false,
+               "welcome": default})
     );
+    // the workspace's welcome as the admin stored it, the defaults filled
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            Ok(t.set_setting("welcome", r##"{"admin_agent":"kd/desk","lobby":"#dev"}"##)?)
+        })
+        .unwrap()
+    })
+    .await;
+    let admin = |on: bool| {
+        let d = d.clone();
+        blocking(move || {
+            d.with_tx(|t| {
+                let kd = t.user_id("kd")?.unwrap();
+                Ok(t.set_user_admin(kd, on)?)
+            })
+            .unwrap()
+        })
+    };
+    // kd is no admin yet: the stored agent is not handed out
+    let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
+    assert_eq!(
+        info["welcome"],
+        json!({"admin_agent": null, "lobby": "#dev", "guide": "https://conde.cloud/docs/setup",
+               "text": conde_remote::web::DEFAULT_WELCOME_TEXT})
+    );
+    admin(true).await;
+    let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
+    assert_eq!(info["welcome"]["admin_agent"], "kd/desk", "{info}");
+    admin(false).await;
+    let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
+    assert_eq!(
+        info["welcome"]["admin_agent"],
+        Value::Null,
+        "demoted: {info}"
+    );
+    // a lobby that is gone is not handed out either
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| Ok(t.set_setting("welcome", r##"{"lobby":"#gone"}"##)?))
+            .unwrap()
+    })
+    .await;
+    let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
+    assert_eq!(info["welcome"]["lobby"], Value::Null, "{info}");
     let (_home, _) = migrated(&fx, &[], 4).await;
     let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
     assert_eq!(info["mailbox_only"], true);
@@ -1991,4 +2040,40 @@ fn an_old_sqlite_board_is_rebuilt_to_accept_mailboxes() {
     // Opening again leaves the rebuilt table alone.
     drop(c);
     Dispatcher::open(&path).unwrap();
+}
+
+/// The welcome's lobby, whatever its name, is joined on a name's first publish (as `#lobby`
+/// is), so the `Team channel:` line's `conde read` works.
+async fn publishing_joins_the_welcomes_lobby(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    fx.s.ok(
+        &fx.kd,
+        Some(DESK),
+        "channel.create",
+        json!({"channel": "#team"}),
+    )
+    .await;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| Ok(t.set_setting("welcome", r##"{"lobby":"#team"}"##)?))
+            .unwrap()
+    })
+    .await;
+    let (_home, _) = migrated(&fx, &[], 4).await;
+    fx.s.ok(&fx.kd, None, "mailbox.publish", json!({"name": "scribe"}))
+        .await;
+    let scribe = fx.s.agent("kd", "scribe").await;
+    let d2 = d.clone();
+    let member = blocking(move || {
+        d2.with_conn(|t| {
+            let team = t.channel_by_name("team")?.unwrap();
+            t.read_seq(&team.id, &scribe.id)
+        })
+        .unwrap()
+    })
+    .await;
+    assert!(
+        member.is_some(),
+        "kd/scribe joined #team on its first publish"
+    );
 }

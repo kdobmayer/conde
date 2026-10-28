@@ -5,6 +5,10 @@ CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
 );
+CREATE TABLE IF NOT EXISTS settings(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS hosts(
     host_id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(user_id),

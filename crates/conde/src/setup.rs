@@ -29,15 +29,6 @@ pub const CODEX_SKILL: &str = include_str!("../../../skills/codex/SKILL.md");
 pub const LAUNCHD_LABEL: &str = "space.nativeai.conde";
 /// The Windows scheduled task that runs the bridge at logon.
 pub const TASK_NAME: &str = "conde";
-/// The last step of every setup (owner's decision): report how it went.
-pub const FEEDBACK: &str = "Send a DM to kdobmayer/desk with how the setup went: what worked, what failed, what you \
-had to figure out yourself, roughly how long it took, and the OS.";
-pub const FEEDBACK_COMMAND: &str =
-    "conde send kdobmayer/desk \"<how the setup went>\" --board dakai";
-pub const FEEDBACK_KEEP: &str = "desk is on the team's board: the name you send it from must be published there \
-first (conde publish <name> --board dakai, when your human told you to publish it); otherwise, or on a host without \
-that board, tell your human instead. Keep the name registered: desk replies to it.";
-pub const GUIDE: &str = "Setup guide: https://conde.nativeai.space/readme";
 /// What enrolling a shared board does and does not do, for the human who runs it.
 pub const ENROLL_SCOPE: &str = "Enrolling publishes nothing and uploads no history: every agent stays on this \
 machine's local board, and teammates cannot reach one until you publish it";
@@ -693,14 +684,22 @@ pub fn run(
             writeln!(out, "skip    {CODEX_ABSENT}")?;
         }
     }
+    let mut welcomes = Vec::new();
     if opts.boards {
-        let r = boards_part(env, opts, host, out);
+        let r = boards_part(env, opts, host, out, &mut welcomes);
         part("boards", r, out)?;
     }
-    writeln!(
-        out,
-        "\n{FEEDBACK}\n  {FEEDBACK_COMMAND}\n{FEEDBACK_KEEP}\n\n{GUIDE}"
-    )?;
+    writeln!(out)?;
+    if welcomes.is_empty() {
+        write!(out, "{}", crate::welcome::lines(LOCAL_BOARD, None))?;
+    }
+    let many = welcomes.len() > 1;
+    for (alias, welcome) in &welcomes {
+        if many {
+            writeln!(out, "{alias}:")?;
+        }
+        write!(out, "{}", crate::welcome::lines(alias, welcome.as_ref()))?;
+    }
     Ok(ok)
 }
 
@@ -1653,23 +1652,28 @@ fn adopt_v1_credential(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> a
 }
 
 /// The boards part of `conde setup`: each enrolled board's review, then the default board.
+/// `welcomes`: each enrolled board's welcome as its `board.info` answered it (None: not reached,
+/// or a server from before the welcome).
 fn boards_part(
     env: &Env,
     opts: &Options,
     host: &mut dyn Host,
     out: &mut dyn Write,
+    welcomes: &mut Vec<(String, Option<conde_remote::web::Welcome>)>,
 ) -> anyhow::Result<()> {
     let enrolled = boards::enrolled_in(&env.boards_dir())?;
     if enrolled.is_empty() {
         writeln!(
             out,
             "boards: no shared board enrolled; this host works on its local board. Joining a team's board is a separate \
-             step: conde login --server https://conde.nativeai.space. {ENROLL_SCOPE}."
+             step: conde login --server https://<workspace>.conde.cloud. {ENROLL_SCOPE}."
         )?;
     }
     let mut ok = true;
     for alias in &enrolled {
-        ok &= migrate_review(env, host, out, alias, false, opts.publish.as_ref())?;
+        let (done, info) = review(env, host, out, alias, false, opts.publish.as_ref())?;
+        ok &= done;
+        welcomes.push((alias.clone(), info.and_then(|i| i.welcome)));
     }
     default_board(env, opts, host, out, &enrolled)?;
     if !ok {
@@ -1754,6 +1758,18 @@ pub fn migrate_review(
     explicit: bool,
     publish: Option<&Publish>,
 ) -> anyhow::Result<bool> {
+    Ok(review(env, host, out, alias, explicit, publish)?.0)
+}
+
+/// [`migrate_review`], with the board's `board.info` answer when it gave one.
+fn review(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    alias: &str,
+    explicit: bool,
+    publish: Option<&Publish>,
+) -> anyhow::Result<(bool, Option<BoardInfo>)> {
     let later = format!(
         "until then {alias} stays local-only on this host; the review: conde boards --migrate {alias}"
     );
@@ -1767,9 +1783,28 @@ pub fn migrate_review(
                 out,
                 "boards: {alias}: not reached through the daemon ({why}); {later}"
             )?;
-            return Ok(false);
+            return Ok((false, None));
         }
     };
+    let ok = review_info(
+        env, host, out, alias, explicit, publish, &info, finished, &later,
+    )?;
+    Ok((ok, Some(info)))
+}
+
+/// The review once `board.info` answered (`finished`: a switch the daemon finished just now).
+#[allow(clippy::too_many_arguments)]
+fn review_info(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    alias: &str,
+    explicit: bool,
+    publish: Option<&Publish>,
+    info: &BoardInfo,
+    finished: Option<Value>,
+    later: &str,
+) -> anyhow::Result<bool> {
     if info.mailbox_only {
         // a switch the daemon finished just now (its local apply had been pending)
         if let Some(r) = finished {
@@ -1819,7 +1854,7 @@ pub fn migrate_review(
         return apply_migration(env, host, out, alias, &[]);
     }
     let interactive = publish.is_none() && host.terminal();
-    show_preview(out, alias, &info, &preview, interactive)?;
+    show_preview(out, alias, info, &preview, interactive)?;
     if let Some(choice) = publish {
         let head = format!("{} publishes", choice.flag());
         let chosen = match choice.rows(&preview.rows) {

@@ -615,9 +615,19 @@ pub fn run(
         runtime.block_on(sign_in(server, &host, open_browser, BROWSER_WAIT))?
     };
     drop(runtime);
-    let alias = match board {
-        Some(a) => a.to_string(),
-        None => boards::board_info(server, &enrolled.key)?.name,
+    // the alias it advertises, unless --board names one, and the workspace's welcome
+    let info = match boards::board_info(server, &enrolled.key) {
+        Ok(info) => Some(info),
+        Err(e) if board.is_some() => {
+            eprintln!("(board.info failed: {e:#}; the workspace's welcome is not shown)");
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    let alias = match (board, &info) {
+        (Some(a), _) => a.to_string(),
+        (None, Some(i)) => i.name.clone(),
+        (None, None) => anyhow::bail!("board.info named no board"),
     };
     boards::check_shared_alias(&alias)?;
     let path = boards::path(&alias)?;
@@ -635,6 +645,8 @@ pub fn run(
             &bridge
         )
     );
+    let welcome = info.and_then(|i| i.welcome);
+    print!("{}", crate::welcome::lines(&alias, welcome.as_ref()));
     Ok(0)
 }
 

@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use client::{
-    BridgeClient, BridgeConfig, BridgeState, CallError, Inbound, MAX_REASON_BYTES, StopReason,
-    moved_to, rpc,
+    BridgeClient, BridgeConfig, BridgeState, CallError, Inbound, MAX_REASON_BYTES, Retry,
+    StopReason, moved_to, rpc,
 };
 pub use secret::{SecretError, secret_env, secret_from};
 pub use server::{MAX_FRAME_BYTES, ServerConfig, ServerHandle, serve, start, start_on};

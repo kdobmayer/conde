@@ -399,8 +399,8 @@ resource "kubernetes_service_v1" "keycloak" {
   }
 }
 
-# Only the workspace realms, the infra realm (Argo CD sign-in), static resources and, until the admin host behind IAP is
-# verified, the admin paths, which Cloud Armor holds to the allowlist (docs/infra-gcp-s4-iap.md).
+# Only the workspace realms, the infra realm (Argo CD sign-in) and static resources; the console and the master realm are
+# on admin-auth.conde.cloud (keycloak_admin_route).
 resource "kubernetes_manifest" "keycloak_route" {
   manifest = {
     apiVersion = "gateway.networking.k8s.io/v1"
@@ -417,7 +417,7 @@ resource "kubernetes_manifest" "keycloak_route" {
       }]
       hostnames = [local.keycloak_hostname]
       rules = [{
-        matches = [for prefix in ["/realms/dakai", "/realms/demo", "/realms/clearscale", "/realms/infra", "/resources", "/admin", "/realms/master"] : {
+        matches = [for prefix in ["/realms/dakai", "/realms/demo", "/realms/clearscale", "/realms/infra", "/resources"] : {
           path = { type = "PathPrefix", value = prefix }
         }]
         backendRefs = [{

@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Design-only harness: the U8 primitives and state components on fixture data, for
-	// scripts/design/interact.mjs and the renders. Its skin control sets data-skin directly.
+	// scripts/design/interact.mjs and the renders.
 	import FilterMenu from '#lib/ui/FilterMenu.svelte';
 	import Sheet from '#lib/ui/Sheet.svelte';
 	import Disclosure from '#lib/ui/Disclosure.svelte';
@@ -13,11 +13,6 @@
 	import type { Message } from '#lib/types.ts';
 	import { tick } from 'svelte';
 	import { page } from '$app/state';
-
-	let skin = $state<'a' | 'b'>('a');
-	$effect(() => {
-		document.documentElement.dataset.skin = skin;
-	});
 
 	const agents = [{ value: '', label: 'all' }, ...[...new Set(feed.flatMap((e) => e.via))].sort().map((a) => ({ value: a, label: short(a) }))];
 	const directions = [
@@ -74,10 +69,6 @@
 <main class="harness">
 	<header>
 		<h1>Primitives</h1>
-		<div class="skins" role="group" aria-label="Skin">
-			<button type="button" class="quiet" data-skin-pick="a" aria-pressed={skin === 'a'} onclick={() => (skin = 'a')}>Console</button>
-			<button type="button" class="quiet" data-skin-pick="b" aria-pressed={skin === 'b'} onclick={() => (skin = 'b')}>Editorial</button>
-		</div>
 	</header>
 
 	<section aria-labelledby="h-menu">
@@ -187,14 +178,6 @@
 		font-size: 1em;
 		color: var(--muted);
 	}
-	.skins {
-		display: flex;
-		gap: 4px;
-	}
-	.skins [aria-pressed='true'] {
-		border-color: var(--accent);
-		color: var(--accent);
-	}
 	.contents {
 		display: contents;
 	}
@@ -215,7 +198,7 @@
 	}
 	.thread p {
 		margin: 4px 0 0;
-		font-family: var(--font-text);
+		font-family: var(--serif);
 		white-space: pre-wrap;
 	}
 	.meta {

@@ -1,6 +1,6 @@
 // Design-only: drives the primitives harness (routes/_design/primitives) headless, by keyboard at
-// 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844, in both skins, and exits
-// non-zero when a check fails. Serves the built app through mock-server.mjs.
+// 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844, and exits non-zero when a
+// check fails. Serves the built app through mock-server.mjs.
 // Usage: node scripts/design/interact.mjs [build-dir]
 // Needs playwright-core 1.64.0 (npm i --no-save) and a Chromium headless shell (CHROME, as in
 // shoot.mjs).
@@ -24,7 +24,7 @@ const executablePath =
 const browser = await chromium.launch({ executablePath, args: ['--disable-gpu'] });
 
 let failed = 0;
-/** The skin and size the checks run in, printed with each. */
+/** The size the checks run in, printed with each. */
 let where = '';
 async function check(name, fn) {
 	try {
@@ -39,8 +39,8 @@ function expect(cond, what) {
 	if (!cond) throw new Error(what);
 }
 
-async function open(size, skin) {
-	where = `${skin} ${size.width}`;
+async function open(size) {
+	where = `${size.width}`;
 	const context = await browser.newContext({
 		viewport: size,
 		...(size.width < 720 ? { isMobile: true, hasTouch: true } : {}),
@@ -53,8 +53,6 @@ async function open(size, skin) {
 	});
 	await page.goto(URL, { waitUntil: 'networkidle' });
 	await page.waitForSelector('[data-test=open-sheet]');
-	await page.locator(`[data-skin-pick=${skin}]`).click();
-	if ((await page.evaluate(() => document.documentElement.dataset.skin)) !== skin) throw new Error(`skin ${skin} not set`);
 	return { context, page };
 }
 
@@ -80,8 +78,8 @@ const settle = (page) => page.waitForTimeout(400);
 const box = (page, sel) => page.locator(sel).boundingBox();
 
 // ---- desktop, keyboard ----
-for (const skin of ['a', 'b']) {
-	const { context, page } = await open({ width: 1440, height: 900 }, skin);
+{
+	const { context, page } = await open({ width: 1440, height: 900 });
 	const dirButton = page.locator('[data-test=menu-dir] button');
 
 	await check('filter menu: Tab reaches the menu button', async () => {
@@ -258,16 +256,12 @@ for (const skin of ['a', 'b']) {
 		await page.locator('[data-test=arrive]').click();
 		expect((await page.locator('[aria-live=polite]').textContent()) === '2 new messages', 'not announced');
 	});
-	await check('skin switch: Editorial sets data-skin b', async () => {
-		await page.locator('[data-skin-pick=b]').click();
-		expect((await page.evaluate(() => document.documentElement.dataset.skin)) === 'b', 'not b');
-	});
 	await context.close();
 }
 
 // ---- 1180: the overlay ----
 {
-	const { context, page } = await open({ width: 1180, height: 820 }, 'a');
+	const { context, page } = await open({ width: 1180, height: 820 });
 	await check('sheet at 1180: a 500 px overlay on the right, modal', async () => {
 		await page.locator('[data-test=open-sheet]').click();
 		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
@@ -281,8 +275,8 @@ for (const skin of ['a', 'b']) {
 }
 
 // ---- phone, touch ----
-for (const skin of ['a', 'b']) {
-	const { context, page } = await open({ width: 390, height: 844 }, skin);
+{
+	const { context, page } = await open({ width: 390, height: 844 });
 	await check('filter menu by touch: tap opens, tapping an option selects and closes', async () => {
 		await page.locator('[data-test=menu-dir] button').tap();
 		expect((await listboxes(page)) === 1, 'tap did not open');

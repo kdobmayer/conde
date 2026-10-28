@@ -125,6 +125,9 @@ struct St {
     /// then refused new connections until [`FakeBoard::blackout`] lifts it.
     drop_after_push: HashSet<String>,
     blackout: HashSet<String>,
+    /// Per host: how many more connections lose their hello, answered as a server before
+    /// `hello_timeout` answered a timeout.
+    lost_hellos: HashMap<String, u32>,
     /// `inbox.list` page size (200 when unset).
     inbox_page: Option<usize>,
     /// After the next answer of an op: a DM (from, to owner, to name, text) arrives.
@@ -697,6 +700,12 @@ impl FakeBoard {
         }
     }
 
+    /// The host's next `n` connections lose their hello on the way: the board answers each
+    /// with the timeout's `bad_hello` of a board before `hello_timeout`.
+    pub fn lose_hellos(&self, host: &str, n: u32) {
+        self.lock().lost_hellos.insert(host.into(), n);
+    }
+
     /// The next answer of `op` is lost after its commit: the connection drops instead.
     pub fn lose_response(&self, op: &str) {
         self.lock().lose_response.insert(op.into());
@@ -849,6 +858,20 @@ async fn bridge(
 
 async fn session(st: Arc<Mutex<St>>, host: String, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
+    let lost = match st.lock().unwrap().lost_hellos.get_mut(&host) {
+        Some(n) if *n > 0 => {
+            *n -= 1;
+            true
+        }
+        _ => false,
+    };
+    if lost {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let message = "no hello before the timeout";
+        let error = json!({"code": "bad_hello", "message": message});
+        let _ = tx.send(Message::text(frame("error", &error))).await;
+        return;
+    }
     let Some(Ok(Message::Text(text))) = rx.next().await else {
         return;
     };

@@ -66,7 +66,10 @@ recipient, binding_version, endpoint, message_id), `outcome` (attempt_id,
 event_seq, status, reason), `outcome_ack`. Authentication happens at
 connection setup (bearer token on the WebSocket handshake); transport
 ping/pong keeps the connection alive through the 240 s ingress idle cut;
-reconnect resumes from the server's pending-notification table.
+reconnect resumes from the server's pending-notification table. A hello that does not arrive
+within the server's hello timeout is closed with `hello_timeout` and the bridge reconnects with
+backoff, as after any lost connection; only a verdict stops it (`fenced`, `host_mismatch`,
+`bad_hello` for a refused hello, a rejected key, a moved board).
 
 Ops v1: agent.register/unregister/whoami/resolve/list, message.send/read/get,
 inbox.list, channel.create/join/leave/invite/list/members, reaction.set,

@@ -278,7 +278,15 @@ impl Core {
                     "connected".into()
                 }
                 Some(conde_remote::BridgeState::Connected) => "connected (reconciling)".into(),
-                Some(conde_remote::BridgeState::Backoff) => "unreachable (reconnecting)".into(),
+                Some(conde_remote::BridgeState::Backoff(r)) => {
+                    let wait = r.at.saturating_duration_since(tokio::time::Instant::now());
+                    format!(
+                        "reconnecting (attempt {}, next in {}s): {}",
+                        r.attempt,
+                        wait.as_secs_f64().ceil(),
+                        r.reason
+                    )
+                }
                 _ => "connecting".into(),
             },
         }

@@ -10,6 +10,8 @@ pub const VERSION: u64 = 1;
 pub const CODE_FENCED: &str = "fenced";
 pub const CODE_HOST_MISMATCH: &str = "host_mismatch";
 pub const CODE_BAD_HELLO: &str = "bad_hello";
+/// No hello arrived in time: the connection is closed and the bridge reconnects.
+pub const CODE_HELLO_TIMEOUT: &str = "hello_timeout";
 
 /// Serializes `payload` (a struct or object) and adds `v` and `type`.
 pub fn frame<T: Serialize>(kind: &str, payload: &T) -> String {

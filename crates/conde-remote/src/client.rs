@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HOST_MISMATCH};
+use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HELLO_TIMEOUT, CODE_HOST_MISMATCH};
 use crate::server::MAX_FRAME_BYTES;
 use crate::{Endpoint, Hello, Notify, Outcome, PROTO_V1, Routes};
 
@@ -24,6 +24,9 @@ const TRUNCATED: &str = " [truncated]";
 
 /// How many delivered attempt ids the client remembers to suppress server resends.
 const SEEN_CAPACITY: usize = 65_536;
+
+/// How a server without [`CODE_HELLO_TIMEOUT`] words a hello timeout, under `bad_hello`.
+const LEGACY_HELLO_TIMEOUT: &str = "no hello before the timeout";
 
 #[derive(Clone, Debug)]
 pub struct BridgeConfig {
@@ -113,8 +116,19 @@ pub enum BridgeState {
     Connecting,
     Connected,
     /// Waiting before the next reconnect attempt.
-    Backoff,
+    Backoff(Retry),
     Stopped(StopReason),
+}
+
+/// A pending reconnect: the bridge retries every transient failure, forever, with backoff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Retry {
+    /// Reconnects since the last connection that lasted (1 for the first).
+    pub attempt: u32,
+    /// When the attempt starts.
+    pub at: tokio::time::Instant,
+    /// Why the previous connection or attempt ended.
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,7 +137,8 @@ pub enum StopReason {
     Fenced,
     /// The server rejected the token (unknown or revoked).
     Unauthorized,
-    /// The server refused the hello (`host_mismatch`, `bad_hello`).
+    /// The server refused the hello (`host_mismatch`, `bad_hello`); a hello that timed out is
+    /// retried instead.
     Rejected { code: String, message: String },
     /// [`BridgeClient::shutdown`] was called.
     Shutdown,
@@ -695,19 +710,20 @@ async fn supervise(
     let mut shutdown = inner.shutdown.subscribe();
     let mut seen = Seen::default();
     let mut backoff = cfg.backoff_min;
+    let mut attempt = 0;
     let reason = loop {
         inner.state.send_replace(BridgeState::Connecting);
         let connected = tokio::select! {
             r = connect(&inner) => r,
             _ = protocol::shutdown_signal(&mut shutdown) => break StopReason::Shutdown,
         };
-        match connected {
+        let reason = match connected {
             Ok(ws) => {
                 let started = tokio::time::Instant::now();
                 inner.connects.fetch_add(1, Ordering::Relaxed);
                 inner.state.send_replace(BridgeState::Connected);
                 tracing::info!(url = %cfg.url, instance = %inner.instance, "bridge connected");
-                match session(
+                let why = match session(
                     &inner,
                     ws,
                     &mut cmd_rx,
@@ -718,22 +734,33 @@ async fn supervise(
                 .await
                 {
                     SessionEnd::Stop(reason) => break reason,
-                    SessionEnd::Lost(why) => tracing::warn!(%why, "bridge connection lost"),
-                }
+                    SessionEnd::Lost(why) => why,
+                };
+                tracing::warn!(%why, "bridge connection lost");
                 // A session that lasted starts the backoff over; one closed soon after its hello
                 // (a server closing it again and again, say for a full queue) keeps doubling it.
                 if started.elapsed() >= cfg.backoff_max {
                     backoff = cfg.backoff_min;
+                    attempt = 0;
                 }
+                why
             }
             Err(ConnectError::Unauthorized) => break StopReason::Unauthorized,
             Err(ConnectError::Moved(url)) => break StopReason::Moved(url),
-            Err(ConnectError::Other(e)) => tracing::warn!(error = %e, "bridge connect failed"),
-        }
-        inner.state.send_replace(BridgeState::Backoff);
+            Err(ConnectError::Other(e)) => {
+                tracing::warn!(error = %e, "bridge connect failed");
+                format!("connect failed: {e}")
+            }
+        };
         // Equal jitter: half fixed, half random.
         let half = backoff / 2;
         let delay = half + half.mul_f64(rand::random::<f64>());
+        attempt += 1;
+        inner.state.send_replace(BridgeState::Backoff(Retry {
+            attempt,
+            at: tokio::time::Instant::now() + delay,
+            reason,
+        }));
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = protocol::shutdown_signal(&mut shutdown) => break StopReason::Shutdown,
@@ -1041,6 +1068,10 @@ fn handle_frame(
             tracing::warn!(%code, %message, "server error frame");
             match code.as_str() {
                 CODE_FENCED => return Some(SessionEnd::Stop(StopReason::Fenced)),
+                CODE_HELLO_TIMEOUT => return Some(SessionEnd::Lost(format!("{code}: {message}"))),
+                CODE_BAD_HELLO if message == LEGACY_HELLO_TIMEOUT => {
+                    return Some(SessionEnd::Lost(format!("{code}: {message}")));
+                }
                 CODE_HOST_MISMATCH | CODE_BAD_HELLO => {
                     return Some(SessionEnd::Stop(StopReason::Rejected { code, message }));
                 }

@@ -664,7 +664,7 @@ fn g1_offline_local_work_never_waits_on_a_board() {
         );
         if case != "silent" {
             assert!(
-                a.doctor().contains("dakai: unreachable")
+                a.doctor().contains("dakai: reconnecting (attempt ")
                     || a.doctor().contains("dakai: connecting"),
                 "{}",
                 a.doctor()
@@ -2390,6 +2390,40 @@ fn publication_rules() {
         e.1,
         conde::surface::publication_pending("worker", "dakai", "unpublishing")
     );
+}
+
+/// A reconnect whose hello is lost (a board rollout) is retried with backoff, and doctor says
+/// so, instead of stopping the board for good.
+#[test]
+fn a_lost_hello_reconnects_and_doctor_shows_the_retry() {
+    let board = FakeBoard::start();
+    let tuning = Tuning {
+        backoff_max: Some(Duration::from_secs(1)),
+        ..fast()
+    };
+    let mut a = Host::tuned("kdobmayer", "homepc", tuning);
+    a.enroll(&board);
+    a.start();
+    a.migrate(&board);
+    wait_for("connected", || (a.status() == "connected").then_some(()));
+    board.lose_hellos("homepc", 2);
+    board.drop_connection("homepc");
+    let retry = wait_for("the retry", || {
+        let s = a.status();
+        s.ends_with("s): bad_hello: no hello before the timeout")
+            .then_some(s)
+    });
+    let (attempt, wait) = retry
+        .strip_prefix("reconnecting (attempt ")
+        .and_then(|r| r.split_once("s): "))
+        .and_then(|(r, _)| r.split_once(", next in "))
+        .unwrap_or_else(|| panic!("{retry}"));
+    assert!(attempt.parse::<u32>().unwrap() >= 2, "{retry}");
+    assert!(wait.parse::<u64>().unwrap() <= 1, "{retry}");
+    wait_for("connected again", || {
+        (a.status() == "connected").then_some(())
+    });
+    assert!(board.connected("homepc"));
 }
 
 /// An agent's shell runs the one-time switch like the human: an unregistered session reads

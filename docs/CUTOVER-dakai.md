@@ -1,5 +1,12 @@
 # Dakai cutover: conde.nativeai.space to dakai.conde.cloud
 
+Done on 2026-10-28: freeze applied 02:44:24Z (revision ca-conde--0000034 alone active at 02:45:50Z, 308 confirmed), dump
+02:45:52Z to 02:46:48Z (conde-20261028T024615Z.dump, checksum ok), restore 02:47:23Z to 02:47:46Z (15 s, counts identical
+to the frozen source, all owners conde-dakai@conde-prod.iam), server ready 02:50:05Z on image 0.3.0, this machine's key
+accepted, `conde board move` done on homepc, teammates told in #lobby at 02:51Z. Window: 5 minutes 41 seconds from the
+freeze to the ready server. The old app stays in moved mode for a week; `dump_enabled = false` and the Azure removal
+follow on the owner's go (docs/BACKLOG.md S6).
+
 The Dakai board moves from the Azure Container App `ca-conde` (database `conde` on `psql-conde`) to the GKE workspace
 `ws-dakai` (database `conde_dakai` on Cloud SQL `conde-pg`, owned by the IAM user `conde-dakai@conde-prod.iam`). The
 move is a custom-format `pg_dump` taken on Azure, carried through this machine and restored in the cluster. The steps

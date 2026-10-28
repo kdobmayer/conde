@@ -1,0 +1,577 @@
+/* conde sign-in pages, design B (web/src/app.css): keycloak.v2's PatternFly markup restyled; tokens shared with the web app. */
+/* The woff2 files of @fontsource/source-serif-4 5.3.1 and @fontsource/inter 5.3.0 (web/static/app/fonts), unmodified. */
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../fonts/source-serif-4-v5.3.1-latin-ext-400-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../fonts/source-serif-4-v5.3.1-latin-400-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../fonts/source-serif-4-v5.3.1-latin-ext-600-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../fonts/source-serif-4-v5.3.1-latin-600-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: italic;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../fonts/source-serif-4-v5.3.1-latin-ext-400-italic.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	font-style: italic;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../fonts/source-serif-4-v5.3.1-latin-400-italic.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../fonts/inter-v5.3.0-latin-ext-400-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('../fonts/inter-v5.3.0-latin-400-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../fonts/inter-v5.3.0-latin-ext-600-normal.woff2') format('woff2');
+	unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('../fonts/inter-v5.3.0-latin-600-normal.woff2') format('woff2');
+	unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+/* Tokens; PatternFly's globals point at them so every component it draws follows. */
+html.login-pf {
+	--bg: #131518;
+	--panel: #191c20;
+	--soft: #20242a;
+	--line: #2a2e34;
+	--fg: #ebe6dc;
+	--muted: #b8b2a7;
+	--faint: #8e887e;
+	--accent: #d4886b;
+	--on-accent: #131518;
+	--serif: 'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+	--sans: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	--mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	color-scheme: dark;
+
+	--pf-v5-global--FontFamily--text: var(--sans);
+	--pf-v5-global--FontFamily--heading: var(--serif);
+	--pf-v5-global--FontFamily--monospace: var(--mono);
+	--pf-v5-global--BackgroundColor--100: var(--panel);
+	--pf-v5-global--BackgroundColor--200: var(--bg);
+	--pf-v5-global--BackgroundColor--light-100: var(--bg);
+	--pf-v5-global--Color--100: var(--fg);
+	--pf-v5-global--Color--200: var(--muted);
+	--pf-v5-global--Color--light-100: var(--fg);
+	--pf-v5-global--BorderColor--100: var(--line);
+	--pf-v5-global--BorderColor--200: var(--line);
+	--pf-v5-global--BorderColor--300: var(--line);
+	--pf-v5-global--primary-color--100: var(--accent);
+	--pf-v5-global--primary-color--200: var(--accent);
+	--pf-v5-global--link--Color: var(--accent);
+	--pf-v5-global--link--Color--hover: var(--accent);
+	--pf-v5-global--danger-color--100: var(--accent);
+	--pf-v5-global--danger-color--200: var(--accent);
+	--pf-v5-global--BorderRadius--sm: 6px;
+	--pf-v5-global--BoxShadow--xl: none;
+	--pf-v5-global--BoxShadow--lg: none;
+	background: var(--bg);
+}
+.login-pf body {
+	margin: 0;
+	min-height: 100%;
+	background: var(--bg);
+	color: var(--fg);
+	font: 15px/1.55 var(--sans);
+	-webkit-text-size-adjust: 100%;
+}
+a {
+	color: var(--accent);
+}
+a:hover {
+	color: var(--accent);
+	text-decoration-thickness: 2px;
+}
+:is(a, button, input, select, textarea):focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
+}
+
+/* One reading column, top-aligned like a page of the app rather than a floating card. */
+.pf-v5-c-login {
+	display: block;
+	min-height: 100vh;
+	padding: 0;
+	background: none;
+}
+.pf-v5-c-login__container {
+	display: block;
+	max-width: 456px;
+	margin: 0 auto;
+	padding: max(56px, 11vh) 28px 56px;
+}
+
+/* Masthead: the wordmark, the workspace as a kicker underneath (web/src/lib/Shell.svelte). */
+#kc-header {
+	margin: 0 0 44px;
+	padding: 0;
+}
+#kc-header-wrapper {
+	margin: 0;
+	padding: 0;
+	font: 600 30px/1 var(--serif);
+	letter-spacing: -0.01em;
+	text-transform: none;
+	text-align: left;
+	color: var(--fg) !important;
+}
+.conde-word {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+}
+.conde-word::before {
+	content: '';
+	flex: none;
+	width: 22px;
+	height: 22px;
+	background: url('../img/mark.svg') no-repeat center / contain;
+}
+.conde-realm {
+	display: block;
+	margin-top: 12px;
+	font: 400 10.5px/1.4 var(--sans);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--faint);
+}
+.conde-realm:empty {
+	display: none;
+}
+
+.pf-v5-c-login__main {
+	margin: 0;
+	background: none;
+	box-shadow: none;
+}
+.pf-v5-c-login__main-header {
+	display: block;
+	padding: 0;
+	border-top: 0;
+}
+#kc-page-title {
+	margin: 0 0 28px;
+	font: 600 34px/1.15 var(--serif);
+	letter-spacing: -0.01em;
+	color: var(--fg);
+	overflow-wrap: anywhere;
+}
+.pf-v5-c-login__main-body,
+.pf-v5-c-login__main-footer {
+	padding: 0;
+}
+.instruction {
+	margin: 0 0 20px;
+}
+.pf-v5-c-login__main-body > p,
+#kc-info-message p,
+.instruction,
+#kc-content-wrapper > p,
+.kc-feedback-text + p {
+	font: 17px/1.55 var(--serif);
+	color: var(--fg);
+}
+
+/* Forms: Inter labels above quiet fields, the accent only on focus and the primary action. */
+.pf-v5-c-form {
+	--pf-v5-c-form--GridGap: 20px;
+}
+.pf-v5-c-form__label,
+.pf-v5-c-form__label-text {
+	font: 400 13px/1.4 var(--sans);
+	color: var(--muted);
+}
+.pf-v5-c-form__group-label {
+	padding-bottom: 6px !important;
+}
+.pf-v5-c-form-control {
+	--pf-v5-c-form-control--BackgroundColor: var(--panel);
+	--pf-v5-c-form-control--Color: var(--fg);
+	--pf-v5-c-form-control--FontSize: 15px;
+	--pf-v5-c-form-control--PaddingTop: 9px;
+	--pf-v5-c-form-control--PaddingBottom: 9px;
+	--pf-v5-c-form-control--PaddingLeft: 11px;
+	--pf-v5-c-form-control--PaddingRight: 11px;
+	--pf-v5-c-form-control--before--BorderTopColor: var(--line);
+	--pf-v5-c-form-control--before--BorderRightColor: var(--line);
+	--pf-v5-c-form-control--before--BorderBottomColor: var(--line);
+	--pf-v5-c-form-control--before--BorderLeftColor: var(--line);
+	--pf-v5-c-form-control--before--BorderBottomWidth: 1px;
+	--pf-v5-c-form-control--after--BorderBottomColor: transparent;
+	--pf-v5-c-form-control--hover--after--BorderBottomColor: var(--faint);
+	--pf-v5-c-form-control--focus--after--BorderBottomColor: var(--accent);
+	--pf-v5-c-form-control--focus--after--BorderBottomWidth: 2px;
+	border-radius: 6px;
+}
+.pf-v5-c-form-control::before,
+.pf-v5-c-form-control::after {
+	border-radius: 6px;
+}
+.pf-v5-c-form-control > input,
+.pf-v5-c-form-control > select {
+	font: 15px/1.4 var(--sans);
+	color: var(--fg);
+	caret-color: var(--accent);
+}
+.pf-v5-c-form-control > input:focus-visible {
+	outline: none;
+}
+.pf-v5-c-form-control:focus-within::after {
+	border: 1px solid var(--accent);
+	border-bottom-width: 2px;
+}
+.pf-v5-c-form-control.pf-m-readonly {
+	--pf-v5-c-form-control--BackgroundColor: var(--soft);
+}
+input:-webkit-autofill {
+	-webkit-text-fill-color: var(--fg);
+	-webkit-box-shadow: 0 0 0 40px var(--panel) inset;
+	caret-color: var(--accent);
+}
+.pf-v5-c-form-control.pf-m-error {
+	--pf-v5-c-form-control--before--BorderTopColor: var(--accent);
+	--pf-v5-c-form-control--before--BorderRightColor: var(--accent);
+	--pf-v5-c-form-control--before--BorderBottomColor: var(--accent);
+	--pf-v5-c-form-control--before--BorderLeftColor: var(--accent);
+}
+.pf-v5-c-form-control__icon.pf-m-status {
+	color: var(--accent);
+}
+.pf-v5-c-helper-text__item.pf-m-error,
+.kc-feedback-text.pf-m-error,
+.pf-v5-c-helper-text__item-text.pf-m-error {
+	color: var(--accent);
+	font-size: 13px;
+}
+.pf-v5-c-input-group {
+	gap: 8px;
+}
+.pf-v5-c-button.pf-m-control {
+	--pf-v5-c-button--m-control--BackgroundColor: var(--panel);
+	--pf-v5-c-button--m-control--Color: var(--muted);
+	--pf-v5-c-button--m-control--hover--Color: var(--fg);
+	--pf-v5-c-button--m-control--after--BorderColor: var(--line);
+	--pf-v5-c-button--m-control--hover--after--BorderBottomColor: var(--faint);
+	--pf-v5-c-button--m-control--focus--after--BorderBottomColor: var(--accent);
+	--pf-v5-c-button--m-control--active--after--BorderBottomColor: var(--accent);
+	border-radius: 6px;
+	min-width: 44px;
+}
+.pf-v5-c-button.pf-m-control::after {
+	border: 1px solid var(--line);
+	border-radius: 6px;
+}
+.pf-v5-c-button.pf-m-control:hover::after {
+	border-color: var(--faint);
+}
+.pf-v5-c-button.pf-m-control:focus-visible::after {
+	border-color: var(--accent);
+}
+.pf-v5-c-form__helper-text,
+.pf-v5-c-helper-text {
+	font-size: 13px;
+	color: var(--muted);
+}
+.pf-v5-c-check__label {
+	font-size: 14px;
+	color: var(--muted);
+}
+.pf-v5-c-check__input {
+	accent-color: var(--accent);
+}
+.pf-v5-c-form__label-required {
+	color: var(--accent);
+}
+
+/* Buttons: one filled accent action, the rest quiet (app.css button and button.quiet). */
+.pf-v5-c-button {
+	--pf-v5-c-button--FontSize: 15px;
+	--pf-v5-c-button--FontWeight: 600;
+	--pf-v5-c-button--PaddingTop: 10px;
+	--pf-v5-c-button--PaddingBottom: 10px;
+	--pf-v5-c-button--BorderRadius: 6px;
+	--pf-v5-c-button--after--BorderRadius: 6px;
+	--pf-v5-c-button--m-primary--BackgroundColor: var(--accent);
+	--pf-v5-c-button--m-primary--Color: var(--on-accent);
+	--pf-v5-c-button--m-primary--hover--BackgroundColor: #dd9a80;
+	--pf-v5-c-button--m-primary--hover--Color: var(--on-accent);
+	--pf-v5-c-button--m-primary--focus--BackgroundColor: #dd9a80;
+	--pf-v5-c-button--m-primary--focus--Color: var(--on-accent);
+	--pf-v5-c-button--m-primary--active--BackgroundColor: #c47a5e;
+	--pf-v5-c-button--m-primary--active--Color: var(--on-accent);
+	--pf-v5-c-button--m-secondary--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--after--BorderColor: var(--line);
+	--pf-v5-c-button--m-secondary--hover--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--hover--after--BorderColor: var(--faint);
+	--pf-v5-c-button--m-secondary--focus--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--focus--after--BorderColor: var(--faint);
+	--pf-v5-c-button--m-secondary--active--Color: var(--fg);
+	--pf-v5-c-button--m-secondary--active--after--BorderColor: var(--faint);
+	--pf-v5-c-button--m-tertiary--Color: var(--fg);
+	--pf-v5-c-button--m-tertiary--after--BorderColor: var(--line);
+	--pf-v5-c-button--m-tertiary--hover--Color: var(--fg);
+	--pf-v5-c-button--m-tertiary--hover--after--BorderColor: var(--faint);
+	--pf-v5-c-button--m-link--Color: var(--accent);
+	--pf-v5-c-button--m-link--hover--Color: var(--accent);
+	--pf-v5-c-button--disabled--BackgroundColor: var(--accent);
+	--pf-v5-c-button--disabled--Color: var(--on-accent);
+	font-family: var(--sans);
+}
+.pf-v5-c-button:disabled,
+.pf-v5-c-button.pf-m-disabled {
+	opacity: 0.55;
+}
+.pf-v5-c-button.pf-m-primary {
+	min-height: 44px;
+}
+.pf-v5-c-button.pf-m-secondary:not(.pf-m-control) {
+	min-height: 44px;
+	background: transparent;
+}
+.pf-v5-c-form__actions {
+	margin: 8px 0 0 !important;
+	gap: 12px;
+}
+.pf-v5-c-form__actions > * {
+	margin: 0 !important;
+}
+#kc-form-buttons,
+.pf-v5-c-form__group:has(> .pf-v5-c-form__actions) {
+	margin-top: 4px;
+}
+
+/* Notices: a hairline in the accent, as on the Keys page (.notice), not PatternFly's coloured alert boxes. */
+.pf-v5-c-alert {
+	--pf-v5-c-alert--BackgroundColor: var(--panel);
+	--pf-v5-c-alert--BorderTopWidth: 0;
+	--pf-v5-c-alert__icon--Color: var(--muted);
+	--pf-v5-c-alert__title--Color: var(--fg);
+	--pf-v5-c-alert__title--FontWeight: 400;
+	--pf-v5-c-alert__FontSize: 14px;
+	--pf-v5-c-alert--PaddingTop: 10px;
+	--pf-v5-c-alert--PaddingBottom: 10px;
+	--pf-v5-c-alert--PaddingLeft: 14px;
+	--pf-v5-c-alert--PaddingRight: 14px;
+	border-left: 2px solid var(--faint);
+	margin-bottom: 24px !important;
+}
+.pf-v5-c-alert.pf-m-danger,
+.pf-v5-c-alert.pf-m-warning {
+	--pf-v5-c-alert__icon--Color: var(--accent);
+	border-left-color: var(--accent);
+}
+.pf-v5-c-alert__title,
+.pf-v5-c-alert .kc-feedback-text {
+	color: var(--fg) !important;
+	white-space: normal;
+	overflow: visible;
+	-webkit-line-clamp: unset;
+	display: block;
+}
+
+/* Links under the form ("Back to sign in", "Forgot password?"). */
+#kc-info,
+.pf-v5-c-login__main-footer-band {
+	margin: 28px 0 0;
+	padding: 20px 0 0;
+	border-top: 1px solid var(--line);
+	background: none;
+	text-align: left;
+	font-size: 14px;
+	color: var(--muted);
+}
+.pf-v5-c-login__main-footer-band-item {
+	margin: 0;
+}
+#kc-form-options a,
+.pf-v5-c-helper-text__item-text a {
+	font-size: 13px;
+}
+.pf-v5-c-form__group .pf-v5-c-input-group + .pf-v5-c-form__helper-text {
+	margin-top: 8px;
+}
+/* The signed-in name above the second step (username, then one-time code). */
+.pf-v5-c-login__main-body > .pf-v5-u-mb-md-on-md {
+	margin-bottom: 20px !important;
+}
+
+/* Identity providers ("Sign in with Google"); not normally reached, the realm redirects straight on. */
+#kc-social-providers h2,
+.kc-login-divider {
+	font: 400 10.5px/1.4 var(--sans);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--faint);
+}
+#kc-social-providers .pf-v5-c-button.pf-m-tertiary {
+	min-height: 44px;
+	background: transparent;
+}
+
+/* Authenticator setup: the steps as a numbered list, the QR code on a light tile so every phone camera reads it. */
+#kc-totp-settings,
+.pf-v5-c-login__main-body ol,
+.pf-v5-c-login__main-body ul {
+	padding-left: 22px;
+	margin: 0 0 24px;
+	font: 16px/1.55 var(--serif);
+	color: var(--fg);
+}
+#kc-totp-settings > li {
+	margin: 0 0 14px;
+	padding-left: 4px;
+}
+#kc-totp-settings > li p {
+	margin: 0 0 8px;
+}
+#kc-totp-settings > li ul {
+	margin: 8px 0 0;
+	font-size: 15px;
+	color: var(--muted);
+}
+#kc-totp-supported-apps li {
+	margin: 2px 0;
+}
+.kc-qr-code {
+	align-items: flex-start !important;
+}
+#kc-totp-secret-qr-code,
+.kc-qr-code img {
+	display: block;
+	width: 200px;
+	height: 200px;
+	margin: 12px 0;
+	padding: 10px;
+	background: #fff;
+	border: 0;
+	border-radius: 8px;
+	box-shadow: none;
+}
+#kc-totp-secret-key {
+	display: inline-block;
+	margin: 6px 0;
+	padding: 6px 10px;
+	font: 14px/1.5 var(--mono);
+	letter-spacing: 0.04em;
+	background: var(--soft);
+	border-radius: 4px;
+	overflow-wrap: anywhere;
+}
+code,
+pre,
+kbd {
+	font-family: var(--mono);
+	background: var(--soft);
+	border-radius: 4px;
+}
+
+/* Tooltips and small print. */
+/* Below the button and inside the column, so the hidden tooltip never widens the page on a phone. */
+.kc-login-tooltip .kc-tooltip-text {
+	top: calc(100% + 6px);
+	left: auto;
+	right: 0;
+	background: var(--soft);
+	color: var(--fg);
+	font-size: 12px;
+	box-shadow: none;
+}
+.kc-login-tooltip .kc-tooltip-text::after {
+	display: none;
+}
+.kc-login-tooltip:focus-visible .kc-tooltip-text {
+	visibility: visible;
+	opacity: 1;
+}
+.subtitle,
+#kc-content-wrapper .subtitle {
+	font-size: 12px;
+	color: var(--faint);
+}
+hr {
+	border: 0;
+	border-top: 1px solid var(--line);
+}
+
+@media (max-width: 720px) {
+	.pf-v5-c-login__container {
+		padding: 28px 18px 40px;
+	}
+	#kc-header {
+		margin-bottom: 36px;
+	}
+	#kc-header-wrapper {
+		font-size: 26px;
+	}
+	.conde-word::before {
+		width: 19px;
+		height: 19px;
+	}
+	#kc-page-title {
+		font-size: 28px;
+		margin-bottom: 22px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		transition: none !important;
+		animation: none !important;
+		scroll-behavior: auto !important;
+	}
+}

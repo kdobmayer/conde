@@ -177,25 +177,48 @@ pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyho
     ))
 }
 
-/// `conde admin user invite <name> <email> --server <url>`: creates the user the first sign-in
-/// with this verified email lands on.
-pub fn user_invite(server: &str, name: &str, email: &str) -> anyhow::Result<i32> {
+/// `conde admin user invite <name> <email> [--by <name>] --server <url>`: creates the user the
+/// first sign-in with this verified email lands on; the server sends the invite email.
+pub fn user_invite(server: &str, name: &str, email: &str, by: Option<&str>) -> anyhow::Result<i32> {
     let key = admin_key(
         server,
         "admin user invite needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
     )?;
-    println!("{}", invite(server, &key, name, email)?);
+    println!("{}", invite(server, &key, name, email, by)?);
     Ok(0)
 }
 
-/// `POST /v1/admin/users {name, email}` with the admin key; the line to print.
-pub fn invite(server: &str, key: &str, name: &str, email: &str) -> anyhow::Result<String> {
-    let body = serde_json::json!({"name": name, "email": email});
+/// `POST /v1/admin/users {name, email, inviter?}` with the admin key; the line to print. A mail
+/// failure after the user was created is the error, with the server's message.
+pub fn invite(
+    server: &str,
+    key: &str,
+    name: &str,
+    email: &str,
+    by: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut body = serde_json::json!({"name": name, "email": email});
+    if let Some(by) = by {
+        body["inviter"] = by.into();
+    }
     let answer = admin_request(server, key, "/v1/admin/users", Some(body))?;
     let user = answer["user"].as_str().unwrap_or(name);
     let email = answer["email"].as_str().unwrap_or(email);
     let status = answer["status"].as_str().unwrap_or("invited");
-    Ok(format!("{user} <{email}> on {server}: {status}"))
+    Ok(match answer["mail"].as_str() {
+        Some("sent") => format!("invited {user} {email}, email sent"),
+        Some("keycloak") => {
+            format!("invited {user} {email}, account-setup email sent by the sign-in server")
+        }
+        Some("unconfigured") => format!(
+            "invited {user} {email}, no mail configured: tell them the steps at https://conde.cloud/docs/setup"
+        ),
+        Some("none") if answer["reason"] == "disabled" => {
+            format!("{user} {email} is disabled: no email sent (enable the user first)")
+        }
+        Some("none") => format!("{user} {email} has signed in already: no email sent"),
+        _ => format!("{user} <{email}> on {server}: {status}"),
+    })
 }
 
 /// `conde admin user list --server <url>`.

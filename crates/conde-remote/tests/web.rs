@@ -2114,8 +2114,13 @@ async fn the_admin_invites_lists_and_binds_by_issuer_and_subject() {
     assert_eq!(status, StatusCode::OK, "{got}");
     assert_eq!(
         got,
-        json!({"user": "ann", "email": "ann@dakai.example", "status": "invited", "disabled": false})
+        json!({"user": "ann", "email": "ann@dakai.example", "status": "invited", "disabled": false,
+               "mail": "unconfigured"})
     );
+    let long = "x".repeat(81);
+    let (status, got) =
+        post(json!({"name": "ann", "email": "ann@dakai.example", "inviter": long})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
     assert_eq!(
         post(json!({"name": "ann", "email": "ANN@dakai.example"}))
             .await

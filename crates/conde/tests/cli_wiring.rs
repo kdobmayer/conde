@@ -1608,8 +1608,12 @@ fn admin_user_invites_and_lists_with_the_admin_key() {
     let (url, seen) = one_admin_answer(
         json!({"user": "ann", "email": "ann@dakai.io", "status": "invited", "disabled": false}),
     );
-    let line = conde::admin::invite(&url, key, "Ann", "ann@dakai.io").unwrap();
-    assert_eq!(line, format!("ann <ann@dakai.io> on {url}: invited"));
+    let line = conde::admin::invite(&url, key, "Ann", "ann@dakai.io", None).unwrap();
+    assert_eq!(
+        line,
+        format!("ann <ann@dakai.io> on {url}: invited"),
+        "a server without mail"
+    );
     let request = seen.join().unwrap();
     assert!(
         request.starts_with("POST /v1/admin/users HTTP/1.1\r\n"),
@@ -1626,6 +1630,35 @@ fn admin_user_invites_and_lists_with_the_admin_key() {
         request.ends_with(r#"{"email":"ann@dakai.io","name":"Ann"}"#),
         "{request}"
     );
+
+    for (mail, reason, want) in [
+        ("sent", "", "invited ann ann@dakai.io, email sent"),
+        (
+            "keycloak",
+            "",
+            "invited ann ann@dakai.io, account-setup email sent by the sign-in server",
+        ),
+        (
+            "unconfigured",
+            "",
+            "invited ann ann@dakai.io, no mail configured: tell them the steps at https://conde.cloud/docs/setup",
+        ),
+        (
+            "none",
+            "signed in",
+            "ann ann@dakai.io has signed in already: no email sent",
+        ),
+    ] {
+        let (url, seen) = one_admin_answer(json!({"user": "ann", "email": "ann@dakai.io",
+            "status": "invited", "disabled": false, "mail": mail, "reason": reason}));
+        let line = conde::admin::invite(&url, key, "Ann", "ann@dakai.io", Some("Krisz")).unwrap();
+        assert_eq!(line, want);
+        let request = seen.join().unwrap();
+        assert!(
+            request.ends_with(r#"{"email":"ann@dakai.io","inviter":"Krisz","name":"Ann"}"#),
+            "{request}"
+        );
+    }
 
     let users = json!({"users": [
         {"name": "ann", "email": "ann@dakai.io", "issuers": ["https://auth.conde.cloud/realms/dakai"], "disabled": false},
@@ -1645,7 +1678,7 @@ fn admin_user_invites_and_lists_with_the_admin_key() {
             .unwrap()
             .starts_with("GET /v1/admin/users HTTP/1.1\r\n")
     );
-    let e = conde::admin::invite("http://conde.example", key, "ann", "ann@dakai.io")
+    let e = conde::admin::invite("http://conde.example", key, "ann", "ann@dakai.io", None)
         .unwrap_err()
         .to_string();
     assert!(

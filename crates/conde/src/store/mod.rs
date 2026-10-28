@@ -818,6 +818,15 @@ pub trait Tx {
     fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>>;
     /// The sign-in email (`preferred_username`, else the `email` claim when that is no address).
     fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()>;
+    /// (realm account id, invite correlation value) an invite recorded for the user (password
+    /// workspaces); both None for an unknown user.
+    fn user_keycloak(&self, user_id: i64) -> StoreResult<(Option<String>, Option<String>)>;
+    fn set_user_keycloak(
+        &self,
+        user_id: i64,
+        id: Option<&str>,
+        invite: Option<&str>,
+    ) -> StoreResult<()>;
     /// Fills every NULL email from the user's Entra identity by the sign-in rule
     /// (`preferred_username`, the tenant-controlled UPN, when it holds an `@`; another issuer's
     /// is unverified); a stored email is never replaced. The number filled.

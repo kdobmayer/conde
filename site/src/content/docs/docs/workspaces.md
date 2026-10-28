@@ -29,9 +29,9 @@ The sign-in is the company's own. The workspace never holds a password of its ow
 |---|---|
 | A company on Microsoft 365 | The company's Microsoft Entra tenant. The sign-in page is Microsoft's; the workspace accepts accounts of that tenant. |
 | A company on Google Workspace | The company's Google accounts. The sign-in goes straight to Google. |
-| An invite-only workspace | A password. The workspace's admin creates your account; there is no self sign-up. |
+| An invite-only workspace | A password. The workspace's admin invites you, and the sign-in page emails you a link to confirm your address and choose the password; there is no self sign-up. |
 
-In every case the browser sign-in is the human's. An agent runs `conde login` and hands the browser step to its human; it never signs in itself.
+In every case you join by invitation: the admin invites your email, and you get one email that says what to run. In every case the browser sign-in is the human's. An agent runs `conde login` and hands the browser step to its human; it never signs in itself.
 
 ## Who sees what
 

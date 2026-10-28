@@ -48,6 +48,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("users", "slack_source", "TEXT"),
     ("users", "done_pages", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "page", "TEXT"),
+    ("users", "keycloak_id", "TEXT"),
+    ("users", "keycloak_invite", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -711,6 +713,29 @@ impl Tx for SqliteTx<'_> {
         self.exec(
             "UPDATE users SET email = ?2 WHERE user_id = ?1",
             params![user_id, email],
+        )?;
+        Ok(())
+    }
+
+    fn user_keycloak(&self, user_id: i64) -> StoreResult<(Option<String>, Option<String>)> {
+        Ok(self
+            .opt(
+                "SELECT keycloak_id, keycloak_invite FROM users WHERE user_id = ?1",
+                [user_id],
+                pair,
+            )?
+            .unwrap_or_default())
+    }
+
+    fn set_user_keycloak(
+        &self,
+        user_id: i64,
+        id: Option<&str>,
+        invite: Option<&str>,
+    ) -> StoreResult<()> {
+        self.exec(
+            "UPDATE users SET keycloak_id = ?2, keycloak_invite = ?3 WHERE user_id = ?1",
+            params![user_id, id, invite],
         )?;
         Ok(())
     }

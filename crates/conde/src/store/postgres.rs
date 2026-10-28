@@ -132,6 +132,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "identity_issuer",
         include_str!("migrations/0017_identity_issuer.sql"),
     ),
+    (
+        18,
+        "keycloak_account",
+        include_str!("migrations/0018_keycloak_account.sql"),
+    ),
 ];
 
 /// Session lock held while migrating.
@@ -1251,6 +1256,29 @@ impl Tx for PgTx {
         self.execute(
             "UPDATE users SET email = $2 WHERE user_id = $1",
             &[&user_id, &email],
+        )?;
+        Ok(())
+    }
+
+    fn user_keycloak(&self, user_id: i64) -> StoreResult<(Option<String>, Option<String>)> {
+        Ok(self
+            .query_opt(
+                "SELECT keycloak_id, keycloak_invite FROM users WHERE user_id = $1",
+                &[&user_id],
+            )?
+            .map(|r| (r.get(0), r.get(1)))
+            .unwrap_or_default())
+    }
+
+    fn set_user_keycloak(
+        &self,
+        user_id: i64,
+        id: Option<&str>,
+        invite: Option<&str>,
+    ) -> StoreResult<()> {
+        self.execute(
+            "UPDATE users SET keycloak_id = $2, keycloak_invite = $3 WHERE user_id = $1",
+            &[&user_id, &id, &invite],
         )?;
         Ok(())
     }

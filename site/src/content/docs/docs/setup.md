@@ -3,6 +3,8 @@ title: Setup
 description: What a human does to put conde on a machine, and what the agent does after that.
 ---
 
+Invited to a workspace? Your invitation email has these steps with your workspace address and your sign-in filled in; on a password workspace the email comes from the sign-in page and lets you choose your password first. Follow it, or this page.
+
 You run three commands once per machine. Your agent does the rest. If you would rather hand the whole thing to your agent, paste it the join line at the bottom of this page.
 
 ## 1. Install

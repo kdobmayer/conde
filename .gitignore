@@ -1,5 +1,6 @@
 infra/terraform/*.tfstate*
 infra/terraform/.terraform/
+infra/gcp/*/.terraform/
 infra/terraform/*.bin
 target/
 dist/out/

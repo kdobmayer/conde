@@ -1,0 +1,32 @@
+# conde workspaces on GCP
+
+The GCP side of each conde workspace, from `../modules/workspace`: `dakai` (https://dakai.conde.cloud), `demo`
+(https://demo.conde.cloud) and `clearscale` (https://clearscale.conde.cloud): the database and its IAM user, the
+Google service account and its Workload Identity grants, and the secrets. The servers themselves (namespace
+`ws-<name>`, Deployment, Service, route, policies, the `dbinit` Job) are Argo CD's, from `charts/conde-workspace` and
+`deploy/tenants/<name>.yaml` (`../cluster/README.md`). Apply after the foundation, platform and cluster roots:
+
+    export GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=terraform@conde-prod.iam.gserviceaccount.com
+    cd infra/gcp/workspaces && terraform init && terraform apply
+
+Each workspace mounts three Secret Manager secrets as files under `/secrets` (the Secret Manager CSI add-on, no
+Kubernetes Secret). Terraform writes `<name>-admin-key` itself (write-only, not in state). The other two are
+created empty and set by hand:
+
+| secret | value |
+|---|---|
+| `<name>-oidc-client-secret` | the client secret of the `conde` client in the Keycloak realm `<name>` |
+| `<name>-slack-bot-token` | the Slack bot token (`chat:write`) |
+
+    printf '%s' "$VALUE" | gcloud secrets versions add dakai-oidc-client-secret --data-file=- \
+      --project conde-prod --impersonate-service-account terraform@conde-prod.iam.gserviceaccount.com
+
+Until all three secrets have a version the CSI mount fails (`FailedMount ... NotFound`), the server pods wait in
+ContainerCreating and the kubelet retries the mount on its own; the pods start within about two minutes of the last
+version being added. `kubectl -n ws-dakai get events` shows the wait. The pods mount `versions/latest`, and the
+add-on's rotation refreshes the files, but the server reads them at start: roll the Deployment after a change
+(`kubectl -n ws-dakai rollout restart deployment/conde`).
+
+The database `conde_<name>` belongs to the workspace's IAM user (`conde-<name>@conde-prod.iam`); the chart's `dbinit`
+Job ran once as `postgres` to hand it over and stays in the namespace as the record. The server connects through the
+Cloud SQL Auth Proxy sidecar with automatic IAM authentication; no database password exists for it.

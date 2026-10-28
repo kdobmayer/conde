@@ -48,6 +48,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("users", "slack_source", "TEXT"),
     ("users", "done_pages", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "page", "TEXT"),
+    ("users", "keycloak_id", "TEXT"),
+    ("users", "keycloak_invite", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -713,6 +715,32 @@ impl Tx for SqliteTx<'_> {
             params![user_id, email],
         )?;
         Ok(())
+    }
+
+    fn user_keycloak(&self, user_id: i64) -> StoreResult<(Option<String>, Option<String>)> {
+        Ok(self
+            .opt(
+                "SELECT keycloak_id, keycloak_invite FROM users WHERE user_id = ?1",
+                [user_id],
+                pair,
+            )?
+            .unwrap_or_default())
+    }
+
+    fn claim_user_keycloak_invite(&self, user_id: i64, candidate: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE users SET keycloak_invite = ?2
+                 WHERE user_id = ?1 AND keycloak_id IS NULL AND keycloak_invite IS NULL",
+            params![user_id, candidate],
+        )? > 0)
+    }
+
+    fn record_user_keycloak_id(&self, user_id: i64, invite: &str, id: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE users SET keycloak_id = ?2
+                 WHERE user_id = ?1 AND keycloak_invite = ?3 AND keycloak_id IS NULL",
+            params![user_id, id, invite],
+        )? > 0)
     }
 
     fn backfill_emails(&self) -> StoreResult<u64> {

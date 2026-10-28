@@ -44,6 +44,8 @@ your store). The Secret holds:
 | `oidc.issuer` | required | OIDC issuer the server signs in against |
 | `oidc.clientId` | `conde` | OIDC client id |
 | `oidc.redirectUri` | `https://<hostname>/auth/callback` | OIDC redirect URI |
+| `invite.signIn` | `""` | `CONDE_JOIN_SIGN_IN`: `google` or `microsoft` (the server emails the invite through Resend), `password` (Keycloak sends its account-setup email), empty (no email) |
+| `invite.keycloakAdmin.url`, `.clientId`, `.namespace` | in-cluster Keycloak, `conde-admin`, `keycloak` | password workspaces: the Keycloak admin API and the egress to its namespace on 8080 |
 | `logLevel` | `info` | `RUST_LOG` |
 | `distBaseUrl` | the conde.cloud dist bucket | where `conde update` downloads binaries |
 | `extraEnv` | `[]` | extra container env entries |
@@ -64,6 +66,7 @@ your store). The Secret holds:
 | `gcp.cloudSqlProxyImage` | pinned Cloud SQL Auth Proxy | sidecar image |
 | `gcp.database` | `conde_<name>` | database name |
 | `gcp.secrets.adminKey`, `.oidcClientSecret`, `.slackBotToken` | required with gcp | Secret Manager secret ids mounted as `admin-key`, `oidc-client-secret`, `slack-bot-token` |
+| `gcp.secrets.resendApiKey`, `.keycloakAdminClientSecret` | `""` | mounted as `resend-api-key` when set, and `keycloak-admin-client-secret` (required) on a password workspace |
 | `gcp.securityPolicy` | `""` | Cloud Armor policy on the backend |
 | `gcp.backendTimeoutSec` | `3600` | load balancer backend timeout (SSE and WebSocket streams) |
 | `gcp.dbinit.enabled`, `.image`, `.adminSecret` | `true`, pinned postgres, `pg-admin-password` | the database hand-over Job and the secret with the `postgres` password |

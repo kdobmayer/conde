@@ -132,6 +132,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "identity_issuer",
         include_str!("migrations/0017_identity_issuer.sql"),
     ),
+    (
+        18,
+        "keycloak_account",
+        include_str!("migrations/0018_keycloak_account.sql"),
+    ),
 ];
 
 /// Session lock held while migrating.
@@ -1253,6 +1258,32 @@ impl Tx for PgTx {
             &[&user_id, &email],
         )?;
         Ok(())
+    }
+
+    fn user_keycloak(&self, user_id: i64) -> StoreResult<(Option<String>, Option<String>)> {
+        Ok(self
+            .query_opt(
+                "SELECT keycloak_id, keycloak_invite FROM users WHERE user_id = $1",
+                &[&user_id],
+            )?
+            .map(|r| (r.get(0), r.get(1)))
+            .unwrap_or_default())
+    }
+
+    fn claim_user_keycloak_invite(&self, user_id: i64, candidate: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE users SET keycloak_invite = $2
+                 WHERE user_id = $1 AND keycloak_id IS NULL AND keycloak_invite IS NULL",
+            &[&user_id, &candidate],
+        )? > 0)
+    }
+
+    fn record_user_keycloak_id(&self, user_id: i64, invite: &str, id: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE users SET keycloak_id = $2
+                 WHERE user_id = $1 AND keycloak_invite = $3 AND keycloak_id IS NULL",
+            &[&user_id, &id, &invite],
+        )? > 0)
     }
 
     fn backfill_emails(&self) -> StoreResult<u64> {

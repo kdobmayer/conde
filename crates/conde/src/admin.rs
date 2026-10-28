@@ -107,6 +107,17 @@ fn admin_request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> anyhow::Result<serde_json::Value> {
+    admin_request_within(server, key, path, body, std::time::Duration::from_secs(30))
+}
+
+/// [`admin_request`] waiting up to `timeout` for the answer.
+fn admin_request_within(
+    server: &str,
+    key: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    timeout: std::time::Duration,
+) -> anyhow::Result<serde_json::Value> {
     let base = credentials::rpc_url(server)?;
     let parsed = reqwest::Url::parse(&base)?;
     let host = parsed
@@ -129,7 +140,7 @@ fn admin_request(
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(crate::login::tls()?)
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(timeout)
             .build()?;
         let request = match body {
             Some(b) => client.post(&url).json(&b),
@@ -177,25 +188,62 @@ pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyho
     ))
 }
 
-/// `conde admin user invite <name> <email> --server <url>`: creates the user the first sign-in
-/// with this verified email lands on.
-pub fn user_invite(server: &str, name: &str, email: &str) -> anyhow::Result<i32> {
+/// `conde admin user invite <name> <email> [--by <name>] --server <url>`: creates the user the
+/// first sign-in with this verified email lands on; the server sends the invite email.
+pub fn user_invite(server: &str, name: &str, email: &str, by: Option<&str>) -> anyhow::Result<i32> {
     let key = admin_key(
         server,
         "admin user invite needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
     )?;
-    println!("{}", invite(server, &key, name, email)?);
+    println!("{}", invite(server, &key, name, email, by)?);
     Ok(0)
 }
 
-/// `POST /v1/admin/users {name, email}` with the admin key; the line to print.
-pub fn invite(server: &str, key: &str, name: &str, email: &str) -> anyhow::Result<String> {
-    let body = serde_json::json!({"name": name, "email": email});
-    let answer = admin_request(server, key, "/v1/admin/users", Some(body))?;
+/// `POST /v1/admin/users {name, email, inviter?}` with the admin key; the line to print. A mail
+/// failure after the user was created is the error, with the server's message.
+pub fn invite(
+    server: &str,
+    key: &str,
+    name: &str,
+    email: &str,
+    by: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut body = serde_json::json!({"name": name, "email": email});
+    if let Some(by) = by {
+        body["inviter"] = by.into();
+    }
+    // the server waits up to 45 s for the mail service or the sign-in server
+    let answer = admin_request_within(
+        server,
+        key,
+        "/v1/admin/users",
+        Some(body),
+        std::time::Duration::from_secs(90),
+    )?;
     let user = answer["user"].as_str().unwrap_or(name);
     let email = answer["email"].as_str().unwrap_or(email);
     let status = answer["status"].as_str().unwrap_or("invited");
-    Ok(format!("{user} <{email}> on {server}: {status}"))
+    let mut line = match answer["mail"].as_str() {
+        Some("sent") => format!("invited {user} {email}, email sent"),
+        Some("keycloak") => {
+            format!("invited {user} {email}, account-setup email sent by the sign-in server")
+        }
+        Some("unconfigured") => format!(
+            "invited {user} {email}, no mail configured: tell them the steps at https://conde.cloud/docs/setup"
+        ),
+        Some("none") if answer["reason"] == "disabled" => {
+            format!("{user} {email} is disabled: no email sent (enable the user first)")
+        }
+        Some("none") if answer["reason"] == "set up" => {
+            format!("{user} {email} has set up the sign-in account already: no email sent")
+        }
+        Some("none") => format!("{user} {email} has signed in already: no email sent"),
+        _ => format!("{user} <{email}> on {server}: {status}"),
+    };
+    if by.is_some() && answer["mail"] == "keycloak" {
+        line.push_str("\ninviter not shown: the sign-in server sends this email");
+    }
+    Ok(line)
 }
 
 /// `conde admin user list --server <url>`.

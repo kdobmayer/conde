@@ -500,10 +500,14 @@ enum BoardCmd {
 
 #[derive(Subcommand)]
 enum UserCmd {
-    /// Invite a user: the first sign-in whose verified email is EMAIL becomes NAME.
+    /// Invite a user: the first sign-in whose verified email is EMAIL becomes NAME. The server
+    /// sends the invite email when its mail is configured.
     Invite {
         name: String,
         email: String,
+        /// Who invites, named in the email ("<name> invited you to ...").
+        #[arg(long, value_name = "NAME")]
+        by: Option<String>,
         /// The server URL (https://host).
         #[arg(long, value_name = "URL")]
         server: String,
@@ -819,8 +823,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 UserCmd::Invite {
                     name,
                     email,
+                    by,
                     server,
-                } => admin::user_invite(&server, &name, &email),
+                } => admin::user_invite(&server, &name, &email, by.as_deref()),
                 UserCmd::List { server } => admin::user_list(&server),
             };
         }

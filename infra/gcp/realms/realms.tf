@@ -53,7 +53,7 @@ resource "keycloak_realm" "this" {
 
     auth {
       username = local.smtp.username
-      password = data.google_secret_manager_secret_version.resend.secret_data
+      password = local.smtp.password
     }
   }
 
@@ -142,13 +142,8 @@ resource "google_secret_manager_secret_version" "conde_client_secret" {
 }
 
 # ── Google sign-in: realms whose users sign in only with their company's Google Workspace accounts ─────────────
-# The provider has no write-only client secret, so this value is in this state, like the SMTP password.
-data "google_secret_manager_secret_version" "google_sign_in" {
-  for_each = local.google_sign_in
-
-  secret = "${each.key}-google-oauth-client-secret"
-}
-
+# The client secret is a reference to Keycloak's file vault, which holds <name>-google-oauth-client-secret (mounted by
+# the cluster root), so it is not in this state.
 # The default first broker login flow links an existing account only after its password or, once SMTP is set, an emailed link.
 resource "keycloak_oidc_google_identity_provider" "this" {
   for_each = local.google_sign_in
@@ -160,7 +155,7 @@ resource "keycloak_oidc_google_identity_provider" "this" {
   display_name  = "Google"
   enabled       = true
   client_id     = each.value.client_id
-  client_secret = data.google_secret_manager_secret_version.google_sign_in[each.key].secret_data
+  client_secret = "$${vault.google-client-secret}"
   hosted_domain = each.value.hosted_domain
   # Keycloak refuses a token whose hd claim is not the company domain, and Google verifies the address of a Workspace account.
   trust_email        = true
@@ -168,11 +163,6 @@ resource "keycloak_oidc_google_identity_provider" "this" {
   sync_mode          = "IMPORT"
   default_scopes     = "openid email profile"
   hide_on_login_page = false
-}
-
-moved {
-  from = data.google_secret_manager_secret_version.clearscale_google
-  to   = data.google_secret_manager_secret_version.google_sign_in["clearscale"]
 }
 
 moved {

@@ -107,7 +107,7 @@ resource "keycloak_realm" "master" {
 
     auth {
       username = local.smtp.username
-      password = data.google_secret_manager_secret_version.resend.secret_data
+      password = local.smtp.password
     }
   }
 

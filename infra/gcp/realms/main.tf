@@ -40,20 +40,17 @@ locals {
     { infra = { display_name = "conde infra", require_mfa = true, passwords = false } },
   )
 
-  # Outbound mail of every realm, master included, through Resend (SMTPS); the password is the Resend API key.
+  # Outbound mail of every realm, master included, through Resend (SMTPS). The password is a reference to Keycloak's
+  # file vault, which holds the Resend API key (`resend-api-key`, mounted by the cluster root), so it is not in this state.
   smtp = {
     host              = "smtp.resend.com"
     port              = "465"
     username          = "resend"
+    password          = "$${vault.smtp-password}"
     from              = "no-reply@conde.cloud"
     from_display_name = "conde"
     reply_to          = local.owner_email
   }
-}
-
-# The provider has no write-only SMTP password, so the API key is in this state, like the Google client secret.
-data "google_secret_manager_secret_version" "resend" {
-  secret = "resend-api-key"
 }
 
 # Secrets this root writes; every value is write-only, so none is in this state.

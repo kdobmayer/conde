@@ -99,6 +99,8 @@ after Keycloak has stopped accepting it. The secret version holding the old valu
   `infra/keycloak/themes`) turns the execute-actions email into the invitation with the onboarding steps.
 - Sign-in pages: every realm, master included, uses the login theme `conde` (design B of the web app, in the Keycloak
   image, `infra/keycloak/themes/conde/login`): keycloak.v2's templates with conde's stylesheet and wording.
+  The account console (`/realms/<realm>/account`) uses the account theme `conde` (`infra/keycloak/themes/conde/account`):
+  keycloak.v3's React app with conde's stylesheet, dark only; its fonts are the login theme's.
 
 ## Adding a company
 

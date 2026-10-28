@@ -10,15 +10,16 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
 use super::agents::{self, Agent};
-use super::web;
 use super::channels::{self, Channel};
+use super::web;
 use crate::address::{Kind, normalize_channel};
 use crate::dispatch::{
-    Ctx, OpResult, bad_request, forbidden, not_found, one_line, opt_i64, opt_str, str_param, too_large,
+    Ctx, OpResult, bad_request, forbidden, not_found, one_line, opt_i64, opt_str, str_param,
+    too_large,
 };
 use crate::protocol::{MAX_ATTACHMENT, MAX_MESSAGE_ATTACHMENTS, MAX_TEXT, PAGE, SEARCH_SCAN};
 use crate::store::{NewMessage, NewNotification, SearchScope, Tx, topics};
-use crate::util::{After, iso_from_ms, is_ulid, ms_from_iso, new_ulid, parse_after};
+use crate::util::{After, is_ulid, iso_from_ms, ms_from_iso, new_ulid, parse_after};
 
 static MENTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"@([A-Za-z0-9_](?:[A-Za-z0-9_./\-]*[A-Za-z0-9_])?)").expect("mention regex")
@@ -26,7 +27,10 @@ static MENTION: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Lowercased `@name` / `@owner/name` tokens in a body.
 pub fn mentions_in(text: &str) -> BTreeSet<String> {
-    MENTION.captures_iter(text).map(|c| c[1].to_lowercase()).collect()
+    MENTION
+        .captures_iter(text)
+        .map(|c| c[1].to_lowercase())
+        .collect()
 }
 
 pub enum Target<'a> {
@@ -80,7 +84,8 @@ pub fn insert_message(
         ctx.db.set_message_page(&id, kind)?;
     }
     for a in attachments {
-        ctx.db.insert_attachment(&new_ulid(), &id, &a.filename, &a.bytes)?;
+        ctx.db
+            .insert_attachment(&new_ulid(), &id, &a.filename, &a.bytes)?;
     }
     let mut push: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut not_delivered = Vec::new();
@@ -108,7 +113,9 @@ pub fn insert_message(
     }
     push.remove(&sender.id);
     for (rcpt, kind) in push {
-        let Some(agent) = agents::by_id(ctx.db, &rcpt)? else { continue };
+        let Some(agent) = agents::by_id(ctx.db, &rcpt)? else {
+            continue;
+        };
         if ctx.board.is_some() && agent.is_human() && page.is_none() {
             continue;
         }
@@ -121,14 +128,24 @@ pub fn insert_message(
             next_attempt_at: ctx.now_ms,
         })?;
     }
-    Ok(Inserted { id, seq, not_delivered })
+    Ok(Inserted {
+        id,
+        seq,
+        not_delivered,
+    })
 }
 
 /// A mention resolves in the sender's namespace unless qualified; only
 /// registered names count.
 fn mentioned_agent(ctx: &Ctx, sender: &Agent, token: &str) -> OpResult<Option<Agent>> {
-    let qualified = if token.contains('/') { token.to_string() } else { format!("{}/{token}", sender.owner) };
-    Ok(agents::find(ctx, &qualified).unwrap_or(None).filter(|a| a.address.is_some()))
+    let qualified = if token.contains('/') {
+        token.to_string()
+    } else {
+        format!("{}/{token}", sender.owner)
+    };
+    Ok(agents::find(ctx, &qualified)
+        .unwrap_or(None)
+        .filter(|a| a.address.is_some()))
 }
 
 // --- message rows -----------------------------------------------------------
@@ -170,8 +187,10 @@ pub(crate) fn view(db: &dyn Tx, m: &MsgRow) -> OpResult<Value> {
     for (emoji, who) in db.reactions(&m.id)? {
         reactions.entry(emoji).or_default().push(who);
     }
-    let reactions: Vec<Value> =
-        reactions.into_iter().map(|(emoji, by)| json!({"emoji": emoji, "by": by})).collect();
+    let reactions: Vec<Value> = reactions
+        .into_iter()
+        .map(|(emoji, by)| json!({"emoji": emoji, "by": by}))
+        .collect();
     Ok(json!({
         "message_id": m.id, "seq": m.seq, "place": m.place(), "from": m.sender, "to": m.to(),
         "date": m.created_at, "reply_to": m.reply_to, "text": m.text,
@@ -185,36 +204,69 @@ pub fn send(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
     let text = str_param(body, "text")?;
     if text.len() > MAX_TEXT {
-        return Err(too_large(format!("text is {} bytes; the limit is {MAX_TEXT}", text.len())));
+        return Err(too_large(format!(
+            "text is {} bytes; the limit is {MAX_TEXT}",
+            text.len()
+        )));
     }
     let reply_to = opt_str(body, "reply_to")?;
     if let Some(r) = reply_to {
         visible_msg(ctx, &me, r)?;
     }
     let attachments = decode_attachments(body)?;
-    let to = body.get("to").ok_or_else(|| bad_request("missing field 'to'"))?;
+    let to = body
+        .get("to")
+        .ok_or_else(|| bad_request("missing field 'to'"))?;
     let (inserted, to_name) = if let Some(name) = to.get("agent").and_then(Value::as_str) {
         // A local board queues for a name that is not registered now; a shared board addresses
         // published names only.
         let rcpt = match ctx.board {
             Some(_) => agents::lookup_bound(ctx, name)?,
-            None => agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent registered as '{name}'")))?,
+            None => agents::find(ctx, name)?
+                .ok_or_else(|| not_found(format!("no agent registered as '{name}'")))?,
         };
         if ctx.board.is_some() && rcpt.is_human() {
             return Err(forbidden(if rcpt.owner_id == me.owner_id {
                 "use `conde page` to reach your human".to_string()
             } else {
-                format!("humans are reached through their own agents; message one of `{}`'s agents instead", rcpt.owner)
+                format!(
+                    "humans are reached through their own agents; message one of `{}`'s agents instead",
+                    rcpt.owner
+                )
             }));
         }
         let to = rcpt.canonical();
-        (insert_message(ctx, &me, Target::Agent(&rcpt), text, reply_to, attachments, None)?, to)
+        (
+            insert_message(
+                ctx,
+                &me,
+                Target::Agent(&rcpt),
+                text,
+                reply_to,
+                attachments,
+                None,
+            )?,
+            to,
+        )
     } else if let Some(raw) = to.get("channel").and_then(Value::as_str) {
         let channel = channels::member_channel(ctx, &me, raw)?;
         let to = format!("#{}", channel.name);
-        (insert_message(ctx, &me, Target::Channel(&channel), text, reply_to, attachments, None)?, to)
+        (
+            insert_message(
+                ctx,
+                &me,
+                Target::Channel(&channel),
+                text,
+                reply_to,
+                attachments,
+                None,
+            )?,
+            to,
+        )
     } else {
-        return Err(bad_request("'to' must be {\"agent\": name} or {\"channel\": \"#name\"}"));
+        return Err(bad_request(
+            "'to' must be {\"agent\": name} or {\"channel\": \"#name\"}",
+        ));
     };
     let mut out = json!({"message_id": inserted.id, "seq": inserted.seq, "to": to_name});
     if !inserted.not_delivered.is_empty() {
@@ -224,8 +276,12 @@ pub fn send(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 }
 
 fn decode_attachments(body: &Value) -> OpResult<Vec<NewAttachment>> {
-    let Some(list) = body.get("attachments").filter(|v| !v.is_null()) else { return Ok(Vec::new()) };
-    let list = list.as_array().ok_or_else(|| bad_request("'attachments' must be a list"))?;
+    let Some(list) = body.get("attachments").filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let list = list
+        .as_array()
+        .ok_or_else(|| bad_request("'attachments' must be a list"))?;
     let mut out: Vec<NewAttachment> = Vec::new();
     let mut total = 0usize;
     for item in list {
@@ -239,11 +295,16 @@ fn decode_attachments(body: &Value) -> OpResult<Vec<NewAttachment>> {
             .decode(str_param(item, "data")?)
             .map_err(|e| bad_request(format!("attachment '{base}': bad base64: {e}")))?;
         if bytes.len() > MAX_ATTACHMENT {
-            return Err(too_large(format!("attachment '{base}' is {} bytes; the limit is {MAX_ATTACHMENT}", bytes.len())));
+            return Err(too_large(format!(
+                "attachment '{base}' is {} bytes; the limit is {MAX_ATTACHMENT}",
+                bytes.len()
+            )));
         }
         total += bytes.len();
         if total > MAX_MESSAGE_ATTACHMENTS {
-            return Err(too_large(format!("attachments exceed {MAX_MESSAGE_ATTACHMENTS} bytes per message")));
+            return Err(too_large(format!(
+                "attachments exceed {MAX_MESSAGE_ATTACHMENTS} bytes per message"
+            )));
         }
         let mut filename = base.to_string();
         let mut n = 1;
@@ -267,8 +328,10 @@ pub fn inbox(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let (items, next) = page(rows);
     let items: Vec<Value> = items
         .iter()
-        .map(|m| json!({"kind": m.place(), "message_id": m.id, "seq": m.seq, "from": m.sender,
-                        "date": m.created_at, "preview": m.preview()}))
+        .map(|m| {
+            json!({"kind": m.place(), "message_id": m.id, "seq": m.seq, "from": m.sender,
+                        "date": m.created_at, "preview": m.preview()})
+        })
         .collect();
     Ok(json!({"items": items, "next_cursor": next}))
 }
@@ -322,13 +385,17 @@ pub fn read(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         vec![visible_msg(ctx, &me, id)?]
     } else if let Some(raw) = opt_str(body, "channel")? {
         let channel = channels::member_channel(ctx, &me, raw)?;
-        ctx.db.unread_in_channel(&channel.id, &me.id, PAGE as i64 + 1)?
+        ctx.db
+            .unread_in_channel(&channel.id, &me.id, PAGE as i64 + 1)?
     } else {
         ctx.db.unread_all(&me.id, PAGE as i64 + 1)?
     };
     let (rows, next) = page(rows);
     mark_read(ctx, &me, &rows)?;
-    let messages = rows.iter().map(|m| view(ctx.db, m)).collect::<OpResult<Vec<_>>>()?;
+    let messages = rows
+        .iter()
+        .map(|m| view(ctx.db, m))
+        .collect::<OpResult<Vec<_>>>()?;
     Ok(json!({"messages": messages, "more": next.is_some()}))
 }
 
@@ -345,8 +412,10 @@ pub fn attachment_get(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let att = ctx.db.attachment(id)?.ok_or_else(missing)?;
     let (message_id, filename, bytes) = (att.message_id, att.filename, att.bytes);
     visible_msg(ctx, &me, &message_id).map_err(|_| missing())?;
-    Ok(json!({"attachment_id": id, "message_id": message_id, "filename": filename,
-              "size": bytes.len(), "data": B64.encode(&bytes)}))
+    Ok(
+        json!({"attachment_id": id, "message_id": message_id, "filename": filename,
+              "size": bytes.len(), "data": B64.encode(&bytes)}),
+    )
 }
 
 /// Set (not toggle) one reaction; reactions never notify.
@@ -373,7 +442,11 @@ pub(crate) const SEARCH_BATCH: i64 = 500;
 /// own DMs), optionally narrowed to one channel or DM partner.
 pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
-    search_in(ctx, body, |after, scope, from_day| Ok(ctx.db.search_scan(&me.id, after, scope, from_day, SEARCH_BATCH)?))
+    search_in(ctx, body, |after, scope, from_day| {
+        Ok(ctx
+            .db
+            .search_scan(&me.id, after, scope, from_day, SEARCH_BATCH)?)
+    })
 }
 
 /// The search loop over `scan` (a batch of what the caller may see after a cursor, in scope,
@@ -389,7 +462,10 @@ pub(crate) fn search_in(
         .size_limit(1 << 20)
         .build()
         .map_err(|e| bad_request(format!("bad pattern: {e}")))?;
-    let After { cursor: after, time: since } = match body.get("after") {
+    let After {
+        cursor: after,
+        time: since,
+    } = match body.get("after") {
         Some(Value::String(s)) => parse_after(s).map_err(bad_request)?,
         _ => After::cursor(opt_i64(body, "after")?.unwrap_or(0)),
     };
@@ -397,11 +473,14 @@ pub(crate) fn search_in(
     let scope = match opt_str(body, "target")? {
         None => SearchScope::All,
         Some(t) if t.starts_with('#') => {
-            channel = normalize_channel(t).ok_or_else(|| bad_request(format!("invalid channel '{t}'")))?;
+            channel = normalize_channel(t)
+                .ok_or_else(|| bad_request(format!("invalid channel '{t}'")))?;
             SearchScope::Channel(&channel)
         }
         Some(t) => {
-            partner = agents::find(ctx, t)?.ok_or_else(|| not_found(format!("no agent named '{t}'")))?.id;
+            partner = agents::find(ctx, t)?
+                .ok_or_else(|| not_found(format!("no agent named '{t}'")))?
+                .id;
             SearchScope::Partner(&partner)
         }
     };
@@ -429,21 +508,40 @@ pub(crate) fn search_in(
             if since.is_some_and(|t| ms_from_iso(&m.created_at).is_none_or(|c| c <= t)) {
                 continue;
             }
-            let Some(line) = m.text.lines().find(|l| rx.is_match(l)) else { continue };
+            let Some(line) = m.text.lines().find(|l| rx.is_match(l)) else {
+                continue;
+            };
             if hits.len() == PAGE {
                 // a time search continues with its cutoff: `<seq>@<time>`
-                next = hits.last().and_then(|h: &Value| h["seq"].as_i64()).map(|seq| After { cursor: seq, time: since }.wire());
+                next = hits
+                    .last()
+                    .and_then(|h: &Value| h["seq"].as_i64())
+                    .map(|seq| {
+                        After {
+                            cursor: seq,
+                            time: since,
+                        }
+                        .wire()
+                    });
                 break 'scan;
             }
-            hits.push(json!({"place": m.place(), "message_id": m.id, "seq": m.seq, "from": m.sender,
-                             "date": m.created_at, "line": line.trim()}));
+            hits.push(
+                json!({"place": m.place(), "message_id": m.id, "seq": m.seq, "from": m.sender,
+                             "date": m.created_at, "line": line.trim()}),
+            );
         }
         if (batch.len() as i64) < SEARCH_BATCH {
             break;
         }
         // The scan budget: answer with what was found and continue from here on the next call.
         if scanned >= SEARCH_SCAN {
-            next = Some(After { cursor, time: since }.wire());
+            next = Some(
+                After {
+                    cursor,
+                    time: since,
+                }
+                .wire(),
+            );
             partial = true;
             break;
         }
@@ -480,10 +578,13 @@ pub fn receipts(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 /// `not sent (<why>)`. Slack attempts are hidden from every other receipt; a page shows them,
 /// because its sender must know whether the human was reached.
 fn slack_state(ctx: &Ctx, m: &MsgRow) -> OpResult<String> {
-    let old = ms_from_iso(&m.created_at).is_some_and(|at| ctx.now_ms - at > crate::slack::MAX_AGE_MS);
+    let old =
+        ms_from_iso(&m.created_at).is_some_and(|at| ctx.now_ms - at > crate::slack::MAX_AGE_MS);
     Ok(match ctx.db.slack_attempt(&m.id)? {
         Some((status, _)) if status == "delivered" => "sent".to_string(),
-        Some((status, reason)) if status == "refused" => format!("failed ({})", reason.unwrap_or_default()),
+        Some((status, reason)) if status == "refused" => {
+            format!("failed ({})", reason.unwrap_or_default())
+        }
         // only a read drops a send; nothing marks a web-bound human's DM read today
         Some((status, _)) if status == "dropped" => "not sent (read before the post)".to_string(),
         _ if old => "not sent (unread past the hour a page is sent in)".to_string(),
@@ -501,7 +602,10 @@ fn receipt(ctx: &Ctx, m: &MsgRow) -> OpResult<(String, Option<String>)> {
         }
         (None, Some(r)) => {
             let read = ctx.db.dm_read_at(&m.id, r)?;
-            (read.map_or_else(|| "unread".to_string(), |at| format!("read {at}")), dm_delivery(ctx, &m.id, r)?)
+            (
+                read.map_or_else(|| "unread".to_string(), |at| format!("read {at}")),
+                dm_delivery(ctx, &m.id, r)?,
+            )
         }
         (None, None) => (String::new(), None),
     })
@@ -524,11 +628,18 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
     let viewer = (ctx.board.is_some() || !me.is_human()).then_some(me.id.as_str());
     let agent = match opt_str(body, "agent")? {
-        Some(name) => Some(agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent named '{name}'")))?.id),
+        Some(name) => Some(
+            agents::find(ctx, name)?
+                .ok_or_else(|| not_found(format!("no agent named '{name}'")))?
+                .id,
+        ),
         None => None,
     };
     let channel = match opt_str(body, "channel")? {
-        Some(raw) => Some(normalize_channel(raw).ok_or_else(|| bad_request(format!("invalid channel '{raw}'")))?),
+        Some(raw) => Some(
+            normalize_channel(raw)
+                .ok_or_else(|| bad_request(format!("invalid channel '{raw}'")))?,
+        ),
         None => None,
     };
     let (agent, channel) = (agent.as_deref(), channel.as_deref());
@@ -536,7 +647,9 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let (rows, cursor) = match opt_i64(body, "after")? {
         Some(after) if after >= top => (Vec::new(), after),
         Some(after) => {
-            let mut rows = ctx.db.feed_scan(viewer, after, top, agent, channel, false, PAGE as i64 + 1)?;
+            let mut rows =
+                ctx.db
+                    .feed_scan(viewer, after, top, agent, channel, false, PAGE as i64 + 1)?;
             if rows.len() > PAGE {
                 rows.truncate(PAGE);
                 let last = rows[PAGE - 1].seq;
@@ -546,8 +659,12 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             }
         }
         None => {
-            let last = opt_i64(body, "last")?.unwrap_or(PAGE as i64).clamp(0, PAGE as i64);
-            let mut rows = ctx.db.feed_scan(viewer, 0, top, agent, channel, true, last)?;
+            let last = opt_i64(body, "last")?
+                .unwrap_or(PAGE as i64)
+                .clamp(0, PAGE as i64);
+            let mut rows = ctx
+                .db
+                .feed_scan(viewer, 0, top, agent, channel, true, last)?;
             rows.reverse();
             (rows, top)
         }
@@ -568,7 +685,9 @@ fn owner_feed(ctx: &Ctx, body: &Value) -> OpResult<(Vec<MsgRow>, i64)> {
     match opt_i64(body, "after")? {
         Some(after) if after >= top => Ok((Vec::new(), after)),
         Some(after) => {
-            let mut rows = ctx.db.owner_feed(owner, &ranges, after, top + 1, PAGE as i64 + 1, true)?;
+            let mut rows =
+                ctx.db
+                    .owner_feed(owner, &ranges, after, top + 1, PAGE as i64 + 1, true)?;
             if rows.len() > PAGE {
                 rows.truncate(PAGE);
                 let last = rows[PAGE - 1].seq;
@@ -578,7 +697,9 @@ fn owner_feed(ctx: &Ctx, body: &Value) -> OpResult<(Vec<MsgRow>, i64)> {
             }
         }
         None => {
-            let last = opt_i64(body, "last")?.unwrap_or(PAGE as i64).clamp(0, PAGE as i64);
+            let last = opt_i64(body, "last")?
+                .unwrap_or(PAGE as i64)
+                .clamp(0, PAGE as i64);
             let mut rows = ctx.db.owner_feed(owner, &ranges, 0, top + 1, last, false)?;
             rows.reverse();
             Ok((rows, top))
@@ -591,7 +712,12 @@ fn feed_page(ctx: &Ctx, rows: &[MsgRow], cursor: i64) -> OpResult<Value> {
     let mut out = Vec::with_capacity(rows.len());
     for m in rows {
         let (status, delivery) = receipt(ctx, m)?;
-        let line = m.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+        let line = m
+            .text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default();
         out.push(json!({"message_id": m.id, "seq": m.seq, "date": m.created_at, "from": m.sender, "to": m.to(),
                         "line": line, "status": status, "delivery": delivery}));
     }

@@ -21,11 +21,20 @@ pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
 /// Every revision served, modern first.
 pub fn supported_versions() -> Vec<&'static str> {
-    MODERN_VERSIONS.iter().chain(LEGACY_VERSIONS).copied().collect()
+    MODERN_VERSIONS
+        .iter()
+        .chain(LEGACY_VERSIONS)
+        .copied()
+        .collect()
 }
 
 /// A JSON-RPC error response.
-pub fn error_response(id: &serde_json::Value, code: i64, message: &str, data: Option<serde_json::Value>) -> serde_json::Value {
+pub fn error_response(
+    id: &serde_json::Value,
+    code: i64,
+    message: &str,
+    data: Option<serde_json::Value>,
+) -> serde_json::Value {
     let mut error = serde_json::json!({"code": code, "message": message});
     if let Some(data) = data {
         error["data"] = data;

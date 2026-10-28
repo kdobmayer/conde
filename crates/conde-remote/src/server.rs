@@ -7,15 +7,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ws::{
     CloseFrame, Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection,
 };
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::{Json, Router};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -27,8 +27,8 @@ use tokio::time::{MissedTickBehavior, interval_at, timeout};
 
 use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HOST_MISMATCH};
 use crate::{
-    Admission, Authentication, Authenticator, Dispatcher, Endpoint, Hello, NotificationSource, Outcome, PROTO_V2, Polled,
-    Principal, Recorded, Routes, SourceEvent,
+    Admission, Authentication, Authenticator, Dispatcher, Endpoint, Hello, NotificationSource,
+    Outcome, PROTO_V2, Polled, Principal, Recorded, Routes, SourceEvent,
 };
 
 /// Frame and request-body limit (DESIGN.md §4).
@@ -48,11 +48,14 @@ pub struct ServerConfig {
     /// Public release files (`https://.../dist`, no trailing slash): `/install.sh`,
     /// `/install.ps1` and `/dist/<file>` redirect there; None answers 404.
     pub dist_base_url: Option<String>,
-    /// Entra sign-in, the keys page and the admin API, when configured.
+    /// OIDC sign-in, the keys page and the admin API, when configured.
     pub web: Option<crate::web::WebSetup>,
     /// The lowest bridge protocol accepted (`CONDE_MIN_PROTO`); an older hello is refused with
     /// `bad_hello`, which a v1 bridge takes as final.
     pub min_proto: u32,
+    /// The board moved to this URL (`CONDE_MOVED_TO`): every request but `GET /healthz` is
+    /// answered 308 with it as Location and `{"moved_to": <url>}`, nothing else is served.
+    pub moved_to: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -66,6 +69,7 @@ impl Default for ServerConfig {
             dist_base_url: None,
             web: None,
             min_proto: crate::PROTO_V1,
+            moved_to: None,
         }
     }
 }
@@ -83,7 +87,7 @@ struct Shared {
     shutdown: watch::Receiver<bool>,
     /// Board changes for the browsers' event sockets (topic bits).
     board: tokio::sync::broadcast::Sender<u8>,
-    /// The web app, when Entra sign-in is configured.
+    /// The web app, when sign-in is configured.
     app: Mutex<Option<crate::web::app::AppState>>,
 }
 
@@ -127,7 +131,10 @@ impl crate::web::BridgeRegistry for Registry {
 }
 
 /// Delivers store events to the connections they concern, until the source or the server stops.
-async fn route_events(shared: Arc<Shared>, mut events: tokio::sync::broadcast::Receiver<SourceEvent>) {
+async fn route_events(
+    shared: Arc<Shared>,
+    mut events: tokio::sync::broadcast::Receiver<SourceEvent>,
+) {
     let mut shutdown = shared.shutdown.clone();
     loop {
         let event = tokio::select! {
@@ -239,7 +246,10 @@ struct Revalidation {
 /// that then succeeds, gets a pass that starts after it.
 fn retry_revalidation(shared: Arc<Shared>) {
     {
-        let mut r = shared.revalidation.lock().unwrap_or_else(|p| p.into_inner());
+        let mut r = shared
+            .revalidation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         r.requested += 1;
         if r.running {
             return;
@@ -262,7 +272,10 @@ fn retry_revalidation(shared: Arc<Shared>) {
             }
             let complete = revalidate(&shared).await;
             {
-                let mut r = shared.revalidation.lock().unwrap_or_else(|p| p.into_inner());
+                let mut r = shared
+                    .revalidation
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 if complete && r.requested == serving {
                     r.running = false;
                     return;
@@ -331,7 +344,14 @@ pub async fn start(
     dispatcher: Arc<dyn Dispatcher>,
     source: Arc<dyn NotificationSource>,
 ) -> std::io::Result<ServerHandle> {
-    start_on(TcpListener::bind(listen).await?, config, auth, dispatcher, source).await
+    start_on(
+        TcpListener::bind(listen).await?,
+        config,
+        auth,
+        dispatcher,
+        source,
+    )
+    .await
 }
 
 /// As [`start`], serving on a listener the caller already bound (it knows the port before the
@@ -361,6 +381,29 @@ pub async fn start_on(
     });
     if let Some(events) = shared.source.events() {
         tokio::spawn(route_events(shared.clone(), events));
+    }
+    if let Some(url) = shared.config.moved_to.clone() {
+        let location = HeaderValue::from_str(&url).map_err(|_| {
+            std::io::Error::other(format!("moved_to '{url}' is not a header value"))
+        })?;
+        let app = Router::new()
+            .route("/healthz", get(healthz))
+            .fallback(move || {
+                let (url, location) = (url.clone(), location.clone());
+                async move {
+                    let mut r = (
+                        StatusCode::PERMANENT_REDIRECT,
+                        Json(json!({"moved_to": url})),
+                    )
+                        .into_response();
+                    r.headers_mut().insert(header::LOCATION, location);
+                    r.headers_mut()
+                        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                    r
+                }
+            })
+            .with_state(shared.clone());
+        return serve_app(listener, app, shutdown_tx, shutdown_rx, local_addr);
     }
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -396,11 +439,23 @@ pub async fn start_on(
         }
         None => app,
     };
-    let mut stop = shutdown_rx;
+    serve_app(listener, app, shutdown_tx, shutdown_rx, local_addr)
+}
+
+fn serve_app(
+    listener: TcpListener,
+    app: Router,
+    shutdown_tx: watch::Sender<bool>,
+    mut stop: watch::Receiver<bool>,
+    local_addr: SocketAddr,
+) -> std::io::Result<ServerHandle> {
     let task = tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(async move { protocol::shutdown_signal(&mut stop).await })
-            .await
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { protocol::shutdown_signal(&mut stop).await })
+        .await
     });
     tracing::info!(%local_addr, "conde remote server listening");
     Ok(ServerHandle {
@@ -534,21 +589,25 @@ async fn dispatch(shared: &Shared, principal: Principal, request: Value) -> Valu
 }
 
 /// [`dispatch`] for a request carried by `bridge_instance`'s connection.
-async fn dispatch_on(shared: &Shared, principal: Principal, bridge_instance: Option<String>, request: Value) -> Value {
+async fn dispatch_on(
+    shared: &Shared,
+    principal: Principal,
+    bridge_instance: Option<String>,
+    request: Value,
+) -> Value {
     let request_id = request.get("request_id").cloned().unwrap_or(Value::Null);
     let dispatcher = shared.dispatcher.clone();
     let run = move || match &bridge_instance {
         Some(instance) => dispatcher.dispatch_bridge(&principal, instance, request),
         None => dispatcher.dispatch(&principal, request),
     };
-    let mut response =
-        match tokio::task::spawn_blocking(run).await {
-            Ok(response) => response,
-            Err(e) => {
-                tracing::error!(error = %e, "dispatcher panicked");
-                protocol::error_response(None, "internal", "dispatcher failed")
-            }
-        };
+    let mut response = match tokio::task::spawn_blocking(run).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!(error = %e, "dispatcher panicked");
+            protocol::error_response(None, "internal", "dispatcher failed")
+        }
+    };
     if let Some(obj) = response.as_object_mut() {
         obj.insert("request_id".into(), request_id);
     }
@@ -659,7 +718,10 @@ async fn run_bridge(
         .await;
     }
     if hello.proto < shared.config.min_proto {
-        let why = format!("upgrade conde: this board takes bridge protocol {} or newer", shared.config.min_proto);
+        let why = format!(
+            "upgrade conde: this board takes bridge protocol {} or newer",
+            shared.config.min_proto
+        );
         return close_with_error(&mut tx, CODE_BAD_HELLO, &why).await;
     }
     let host = hello.host_id.clone();
@@ -668,7 +730,12 @@ async fn run_bridge(
 
     let conn_id = shared.next_conn.fetch_add(1, Ordering::Relaxed);
     let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-    let endpoints: HashSet<Endpoint> = hello.endpoints.iter().filter(|e| speaks(proto, e)).cloned().collect();
+    let endpoints: HashSet<Endpoint> = hello
+        .endpoints
+        .iter()
+        .filter(|e| speaks(proto, e))
+        .cloned()
+        .collect();
     let fence = {
         let (shared, host, instance) = (shared.clone(), host.clone(), instance.clone());
         let endpoints: Vec<Endpoint> = endpoints.iter().cloned().collect();
@@ -682,7 +749,7 @@ async fn run_bridge(
             match token.as_deref().map(|t| shared.auth.check(t)) {
                 Some(Authentication::Valid(current)) if current == admitted => {}
                 Some(Authentication::Unavailable(why)) => {
-                    return Err(Some(("credential store unavailable, retry", why)))
+                    return Err(Some(("credential store unavailable, retry", why)));
                 }
                 _ => return Err(None),
             }
@@ -694,7 +761,7 @@ async fn run_bridge(
                 match shared.source.endpoints(&host, &instance, &endpoints) {
                     Recorded::Accepted => {}
                     Recorded::Retry(why) | Recorded::Rejected(why) => {
-                        return Err(Some(("endpoints not recorded, retry", why)))
+                        return Err(Some(("endpoints not recorded, retry", why)));
                     }
                 }
                 let entry = ActiveBridge {
@@ -1018,13 +1085,19 @@ impl Conn {
     fn heartbeat(&mut self, ping_interval: Duration) {
         use std::sync::atomic::Ordering::SeqCst;
         let now = tokio::time::Instant::now();
-        if self.last_heartbeat.is_some_and(|last| now.duration_since(last) < ping_interval / 2)
+        if self
+            .last_heartbeat
+            .is_some_and(|last| now.duration_since(last) < ping_interval / 2)
             || self.heartbeat_pending.swap(true, SeqCst)
         {
             return;
         }
         self.last_heartbeat = Some(now);
-        let (source, host, instance) = (self.shared.source.clone(), self.host.clone(), self.instance.clone());
+        let (source, host, instance) = (
+            self.shared.source.clone(),
+            self.host.clone(),
+            self.instance.clone(),
+        );
         let pending = self.heartbeat_pending.clone();
         tokio::task::spawn_blocking(move || {
             source.heartbeat(&host, &instance);
@@ -1072,8 +1145,15 @@ impl Conn {
             }
             Ok(Polled::Fenced) => {
                 // Durably fenced (an event may have been missed): close this connection.
-                let bridges = self.shared.bridges.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(b) = bridges.get(&self.host).filter(|b| b.conn_id == self.conn_id) {
+                let bridges = self
+                    .shared
+                    .bridges
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if let Some(b) = bridges
+                    .get(&self.host)
+                    .filter(|b| b.conn_id == self.conn_id)
+                {
                     let _ = b.control.send(Control::Fenced);
                 }
                 return Vec::new();
@@ -1096,7 +1176,12 @@ impl Conn {
     /// Queues work for the ordered worker without waiting: a full queue closes the connection
     /// (the bridge keeps unacknowledged outcomes and resends them, and its hello carries the
     /// endpoints), so control and shutdown never wait on capacity and nothing is dropped.
-    fn enqueue(&self, queue: &mpsc::Sender<Work>, stop: &mpsc::UnboundedSender<&'static str>, work: Work) {
+    fn enqueue(
+        &self,
+        queue: &mpsc::Sender<Work>,
+        stop: &mpsc::UnboundedSender<&'static str>,
+        work: Work,
+    ) {
         if let Err(mpsc::error::TrySendError::Full(_)) = queue.try_send(work) {
             tracing::warn!(host = %self.host, instance = %self.instance, depth = OUTCOME_QUEUE,
                 "bridge work queue full; closing the connection");
@@ -1156,7 +1241,8 @@ impl Conn {
                     self.endpoints.remove(e);
                 }
                 let proto = self.proto;
-                self.endpoints.extend(diff.added.into_iter().filter(|e| speaks(proto, e)));
+                self.endpoints
+                    .extend(diff.added.into_iter().filter(|e| speaks(proto, e)));
                 // Behind the outcomes read before it, in the same ordered worker.
                 let all: Vec<Endpoint> = self.endpoints.iter().cloned().collect();
                 self.enqueue(outcome_tx, stop_tx, Work::Endpoints(all));
@@ -1229,7 +1315,9 @@ mod revalidation_tests {
                     valid()
                 }
                 2 => Authentication::Unavailable("store unavailable after the revocation".into()),
-                _ if self.first.lock().unwrap().as_deref() == Some(token) => Authentication::Invalid,
+                _ if self.first.lock().unwrap().as_deref() == Some(token) => {
+                    Authentication::Invalid
+                }
                 _ => valid(),
             }
         }
@@ -1307,11 +1395,20 @@ mod revalidation_tests {
         })
         .await
         .expect("the worker finishes");
-        assert!(auth.calls.load(Ordering::SeqCst) >= 4, "the requested pass never ran");
+        assert!(
+            auth.calls.load(Ordering::SeqCst) >= 4,
+            "the requested pass never ran"
+        );
         let revoked = controls.get_mut(&first).unwrap().try_recv();
-        assert!(matches!(revoked, Ok(Control::Revoked)), "the revoked bridge stayed open");
+        assert!(
+            matches!(revoked, Ok(Control::Revoked)),
+            "the revoked bridge stayed open"
+        );
         let other = if first == "a" { "b" } else { "a" };
-        assert!(controls.get_mut(other).unwrap().try_recv().is_err(), "a valid bridge was closed");
+        assert!(
+            controls.get_mut(other).unwrap().try_recv().is_err(),
+            "a valid bridge was closed"
+        );
         stop.send(true).unwrap();
     }
 }

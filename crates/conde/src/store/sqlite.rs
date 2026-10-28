@@ -11,10 +11,13 @@ use rusqlite::types::FromSql;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, params_from_iter};
 
 use super::{
-    Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, SlackDue, UserSlack, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    FeedArg, FeedRange, Membership, problem_seqs_sql, thread_down_sql, thread_up_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
-    WebSessionRow, address_of, feed_seqs_sql,
+    Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary,
+    ChannelThread, CredentialRow, Delivery, DmDelivery, DmThread, DueNotification, EndpointRow,
+    EvidenceRow, FeedArg, FeedRange, HostBridge, ImportState, ImportedAgent, McpCodeRow,
+    McpGrantRow, McpRefreshRow, Membership, Message, Mode, NewMessage, NewNotification,
+    NotificationRow, OpenAttempt, PendingSignal, SearchScope, SlackDue, StaleAttempt, Store,
+    StoreError, StoreResult, Tx, UserRow, UserSlack, Wake, Wakes, WebSessionRow, address_of,
+    feed_seqs_sql, problem_seqs_sql, thread_down_sql, thread_up_sql,
 };
 use crate::address::Address;
 
@@ -80,7 +83,10 @@ impl SqliteStore {
     }
 
     fn with(conn: Connection) -> SqliteStore {
-        SqliteStore { conn: Mutex::new(conn), signal: PendingSignal::default() }
+        SqliteStore {
+            conn: Mutex::new(conn),
+            signal: PendingSignal::default(),
+        }
     }
 
     /// A write transaction that also reaches the local board's own tables
@@ -104,7 +110,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
     for (table, column, decl) in ADDED_COLUMNS {
-        let mut stmt = conn.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+        ))?;
         if !stmt.exists([column])? {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
         }
@@ -118,15 +126,61 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS messages_dm_by_sender ON messages(sender_agent_id, commit_seq) WHERE channel_id IS NULL;
          CREATE INDEX IF NOT EXISTS messages_by_reply_to ON messages(reply_to, commit_seq);",
     )?;
-    rebuild_agents(conn)
+    rebuild_agents(conn)?;
+    rebuild_identities(conn)
+}
+
+/// A file from before sign-in by any issuer (identities keyed by Entra's `tid`, `oid`, one per
+/// user) gets the table rebuilt in the schema's shape, each row keeping its binding as
+/// (the tenant's v2.0 issuer URL, oid), as Postgres migration 0017 does. Runs once per file.
+fn rebuild_identities(conn: &Connection) -> rusqlite::Result<()> {
+    let old_shape = || {
+        conn.prepare("SELECT 1 FROM pragma_table_info('identities') WHERE name = 'tid'")?
+            .exists([])
+    };
+    if !old_shape()? {
+        return Ok(());
+    }
+    const START: &str = "CREATE TABLE IF NOT EXISTS identities(";
+    let at = SCHEMA.find(START).expect("the schema defines identities");
+    let len = SCHEMA[at..]
+        .find(");")
+        .expect("the identities definition ends")
+        + 2;
+    let create = SCHEMA[at..at + len].replacen(START, "CREATE TABLE identities_rebuilt(", 1);
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let steps = || -> rusqlite::Result<()> {
+        // another process may have rebuilt it while this one waited for the lock
+        if !old_shape()? {
+            return Ok(());
+        }
+        conn.execute_batch(&create)?;
+        conn.execute_batch(
+            "INSERT INTO identities_rebuilt(issuer, subject, user_id, display_name, preferred_username)
+                 SELECT 'https://login.microsoftonline.com/' || tid || '/v2.0', oid, user_id, display_name,
+                        preferred_username FROM identities;
+             DROP TABLE identities;
+             ALTER TABLE identities_rebuilt RENAME TO identities;",
+        )
+    };
+    match steps() {
+        Ok(()) => conn.execute_batch("COMMIT"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// A file created before `address_kind` accepted 'mailbox' (DESIGN-v2.md §4) gets the agents
 /// table rebuilt with the schema's CHECK: the standard SQLite rebuild, in one transaction with
 /// foreign keys off, verified by `foreign_key_check` before it commits. Runs once per file.
 fn rebuild_agents(conn: &Connection) -> rusqlite::Result<()> {
-    let current: String =
-        conn.query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agents'", [], |r| r.get(0))?;
+    let current: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agents'",
+        [],
+        |r| r.get(0),
+    )?;
     if current.contains("'mailbox'") {
         return Ok(());
     }
@@ -134,8 +188,7 @@ fn rebuild_agents(conn: &Connection) -> rusqlite::Result<()> {
     let at = SCHEMA.find(START).expect("the schema defines agents");
     let len = SCHEMA[at..].find(");").expect("the agents definition ends") + 2;
     let create = SCHEMA[at..at + len].replacen(START, "CREATE TABLE agents_rebuilt(", 1);
-    const COLUMNS: &str =
-        "agent_id, owner_id, name_lower, display, address_kind, address_target, host_id, binding_version, pinned_address";
+    const COLUMNS: &str = "agent_id, owner_id, name_lower, display, address_kind, address_target, host_id, binding_version, pinned_address";
     conn.pragma_update(None, "foreign_keys", "OFF")?;
     let rebuilt = (|| {
         conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -194,7 +247,8 @@ impl Store for SqliteStore {
 
     fn ping(&self) -> bool {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)).is_ok()
+        conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+            .is_ok()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -218,7 +272,8 @@ impl Drop for SqliteTx<'_> {
     }
 }
 
-const AGENT_SELECT: &str = "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
+const AGENT_SELECT: &str =
+    "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
     a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL
     FROM agents a JOIN users u ON u.user_id = a.owner_id";
 
@@ -244,7 +299,8 @@ const MSG_SELECT: &str = "SELECT m.commit_seq, m.message_id, m.sender_agent_id, 
     LEFT JOIN agents r ON r.agent_id = m.recipient_agent_id LEFT JOIN users ru ON ru.user_id = r.owner_id
     LEFT JOIN channels c ON c.channel_id = m.channel_id";
 
-const MCP_GRANT_SELECT: &str = "SELECT grant_id, user_id, client_id, client_host, client_name, resource, created_at,
+const MCP_GRANT_SELECT: &str =
+    "SELECT grant_id, user_id, client_id, client_host, client_name, resource, created_at,
     last_used_at, expires_at, revoked_at FROM mcp_grants";
 
 fn mcp_grant_row(r: &Row) -> rusqlite::Result<McpGrantRow> {
@@ -293,11 +349,17 @@ fn user_slack_row(r: &Row) -> rusqlite::Result<UserSlack> {
     })
 }
 
-const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled, i.user_id IS NOT NULL
-    FROM users u LEFT JOIN identities i ON i.user_id = u.user_id";
+const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled,
+    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email FROM users u";
 
 fn user_row(r: &Row) -> rusqlite::Result<UserRow> {
-    Ok(UserRow { user_id: r.get(0)?, name: r.get(1)?, disabled: r.get(2)?, bound: r.get(3)? })
+    Ok(UserRow {
+        user_id: r.get(0)?,
+        name: r.get(1)?,
+        disabled: r.get(2)?,
+        bound: r.get(3)?,
+        email: r.get(4)?,
+    })
 }
 
 fn pair<A: FromSql, B: FromSql>(r: &Row) -> rusqlite::Result<(A, B)> {
@@ -326,7 +388,12 @@ impl SqliteTx<'_> {
         self.guard(self.conn.execute(sql, args))
     }
 
-    fn one<T>(&self, sql: &str, args: impl Params, f: impl FnOnce(&Row) -> rusqlite::Result<T>) -> StoreResult<T> {
+    fn one<T>(
+        &self,
+        sql: &str,
+        args: impl Params,
+        f: impl FnOnce(&Row) -> rusqlite::Result<T>,
+    ) -> StoreResult<T> {
         self.guard(self.conn.query_row(sql, args, f))
     }
 
@@ -339,7 +406,12 @@ impl SqliteTx<'_> {
         self.guard(self.conn.query_row(sql, args, f).optional())
     }
 
-    fn rows<T>(&self, sql: &str, args: impl Params, f: impl FnMut(&Row) -> rusqlite::Result<T>) -> StoreResult<Vec<T>> {
+    fn rows<T>(
+        &self,
+        sql: &str,
+        args: impl Params,
+        f: impl FnMut(&Row) -> rusqlite::Result<T>,
+    ) -> StoreResult<Vec<T>> {
         let run = || -> rusqlite::Result<Vec<T>> {
             let mut stmt = self.conn.prepare(sql)?;
             let rows = stmt.query_map(args, f)?;
@@ -379,9 +451,15 @@ impl SqliteTx<'_> {
 impl Tx for SqliteTx<'_> {
     fn commit(self: Box<Self>) -> StoreResult<()> {
         if self.failed.get() {
-            return Err(StoreError("transaction aborted by an earlier failed statement".into()));
+            return Err(StoreError(
+                "transaction aborted by an earlier failed statement".into(),
+            ));
         }
-        let hosts = if self.wakes.borrow().is_empty() { Vec::new() } else { self.hosts_to_wake()? };
+        let hosts = if self.wakes.borrow().is_empty() {
+            Vec::new()
+        } else {
+            self.hosts_to_wake()?
+        };
         self.conn.execute_batch("COMMIT")?;
         self.open.set(false);
         for host in hosts {
@@ -408,8 +486,15 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn ensure_host(&self, host: &str, user_id: i64) -> StoreResult<i64> {
-        self.exec("INSERT OR IGNORE INTO hosts(host_id, user_id) VALUES (?1, ?2)", params![host, user_id])?;
-        self.one("SELECT user_id FROM hosts WHERE host_id = ?1", [host], one_col)
+        self.exec(
+            "INSERT OR IGNORE INTO hosts(host_id, user_id) VALUES (?1, ?2)",
+            params![host, user_id],
+        )?;
+        self.one(
+            "SELECT user_id FROM hosts WHERE host_id = ?1",
+            [host],
+            one_col,
+        )
     }
 
     fn user_id(&self, name: &str) -> StoreResult<Option<i64>> {
@@ -483,11 +568,20 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn host_mailbox_only(&self, host: &str) -> StoreResult<bool> {
-        Ok(self.opt("SELECT mailbox_only FROM hosts WHERE host_id = ?1", [host], one_col::<bool>)?.unwrap_or(false))
+        Ok(self
+            .opt(
+                "SELECT mailbox_only FROM hosts WHERE host_id = ?1",
+                [host],
+                one_col::<bool>,
+            )?
+            .unwrap_or(false))
     }
 
     fn set_host_mailbox_only(&self, host: &str) -> StoreResult<()> {
-        self.exec("UPDATE hosts SET mailbox_only = 1 WHERE host_id = ?1", [host])?;
+        self.exec(
+            "UPDATE hosts SET mailbox_only = 1 WHERE host_id = ?1",
+            [host],
+        )?;
         Ok(())
     }
 
@@ -504,7 +598,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn host_last_seen(&self, host: &str) -> StoreResult<Option<String>> {
-        self.one("SELECT MAX(updated_at) FROM bridge_instances WHERE host_id = ?1", [host], one_col)
+        self.one(
+            "SELECT MAX(updated_at) FROM bridge_instances WHERE host_id = ?1",
+            [host],
+            one_col,
+        )
     }
 
     fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>> {
@@ -516,66 +614,115 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    // users, Entra identities and browser sign-in
+    // users, sign-in identities and browser sign-in
 
-    fn user_by_identity(&self, tid: &str, oid: &str) -> StoreResult<Option<UserRow>> {
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> StoreResult<Option<UserRow>> {
         self.opt(
-            &format!("{USER_SELECT} WHERE i.tid = ?1 AND i.oid = ?2"),
-            params![tid, oid],
+            &format!(
+                "{USER_SELECT} WHERE u.user_id = (SELECT user_id FROM identities WHERE issuer = ?1 AND subject = ?2)"
+            ),
+            params![issuer, subject],
             user_row,
         )
     }
 
     fn user_by_name(&self, name: &str) -> StoreResult<Option<UserRow>> {
-        self.opt(&format!("{USER_SELECT} WHERE u.name = ?1"), [name], user_row)
+        self.opt(
+            &format!("{USER_SELECT} WHERE u.name = ?1"),
+            [name],
+            user_row,
+        )
     }
 
     fn user_by_id(&self, user_id: i64) -> StoreResult<Option<UserRow>> {
-        self.opt(&format!("{USER_SELECT} WHERE u.user_id = ?1"), [user_id], user_row)
+        self.opt(
+            &format!("{USER_SELECT} WHERE u.user_id = ?1"),
+            [user_id],
+            user_row,
+        )
+    }
+
+    fn users_by_email(&self, email: &str) -> StoreResult<Vec<UserRow>> {
+        self.rows(
+            &format!("{USER_SELECT} WHERE lower(u.email) = lower(?1) ORDER BY u.user_id"),
+            [email],
+            user_row,
+        )
+    }
+
+    fn users(&self) -> StoreResult<Vec<UserRow>> {
+        self.rows(&format!("{USER_SELECT} ORDER BY u.name"), [], user_row)
+    }
+
+    fn identity_issuers(&self, user_id: i64) -> StoreResult<Vec<String>> {
+        self.rows(
+            "SELECT issuer FROM identities WHERE user_id = ?1 ORDER BY issuer",
+            [user_id],
+            |r| r.get(0),
+        )
     }
 
     fn bind_identity(
         &self,
         user_id: i64,
-        tid: &str,
-        oid: &str,
+        issuer: &str,
+        subject: &str,
         display: Option<&str>,
         upn: Option<&str>,
     ) -> StoreResult<()> {
         self.exec(
-            "INSERT INTO identities(tid, oid, user_id, display_name, preferred_username) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![tid, oid, user_id, display, upn],
+            "INSERT INTO identities(issuer, subject, user_id, display_name, preferred_username) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![issuer, subject, user_id, display, upn],
         )?;
         Ok(())
     }
 
-    fn set_identity_profile(&self, user_id: i64, display: Option<&str>, upn: Option<&str>) -> StoreResult<()> {
+    fn set_identity_profile(
+        &self,
+        issuer: &str,
+        subject: &str,
+        display: Option<&str>,
+        upn: Option<&str>,
+    ) -> StoreResult<()> {
         self.exec(
-            "UPDATE identities SET display_name = ?2, preferred_username = ?3 WHERE user_id = ?1",
-            params![user_id, display, upn],
+            "UPDATE identities SET display_name = ?3, preferred_username = ?4 WHERE issuer = ?1 AND subject = ?2",
+            params![issuer, subject, display, upn],
         )?;
         Ok(())
     }
 
     fn users_slack(&self) -> StoreResult<Vec<UserSlack>> {
-        self.rows(&format!("{USER_SLACK_SELECT} ORDER BY user_id"), [], user_slack_row)
+        self.rows(
+            &format!("{USER_SLACK_SELECT} ORDER BY user_id"),
+            [],
+            user_slack_row,
+        )
     }
 
     fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>> {
-        self.opt(&format!("{USER_SLACK_SELECT} WHERE user_id = ?1"), [user_id], user_slack_row)
+        self.opt(
+            &format!("{USER_SLACK_SELECT} WHERE user_id = ?1"),
+            [user_id],
+            user_slack_row,
+        )
     }
 
     fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()> {
-        self.exec("UPDATE users SET email = ?2 WHERE user_id = ?1", params![user_id, email])?;
+        self.exec(
+            "UPDATE users SET email = ?2 WHERE user_id = ?1",
+            params![user_id, email],
+        )?;
         Ok(())
     }
 
     fn backfill_emails(&self) -> StoreResult<u64> {
         Ok(self.exec(
             "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')
              WHERE email IS NULL AND EXISTS (SELECT 1 FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')",
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')",
             [],
         )? as u64)
     }
@@ -589,19 +736,31 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn set_done_pages(&self, user_id: i64, on: bool) -> StoreResult<()> {
-        self.exec("UPDATE users SET done_pages = ?2 WHERE user_id = ?1", params![user_id, on])?;
+        self.exec(
+            "UPDATE users SET done_pages = ?2 WHERE user_id = ?1",
+            params![user_id, on],
+        )?;
         Ok(())
     }
 
     fn set_user_disabled(&self, user_id: i64, disabled: bool) -> StoreResult<Vec<String>> {
-        self.exec("UPDATE users SET disabled = ?2 WHERE user_id = ?1", params![user_id, disabled])?;
+        self.exec(
+            "UPDATE users SET disabled = ?2 WHERE user_id = ?1",
+            params![user_id, disabled],
+        )?;
         if disabled {
             self.exec("DELETE FROM web_sessions WHERE user_id = ?1", [user_id])?;
         }
-        let hosts: Vec<String> =
-            self.rows("SELECT host_id FROM hosts WHERE user_id = ?1 ORDER BY host_id", [user_id], one_col)?;
+        let hosts: Vec<String> = self.rows(
+            "SELECT host_id FROM hosts WHERE user_id = ?1 ORDER BY host_id",
+            [user_id],
+            one_col,
+        )?;
         if disabled {
-            self.wakes.borrow_mut().revoked.extend(hosts.iter().cloned());
+            self.wakes
+                .borrow_mut()
+                .revoked
+                .extend(hosts.iter().cloned());
         }
         Ok(hosts)
     }
@@ -610,7 +769,14 @@ impl Tx for SqliteTx<'_> {
         self.exec(
             "INSERT INTO web_sessions(id_digest, user_id, display, csrf, created_at, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id_digest, w.user_id, w.display, w.csrf, w.created_at, w.last_seen],
+            params![
+                id_digest,
+                w.user_id,
+                w.display,
+                w.csrf,
+                w.created_at,
+                w.last_seen
+            ],
         )?;
         Ok(())
     }
@@ -634,7 +800,10 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn touch_web_session(&self, id_digest: &str, at: i64) -> StoreResult<()> {
-        self.exec("UPDATE web_sessions SET last_seen = ?2 WHERE id_digest = ?1", params![id_digest, at])?;
+        self.exec(
+            "UPDATE web_sessions SET last_seen = ?2 WHERE id_digest = ?1",
+            params![id_digest, at],
+        )?;
         Ok(())
     }
 
@@ -643,7 +812,13 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
-    fn put_web_token(&self, kind: &str, digest: &str, payload: &str, created_at: i64) -> StoreResult<()> {
+    fn put_web_token(
+        &self,
+        kind: &str,
+        digest: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> StoreResult<()> {
         self.exec(
             "INSERT INTO web_tokens(kind, digest, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![kind, digest, payload, created_at],
@@ -659,20 +834,34 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn purge_web(&self, now: i64, session_idle: i64, session_max: i64, ttls: &[(&str, i64)]) -> StoreResult<()> {
+    fn purge_web(
+        &self,
+        now: i64,
+        session_idle: i64,
+        session_max: i64,
+        ttls: &[(&str, i64)],
+    ) -> StoreResult<()> {
         self.exec(
             "DELETE FROM web_sessions WHERE last_seen < ?1 - ?2 OR created_at < ?1 - ?3",
             params![now, session_idle, session_max],
         )?;
         for (kind, ttl) in ttls {
-            self.exec("DELETE FROM web_tokens WHERE kind = ?1 AND created_at < ?2 - ?3", params![kind, now, ttl])?;
+            self.exec(
+                "DELETE FROM web_tokens WHERE kind = ?1 AND created_at < ?2 - ?3",
+                params![kind, now, ttl],
+            )?;
         }
         Ok(())
     }
 
     // idempotency
 
-    fn idempotency_get(&self, actor_id: &str, op: &str, key: &str) -> StoreResult<Option<(String, String)>> {
+    fn idempotency_get(
+        &self,
+        actor_id: &str,
+        op: &str,
+        key: &str,
+    ) -> StoreResult<Option<(String, String)>> {
         self.opt(
             "SELECT request_hash, result_json FROM idempotency WHERE actor_id = ?1 AND op = ?2 AND key = ?3",
             params![actor_id, op, key],
@@ -700,11 +889,19 @@ impl Tx for SqliteTx<'_> {
     // agents
 
     fn agent_by_id(&self, id: &str) -> StoreResult<Option<Agent>> {
-        self.opt(&format!("{AGENT_SELECT} WHERE a.agent_id = ?1"), [id], agent_row)
+        self.opt(
+            &format!("{AGENT_SELECT} WHERE a.agent_id = ?1"),
+            [id],
+            agent_row,
+        )
     }
 
     fn agent_by_name(&self, owner_id: i64, name: &str) -> StoreResult<Option<Agent>> {
-        self.opt(&format!("{AGENT_SELECT} WHERE a.owner_id = ?1 AND a.name_lower = ?2"), params![owner_id, name], agent_row)
+        self.opt(
+            &format!("{AGENT_SELECT} WHERE a.owner_id = ?1 AND a.name_lower = ?2"),
+            params![owner_id, name],
+            agent_row,
+        )
     }
 
     fn agents_at_address(&self, owner_id: i64, address: &Address) -> StoreResult<Vec<Agent>> {
@@ -727,7 +924,13 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn bound_agents(&self) -> StoreResult<Vec<Agent>> {
-        self.rows(&format!("{AGENT_SELECT} WHERE a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"), [], agent_row)
+        self.rows(
+            &format!(
+                "{AGENT_SELECT} WHERE a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"
+            ),
+            [],
+            agent_row,
+        )
     }
 
     fn agents_on_host(&self, host: &str) -> StoreResult<Vec<Agent>> {
@@ -739,13 +942,21 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn insert_agent(&self, id: &str, owner_id: i64, name: &str) -> StoreResult<()> {
-        self.exec("INSERT INTO agents(agent_id, owner_id, name_lower) VALUES (?1, ?2, ?3)", params![id, owner_id, name])?;
+        self.exec(
+            "INSERT INTO agents(agent_id, owner_id, name_lower) VALUES (?1, ?2, ?3)",
+            params![id, owner_id, name],
+        )?;
         Ok(())
     }
 
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()> {
-        let old: Option<String> =
-            self.opt("SELECT host_id FROM agents WHERE agent_id = ?1", [agent_id], one_col)?.flatten();
+        let old: Option<String> = self
+            .opt(
+                "SELECT host_id FROM agents WHERE agent_id = ?1",
+                [agent_id],
+                one_col,
+            )?
+            .flatten();
         self.wakes.borrow_mut().hosts.extend(old.clone());
         self.exec(
             "UPDATE agents SET address_kind = ?2, address_target = ?3, host_id = ?4,
@@ -769,35 +980,61 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn route_revision(&self, host: &str) -> StoreResult<u64> {
-        let r: Option<i64> = self.opt("SELECT route_revision FROM hosts WHERE host_id = ?1", [host], one_col)?;
+        let r: Option<i64> = self.opt(
+            "SELECT route_revision FROM hosts WHERE host_id = ?1",
+            [host],
+            one_col,
+        )?;
         Ok(r.unwrap_or_default() as u64)
     }
 
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()> {
-        self.exec("UPDATE agents SET pinned_address = ?2 WHERE agent_id = ?1", params![agent_id, pinned])?;
+        self.exec(
+            "UPDATE agents SET pinned_address = ?2 WHERE agent_id = ?1",
+            params![agent_id, pinned],
+        )?;
         Ok(())
     }
 
     fn set_display(&self, agent_id: &str, display: Option<&str>) -> StoreResult<()> {
-        self.exec("UPDATE agents SET display = ?2 WHERE agent_id = ?1", params![agent_id, display])?;
+        self.exec(
+            "UPDATE agents SET display = ?2 WHERE agent_id = ?1",
+            params![agent_id, display],
+        )?;
         Ok(())
     }
 
     fn rename_agent(&self, agent_id: &str, name: &str) -> StoreResult<()> {
-        self.exec("UPDATE agents SET name_lower = ?2 WHERE agent_id = ?1", params![agent_id, name])?;
+        self.exec(
+            "UPDATE agents SET name_lower = ?2 WHERE agent_id = ?1",
+            params![agent_id, name],
+        )?;
         Ok(())
     }
 
     // channels
 
     fn channel_by_name(&self, name: &str) -> StoreResult<Option<Channel>> {
-        self.opt("SELECT channel_id, name_lower, created_by, topic FROM channels WHERE name_lower = ?1", [name], |r| {
-            Ok(Channel { id: r.get(0)?, name: r.get(1)?, created_by: r.get(2)?, topic: r.get(3)? })
-        })
+        self.opt(
+            "SELECT channel_id, name_lower, created_by, topic FROM channels WHERE name_lower = ?1",
+            [name],
+            |r| {
+                Ok(Channel {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    created_by: r.get(2)?,
+                    topic: r.get(3)?,
+                })
+            },
+        )
     }
 
     fn channel_id_by_name(&self, name: &str) -> StoreResult<Option<String>> {
-        self.opt("SELECT channel_id FROM channels WHERE name_lower = ?1", [name], one_col)
+        self.opt(
+            "SELECT channel_id FROM channels WHERE name_lower = ?1",
+            [name],
+            one_col,
+        )
     }
 
     fn insert_channel(&self, channel: &Channel) -> StoreResult<()> {
@@ -809,12 +1046,19 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn set_channel_topic(&self, channel_id: &str, topic: Option<&str>) -> StoreResult<()> {
-        self.exec("UPDATE channels SET topic = ?2 WHERE channel_id = ?1", params![channel_id, topic])?;
+        self.exec(
+            "UPDATE channels SET topic = ?2 WHERE channel_id = ?1",
+            params![channel_id, topic],
+        )?;
         Ok(())
     }
 
     fn channel_member_ids(&self, channel_id: &str) -> StoreResult<Vec<String>> {
-        self.rows("SELECT agent_id FROM memberships WHERE channel_id = ?1 ORDER BY agent_id", [channel_id], one_col)
+        self.rows(
+            "SELECT agent_id FROM memberships WHERE channel_id = ?1 ORDER BY agent_id",
+            [channel_id],
+            one_col,
+        )
     }
 
     fn read_seq(&self, channel_id: &str, agent_id: &str) -> StoreResult<Option<i64>> {
@@ -834,10 +1078,19 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn channel_last_seq(&self, channel_id: &str) -> StoreResult<i64> {
-        self.one("SELECT COALESCE(MAX(commit_seq), 0) FROM messages WHERE channel_id = ?1", [channel_id], one_col)
+        self.one(
+            "SELECT COALESCE(MAX(commit_seq), 0) FROM messages WHERE channel_id = ?1",
+            [channel_id],
+            one_col,
+        )
     }
 
-    fn insert_membership(&self, channel_id: &str, agent_id: &str, read_seq: i64) -> StoreResult<()> {
+    fn insert_membership(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        read_seq: i64,
+    ) -> StoreResult<()> {
         self.exec(
             "INSERT INTO memberships(channel_id, agent_id, read_seq) VALUES (?1, ?2, ?3)",
             params![channel_id, agent_id, read_seq],
@@ -846,7 +1099,10 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn delete_membership(&self, channel_id: &str, agent_id: &str) -> StoreResult<()> {
-        self.exec("DELETE FROM memberships WHERE channel_id = ?1 AND agent_id = ?2", params![channel_id, agent_id])?;
+        self.exec(
+            "DELETE FROM memberships WHERE channel_id = ?1 AND agent_id = ?2",
+            params![channel_id, agent_id],
+        )?;
         Ok(())
     }
 
@@ -857,7 +1113,14 @@ impl Tx for SqliteTx<'_> {
                 (SELECT COUNT(*) FROM messages m WHERE m.channel_id = c.channel_id)
              FROM channels c ORDER BY c.name_lower",
             [],
-            |r| Ok(ChannelSummary { name: r.get(0)?, topic: r.get(1)?, members: r.get(2)?, messages: r.get(3)? }),
+            |r| {
+                Ok(ChannelSummary {
+                    name: r.get(0)?,
+                    topic: r.get(1)?,
+                    members: r.get(2)?,
+                    messages: r.get(3)?,
+                })
+            },
         )
     }
 
@@ -873,7 +1136,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn channel_message_ids(&self, channel_id: &str) -> StoreResult<Vec<String>> {
-        self.rows("SELECT message_id FROM messages WHERE channel_id = ?1 ORDER BY commit_seq", [channel_id], one_col)
+        self.rows(
+            "SELECT message_id FROM messages WHERE channel_id = ?1 ORDER BY commit_seq",
+            [channel_id],
+            one_col,
+        )
     }
 
     fn channel_seq_at(&self, channel_id: &str, message_id: &str) -> StoreResult<i64> {
@@ -896,7 +1163,10 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn set_message_page(&self, message_id: &str, kind: &str) -> StoreResult<()> {
-        self.exec("UPDATE messages SET page = ?2 WHERE message_id = ?1", params![message_id, kind])?;
+        self.exec(
+            "UPDATE messages SET page = ?2 WHERE message_id = ?1",
+            params![message_id, kind],
+        )?;
         Ok(())
     }
 
@@ -916,7 +1186,13 @@ impl Tx for SqliteTx<'_> {
         )? > 0)
     }
 
-    fn insert_attachment(&self, id: &str, message_id: &str, filename: &str, bytes: &[u8]) -> StoreResult<()> {
+    fn insert_attachment(
+        &self,
+        id: &str,
+        message_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> StoreResult<()> {
         self.exec(
             "INSERT INTO attachments(attachment_id, message_id, filename, bytes, size) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, message_id, filename, bytes, bytes.len() as i64],
@@ -925,7 +1201,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn message_by_id(&self, id: &str) -> StoreResult<Option<Message>> {
-        self.opt(&format!("{MSG_SELECT} WHERE m.message_id = ?1"), [id], msg_row)
+        self.opt(
+            &format!("{MSG_SELECT} WHERE m.message_id = ?1"),
+            [id],
+            msg_row,
+        )
     }
 
     fn inbox(&self, agent_id: &str, after: i64, limit: i64) -> StoreResult<Vec<Message>> {
@@ -940,7 +1220,12 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn unread_in_channel(&self, channel_id: &str, agent_id: &str, limit: i64) -> StoreResult<Vec<Message>> {
+    fn unread_in_channel(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>> {
         self.msgs(
             "m.channel_id = ?1 AND m.commit_seq > (SELECT read_seq FROM memberships
                 WHERE channel_id = ?1 AND agent_id = ?2) ORDER BY m.commit_seq LIMIT ?3",
@@ -960,7 +1245,10 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn sent_by(&self, agent_id: &str, after: i64, limit: i64) -> StoreResult<Vec<Message>> {
-        self.msgs("m.sender_agent_id = ?1 AND m.commit_seq > ?2 ORDER BY m.commit_seq LIMIT ?3", params![agent_id, after, limit])
+        self.msgs(
+            "m.sender_agent_id = ?1 AND m.commit_seq > ?2 ORDER BY m.commit_seq LIMIT ?3",
+            params![agent_id, after, limit],
+        )
     }
 
     fn first_seq_from_day(&self, day: &str) -> StoreResult<Option<i64>> {
@@ -993,9 +1281,10 @@ impl Tx for SqliteTx<'_> {
         let (filter, arg) = match scope {
             SearchScope::All => ("?4 IS NULL", None),
             SearchScope::Channel(name) => ("c.name_lower = ?4", Some(name)),
-            SearchScope::Partner(id) => {
-                ("m.channel_id IS NULL AND (m.sender_agent_id = ?4 OR m.recipient_agent_id = ?4)", Some(id))
-            }
+            SearchScope::Partner(id) => (
+                "m.channel_id IS NULL AND (m.sender_agent_id = ?4 OR m.recipient_agent_id = ?4)",
+                Some(id),
+            ),
         };
         self.msgs(
             &format!(
@@ -1007,7 +1296,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn last_seq(&self) -> StoreResult<i64> {
-        self.one("SELECT COALESCE(MAX(commit_seq), 0) FROM messages", [], one_col)
+        self.one(
+            "SELECT COALESCE(MAX(commit_seq), 0) FROM messages",
+            [],
+            one_col,
+        )
     }
 
     fn feed_scan(
@@ -1047,12 +1340,24 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn attachment(&self, id: &str) -> StoreResult<Option<Attachment>> {
-        self.opt("SELECT message_id, filename, bytes FROM attachments WHERE attachment_id = ?1", [id], |r| {
-            Ok(Attachment { message_id: r.get(0)?, filename: r.get(1)?, bytes: r.get(2)? })
-        })
+        self.opt(
+            "SELECT message_id, filename, bytes FROM attachments WHERE attachment_id = ?1",
+            [id],
+            |r| {
+                Ok(Attachment {
+                    message_id: r.get(0)?,
+                    filename: r.get(1)?,
+                    bytes: r.get(2)?,
+                })
+            },
+        )
     }
 
-    fn attachment_sizes(&self, message_id: &str, filename: &str) -> StoreResult<Option<(i64, i64)>> {
+    fn attachment_sizes(
+        &self,
+        message_id: &str,
+        filename: &str,
+    ) -> StoreResult<Option<(i64, i64)>> {
         self.opt(
             "SELECT size, length(bytes) FROM attachments WHERE message_id = ?1 AND filename = ?2
              ORDER BY attachment_id LIMIT 1",
@@ -1071,7 +1376,13 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn set_reaction(&self, message_id: &str, actor_id: &str, emoji: &str, present: bool) -> StoreResult<()> {
+    fn set_reaction(
+        &self,
+        message_id: &str,
+        actor_id: &str,
+        emoji: &str,
+        present: bool,
+    ) -> StoreResult<()> {
         self.exec(
             "INSERT INTO reactions(message_id, actor_id, emoji, present) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(message_id, actor_id, emoji) DO UPDATE SET present = excluded.present",
@@ -1108,7 +1419,12 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn channel_read_count(&self, channel_id: &str, except_agent: &str, seq: i64) -> StoreResult<(i64, i64)> {
+    fn channel_read_count(
+        &self,
+        channel_id: &str,
+        except_agent: &str,
+        seq: i64,
+    ) -> StoreResult<(i64, i64)> {
         self.one(
             "SELECT COALESCE(SUM(read_seq >= ?3), 0), COUNT(*) FROM memberships
              WHERE channel_id = ?1 AND agent_id <> ?2",
@@ -1129,18 +1445,33 @@ impl Tx for SqliteTx<'_> {
              binding_version, status, next_attempt_at) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
             params![n.id, n.message_id, n.recipient_id, n.kind, n.binding_version, n.next_attempt_at],
         )?;
-        self.wakes.borrow_mut().notifications.insert(n.id.to_string());
+        self.wakes
+            .borrow_mut()
+            .notifications
+            .insert(n.id.to_string());
         Ok(())
     }
 
-    fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>> {
+    fn due_notifications(
+        &self,
+        now: i64,
+        host: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<DueNotification>> {
         self.rows(
             "SELECT n.notification_id, n.message_id, n.recipient_agent_id, n.kind
              FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
              WHERE n.status = 'pending' AND n.next_attempt_at <= ?1 AND a.host_id = ?2
              ORDER BY n.next_attempt_at, n.rowid LIMIT ?3",
             params![now, host, limit],
-            |r| Ok(DueNotification { id: r.get(0)?, message_id: r.get(1)?, recipient_id: r.get(2)?, kind: r.get(3)? }),
+            |r| {
+                Ok(DueNotification {
+                    id: r.get(0)?,
+                    message_id: r.get(1)?,
+                    recipient_id: r.get(2)?,
+                    kind: r.get(3)?,
+                })
+            },
         )
     }
 
@@ -1208,19 +1539,33 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn set_attempt_not_before(&self, id: &str, not_before: i64) -> StoreResult<()> {
-        self.exec("UPDATE attempts SET not_before = ?2 WHERE attempt_id = ?1", params![id, not_before])?;
+        self.exec(
+            "UPDATE attempts SET not_before = ?2 WHERE attempt_id = ?1",
+            params![id, not_before],
+        )?;
         Ok(())
     }
 
     fn attempt_not_before(&self, id: &str) -> StoreResult<Option<i64>> {
-        Ok(self.opt("SELECT not_before FROM attempts WHERE attempt_id = ?1", [id], |r| r.get::<_, Option<i64>>(0))?.flatten())
+        Ok(self
+            .opt(
+                "SELECT not_before FROM attempts WHERE attempt_id = ?1",
+                [id],
+                |r| r.get::<_, Option<i64>>(0),
+            )?
+            .flatten())
     }
 
     fn set_notification_status(&self, id: &str, status: &str) -> StoreResult<()> {
         self.settle_notification(id, status, None)
     }
 
-    fn settle_read_in_channel(&self, channel_id: &str, recipient_id: &str, cursor: i64) -> StoreResult<u64> {
+    fn settle_read_in_channel(
+        &self,
+        channel_id: &str,
+        recipient_id: &str,
+        cursor: i64,
+    ) -> StoreResult<u64> {
         Ok(self.exec(
             "UPDATE notifications SET status = 'read'
              WHERE recipient_agent_id = ?2 AND status IN ('pending', 'dispatching', 'notified', 'held')
@@ -1237,7 +1582,12 @@ impl Tx for SqliteTx<'_> {
         )? > 0)
     }
 
-    fn settle_notification(&self, id: &str, status: &str, next_attempt_at: Option<i64>) -> StoreResult<()> {
+    fn settle_notification(
+        &self,
+        id: &str,
+        status: &str,
+        next_attempt_at: Option<i64>,
+    ) -> StoreResult<()> {
         self.exec(
             "UPDATE notifications SET status = ?2, next_attempt_at = COALESCE(?3, next_attempt_at)
              WHERE notification_id = ?1",
@@ -1380,7 +1730,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn attempt(&self, id: &str) -> StoreResult<Option<(String, String)>> {
-        self.opt("SELECT notification_id, status FROM attempts WHERE attempt_id = ?1", [id], pair)
+        self.opt(
+            "SELECT notification_id, status FROM attempts WHERE attempt_id = ?1",
+            [id],
+            pair,
+        )
     }
 
     fn attempt_route(&self, id: &str) -> StoreResult<Option<(i64, i64)>> {
@@ -1403,9 +1757,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn attempt_owner(&self, id: &str) -> StoreResult<Option<(String, Option<String>, i64)>> {
-        self.opt("SELECT bridge_instance, host_id, last_event_seq FROM attempts WHERE attempt_id = ?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })
+        self.opt(
+            "SELECT bridge_instance, host_id, last_event_seq FROM attempts WHERE attempt_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
     }
 
     fn update_attempt(
@@ -1476,7 +1832,11 @@ impl Tx for SqliteTx<'_> {
     // bridge instances and endpoints
 
     fn bridge_instance(&self, instance: &str) -> StoreResult<Option<(String, String)>> {
-        self.opt("SELECT host_id, state FROM bridge_instances WHERE instance = ?1", [instance], pair)
+        self.opt(
+            "SELECT host_id, state FROM bridge_instances WHERE instance = ?1",
+            [instance],
+            pair,
+        )
     }
 
     fn active_bridges(&self, host: &str) -> StoreResult<Vec<String>> {
@@ -1504,7 +1864,10 @@ impl Tx for SqliteTx<'_> {
              ON CONFLICT(instance) DO UPDATE SET state = 'active', updated_at = ?3",
             params![instance, host, at],
         )?;
-        self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
+        self.wakes
+            .borrow_mut()
+            .fenced
+            .extend(fenced.iter().cloned());
         Ok(fenced)
     }
 
@@ -1518,11 +1881,20 @@ impl Tx for SqliteTx<'_> {
             "UPDATE bridge_instances SET state = 'fenced', updated_at = ?2 WHERE host_id = ?1 AND state = 'active'",
             params![host, at],
         )?;
-        self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
+        self.wakes
+            .borrow_mut()
+            .fenced
+            .extend(fenced.iter().cloned());
         Ok(fenced)
     }
 
-    fn replace_endpoints(&self, host: &str, instance: &str, endpoints: &[(&str, &str)], at: &str) -> StoreResult<()> {
+    fn replace_endpoints(
+        &self,
+        host: &str,
+        instance: &str,
+        endpoints: &[(&str, &str)],
+        at: &str,
+    ) -> StoreResult<()> {
         self.exec("DELETE FROM endpoints WHERE host_id = ?1", [host])?;
         for (kind, target) in endpoints {
             self.exec(
@@ -1541,7 +1913,11 @@ impl Tx for SqliteTx<'_> {
     // web UI: owner-scoped reads
 
     fn owner_agents(&self, owner_id: i64) -> StoreResult<Vec<Agent>> {
-        self.rows(&format!("{AGENT_SELECT} WHERE a.owner_id = ?1 ORDER BY a.name_lower"), [owner_id], agent_row)
+        self.rows(
+            &format!("{AGENT_SELECT} WHERE a.owner_id = ?1 ORDER BY a.name_lower"),
+            [owner_id],
+            agent_row,
+        )
     }
 
     fn owner_dm_threads(&self, owner_id: i64) -> StoreResult<Vec<DmThread>> {
@@ -1662,9 +2038,20 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64, oldest_first: bool)
-    -> StoreResult<Vec<Message>> {
-        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, oldest_first, |n| format!("?{n}")) else {
+    fn owner_feed(
+        &self,
+        owner_id: i64,
+        ranges: &[FeedRange],
+        after: i64,
+        before: i64,
+        limit: i64,
+        oldest_first: bool,
+    ) -> StoreResult<Vec<Message>> {
+        let Some((seqs, args)) =
+            feed_seqs_sql(owner_id, ranges, after, before, limit, oldest_first, |n| {
+                format!("?{n}")
+            })
+        else {
             return Ok(Vec::new());
         };
         let args = args.into_iter().map(|a| match a {
@@ -1672,19 +2059,44 @@ impl Tx for SqliteTx<'_> {
             FeedArg::Text(t) => rusqlite::types::Value::Text(t),
         });
         let order = if oldest_first { "ASC" } else { "DESC" };
-        self.msgs(&format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq {order}"), params_from_iter(args))
+        self.msgs(
+            &format!("m.commit_seq IN ({seqs}) ORDER BY m.commit_seq {order}"),
+            params_from_iter(args),
+        )
     }
 
     fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>> {
-        self.rows(&problem_seqs_sql(|n| format!("?{n}")), params![owner_id, after, before], one_col)
+        self.rows(
+            &problem_seqs_sql(|n| format!("?{n}")),
+            params![owner_id, after, before],
+            one_col,
+        )
     }
 
-    fn owner_thread_up(&self, owner_id: i64, id: &str) -> StoreResult<Vec<(i64, String, Option<String>)>> {
-        self.rows(&thread_up_sql(|n| format!("?{n}")), params![owner_id, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    fn owner_thread_up(
+        &self,
+        owner_id: i64,
+        id: &str,
+    ) -> StoreResult<Vec<(i64, String, Option<String>)>> {
+        self.rows(
+            &thread_up_sql(|n| format!("?{n}")),
+            params![owner_id, id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
     }
 
-    fn owner_thread_down(&self, owner_id: i64, top: &str, after: i64, limit: i64) -> StoreResult<Vec<i64>> {
-        self.rows(&thread_down_sql(|n| format!("?{n}")), params![owner_id, top, after, limit], one_col)
+    fn owner_thread_down(
+        &self,
+        owner_id: i64,
+        top: &str,
+        after: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<i64>> {
+        self.rows(
+            &thread_down_sql(|n| format!("?{n}")),
+            params![owner_id, top, after, limit],
+            one_col,
+        )
     }
 
     fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>> {
@@ -1692,7 +2104,10 @@ impl Tx for SqliteTx<'_> {
             return Ok(Vec::new());
         }
         let marks = vec!["?"; seqs.len()].join(", ");
-        self.msgs(&format!("m.commit_seq IN ({marks}) ORDER BY m.commit_seq DESC"), params_from_iter(seqs))
+        self.msgs(
+            &format!("m.commit_seq IN ({marks}) ORDER BY m.commit_seq DESC"),
+            params_from_iter(seqs),
+        )
     }
 
     fn owner_search_scan(
@@ -1709,9 +2124,10 @@ impl Tx for SqliteTx<'_> {
         let (filter, arg) = match scope {
             SearchScope::All => ("?4 IS NULL", None),
             SearchScope::Channel(name) => ("c.name_lower = ?4", Some(name)),
-            SearchScope::Partner(id) => {
-                ("m.channel_id IS NULL AND (m.sender_agent_id = ?4 OR m.recipient_agent_id = ?4)", Some(id))
-            }
+            SearchScope::Partner(id) => (
+                "m.channel_id IS NULL AND (m.sender_agent_id = ?4 OR m.recipient_agent_id = ?4)",
+                Some(id),
+            ),
         };
         self.msgs(
             &format!(
@@ -1763,7 +2179,13 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
-    fn insert_mcp_token(&self, token_digest: &str, grant_id: &str, audience: &str, expires_at: i64) -> StoreResult<()> {
+    fn insert_mcp_token(
+        &self,
+        token_digest: &str,
+        grant_id: &str,
+        audience: &str,
+        expires_at: i64,
+    ) -> StoreResult<()> {
         self.exec(
             "INSERT INTO mcp_tokens(token_digest, grant_id, audience, expires_at) VALUES (?1, ?2, ?3, ?4)",
             params![token_digest, grant_id, audience, expires_at],
@@ -1771,7 +2193,13 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
-    fn insert_mcp_refresh(&self, digest: &str, grant_id: &str, issued_at: i64, expires_at: i64) -> StoreResult<()> {
+    fn insert_mcp_refresh(
+        &self,
+        digest: &str,
+        grant_id: &str,
+        issued_at: i64,
+        expires_at: i64,
+    ) -> StoreResult<()> {
         self.exec(
             "INSERT INTO mcp_refresh(digest, grant_id, issued_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
             params![digest, grant_id, issued_at, expires_at],
@@ -1780,7 +2208,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn mcp_grant(&self, grant_id: &str) -> StoreResult<Option<McpGrantRow>> {
-        self.opt(&format!("{MCP_GRANT_SELECT} WHERE grant_id = ?1"), [grant_id], mcp_grant_row)
+        self.opt(
+            &format!("{MCP_GRANT_SELECT} WHERE grant_id = ?1"),
+            [grant_id],
+            mcp_grant_row,
+        )
     }
 
     fn mcp_token(&self, token_digest: &str) -> StoreResult<Option<(String, String, i64)>> {
@@ -1808,7 +2240,10 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn touch_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<()> {
-        self.exec("UPDATE mcp_grants SET last_used_at = ?2 WHERE grant_id = ?1", params![grant_id, at])?;
+        self.exec(
+            "UPDATE mcp_grants SET last_used_at = ?2 WHERE grant_id = ?1",
+            params![grant_id, at],
+        )?;
         Ok(())
     }
 
@@ -1842,12 +2277,19 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()> {
-        self.exec("UPDATE mcp_grants SET code_digest = ?2 WHERE grant_id = ?1", params![grant_id, code_digest])?;
+        self.exec(
+            "UPDATE mcp_grants SET code_digest = ?2 WHERE grant_id = ?1",
+            params![grant_id, code_digest],
+        )?;
         Ok(())
     }
 
     fn mcp_grant_of_code(&self, code_digest: &str) -> StoreResult<Option<String>> {
-        self.opt("SELECT grant_id FROM mcp_grants WHERE code_digest = ?1", [code_digest], |r| r.get(0))
+        self.opt(
+            "SELECT grant_id FROM mcp_grants WHERE code_digest = ?1",
+            [code_digest],
+            |r| r.get(0),
+        )
     }
 
     fn mcp_grants_of(&self, user_id: i64) -> StoreResult<Vec<McpGrantRow>> {
@@ -1859,16 +2301,25 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn purge_mcp(&self, now: i64, code_ttl: i64) -> StoreResult<()> {
-        self.exec("DELETE FROM mcp_codes WHERE created_at < ?1 - ?2", params![now, code_ttl])?;
+        self.exec(
+            "DELETE FROM mcp_codes WHERE created_at < ?1 - ?2",
+            params![now, code_ttl],
+        )?;
         self.exec("DELETE FROM mcp_tokens WHERE expires_at < ?1", [now])?;
         // A consumed refresh token stays while its grant lives, so a replay is still recognised.
-        self.exec("DELETE FROM mcp_refresh WHERE consumed_at IS NULL AND expires_at < ?1", [now])?;
+        self.exec(
+            "DELETE FROM mcp_refresh WHERE consumed_at IS NULL AND expires_at < ?1",
+            [now],
+        )?;
         self.exec(
             "DELETE FROM mcp_refresh WHERE grant_id IN
                  (SELECT grant_id FROM mcp_grants WHERE expires_at < ?1 OR revoked_at IS NOT NULL)",
             [now],
         )?;
-        self.exec("DELETE FROM mcp_grants WHERE expires_at < ?1 OR revoked_at IS NOT NULL", [now])?;
+        self.exec(
+            "DELETE FROM mcp_grants WHERE expires_at < ?1 OR revoked_at IS NOT NULL",
+            [now],
+        )?;
         Ok(())
     }
 
@@ -1913,7 +2364,14 @@ impl Tx for SqliteTx<'_> {
         self.rows(
             "SELECT host_id, kind, target, seen_at FROM endpoints ORDER BY host_id, kind, target",
             [],
-            |r| Ok(EndpointRow { host: r.get(0)?, kind: r.get(1)?, target: r.get(2)?, seen_at: r.get(3)? }),
+            |r| {
+                Ok(EndpointRow {
+                    host: r.get(0)?,
+                    kind: r.get(1)?,
+                    target: r.get(2)?,
+                    seen_at: r.get(3)?,
+                })
+            },
         )
     }
 
@@ -2026,7 +2484,11 @@ impl Tx for SqliteTx<'_> {
     }
 
     fn count_bound_agents(&self) -> StoreResult<i64> {
-        self.one("SELECT COUNT(*) FROM agents WHERE address_kind IS NOT NULL", [], one_col)
+        self.one(
+            "SELECT COUNT(*) FROM agents WHERE address_kind IS NOT NULL",
+            [],
+            one_col,
+        )
     }
 
     fn unbound_waiting(&self, owner_id: i64) -> StoreResult<Vec<(String, i64)>> {

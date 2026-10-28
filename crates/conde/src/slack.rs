@@ -53,7 +53,12 @@ const CONFIG_ERRORS: &[&str] = &[
 /// for a member id that changed or was wrong. Not `account_inactive`: that is the bot's own account.
 const RELOOKUP: &[&str] = &["user_not_found", "channel_not_found"];
 /// Slack's `error` codes worth another attempt; any other is final.
-const RETRYABLE: &[&str] = &["internal_error", "fatal_error", "service_unavailable", "request_timeout"];
+const RETRYABLE: &[&str] = &[
+    "internal_error",
+    "fatal_error",
+    "service_unavailable",
+    "request_timeout",
+];
 
 /// The bot token; never printed.
 #[derive(Clone)]
@@ -86,11 +91,16 @@ pub struct SlackConfig {
 }
 
 impl SlackConfig {
-    /// From `CONDE_SLACK_BOT_TOKEN` (and `CONDE_SLACK_NOTIFY` for the import); `Ok(None)`
-    /// (feature off) without a token.
-    pub fn from_env(board: &str, public_url: Option<String>) -> anyhow::Result<Option<SlackConfig>> {
+    /// From `CONDE_SLACK_BOT_TOKEN` (or `CONDE_SLACK_BOT_TOKEN_FILE`; and `CONDE_SLACK_NOTIFY`
+    /// for the import); `Ok(None)` (feature off) without a token.
+    pub fn from_env(
+        board: &str,
+        public_url: Option<String>,
+    ) -> anyhow::Result<Option<SlackConfig>> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        SlackConfig::from_vars(var("CONDE_SLACK_BOT_TOKEN"), var("CONDE_SLACK_NOTIFY"), board, public_url)
+        let token =
+            conde_remote::secret_env("CONDE_SLACK_BOT_TOKEN")?.filter(|v| !v.trim().is_empty());
+        SlackConfig::from_vars(token, var("CONDE_SLACK_NOTIFY"), board, public_url)
     }
 
     pub fn from_vars(
@@ -107,7 +117,11 @@ impl SlackConfig {
         };
         Ok(Some(SlackConfig {
             token: Token::new(&token),
-            import: notify.as_deref().map(parse_members).transpose()?.unwrap_or_default(),
+            import: notify
+                .as_deref()
+                .map(parse_members)
+                .transpose()?
+                .unwrap_or_default(),
             api_base: API_BASE.to_string(),
             board: board.to_string(),
             public_url: public_url.map(|u| u.trim_end_matches('/').to_string()),
@@ -119,15 +133,17 @@ impl SlackConfig {
 pub fn parse_members(raw: &str) -> anyhow::Result<BTreeMap<String, String>> {
     let mut members = BTreeMap::new();
     for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        let (owner, member) = entry
-            .split_once('=')
-            .with_context(|| format!("CONDE_SLACK_NOTIFY entry '{entry}' is not <owner>=<Slack member id>"))?;
+        let (owner, member) = entry.split_once('=').with_context(|| {
+            format!("CONDE_SLACK_NOTIFY entry '{entry}' is not <owner>=<Slack member id>")
+        })?;
         let (owner, member) = (owner.trim().to_lowercase(), member.trim());
         if owner.is_empty() || owner.chars().any(|c| c.is_whitespace() || c == '/') {
             bail!("CONDE_SLACK_NOTIFY entry '{entry}': '{owner}' is not an owner name");
         }
         if !is_member_id(member) {
-            bail!("CONDE_SLACK_NOTIFY entry '{entry}': '{member}' is not a Slack member id (U... or W...)");
+            bail!(
+                "CONDE_SLACK_NOTIFY entry '{entry}': '{member}' is not a Slack member id (U... or W...)"
+            );
         }
         if members.insert(owner.clone(), member.to_string()).is_some() {
             bail!("CONDE_SLACK_NOTIFY names '{owner}' twice");
@@ -141,7 +157,11 @@ pub fn parse_members(raw: &str) -> anyhow::Result<BTreeMap<String, String>> {
 
 /// A Slack member id as Slack writes one: `U...` or `W...`, upper-case letters and digits.
 pub fn is_member_id(id: &str) -> bool {
-    id.len() >= 3 && id.starts_with(['U', 'W']) && id.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    id.len() >= 3
+        && id.starts_with(['U', 'W'])
+        && id
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 /// Copies `CONDE_SLACK_NOTIFY` into `users.slack_member_id` where it is empty (`slack_source =
@@ -153,7 +173,10 @@ pub fn import_env(tx: &dyn Tx, config: &SlackConfig) -> anyhow::Result<Vec<Strin
             tracing::warn!(%owner, "slack: CONDE_SLACK_NOTIFY names an owner the board does not have");
             continue;
         };
-        if tx.user_slack(user_id)?.is_some_and(|u| u.slack_member_id.is_none()) {
+        if tx
+            .user_slack(user_id)?
+            .is_some_and(|u| u.slack_member_id.is_none())
+        {
             tx.set_user_slack(user_id, member, "env")?;
             tracing::info!(%owner, "slack: member id imported from CONDE_SLACK_NOTIFY");
             imported.push(owner.clone());
@@ -183,7 +206,9 @@ pub enum Outcome {
     Retry(String),
     /// Slack's rate limit: sent again after `after_ms` (Retry-After) or the backoff; the rest of
     /// the owner's pass waits too.
-    RateLimited { after_ms: Option<i64> },
+    RateLimited {
+        after_ms: Option<i64>,
+    },
 }
 
 pub fn client() -> anyhow::Result<reqwest::Client> {
@@ -196,7 +221,10 @@ pub fn client() -> anyhow::Result<reqwest::Client> {
 
 /// Imports `CONDE_SLACK_NOTIFY`, then runs the worker until the store's event stream closes,
 /// restarted after a panic.
-pub async fn spawn(d: Arc<Dispatcher>, config: Arc<SlackConfig>) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+pub async fn spawn(
+    d: Arc<Dispatcher>,
+    config: Arc<SlackConfig>,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let http = client()?;
     let (d2, c2) = (d.clone(), config.clone());
     tokio::task::spawn_blocking(move || d2.with_tx(|tx| import_env(tx, &c2))).await??;
@@ -237,7 +265,13 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(d: Arc<Dispatcher>, config: Arc<SlackConfig>, http: reqwest::Client) -> Worker {
-        Worker { d, config, http, startup: true, looked_up: BTreeMap::new() }
+        Worker {
+            d,
+            config,
+            http,
+            startup: true,
+            looked_up: BTreeMap::new(),
+        }
     }
 
     /// A pass on every store event and every [`TICK`].
@@ -271,7 +305,14 @@ impl Worker {
         for job in jobs {
             if let Some(after_ms) = limited.get(&job.owner) {
                 // Not sent: due again with the rate-limited one.
-                record(d, job, Outcome::RateLimited { after_ms: *after_ms }).await;
+                record(
+                    d,
+                    job,
+                    Outcome::RateLimited {
+                        after_ms: *after_ms,
+                    },
+                )
+                .await;
                 continue;
             }
             let owner = job.owner.clone();
@@ -299,17 +340,26 @@ impl Worker {
         .await??;
         let mut wanted = self.d.take_slack_lookups();
         if std::mem::take(&mut self.startup) {
-            wanted.extend(users.iter().filter(|u| u.slack_member_id.is_none()).map(|u| u.user_id));
+            wanted.extend(
+                users
+                    .iter()
+                    .filter(|u| u.slack_member_id.is_none())
+                    .map(|u| u.user_id),
+            );
         }
         self.looked_up.retain(|_, at| now - *at <= MAX_AGE_MS);
         // once per page: an owner's newest waiting page not looked up yet
         for (owner_id, message_id) in waiting {
-            if let std::collections::btree_map::Entry::Vacant(e) = self.looked_up.entry(message_id) {
+            if let std::collections::btree_map::Entry::Vacant(e) = self.looked_up.entry(message_id)
+            {
                 e.insert(now);
                 wanted.insert(owner_id);
             }
         }
-        for user in users.iter().filter(|u| wanted.contains(&u.user_id) && u.slack_member_id.is_none()) {
+        for user in users
+            .iter()
+            .filter(|u| wanted.contains(&u.user_id) && u.slack_member_id.is_none())
+        {
             self.look_up(user, None).await;
         }
         Ok(())
@@ -340,7 +390,10 @@ impl Worker {
         let stored = tokio::task::spawn_blocking(move || {
             d.with_tx(|tx| {
                 // the admin's id is never replaced; a concurrent lookup's is
-                if tx.user_slack(user_id)?.is_some_and(|u| u.slack_source.as_deref() != Some("admin")) {
+                if tx
+                    .user_slack(user_id)?
+                    .is_some_and(|u| u.slack_source.as_deref() != Some("admin"))
+                {
                     tx.set_user_slack(user_id, &id, "lookup")?;
                     return Ok(true);
                 }
@@ -372,7 +425,9 @@ pub async fn claim_due(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>) -> anyhow
     tokio::task::spawn_blocking(move || {
         let now = d.now_ms();
         // A read first: most passes find nothing, and a write transaction takes the board-wide lock.
-        if d.with_conn(|tx| tx.slack_due(now, now - MAX_AGE_MS, 1))?.is_empty() {
+        if d.with_conn(|tx| tx.slack_due(now, now - MAX_AGE_MS, 1))?
+            .is_empty()
+        {
             return Ok(Vec::new());
         }
         d.with_tx(|tx| claim(tx, &config, now))
@@ -382,13 +437,20 @@ pub async fn claim_due(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>) -> anyhow
 
 /// Sends one claimed job and records its outcome; None when the job was no longer this pass's to
 /// send (taken over after its lease, or the message read meanwhile) and nothing was posted.
-pub async fn deliver(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>, http: &reqwest::Client, mut job: Job) -> Option<Outcome> {
+pub async fn deliver(
+    d: &Arc<Dispatcher>,
+    config: &Arc<SlackConfig>,
+    http: &reqwest::Client,
+    mut job: Job,
+) -> Option<Outcome> {
     if !still_ours(d, &job).await {
         return None;
     }
     let mut outcome = post(http, config, &job).await;
     if let Outcome::Refused(why) = &outcome
-        && why.strip_prefix("slack: ").is_some_and(|code| RELOOKUP.contains(&code))
+        && why
+            .strip_prefix("slack: ")
+            .is_some_and(|code| RELOOKUP.contains(&code))
         && let Some(id) = relookup(d, config, http, &job).await
     {
         tracing::info!(owner = %job.owner, notification = %job.notification_id, "slack: member id changed; sending again");
@@ -399,15 +461,24 @@ pub async fn deliver(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>, http: &reqw
         outcome = post(http, config, &job).await;
     }
     match &outcome {
-        Outcome::Delivered => tracing::info!(notification = %job.notification_id, "slack: delivered"),
-        Outcome::Refused(why) => match why.strip_prefix("slack: ").filter(|code| CONFIG_ERRORS.contains(code)) {
+        Outcome::Delivered => {
+            tracing::info!(notification = %job.notification_id, "slack: delivered")
+        }
+        Outcome::Refused(why) => match why
+            .strip_prefix("slack: ")
+            .filter(|code| CONFIG_ERRORS.contains(code))
+        {
             Some(code) => tracing::error!(
                 owner = %job.owner, code, notification = %job.notification_id,
                 "slack: refused for a configuration fault (bot token or member id), every message to this owner fails"
             ),
-            None => tracing::warn!(notification = %job.notification_id, reason = %why, "slack: refused"),
+            None => {
+                tracing::warn!(notification = %job.notification_id, reason = %why, "slack: refused")
+            }
         },
-        Outcome::Retry(why) => tracing::warn!(notification = %job.notification_id, reason = %why, "slack: retrying"),
+        Outcome::Retry(why) => {
+            tracing::warn!(notification = %job.notification_id, reason = %why, "slack: retrying")
+        }
         Outcome::RateLimited { after_ms } => {
             tracing::warn!(notification = %job.notification_id, ?after_ms, "slack: rate limited")
         }
@@ -443,9 +514,17 @@ async fn still_ours(d: &Arc<Dispatcher>, job: &Job) -> bool {
 
 /// After a send refused for an unknown member id: the owner's member id looked up once more, when
 /// it changed.
-async fn relookup(d: &Arc<Dispatcher>, config: &Arc<SlackConfig>, http: &reqwest::Client, job: &Job) -> Option<String> {
+async fn relookup(
+    d: &Arc<Dispatcher>,
+    config: &Arc<SlackConfig>,
+    http: &reqwest::Client,
+    job: &Job,
+) -> Option<String> {
     let (d2, owner_id) = (d.clone(), job.owner_id);
-    let user = tokio::task::spawn_blocking(move || d2.with_conn(|tx| tx.user_slack(owner_id))).await.ok()?.ok()??;
+    let user = tokio::task::spawn_blocking(move || d2.with_conn(|tx| tx.user_slack(owner_id)))
+        .await
+        .ok()?
+        .ok()??;
     let w = Worker::new(d.clone(), config.clone(), http.clone());
     w.look_up(&user, Some(&job.channel)).await
 }
@@ -466,24 +545,39 @@ async fn record(d: &Arc<Dispatcher>, job: Job, outcome: Outcome) {
 }
 
 fn claim(tx: &dyn Tx, config: &SlackConfig, now: i64) -> anyhow::Result<Vec<Job>> {
-    let members: BTreeMap<i64, String> =
-        tx.users_slack()?.into_iter().filter_map(|u| Some((u.user_id, u.slack_member_id?))).collect();
+    let members: BTreeMap<i64, String> = tx
+        .users_slack()?
+        .into_iter()
+        .filter_map(|u| Some((u.user_id, u.slack_member_id?)))
+        .collect();
     let mut jobs = Vec::new();
     let mut messages = BTreeSet::new();
     for n in tx.slack_due(now, now - MAX_AGE_MS, BATCH)? {
-        let Some(member) = members.get(&n.owner_id) else { continue };
+        let Some(member) = members.get(&n.owner_id) else {
+            continue;
+        };
         // One DM per page, whichever of the owner's human rows it reached.
         if !messages.insert((n.owner_id, n.message_id.clone())) {
             continue;
         }
-        let (Some(m), Some(rcpt)) = (tx.message_by_id(&n.message_id)?, tx.agent_by_id(&n.recipient_id)?) else {
+        let (Some(m), Some(rcpt)) = (
+            tx.message_by_id(&n.message_id)?,
+            tx.agent_by_id(&n.recipient_id)?,
+        ) else {
             continue;
         };
         // A send of this page still dispatching outlived its lease: its replica died mid-send.
         tx.slack_abandon(&n.message_id, &n.owner, &iso_from_ms(now))?;
         let text = render(config, &m, &rcpt);
         let attempt_id = new_ulid();
-        tx.insert_attempt(&attempt_id, &n.id, SLACK_INSTANCE, rcpt.binding_version, SLACK_INSTANCE, &text)?;
+        tx.insert_attempt(
+            &attempt_id,
+            &n.id,
+            SLACK_INSTANCE,
+            rcpt.binding_version,
+            SLACK_INSTANCE,
+            &text,
+        )?;
         tx.set_attempt_not_before(&attempt_id, now + LEASE_MS)?;
         jobs.push(Job {
             owner: n.owner,
@@ -502,11 +596,23 @@ fn claim(tx: &dyn Tx, config: &SlackConfig, now: i64) -> anyhow::Result<Vec<Job>
 /// unread; otherwise the attempt is closed and nothing is posted.
 fn fence(tx: &dyn Tx, job: &Job, now: i64) -> anyhow::Result<bool> {
     let at = iso_from_ms(now);
-    if tx.attempt(&job.attempt_id)?.is_none_or(|(_, status)| status != "dispatching") {
+    if tx
+        .attempt(&job.attempt_id)?
+        .is_none_or(|(_, status)| status != "dispatching")
+    {
         return Ok(false);
     }
-    if tx.attempt_not_before(&job.attempt_id)?.is_none_or(|lease| lease <= now) {
-        tx.update_attempt(&job.attempt_id, "abandoned", Some("lease expired"), None, &at)?;
+    if tx
+        .attempt_not_before(&job.attempt_id)?
+        .is_none_or(|lease| lease <= now)
+    {
+        tx.update_attempt(
+            &job.attempt_id,
+            "abandoned",
+            Some("lease expired"),
+            None,
+            &at,
+        )?;
         return Ok(false);
     }
     if let Some((_, message_id, rcpt)) = tx.attempt_target(&job.attempt_id)?
@@ -529,15 +635,28 @@ fn read_by(tx: &dyn Tx, m: &Message, rcpt: &str) -> anyhow::Result<bool> {
 
 /// Records the outcome on the attempt while it is still dispatching (not taken over); the
 /// notification is never touched.
-fn settle(tx: &dyn Tx, job: &Job, outcome: &Outcome, now: i64, retry_ms: i64) -> anyhow::Result<()> {
-    if tx.attempt(&job.attempt_id)?.is_none_or(|(_, status)| status != "dispatching") {
+fn settle(
+    tx: &dyn Tx,
+    job: &Job,
+    outcome: &Outcome,
+    now: i64,
+    retry_ms: i64,
+) -> anyhow::Result<()> {
+    if tx
+        .attempt(&job.attempt_id)?
+        .is_none_or(|(_, status)| status != "dispatching")
+    {
         return Ok(());
     }
     let (status, reason, again) = match outcome {
         Outcome::Delivered => ("delivered", None, None),
         Outcome::Refused(why) => ("refused", Some(why.as_str()), None),
         Outcome::Retry(why) => ("failed", Some(why.as_str()), Some(retry_ms)),
-        Outcome::RateLimited { after_ms } => ("failed", Some("slack: ratelimited"), Some(after_ms.unwrap_or(retry_ms))),
+        Outcome::RateLimited { after_ms } => (
+            "failed",
+            Some("slack: ratelimited"),
+            Some(after_ms.unwrap_or(retry_ms)),
+        ),
     };
     tx.update_attempt(&job.attempt_id, status, reason, None, &iso_from_ms(now))?;
     if let Some(wait) = again {
@@ -548,14 +667,18 @@ fn settle(tx: &dyn Tx, job: &Job, outcome: &Outcome, now: i64, retry_ms: i64) ->
 
 /// Escapes Slack's mrkdwn control characters, so no text becomes a link or a mention.
 pub fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// encodeURIComponent's unreserved set.
 fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -563,7 +686,11 @@ fn encode(s: &str) -> String {
 
 /// The first non-empty line, at most [`LINE_CHARS`] characters.
 fn first_line(text: &str) -> String {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
     if line.chars().count() <= LINE_CHARS {
         return line.to_string();
     }
@@ -603,19 +730,37 @@ pub fn render(config: &SlackConfig, m: &Message, rcpt: &Agent) -> String {
 
 /// A Retry-After header in milliseconds: whole seconds, clamped to 1..=[`MAX_RETRY_AFTER`].
 pub fn retry_after_ms(header: Option<&str>) -> Option<i64> {
-    header.and_then(|v| v.trim().parse::<i64>().ok()).map(|s| s.clamp(1, MAX_RETRY_AFTER) * 1000)
+    header
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|s| s.clamp(1, MAX_RETRY_AFTER) * 1000)
 }
 
 /// `users.lookupByEmail`: the member id of the Slack user with this email, None when Slack has
 /// none (`users_not_found`); Err with why when the lookup itself failed.
-pub async fn lookup_by_email(http: &reqwest::Client, config: &SlackConfig, email: &str) -> Result<Option<String>, String> {
-    let url = format!("{}/users.lookupByEmail?email={}", config.api_base.trim_end_matches('/'), encode(email));
-    let response = http.get(url).bearer_auth(&config.token.0).send().await.map_err(|e| format!("slack unreachable: {}", e.without_url()))?;
+pub async fn lookup_by_email(
+    http: &reqwest::Client,
+    config: &SlackConfig,
+    email: &str,
+) -> Result<Option<String>, String> {
+    let url = format!(
+        "{}/users.lookupByEmail?email={}",
+        config.api_base.trim_end_matches('/'),
+        encode(email)
+    );
+    let response = http
+        .get(url)
+        .bearer_auth(&config.token.0)
+        .send()
+        .await
+        .map_err(|e| format!("slack unreachable: {}", e.without_url()))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("slack answered {status}"));
     }
-    let answer: Value = response.json().await.map_err(|_| "slack's answer is not JSON".to_string())?;
+    let answer: Value = response
+        .json()
+        .await
+        .map_err(|_| "slack's answer is not JSON".to_string())?;
     if answer["ok"] == true {
         return match answer["user"]["id"].as_str() {
             Some(id) if is_member_id(id) => Ok(Some(id.to_string())),
@@ -624,22 +769,41 @@ pub async fn lookup_by_email(http: &reqwest::Client, config: &SlackConfig, email
     }
     match answer["error"].as_str().unwrap_or("unknown_error") {
         "users_not_found" => Ok(None),
-        other => Err(format!("slack: {}", other.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(64).collect::<String>())),
+        other => Err(format!(
+            "slack: {}",
+            other
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .take(64)
+                .collect::<String>()
+        )),
     }
 }
 
 async fn post(http: &reqwest::Client, config: &SlackConfig, job: &Job) -> Outcome {
     let url = format!("{}/chat.postMessage", config.api_base.trim_end_matches('/'));
     let body = json!({"channel": job.channel, "text": job.text, "unfurl_links": false, "unfurl_media": false});
-    let response = match http.post(url).bearer_auth(&config.token.0).json(&body).send().await {
+    let response = match http
+        .post(url)
+        .bearer_auth(&config.token.0)
+        .json(&body)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return Outcome::Retry(format!("slack unreachable: {}", e.without_url())),
     };
     let status = response.status();
-    let retry_after =
-        retry_after_ms(response.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()));
+    let retry_after = retry_after_ms(
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+    );
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Outcome::RateLimited { after_ms: retry_after };
+        return Outcome::RateLimited {
+            after_ms: retry_after,
+        };
     }
     if status.is_server_error() {
         return Outcome::Retry(format!("slack answered {status}"));
@@ -662,7 +826,9 @@ async fn post(http: &reqwest::Client, config: &SlackConfig, job: &Job) -> Outcom
         .take(64)
         .collect();
     if error == "ratelimited" {
-        Outcome::RateLimited { after_ms: retry_after }
+        Outcome::RateLimited {
+            after_ms: retry_after,
+        }
     } else if RETRYABLE.contains(&error.as_str()) {
         Outcome::Retry(format!("slack: {error}"))
     } else {
@@ -677,20 +843,50 @@ mod tests {
     #[test]
     fn on_with_a_token_and_the_map_is_only_an_import() {
         let some = |s: &str| Some(s.to_string());
-        assert!(SlackConfig::from_vars(None, None, "b", None).unwrap().is_none());
-        assert!(SlackConfig::from_vars(None, some("kdobmayer=U01"), "b", None).unwrap().is_none());
-        assert!(SlackConfig::from_vars(some("xoxb-1"), None, "b", None).unwrap().unwrap().import.is_empty());
-        let c = SlackConfig::from_vars(some("xoxb-1"), some(" KDobmayer = U0123ABC , other=W0456DEF "), "b", None)
-            .unwrap()
-            .unwrap();
-        assert_eq!(c.import.get("kdobmayer").map(String::as_str), Some("U0123ABC"));
+        assert!(
+            SlackConfig::from_vars(None, None, "b", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SlackConfig::from_vars(None, some("kdobmayer=U01"), "b", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SlackConfig::from_vars(some("xoxb-1"), None, "b", None)
+                .unwrap()
+                .unwrap()
+                .import
+                .is_empty()
+        );
+        let c = SlackConfig::from_vars(
+            some("xoxb-1"),
+            some(" KDobmayer = U0123ABC , other=W0456DEF "),
+            "b",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            c.import.get("kdobmayer").map(String::as_str),
+            Some("U0123ABC")
+        );
         assert_eq!(c.import.get("other").map(String::as_str), Some("W0456DEF"));
         assert!(!format!("{c:?}").contains("xoxb-1"));
     }
 
     #[test]
     fn a_bad_mapping_is_refused() {
-        for bad in ["kdobmayer", "kdobmayer=", "=U0123", "kdobmayer=u0123", "kdobmayer=C0123", "a=U01,A=U02", ","] {
+        for bad in [
+            "kdobmayer",
+            "kdobmayer=",
+            "=U0123",
+            "kdobmayer=u0123",
+            "kdobmayer=C0123",
+            "a=U01,A=U02",
+            ",",
+        ] {
             assert!(parse_members(bad).is_err(), "{bad}");
         }
     }
@@ -717,7 +913,10 @@ mod tests {
 
     #[test]
     fn a_panicking_worker_is_logged_and_restarted() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let r = runs.clone();
         rt.block_on(supervise(Duration::from_millis(1), move || {

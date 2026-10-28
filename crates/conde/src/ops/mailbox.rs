@@ -9,7 +9,9 @@ use serde_json::Value;
 use super::agents::{self, Agent};
 use crate::address::{Address, Kind};
 use crate::dispatch::{Ctx, OpResult, bad_request, conflict, forbidden, not_found};
-use crate::protocol::v2::{BoardInfo, Mine, MineMailbox, PublishBody, Published, UnpublishBody, Unpublished};
+use crate::protocol::v2::{
+    BoardInfo, Mine, MineMailbox, PublishBody, Published, UnpublishBody, Unpublished,
+};
 
 pub(crate) fn parse<T: DeserializeOwned>(body: &Value) -> OpResult<T> {
     serde_json::from_value(body.clone()).map_err(|e| bad_request(format!("bad body: {e}")))
@@ -21,7 +23,9 @@ pub(crate) fn json<T: serde::Serialize>(value: &T) -> OpResult<Value> {
 
 /// A row `host` routes: a mailbox or a published human name bound there.
 fn routed(a: &Agent, host: &str) -> bool {
-    a.address.as_ref().is_some_and(|x| x.host == host && matches!(x.kind, Kind::Mailbox | Kind::Human))
+    a.address
+        .as_ref()
+        .is_some_and(|x| x.host == host && matches!(x.kind, Kind::Mailbox | Kind::Human))
 }
 
 fn generation(a: &Agent) -> u64 {
@@ -35,14 +39,22 @@ pub fn routes(ctx: &Ctx) -> OpResult<Vec<Route>> {
         .agents_on_host(&ctx.p.host)?
         .iter()
         .filter(|a| routed(a, &ctx.p.host))
-        .map(|a| Route { mailbox_id: a.id.clone(), route_generation: generation(a) })
+        .map(|a| Route {
+            mailbox_id: a.id.clone(),
+            route_generation: generation(a),
+        })
         .collect())
 }
 
 /// `board.info`: the advertised name (the default alias) and the caller's account and host.
 pub fn board_info(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     let name = ctx.shared_board()?.to_string();
-    json(&BoardInfo { name, owner: ctx.p.user.clone(), host: ctx.p.host.clone(), mailbox_only: ctx.mailbox_only })
+    json(&BoardInfo {
+        name,
+        owner: ctx.p.user.clone(),
+        host: ctx.p.host.clone(),
+        mailbox_only: ctx.mailbox_only,
+    })
 }
 
 /// `mailbox.publish {name, take?}`: binds `<caller>/name` on the calling host and bumps its
@@ -54,7 +66,9 @@ pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let b: PublishBody = parse(body)?;
     let name = ctx.own_name(&b.name)?;
     if name == "everybody" {
-        return Err(bad_request("'everybody' is reserved (channel-wide mention)"));
+        return Err(bad_request(
+            "'everybody' is reserved (channel-wide mention)",
+        ));
     }
     if b.human {
         return Err(forbidden(
@@ -112,13 +126,19 @@ pub fn unpublish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             b.mailbox_id, ctx.p.host, b.expected_generation
         ))
     };
-    let row = agents::by_id(ctx.db, &b.mailbox_id)?.filter(|a| a.owner_id == ctx.p.user_id).ok_or_else(moved)?;
+    let row = agents::by_id(ctx.db, &b.mailbox_id)?
+        .filter(|a| a.owner_id == ctx.p.user_id)
+        .ok_or_else(moved)?;
     agents::unprotected(ctx, &row)?;
     if !routed(&row, &ctx.p.host) || generation(&row) != b.expected_generation {
         return Err(moved());
     }
     ctx.db.set_binding(&row.id, None)?;
-    json(&Unpublished { mailbox_id: row.id, route_generation: b.expected_generation + 1, revision: Some(revision(ctx)?) })
+    json(&Unpublished {
+        mailbox_id: row.id,
+        route_generation: b.expected_generation + 1,
+        revision: Some(revision(ctx)?),
+    })
 }
 
 /// `mailbox.mine`: the mailboxes routed to the calling host, with their generations.
@@ -129,7 +149,14 @@ pub fn mine(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         .agents_on_host(&ctx.p.host)?
         .iter()
         .filter(|a| routed(a, &ctx.p.host))
-        .map(|a| MineMailbox { name: a.name.clone(), mailbox_id: a.id.clone(), route_generation: generation(a) })
+        .map(|a| MineMailbox {
+            name: a.name.clone(),
+            mailbox_id: a.id.clone(),
+            route_generation: generation(a),
+        })
         .collect();
-    json(&Mine { mailboxes, revision: Some(revision(ctx)?) })
+    json(&Mine {
+        mailboxes,
+        revision: Some(revision(ctx)?),
+    })
 }

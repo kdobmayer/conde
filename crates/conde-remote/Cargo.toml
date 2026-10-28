@@ -30,6 +30,7 @@ tracing = "0.1.44"
 webpki-roots = "1.0.9"
 
 [dev-dependencies]
+serde_path_to_error = "0.1.20"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "cookies", "json", "form"] }
 rsa = { version = "0.9.10", features = ["sha2"] }
 rand_core06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }

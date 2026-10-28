@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use super::channels;
 use crate::address::{Address, Kind, split_qualified};
 use crate::dispatch::{
-    Ctx, OpError, OpResult, bad_request, conflict, forbidden, not_found, one_line, opt_str, str_param,
+    Ctx, OpError, OpResult, bad_request, conflict, forbidden, not_found, one_line, opt_str,
+    str_param,
 };
 use crate::humans::{self, HUMAN_NAME};
 pub use crate::store::Agent;
@@ -45,10 +46,12 @@ pub fn find(ctx: &Ctx, input: &str) -> OpResult<Option<Agent>> {
 /// Like `find`, but the name must currently be bound to an address. On a shared board an
 /// unknown, unbound or unpublished name all read `recipient unavailable` (DESIGN-v2.md §6).
 pub fn lookup_bound(ctx: &Ctx, input: &str) -> OpResult<Agent> {
-    find(ctx, input)?.filter(|a| a.address.is_some()).ok_or_else(|| match ctx.board {
-        Some(_) => unavailable(ctx, input),
-        None => not_found(format!("no agent registered as '{input}'")),
-    })
+    find(ctx, input)?
+        .filter(|a| a.address.is_some())
+        .ok_or_else(|| match ctx.board {
+            Some(_) => unavailable(ctx, input),
+            None => not_found(format!("no agent registered as '{input}'")),
+        })
 }
 
 /// The shared board's one answer for a name that cannot be addressed, whether it never existed
@@ -78,7 +81,9 @@ fn set_binding(db: &dyn Tx, agent_id: &str, address: Option<&Address>) -> OpResu
 /// On a shared board a new name is never `human` (each owner's human name is the board's own).
 pub(crate) fn not_reserved(ctx: &Ctx, name: &str) -> OpResult<()> {
     if ctx.board.is_some() && name == HUMAN_NAME {
-        return Err(bad_request(format!("'{HUMAN_NAME}' is reserved on this board for each owner's human name")));
+        return Err(bad_request(format!(
+            "'{HUMAN_NAME}' is reserved on this board for each owner's human name"
+        )));
     }
     Ok(())
 }
@@ -112,7 +117,9 @@ pub(crate) fn ensure_row(ctx: &Ctx, name: &str) -> OpResult<Agent> {
 pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let name = ctx.own_name(str_param(body, "name")?)?;
     if name == "everybody" {
-        return Err(bad_request("'everybody' is reserved (channel-wide mention)"));
+        return Err(bad_request(
+            "'everybody' is reserved (channel-wide mention)",
+        ));
     }
     let own = ctx.actor_address()?;
     if ctx.board.is_some() && own.kind == Kind::Human {
@@ -122,7 +129,8 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     may_bind(ctx, &name)?;
     if let Some(explicit) = opt_str(body, "address")? {
-        let explicit = Address::parse_v1(explicit, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
+        let explicit =
+            Address::parse_v1(explicit, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
         if explicit != own {
             return Err(forbidden(format!(
                 "registration is self-only: this shell is {own}, not {explicit}. \
@@ -132,23 +140,30 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     let agent = ensure_row(ctx, &name)?;
     if let Some(pin) = &agent.pinned
-        && *pin != own.to_string() {
-            return Err(forbidden(format!(
-                "{} is owner-pinned to {pin}; refusing {own}. Unpin it first (conde unpin {name}).",
-                agent.canonical()
-            )));
-        }
+        && *pin != own.to_string()
+    {
+        return Err(forbidden(format!(
+            "{} is owner-pinned to {pin}; refusing {own}. Unpin it first (conde unpin {name}).",
+            agent.canonical()
+        )));
+    }
     if agent.address.as_ref() != Some(&own) {
         set_binding(ctx.db, &agent.id, Some(&own))?;
     }
-    let joined = if agent.binding_version == 0 { join_lobby(ctx, &agent)? } else { None };
+    let joined = if agent.binding_version == 0 {
+        join_lobby(ctx, &agent)?
+    } else {
+        None
+    };
     Ok(json!({"name": agent.canonical(), "address": own.to_string(), "joined": joined}))
 }
 
 /// A name's first registration joins `#lobby` when it exists: a plain
 /// membership at the end of the log, no join post, no notification.
 pub(crate) fn join_lobby(ctx: &Ctx, agent: &Agent) -> OpResult<Option<String>> {
-    let Some(lobby) = ctx.db.channel_by_name(LOBBY)? else { return Ok(None) };
+    let Some(lobby) = ctx.db.channel_by_name(LOBBY)? else {
+        return Ok(None);
+    };
     if ctx.db.read_seq(&lobby.id, &agent.id)?.is_some() {
         return Ok(None);
     }
@@ -181,7 +196,8 @@ pub fn unregister(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         )));
     }
     if let Some(expected) = opt_str(body, "if_address")? {
-        let expected = Address::parse_v1(expected, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
+        let expected =
+            Address::parse_v1(expected, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
         if expected != *current {
             return Err(conflict(format!(
                 "not removing {canonical}: registered as '{current}', not '{expected}'"
@@ -197,18 +213,23 @@ pub fn unregister(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 /// register, or a publish on a shared board) revives it.
 pub fn retire(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if ctx.actor_address()?.kind != Kind::Human {
-        return Err(forbidden("retiring a name is the human owner's; ask your human"));
+        return Err(forbidden(
+            "retiring a name is the human owner's; ask your human",
+        ));
     }
     let name = ctx.own_name(str_param(body, "name")?)?;
     let canonical = format!("{}/{name}", ctx.p.user);
-    let agent = by_name(ctx.db, ctx.p.user_id, &name)?.ok_or_else(|| not_found(format!("no agent named '{canonical}'")))?;
+    let agent = by_name(ctx.db, ctx.p.user_id, &name)?
+        .ok_or_else(|| not_found(format!("no agent named '{canonical}'")))?;
     if let Some(address) = &agent.address {
         return Err(forbidden(format!(
             "{canonical} is bound to {address}; unbind it first (conde unregister {name}, or conde unpublish on a shared board)"
         )));
     }
     if !ctx.db.retire_agent(&agent.id, &ctx.now_iso())? {
-        return Err(conflict(format!("{canonical} was bound meanwhile; not retired")));
+        return Err(conflict(format!(
+            "{canonical} was bound meanwhile; not retired"
+        )));
     }
     Ok(json!({"name": canonical, "retired": true}))
 }
@@ -219,7 +240,9 @@ pub fn retire(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 pub fn rename(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let new = ctx.own_name(str_param(body, "new")?)?;
     if new == "everybody" {
-        return Err(bad_request("'everybody' is reserved (channel-wide mention)"));
+        return Err(bad_request(
+            "'everybody' is reserved (channel-wide mention)",
+        ));
     }
     let caller = ctx.actor_address()?;
     let agent = match opt_str(body, "old")? {
@@ -229,7 +252,10 @@ pub fn rename(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             let agent = by_name(ctx.db, ctx.p.user_id, &old)?
                 .ok_or_else(|| not_found(format!("no agent named '{old}'")))?;
             if caller.kind != Kind::Human && agent.address.as_ref() != Some(&caller) {
-                let bound = agent.address.as_ref().map_or("no session".to_string(), ToString::to_string);
+                let bound = agent
+                    .address
+                    .as_ref()
+                    .map_or("no session".to_string(), ToString::to_string);
                 return Err(forbidden(format!(
                     "rename is self-only: {} is bound to {bound}, not to this session ({caller}). \
                      Only that session or the human owner can rename it.",
@@ -262,7 +288,10 @@ pub fn rename(ctx: &Ctx, body: &Value) -> OpResult<Value> {
                     agent.name
                 ),
             };
-            return Err(conflict(format!("cannot rename {old} to {}: it {why}", taken.canonical())));
+            return Err(conflict(format!(
+                "cannot rename {old} to {}: it {why}",
+                taken.canonical()
+            )));
         }
         ctx.db.rename_agent(&agent.id, &new)?;
     }
@@ -284,7 +313,8 @@ pub fn pin(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let agent = ensure_row(ctx, &name)?;
     match opt_str(body, "address")? {
         Some(raw) => {
-            let address = Address::parse_v1(raw, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
+            let address =
+                Address::parse_v1(raw, &ctx.p.host).map_err(|e| bad_request(e.to_string()))?;
             if ctx.board.is_some() && address.kind == Kind::Human {
                 return Err(forbidden(
                     "a human address is never pinned on this board: each owner's human name is the board's own",
@@ -307,8 +337,10 @@ pub fn pin(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 /// (`human.status`).
 pub fn whoami(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
-    let mut out = json!({"name": me.canonical(), "address": me.address.as_ref().map(|a| a.to_string())});
-    if ctx.board.is_some() && !me.is_human()
+    let mut out =
+        json!({"name": me.canonical(), "address": me.address.as_ref().map(|a| a.to_string())});
+    if ctx.board.is_some()
+        && !me.is_human()
         && let Ok(human) = super::paging::status_of(ctx)
     {
         out["human"] = human;
@@ -364,12 +396,16 @@ pub fn profile_get(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 /// Profiles are human-edited: agents never write them.
 pub fn profile_set(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if ctx.actor_address()?.kind != Kind::Human {
-        return Err(forbidden("profiles are human-edited; agents do not edit profiles (ask the human)"));
+        return Err(forbidden(
+            "profiles are human-edited; agents do not edit profiles (ask the human)",
+        ));
     }
     let name = ctx.own_name(str_param(body, "name")?)?;
     let key = str_param(body, "key")?;
     if !key.eq_ignore_ascii_case("display") {
-        return Err(bad_request(format!("unknown profile field '{key}' (stored fields: Display)")));
+        return Err(bad_request(format!(
+            "unknown profile field '{key}' (stored fields: Display)"
+        )));
     }
     let value = str_param(body, "value")?.trim();
     one_line(value, "Display")?;

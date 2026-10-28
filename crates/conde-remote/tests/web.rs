@@ -1,5 +1,5 @@
-//! The web surface (Entra sign-in, keys page, `conde login` browser leg) against an
-//! in-process fake OpenID provider, an in-memory store and a fake bridge registry.
+//! The web surface (OIDC sign-in and the invite gate, keys page, `conde login` browser leg)
+//! against an in-process fake OpenID provider, an in-memory store and a fake bridge registry.
 
 use conde_remote::token_digest;
 use conde_remote::web;
@@ -25,8 +25,8 @@ use sha2::Digest;
 use tokio::net::TcpListener;
 
 use web::{
-    AdminKey, BindUser, BridgeRegistry, CliCode, CliIssued, CreateUser, HostKey, Identity, KeyDisplay, Limits,
-    LoginTxn, Minted, SessionRecord, WebConfig,
+    AdminKey, AdminUser, BindUser, BridgeRegistry, CliCode, CliIssued, CreateUser, HostKey,
+    Identity, Invite, Invited, KeyDisplay, Limits, LoginTxn, Minted, SessionRecord, WebConfig,
     WebResult, WebState, WebStore, WebStoreError, WebUser,
 };
 
@@ -37,7 +37,9 @@ include!("support/web_harness.rs");
 struct User {
     id: i64,
     name: String,
-    identity: Option<(String, String)>,
+    /// (issuer, subject), at most one per issuer.
+    identities: Vec<(String, String)>,
+    email: Option<String>,
     display: Option<String>,
     disabled: bool,
 }
@@ -106,19 +108,20 @@ impl MemStore {
         m.users.push(User {
             id,
             name: name.into(),
-            identity: None,
+            identities: Vec::new(),
+            email: None,
             display: None,
             disabled: false,
         });
         id
     }
-    /// (user id, bound identity, display name) of the user named `name`.
+    /// (user id, first bound identity, display name) of the user named `name`.
     fn user(&self, name: &str) -> Option<UserRow> {
         self.m()
             .users
             .iter()
             .find(|u| u.name == name)
-            .map(|u| (u.id, u.identity.clone(), u.display.clone()))
+            .map(|u| (u.id, u.identities.first().cloned(), u.display.clone()))
     }
     fn live_host_of(&self, key: &str) -> Option<String> {
         let d = token_digest(key);
@@ -127,6 +130,15 @@ impl MemStore {
             .iter()
             .find(|c| c.digest == d && c.revoked_at.is_none())
             .map(|c| c.host.clone())
+    }
+    /// Sets a user's email directly (a store may hold one address on two users).
+    fn set_email(&self, name: &str, email: &str) {
+        self.m()
+            .users
+            .iter_mut()
+            .find(|u| u.name == name)
+            .unwrap()
+            .email = Some(email.into());
     }
     fn creds_of(&self, host: &str) -> Vec<(String, Option<i64>)> {
         self.m()
@@ -139,27 +151,57 @@ impl MemStore {
 }
 
 impl WebStore for MemStore {
-    fn user_by_identity(&self, tid: &str, oid: &str) -> WebResult<Option<WebUser>> {
-        let id = Some((tid.to_string(), oid.to_string()));
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> WebResult<Option<WebUser>> {
+        let id = (issuer.to_string(), subject.to_string());
         Ok(self
             .m()
             .users
             .iter()
-            .find(|u| u.identity == id)
+            .find(|u| u.identities.contains(&id))
             .map(User::web))
+    }
+    fn claim_invite(&self, identity: &Identity, email: &str) -> WebResult<Invite> {
+        let key = (identity.issuer.clone(), identity.subject.clone());
+        let mut m = self.m();
+        if let Some(u) = m.users.iter().find(|u| u.identities.contains(&key)) {
+            return Ok(Invite::Bound(u.web()));
+        }
+        let hits: Vec<usize> = (0..m.users.len())
+            .filter(|&i| {
+                m.users[i]
+                    .email
+                    .as_deref()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(email))
+            })
+            .collect();
+        let [i] = hits[..] else {
+            return Ok(if hits.is_empty() {
+                Invite::NoUser
+            } else {
+                Invite::Ambiguous
+            });
+        };
+        let user = &mut m.users[i];
+        if user.identities.iter().any(|(i, _)| *i == identity.issuer) {
+            return Ok(Invite::IssuerBound);
+        }
+        user.identities.push(key);
+        user.display = identity.display_name.clone();
+        Ok(Invite::Bound(user.web()))
     }
     fn create_user(&self, identity: &Identity, name: &str) -> WebResult<CreateUser> {
         let mut m = self.m();
         if let Some(u) = m.users.iter().find(|u| u.name == name) {
             return Ok(CreateUser::NameTaken {
-                bound: u.identity.is_some(),
+                bound: !u.identities.is_empty(),
             });
         }
         let id = m.users.len() as i64 + 1;
         m.users.push(User {
             id,
             name: name.into(),
-            identity: Some((identity.tid.clone(), identity.oid.clone())),
+            identities: vec![(identity.issuer.clone(), identity.subject.clone())],
+            email: identity.email.clone(),
             display: identity.display_name.clone(),
             disabled: false,
         });
@@ -209,7 +251,9 @@ impl WebStore for MemStore {
     fn insert_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()> {
         // A primary key, as on the real stores.
         match self.m().codes.entry(code_digest.into()) {
-            std::collections::hash_map::Entry::Occupied(_) => Err(WebStoreError("duplicate key".into())),
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(WebStoreError("duplicate key".into()))
+            }
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(code.clone());
                 Ok(())
@@ -237,14 +281,20 @@ impl WebStore for MemStore {
     }
     fn restore_cli_code(&self, code_digest: &str, code: &CliCode) -> WebResult<()> {
         let mut m = self.m();
-        if m.codes.get(code_digest).is_none_or(|newer| newer.user_id != code.user_id) {
+        if m.codes
+            .get(code_digest)
+            .is_none_or(|newer| newer.user_id != code.user_id)
+        {
             m.codes.insert(code_digest.into(), code.clone());
         }
         Ok(())
     }
     fn end_cli_code(&self, code_digest: &str, user_id: i64) -> WebResult<()> {
         let mut m = self.m();
-        if m.codes.get(code_digest).is_some_and(|held| held.user_id != user_id) {
+        if m.codes
+            .get(code_digest)
+            .is_some_and(|held| held.user_id != user_id)
+        {
             m.codes.remove(code_digest);
         }
         Ok(())
@@ -262,7 +312,11 @@ impl WebStore for MemStore {
         let (code, gate) = {
             let mut m = self.m();
             let code = m.codes.remove(code_digest);
-            let gate = if code.is_some() { m.cli_gate.take() } else { None };
+            let gate = if code.is_some() {
+                m.cli_gate.take()
+            } else {
+                None
+            };
             (code, gate)
         };
         if let Some(gate) = gate {
@@ -364,9 +418,12 @@ impl WebStore for MemStore {
     fn bind_identity(&self, name: &str, identity: &Identity) -> WebResult<BindUser> {
         let mut m = self.m();
         match m.users.iter_mut().find(|u| u.name == name) {
-            Some(u) if u.identity.is_some() => Ok(BindUser::NameBound),
+            Some(u) if u.identities.iter().any(|(i, _)| *i == identity.issuer) => {
+                Ok(BindUser::NameBound)
+            }
             Some(u) => {
-                u.identity = Some((identity.tid.clone(), identity.oid.clone()));
+                u.identities
+                    .push((identity.issuer.clone(), identity.subject.clone()));
                 Ok(BindUser::Bound(u.web()))
             }
             None => {
@@ -377,6 +434,44 @@ impl WebStore for MemStore {
                 }
             }
         }
+    }
+    fn invite_user(&self, name: &str, email: &str) -> WebResult<Invited> {
+        let mut m = self.m();
+        let same = |e: &Option<String>| e.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(email));
+        if let Some(other) = m.users.iter().find(|u| u.name != name && same(&u.email)) {
+            return Ok(Invited::EmailTaken(other.name.clone()));
+        }
+        if let Some(u) = m.users.iter_mut().find(|u| u.name == name) {
+            return Ok(match u.email.clone() {
+                Some(_) if same(&u.email) => Invited::Exists(u.web()),
+                Some(have) => Invited::OtherEmail(have),
+                None => {
+                    u.email = Some(email.into());
+                    Invited::EmailSet(u.web())
+                }
+            });
+        }
+        drop(m);
+        let id = self.add_plain_user(name);
+        let mut m = self.m();
+        let u = m.users.iter_mut().find(|u| u.id == id).unwrap();
+        u.email = Some(email.into());
+        Ok(Invited::Created(u.web()))
+    }
+    fn list_users(&self) -> WebResult<Vec<AdminUser>> {
+        let mut users: Vec<AdminUser> = self
+            .m()
+            .users
+            .iter()
+            .map(|u| AdminUser {
+                name: u.name.clone(),
+                email: u.email.clone(),
+                issuers: u.identities.iter().map(|(i, _)| i.clone()).collect(),
+                disabled: u.disabled,
+            })
+            .collect();
+        users.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(users)
     }
     fn all_keys(&self) -> WebResult<Vec<AdminKey>> {
         let ids: Vec<(i64, String)> = self
@@ -450,22 +545,31 @@ impl conde_remote::Authenticator for MemAuth {
 // --- sign-in ----------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn sign_in_creates_the_user_on_first_login_and_reuses_it() {
+async fn an_invited_user_is_bound_on_first_sign_in_and_reused() {
     let env = Env::with(Arc::new(MemStore::default())).await;
+    assert_eq!(
+        env.store.user("krisztian-dobmayer").unwrap().1,
+        None,
+        "invited, not bound"
+    );
     let page = Browser::new().sign_in(&env).await;
     assert!(
         page.contains("Host keys") && page.contains("Krisztián Dobmayer"),
         "{page}"
     );
     assert!(page.contains("No host keys yet"));
-    let (id, identity, display) = env.store.user("krisztian-dobmayer").expect("user created");
+    let (id, identity, display) = env
+        .store
+        .user("krisztian-dobmayer")
+        .expect("the invited user");
+    // Entra: the issuer is the configured one, the subject the oid (not the per-app sub).
     assert_eq!(
         identity,
-        Some((TENANT.to_string(), "oid-krisztian".to_string()))
+        Some((env.idp.issuer.clone(), "oid-krisztian".to_string()))
     );
     assert_eq!(display.as_deref(), Some("Krisztián Dobmayer"));
 
-    // Same (tid, oid), new display name and upn: same user, profile updated, no new user.
+    // Same (issuer, subject), new display name and upn: same user, profile updated, no new user.
     {
         let mut p = env.idp.person.lock().unwrap();
         p.name = "K. Dobmayer".into();
@@ -474,7 +578,7 @@ async fn sign_in_creates_the_user_on_first_login_and_reuses_it() {
     let page = Browser::new().sign_in(&env).await;
     assert!(page.contains("K. Dobmayer"));
     assert_eq!(env.store.user("krisztian-dobmayer").unwrap().0, id);
-    assert!(env.store.user("renamed").is_none());
+    assert_eq!(env.store.m().users.len(), 1);
     assert_eq!(
         env.idp.discoveries.load(Ordering::SeqCst),
         1,
@@ -482,19 +586,106 @@ async fn sign_in_creates_the_user_on_first_login_and_reuses_it() {
     );
 }
 
+/// Signs in through the fake provider and expects the invite gate's refusal.
+async fn refused_as_uninvited<S>(env: &Env<S>) {
+    let b = Browser::new();
+    let (status, _, body) = b.get(&env.url("/keys")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.contains("This account is not invited to this board. Ask the board admin."),
+        "{body}"
+    );
+    let (status, loc) = b.peek(&env.url("/keys")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "no session");
+    assert!(loc.starts_with("/auth/login"), "{loc}");
+}
+
 #[tokio::test]
-async fn another_tenant_is_refused_and_no_user_is_created() {
+async fn an_entra_token_of_another_tenant_is_refused_and_nothing_is_bound() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     env.idp.person.lock().unwrap().tid = "00000000-0000-0000-0000-000000000000".into();
     let b = Browser::new();
     let (status, _, body) = b.get(&env.url("/keys")).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert!(body.contains("another directory"), "{body}");
+    assert!(body.contains("could not be verified"), "{body}");
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None);
+    assert!(env.store.m().sessions.is_empty());
+}
+
+#[tokio::test]
+async fn an_identity_no_user_has_the_email_of_is_refused_and_nothing_is_created() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    refused_as_uninvited(&env).await;
     assert!(env.store.m().users.is_empty());
     assert!(env.store.m().sessions.is_empty());
-    let (status, loc) = b.peek(&env.url("/keys")).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(loc.starts_with("/auth/login"), "{loc}");
+    // another user's invite admits nobody else
+    env.invite("bob", "bob@dakai.example").await;
+    refused_as_uninvited(&env).await;
+    assert_eq!(env.store.user("bob").unwrap().1, None);
+}
+
+#[tokio::test]
+async fn an_email_two_users_share_admits_neither() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    env.invite("krisztian-dobmayer", "krisztian.dobmayer@dakai.example")
+        .await;
+    env.store.add_plain_user("kd");
+    env.store
+        .set_email("kd", "KRISZTIAN.DOBMAYER@dakai.example");
+    refused_as_uninvited(&env).await;
+    assert!(env.store.m().users.iter().all(|u| u.identities.is_empty()));
+    assert!(env.store.m().sessions.is_empty());
+}
+
+#[tokio::test]
+async fn the_invite_matches_the_email_whatever_its_case() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    env.invite("kd", "KRISZTIAN.DOBMAYER@DAKAI.EXAMPLE").await;
+    Browser::new().sign_in(&env).await;
+    assert_eq!(
+        env.store.user("kd").unwrap().1,
+        Some((env.idp.issuer.clone(), "oid-krisztian".into()))
+    );
+}
+
+#[tokio::test]
+async fn a_user_bound_to_this_issuer_is_not_claimed_by_another_identity() {
+    let env = Env::with(Arc::new(MemStore::default())).await;
+    Browser::new().sign_in(&env).await;
+    // Another account of the same directory with the same address (a re-created account).
+    env.idp.person.lock().unwrap().oid = "oid-impostor".into();
+    refused_as_uninvited(&env).await;
+    assert_eq!(
+        env.store.user("krisztian-dobmayer").unwrap().1,
+        Some((env.idp.issuer.clone(), "oid-krisztian".into()))
+    );
+    assert_eq!(env.store.m().users[0].identities.len(), 1);
+}
+
+/// A Keycloak realm: no Entra claims, the subject is `sub`, and only an `email` the provider marks
+/// verified is matched (never preferred_username).
+#[tokio::test]
+async fn a_generic_issuer_matches_only_a_verified_email_and_keys_on_sub() {
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.entra_tenant = None).await;
+    {
+        let mut p = env.idp.person.lock().unwrap();
+        p.entra = false;
+        p.upn = "krisztian.dobmayer@dakai.example".into();
+        p.email = Some("krisztian.dobmayer@dakai.example".into());
+    }
+    refused_as_uninvited(&env).await;
+    env.idp.person.lock().unwrap().email_verified = Some(false);
+    refused_as_uninvited(&env).await;
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None);
+    env.idp.person.lock().unwrap().email_verified = Some(true);
+    Browser::new().sign_in(&env).await;
+    assert_eq!(
+        env.store.user("krisztian-dobmayer").unwrap().1,
+        Some((env.idp.issuer.clone(), "pairwise-oid-krisztian".into()))
+    );
+    // Bound: the next sign-in is by (issuer, sub), whatever the email says now.
+    env.idp.person.lock().unwrap().email_verified = None;
+    Browser::new().sign_in(&env).await;
 }
 
 #[tokio::test]
@@ -512,7 +703,12 @@ async fn spoiled_id_tokens_are_refused() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{spoil:?}: {body}");
         assert!(body.contains("could not be verified"), "{spoil:?}: {body}");
     }
-    assert!(env.store.m().users.is_empty());
+    assert_eq!(env.store.m().users.len(), 1, "the invited user only");
+    assert_eq!(
+        env.store.user("krisztian-dobmayer").unwrap().1,
+        None,
+        "nothing bound"
+    );
     assert!(env.store.m().sessions.is_empty());
     *env.idp.spoil.lock().unwrap() = Spoil::None;
     Browser::new().sign_in(&env).await;
@@ -777,7 +973,8 @@ async fn a_return_path_up_to_2048_characters_is_carried_and_a_longer_one_refused
     let env = Env::with(Arc::new(MemStore::default())).await;
     let next = |len: usize| format!("/keys?pad={}", "a".repeat(len - 10));
     let login = |path: &str| {
-        let next: String = openidconnect::url::form_urlencoded::byte_serialize(path.as_bytes()).collect();
+        let next: String =
+            openidconnect::url::form_urlencoded::byte_serialize(path.as_bytes()).collect();
         env.url(&format!("/auth/login?next={next}"))
     };
     let b = Browser::new();
@@ -786,7 +983,11 @@ async fn a_return_path_up_to_2048_characters_is_carried_and_a_longer_one_refused
     assert_eq!(status, StatusCode::SEE_OTHER, "{authorize}");
     let (_, callback) = b.peek(&authorize).await;
     let (status, back) = b.peek(&callback).await;
-    assert_eq!((status, back.as_str()), (StatusCode::SEE_OTHER, longest.as_str()), "carried back whole");
+    assert_eq!(
+        (status, back.as_str()),
+        (StatusCode::SEE_OTHER, longest.as_str()),
+        "carried back whole"
+    );
 
     let (status, _, body) = Browser::new().get(&login(&next(2049))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -809,16 +1010,12 @@ async fn provider_errors_are_shown() {
 }
 
 #[tokio::test]
-async fn an_unlinked_admin_user_with_the_same_name_is_not_adopted() {
-    let env = Env::with(Arc::new(MemStore::default())).await;
+async fn an_admin_user_without_the_email_is_not_adopted_by_its_name() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
     env.store.add_plain_user("krisztian-dobmayer");
-    let (status, _, body) = Browser::new().get(&env.url("/keys")).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        body.contains("not linked") && body.contains("oid-krisztian"),
-        "{body}"
-    );
+    refused_as_uninvited(&env).await;
     assert_eq!(env.store.m().users.len(), 1);
+    assert_eq!(env.store.user("krisztian-dobmayer").unwrap().1, None);
 }
 
 #[tokio::test]
@@ -1134,20 +1331,37 @@ async fn a_pasted_code_redeems_once_with_the_runs_verifier() {
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
-    assert!(env.store.m().creds.is_empty(), "nothing is minted before the redeem");
+    assert!(
+        env.store.m().creds.is_empty(),
+        "nothing is minted before the redeem"
+    );
     let stored = format!("{:?}", env.store.m().codes.values().collect::<Vec<_>>());
-    assert!(!stored.contains(&shown.replace('-', "")), "the code is stored only as a digest: {stored}");
+    assert!(
+        !stored.contains(&shown.replace('-', "")),
+        "the code is stored only as a digest: {stored}"
+    );
 
     // typed as read aloud: lower case, a space instead of the dash
     let typed = shown.to_lowercase().replace('-', " ");
     let (status, got) = paste_redeem(&env, &run, &typed).await;
     assert_eq!(status, StatusCode::OK, "{got}");
-    assert_eq!((got["host_id"].as_str(), got["user"].as_str()), (Some("head-less"), Some("krisztian-dobmayer")));
-    assert_eq!(env.store.live_host_of(got["key"].as_str().unwrap()).as_deref(), Some("head-less"));
+    assert_eq!(
+        (got["host_id"].as_str(), got["user"].as_str()),
+        (Some("head-less"), Some("krisztian-dobmayer"))
+    );
+    assert_eq!(
+        env.store
+            .live_host_of(got["key"].as_str().unwrap())
+            .as_deref(),
+        Some("head-less")
+    );
 
     // used: nothing waits under this run any more (the CLI has dropped it on success)
     let (status, again) = paste_redeem(&env, &run, &shown).await;
-    assert_eq!((status, again["error"].as_str()), (StatusCode::BAD_REQUEST, Some("authorization_pending")));
+    assert_eq!(
+        (status, again["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("authorization_pending"))
+    );
     assert_eq!(env.store.m().creds.len(), 1);
 }
 
@@ -1157,39 +1371,85 @@ async fn wrong_pasted_codes_use_up_the_tries_then_the_login_dies() {
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
-    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let wrong = if shown.starts_with('2') {
+        "3333-3333"
+    } else {
+        "2222-2222"
+    };
 
     // the right code from another run (the state from the URL, another verifier) is refused and
     // spends no try: only the run that holds the verifier can use the tries up
-    let thief = CliRun { state: run.state.clone(), ..cli_run() };
+    let thief = CliRun {
+        state: run.state.clone(),
+        ..cli_run()
+    };
     let (status, got) = paste_redeem(&env, &thief, &shown).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
-    assert!(got["message"].as_str().unwrap().contains("not from the conde login run"), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_grant")),
+        "{got}"
+    );
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("not from the conde login run"),
+        "{got}"
+    );
     for left in [4, 3, 2, 1] {
         let (status, got) = paste_redeem(&env, &run, wrong).await;
-        assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
+        assert_eq!(
+            (status, got["tries_left"].as_u64()),
+            (StatusCode::BAD_REQUEST, Some(left)),
+            "{got}"
+        );
     }
     let (status, got) = paste_redeem(&env, &run, wrong).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
-    assert!(got["message"].as_str().unwrap().contains("last try"), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_grant")),
+        "{got}"
+    );
+    assert!(
+        got["message"].as_str().unwrap().contains("last try"),
+        "{got}"
+    );
     let (status, got) = paste_redeem(&env, &run, &shown).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("authorization_pending")), "{got}");
-    assert!(env.store.m().creds.is_empty() && env.store.m().codes.is_empty(), "the login is gone");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("authorization_pending")),
+        "{got}"
+    );
+    assert!(
+        env.store.m().creds.is_empty() && env.store.m().codes.is_empty(),
+        "the login is gone"
+    );
 
     // a malformed code is refused before any lookup and costs no try
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
     let (status, got) = paste_redeem(&env, &run, "O0O0-I1I1").await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_request")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_request")),
+        "{got}"
+    );
     // expiry
     env.advance(301);
     let (status, got) = paste_redeem(&env, &run, &shown).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(got["message"].as_str().unwrap().contains("expired"), "{got}");
+    assert!(
+        got["message"].as_str().unwrap().contains("expired"),
+        "{got}"
+    );
 }
 
 /// A redeem from `ip` (the ingress's X-Forwarded-For entry): (status, Retry-After, body).
-async fn redeem_from<S>(env: &Env<S>, ip: &str, body: Value) -> (StatusCode, Option<String>, Value) {
+async fn redeem_from<S>(
+    env: &Env<S>,
+    ip: &str,
+    body: Value,
+) -> (StatusCode, Option<String>, Value) {
     let r = reqwest::Client::new()
         .post(env.url("/auth/cli/redeem"))
         .header("x-forwarded-for", ip)
@@ -1197,25 +1457,51 @@ async fn redeem_from<S>(env: &Env<S>, ip: &str, body: Value) -> (StatusCode, Opt
         .send()
         .await
         .unwrap();
-    let after = r.headers().get(header::RETRY_AFTER).map(|v| v.to_str().unwrap().to_string());
+    let after = r
+        .headers()
+        .get(header::RETRY_AFTER)
+        .map(|v| v.to_str().unwrap().to_string());
     (r.status(), after, r.json().await.unwrap())
 }
 
 #[tokio::test]
 async fn the_redeem_is_rate_limited_per_address() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_redeem_per_min = 3).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| {
+        c.limits.cli_redeem_per_min = 3
+    })
+    .await;
     let run = cli_run();
     let body = json!({"code": "c".repeat(64), "state": run.state, "code_verifier": run.verifier, "host": "box"});
     for _ in 0..3 {
         let (status, _, got) = redeem_from(&env, "203.0.113.1", body.clone()).await;
-        assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
+        assert_eq!(
+            (status, got["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_grant")),
+            "{got}"
+        );
     }
     let (status, after, got) = redeem_from(&env, "203.0.113.1", body.clone()).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        "{got}"
+    );
     let wait = got["retry_after"].as_u64().unwrap();
-    assert!(wait >= 1 && after == Some(wait.to_string()), "{got} {after:?}");
-    assert!(got["message"].as_str().unwrap().contains("from this address"), "{got}");
-    assert!(got.get("login_expires_first").is_none(), "a wait to retry: {got}");
+    assert!(
+        wait >= 1 && after == Some(wait.to_string()),
+        "{got} {after:?}"
+    );
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("from this address"),
+        "{got}"
+    );
+    assert!(
+        got.get("login_expires_first").is_none(),
+        "a wait to retry: {got}"
+    );
     // Another address has its own bucket.
     let (status, _, _) = redeem_from(&env, "203.0.113.2", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1226,25 +1512,52 @@ async fn the_redeem_is_rate_limited_per_address() {
 /// keeps its record (the refused attempt spends no try).
 #[tokio::test]
 async fn pasted_code_attempts_are_limited_per_account_across_reissued_codes() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_guesses_per_hour = 7).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| {
+        c.limits.cli_guesses_per_hour = 7
+    })
+    .await;
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
-    let wrong = |shown: &str| if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let wrong = |shown: &str| {
+        if shown.starts_with('2') {
+            "3333-3333"
+        } else {
+            "2222-2222"
+        }
+    };
     for left in [4, 3, 2, 1] {
         let (status, got) = paste_redeem(&env, &run, wrong(&shown)).await;
-        assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
+        assert_eq!(
+            (status, got["tries_left"].as_u64()),
+            (StatusCode::BAD_REQUEST, Some(left)),
+            "{got}"
+        );
     }
     // Confirming again restarts the per-code tries ...
     let shown = paste_leg(&env, &b, &run).await;
     for left in [4, 3, 2] {
         let (status, got) = paste_redeem(&env, &run, wrong(&shown)).await;
-        assert_eq!((status, got["tries_left"].as_u64()), (StatusCode::BAD_REQUEST, Some(left)), "{got}");
+        assert_eq!(
+            (status, got["tries_left"].as_u64()),
+            (StatusCode::BAD_REQUEST, Some(left)),
+            "{got}"
+        );
     }
     // ... but not the account's: the eighth attempt waits, even with the right code.
     let (status, got) = paste_redeem(&env, &run, &shown).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{got}");
-    assert!(got["message"].as_str().unwrap().contains("for this account"), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        "{got}"
+    );
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("for this account"),
+        "{got}"
+    );
     assert!(env.store.m().creds.is_empty(), "nothing minted");
     let tries: Vec<u32> = env.store.m().codes.values().map(|c| c.tries).collect();
     assert_eq!(tries, [3], "the login waits with its tries unspent");
@@ -1255,15 +1568,25 @@ async fn pasted_code_attempts_are_limited_per_account_across_reissued_codes() {
 /// budget or a per-code try, so the account's next real run still signs in with its code.
 #[tokio::test]
 async fn holding_only_the_login_url_spends_no_attempt_budget() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_guesses_per_hour = 3).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| {
+        c.limits.cli_guesses_per_hour = 3
+    })
+    .await;
     let b = Browser::new();
     for round in 0..3 {
         let run = cli_run();
         let shown = paste_leg(&env, &b, &run).await;
-        let stranger = CliRun { state: run.state.clone(), ..cli_run() };
+        let stranger = CliRun {
+            state: run.state.clone(),
+            ..cli_run()
+        };
         for _ in 0..5 {
             let (status, got) = paste_redeem(&env, &stranger, &shown).await;
-            assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "round {round}: {got}");
+            assert_eq!(
+                (status, got["error"].as_str()),
+                (StatusCode::BAD_REQUEST, Some("invalid_grant")),
+                "round {round}: {got}"
+            );
         }
         let tries: Vec<u32> = env.store.m().codes.values().map(|c| c.tries).collect();
         assert_eq!(tries, [0], "round {round}: no try spent");
@@ -1272,7 +1595,11 @@ async fn holding_only_the_login_url_spends_no_attempt_budget() {
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
     let (status, got) = paste_redeem(&env, &run, &shown).await;
-    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+    assert_eq!(
+        (status, got["user"].as_str()),
+        (StatusCode::OK, Some("krisztian-dobmayer")),
+        "{got}"
+    );
 }
 
 /// The last wrong try ends the login: if another account confirmed this login's URL while that
@@ -1283,11 +1610,19 @@ async fn the_last_wrong_try_leaves_no_other_accounts_record() {
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
-    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let wrong = if shown.starts_with('2') {
+        "3333-3333"
+    } else {
+        "2222-2222"
+    };
     for _ in 0..4 {
-        assert_eq!(paste_redeem(&env, &run, wrong).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            paste_redeem(&env, &run, wrong).await.0,
+            StatusCode::BAD_REQUEST
+        );
     }
     // bob signs in and opens the confirm page of the same login
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1299,56 +1634,101 @@ async fn the_last_wrong_try_leaves_no_other_accounts_record() {
     assert_eq!(status, StatusCode::OK, "{page}");
     let taken = Arc::new(tokio::sync::Notify::new());
     let (release, held) = std::sync::mpsc::channel();
-    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    env.store.m().cli_gate = Some(TakeGate {
+        taken: taken.clone(),
+        release: held,
+    });
     let last = paste_redeem(&env, &run, wrong);
     let confirm = async {
-        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the last guess takes the record");
+        tokio::time::timeout(Duration::from_secs(5), taken.notified())
+            .await
+            .expect("the last guess takes the record");
         let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
         release.send(()).unwrap();
         (status, body)
     };
     let ((status, got), (confirmed, _)) = tokio::join!(last, confirm);
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
-    assert!(got["message"].as_str().unwrap().contains("last try"), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_grant")),
+        "{got}"
+    );
+    assert!(
+        got["message"].as_str().unwrap().contains("last try"),
+        "{got}"
+    );
     assert_eq!(confirmed, StatusCode::OK, "bob's confirm landed in the gap");
-    assert!(env.store.m().codes.is_empty(), "the dead login is not left to bob");
+    assert!(
+        env.store.m().codes.is_empty(),
+        "the dead login is not left to bob"
+    );
 }
 
 /// When the account's next attempt is allowed only after the waiting login expires, the 429 says
 /// so instead of a retry that cannot succeed.
 #[tokio::test]
 async fn a_wait_past_the_logins_expiry_says_to_start_again() {
-    let env = Env::with_config(Arc::new(MemStore::default()), |c| c.limits.cli_guesses_per_hour = 1).await;
+    let env = Env::with_config(Arc::new(MemStore::default()), |c| {
+        c.limits.cli_guesses_per_hour = 1
+    })
+    .await;
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
-    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let wrong = if shown.starts_with('2') {
+        "3333-3333"
+    } else {
+        "2222-2222"
+    };
     let (status, _) = paste_redeem(&env, &run, wrong).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, got) = paste_redeem(&env, &run, &shown).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        "{got}"
+    );
     let message = got["message"].as_str().unwrap();
-    assert!(message.contains("after this login expires") && message.contains("run conde login --code again"), "{message}");
-    assert_eq!(got["login_expires_first"], true, "the CLI ends the run on this answer: {got}");
+    assert!(
+        message.contains("after this login expires")
+            && message.contains("run conde login --code again"),
+        "{message}"
+    );
+    assert_eq!(
+        got["login_expires_first"], true,
+        "the CLI ends the run on this answer: {got}"
+    );
 }
 
 #[tokio::test]
 async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_that_signed_in() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     let run = cli_run();
-    let link = format!("/auth/cli?mode=code&state={}&challenge={}", run.state, run.challenge);
+    let link = format!(
+        "/auth/cli?mode=code&state={}&challenge={}",
+        run.state, run.challenge
+    );
 
     // signed out: the sign-in comes first and returns to the same link
     let (status, loc) = Browser::new().peek(&env.url(&link)).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(loc.starts_with("/auth/login?next=%2Fauth%2Fcli%3Fmode%3Dcode%26state%3D"), "{loc}");
+    assert!(
+        loc.starts_with("/auth/login?next=%2Fauth%2Fcli%3Fmode%3Dcode%26state%3D"),
+        "{loc}"
+    );
 
     // signed in, GET only asks: the account is named, nothing is issued
     let b = Browser::new();
     let (status, page) = paste_confirm_page(&env, &b, &run).await;
     assert_eq!(status, StatusCode::OK, "{page}");
-    assert!(page.contains("wants a host key for <strong>krisztian-dobmayer</strong>"), "{page}");
-    assert!(page.contains("Continue only if you started <code>conde login --code</code> yourself"), "{page}");
+    assert!(
+        page.contains("wants a host key for <strong>krisztian-dobmayer</strong>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("Continue only if you started <code>conde login --code</code> yourself"),
+        "{page}"
+    );
     assert!(!page.contains("<pre id=\"key\">"), "{page}");
     paste_confirm_page(&env, &b, &run).await;
     assert!(env.store.m().codes.is_empty(), "GET has no side effect");
@@ -1365,6 +1745,7 @@ async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_th
     assert_ne!(first, second);
 
     // another account may see the question but cannot take the login over
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1379,9 +1760,17 @@ async fn the_pasted_code_is_issued_only_on_the_confirming_post_of_the_account_th
     assert!(!body.contains("<pre id=\"key\">"), "{body}");
 
     let (status, got) = paste_redeem(&env, &run, &first).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_code")),
+        "{got}"
+    );
     let (status, got) = paste_redeem(&env, &run, &second).await;
-    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+    assert_eq!(
+        (status, got["user"].as_str()),
+        (StatusCode::OK, Some("krisztian-dobmayer")),
+        "{got}"
+    );
 }
 
 /// Another account confirming a login whose record has expired is told it expired (run conde
@@ -1392,6 +1781,7 @@ async fn another_account_confirming_an_expired_login_is_told_it_expired() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     let run = cli_run();
     paste_leg(&env, &Browser::new(), &run).await;
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1409,16 +1799,29 @@ async fn another_account_confirming_an_expired_login_is_told_it_expired() {
     assert_eq!(status, StatusCode::OK, "{page}");
     let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "expired: {body}");
-    assert!(body.contains("This conde login expired. Run conde login again."), "{body}");
+    assert!(
+        body.contains("This conde login expired. Run conde login again."),
+        "{body}"
+    );
     assert!(!body.contains("Another account"), "{body}");
     // a fresh sign-in purges the expired record; the login's age still decides
     let fresh = Browser::new();
     let (status, page) = paste_confirm_page(&env, &fresh, &run).await;
     assert_eq!(status, StatusCode::OK, "{page}");
-    assert!(env.store.m().codes.is_empty(), "the sign-in purged the expired record");
+    assert!(
+        env.store.m().codes.is_empty(),
+        "the sign-in purged the expired record"
+    );
     let (status, body) = paste_confirm(&env, &fresh, &run, &csrf_of(&page)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "expired after the purge: {body}");
-    assert!(body.contains("This conde login expired. Run conde login again."), "{body}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "expired after the purge: {body}"
+    );
+    assert!(
+        body.contains("This conde login expired. Run conde login again."),
+        "{body}"
+    );
     assert!(env.store.m().codes.is_empty(), "nothing issued");
 }
 
@@ -1430,6 +1833,7 @@ async fn an_expired_redeem_leaves_no_other_accounts_record() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     let run = cli_run();
     let shown = paste_leg(&env, &Browser::new(), &run).await;
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -1443,19 +1847,38 @@ async fn an_expired_redeem_leaves_no_other_accounts_record() {
     env.store.m().cli_logins.clear();
     let taken = Arc::new(tokio::sync::Notify::new());
     let (release, held) = std::sync::mpsc::channel();
-    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    env.store.m().cli_gate = Some(TakeGate {
+        taken: taken.clone(),
+        release: held,
+    });
     let late = paste_redeem(&env, &run, &shown);
     let confirm = async {
-        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the late redeem takes the record");
+        tokio::time::timeout(Duration::from_secs(5), taken.notified())
+            .await
+            .expect("the late redeem takes the record");
         let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
         release.send(()).unwrap();
         (status, body)
     };
     let ((status, got), (confirmed, body)) = tokio::join!(late, confirm);
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{got}");
-    assert!(got["message"].as_str().unwrap().contains("expired"), "{got}");
-    assert_eq!(confirmed, StatusCode::OK, "bob's confirm landed in the gap: {body}");
-    assert!(env.store.m().codes.is_empty(), "the expired login is not left to bob");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_grant")),
+        "{got}"
+    );
+    assert!(
+        got["message"].as_str().unwrap().contains("expired"),
+        "{got}"
+    );
+    assert_eq!(
+        confirmed,
+        StatusCode::OK,
+        "bob's confirm landed in the gap: {body}"
+    );
+    assert!(
+        env.store.m().codes.is_empty(),
+        "the expired login is not left to bob"
+    );
 }
 
 #[tokio::test]
@@ -1464,7 +1887,10 @@ async fn pasted_code_links_are_validated_and_the_two_flows_do_not_mix() {
     let b = Browser::new();
     let run = cli_run();
     for query in [
-        format!("mode=code&port=5000&state={}&challenge={}", run.state, run.challenge),
+        format!(
+            "mode=code&port=5000&state={}&challenge={}",
+            run.state, run.challenge
+        ),
         format!("mode=paste&state={}&challenge={}", run.state, run.challenge),
         format!("mode=code&state=short&challenge={}", run.challenge),
         format!("mode=code&state={}", run.state),
@@ -1475,13 +1901,20 @@ async fn pasted_code_links_are_validated_and_the_two_flows_do_not_mix() {
     // a loopback login is not redeemable with a short code, nor a pasted one with a 64-hex code
     let code = browser_leg(&env, &b, &run).await;
     let (status, got) = paste_redeem(&env, &run, "2345-6789").await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("authorization_pending")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("authorization_pending")),
+        "{got}"
+    );
     let other = cli_run();
     paste_leg(&env, &b, &other).await;
     let (status, _) = paste_redeem(&env, &other, &format!("{:064x}", 7)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, got) =
-        redeem(&env, json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "h"})).await;
+    let (status, got) = redeem(
+        &env,
+        json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "h"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{got}");
     assert_eq!(env.store.m().creds.len(), 1);
 }
@@ -1634,7 +2067,7 @@ async fn the_admin_mints_lists_and_revokes_keys() {
 
 #[tokio::test]
 async fn the_admin_pre_creates_and_binds_users() {
-    let env = Env::with(Arc::new(MemStore::default())).await;
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
     let k = Some(ADMIN_KEY);
     let x = json!({"tid": TENANT, "oid": "oid-x", "display": "Xavier Ys"});
     let (status, got) = admin(&env, "/v1/admin/users", Some(x.clone()), k).await;
@@ -1669,6 +2102,105 @@ async fn the_admin_pre_creates_and_binds_users() {
     assert_eq!(
         admin(&env, "/v1/admin/users", Some(steal), k).await.0,
         StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn the_admin_invites_lists_and_binds_by_issuer_and_subject() {
+    let env = Env::uninvited(Arc::new(MemStore::default()), |_| {}).await;
+    let k = Some(ADMIN_KEY);
+    let post = |body: Value| admin(&env, "/v1/admin/users", Some(body), k);
+    let (status, got) = post(json!({"name": "Ann", "email": " ann@dakai.example "})).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(
+        got,
+        json!({"user": "ann", "email": "ann@dakai.example", "status": "invited", "disabled": false})
+    );
+    assert_eq!(
+        post(json!({"name": "ann", "email": "ANN@dakai.example"}))
+            .await
+            .1["status"],
+        "exists"
+    );
+    let (status, got) = post(json!({"name": "ann", "email": "ann@elsewhere.example"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+    let (status, got) = post(json!({"name": "bob", "email": "Ann@Dakai.example"})).await;
+    assert_eq!(
+        (status, got["message"].as_str()),
+        (
+            StatusCode::CONFLICT,
+            Some("user 'ann' has this email already")
+        )
+    );
+    env.store.add_plain_user("carl");
+    assert_eq!(
+        post(json!({"name": "carl", "email": "carl@dakai.example"}))
+            .await
+            .1["status"],
+        "email set"
+    );
+    for bad in [
+        json!({"name": "dan", "email": "not-an-address"}),
+        json!({"name": "a/b", "email": "dan@dakai.example"}),
+        json!({"email": "dan@dakai.example"}),
+        json!({}),
+        json!({"name": "dan", "email": "dan@dakai.example", "tid": TENANT, "oid": "o"}),
+        json!({"issuer": env.idp.issuer, "subject": "s", "tid": TENANT, "oid": "o"}),
+        json!({"issuer": "https://login.microsoftonline.com/other/v2.0", "subject": "s", "name": "ann"}),
+        json!({"issuer": env.idp.issuer, "subject": "has space", "name": "ann"}),
+    ] {
+        let (status, got) = post(bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {got}");
+    }
+    assert!(env.store.user("dan").is_none());
+
+    // {issuer, subject} binds once per issuer.
+    let bind = json!({"issuer": env.idp.issuer, "subject": "sub-ann", "name": "ann"});
+    assert_eq!(post(bind.clone()).await.1["status"], "bound");
+    assert_eq!(post(bind).await.1["status"], "exists");
+    let again = json!({"issuer": env.idp.issuer, "subject": "sub-ann-2", "name": "ann"});
+    assert_eq!(post(again).await.0, StatusCode::CONFLICT);
+    // one identity binds one user: ann's identity is not given to carl
+    let (status, got) =
+        post(json!({"issuer": env.idp.issuer, "subject": "sub-ann", "name": "carl"})).await;
+    assert_eq!(
+        (status, got["message"].as_str()),
+        (
+            StatusCode::CONFLICT,
+            Some("the identity is already bound to 'ann'")
+        )
+    );
+
+    let (status, list) = admin(&env, "/v1/admin/users", None, k).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        list,
+        json!({"users": [
+            {"name": "ann", "email": "ann@dakai.example", "issuers": [env.idp.issuer], "disabled": false},
+            {"name": "carl", "email": "carl@dakai.example", "issuers": [], "disabled": false},
+        ]})
+    );
+    assert_eq!(
+        admin(&env, "/v1/admin/users", None, Some("wrong")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A board signing in with a non-Entra issuer takes no {tid, oid}.
+    let realm = Env::uninvited(Arc::new(MemStore::default()), |c| c.entra_tenant = None).await;
+    let (status, got) = admin(
+        &realm,
+        "/v1/admin/users",
+        Some(json!({"tid": TENANT, "oid": "o", "name": "x"})),
+        k,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("not Entra; pass issuer and subject"),
+        "{got}"
     );
 }
 
@@ -1995,14 +2527,21 @@ async fn confirms_racing_on_one_pasted_code_login_both_succeed() {
     paste_leg(&env, &b, &run).await;
     let taken = Arc::new(tokio::sync::Notify::new());
     let (release, held) = std::sync::mpsc::channel();
-    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    env.store.m().cli_gate = Some(TakeGate {
+        taken: taken.clone(),
+        release: held,
+    });
     let first = paste_confirm(&env, &b, &run, &csrf);
     let second = async {
-        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the first confirm reaches the store");
+        tokio::time::timeout(Duration::from_secs(5), taken.notified())
+            .await
+            .expect("the first confirm reaches the store");
         let second = paste_confirm(&env, &b, &run, &csrf);
         tokio::pin!(second);
         // It completes in the gap (two transactions) or waits for the first (one).
-        let early = tokio::time::timeout(Duration::from_millis(500), &mut second).await.ok();
+        let early = tokio::time::timeout(Duration::from_millis(500), &mut second)
+            .await
+            .ok();
         release.send(()).unwrap();
         match early {
             Some(done) => done,
@@ -2029,21 +2568,38 @@ async fn a_confirm_during_a_wrong_guess_keeps_the_new_code() {
     let b = Browser::new();
     let run = cli_run();
     let shown = paste_leg(&env, &b, &run).await;
-    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let wrong = if shown.starts_with('2') {
+        "3333-3333"
+    } else {
+        "2222-2222"
+    };
     let taken = Arc::new(tokio::sync::Notify::new());
     let (release, held) = std::sync::mpsc::channel();
-    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    env.store.m().cli_gate = Some(TakeGate {
+        taken: taken.clone(),
+        release: held,
+    });
     let guess = paste_redeem(&env, &run, wrong);
     let confirm = async {
-        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the redeem takes the record");
+        tokio::time::timeout(Duration::from_secs(5), taken.notified())
+            .await
+            .expect("the redeem takes the record");
         let fresh = paste_leg(&env, &b, &run).await;
         release.send(()).unwrap();
         fresh
     };
     let ((status, got), fresh) = tokio::join!(guess, confirm);
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_code")),
+        "{got}"
+    );
     let (status, got) = paste_redeem(&env, &run, &fresh).await;
-    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+    assert_eq!(
+        (status, got["user"].as_str()),
+        (StatusCode::OK, Some("krisztian-dobmayer")),
+        "{got}"
+    );
 }
 
 /// A wrong guess holds the taken record while another account confirms the same login from its
@@ -2054,7 +2610,12 @@ async fn a_wrong_guess_gets_the_login_back_from_another_accounts_confirm() {
     let env = Env::with(Arc::new(MemStore::default())).await;
     let run = cli_run();
     let shown = paste_leg(&env, &Browser::new(), &run).await;
-    let wrong = if shown.starts_with('2') { "3333-3333" } else { "2222-2222" };
+    let wrong = if shown.starts_with('2') {
+        "3333-3333"
+    } else {
+        "2222-2222"
+    };
+    env.invite("bob", "bob@dakai.example").await;
     {
         let mut p = env.idp.person.lock().unwrap();
         p.oid = "oid-bob".into();
@@ -2066,26 +2627,51 @@ async fn a_wrong_guess_gets_the_login_back_from_another_accounts_confirm() {
     assert_eq!(status, StatusCode::OK, "{page}");
     let taken = Arc::new(tokio::sync::Notify::new());
     let (release, held) = std::sync::mpsc::channel();
-    env.store.m().cli_gate = Some(TakeGate { taken: taken.clone(), release: held });
+    env.store.m().cli_gate = Some(TakeGate {
+        taken: taken.clone(),
+        release: held,
+    });
     let guess = paste_redeem(&env, &run, wrong);
     let confirm = async {
-        tokio::time::timeout(Duration::from_secs(5), taken.notified()).await.expect("the redeem takes the record");
+        tokio::time::timeout(Duration::from_secs(5), taken.notified())
+            .await
+            .expect("the redeem takes the record");
         let (status, body) = paste_confirm(&env, &bob, &run, &csrf_of(&page)).await;
         release.send(()).unwrap();
         assert_eq!(status, StatusCode::OK, "the slot was empty: {body}");
         key_of(&body)
     };
     let ((status, got), bobs) = tokio::join!(guess, confirm);
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_code")),
+        "{got}"
+    );
     {
         let m = env.store.m();
-        let held: Vec<_> = m.codes.values().map(|c| (c.user_name.as_str(), c.tries)).collect();
-        assert_eq!(held, [("krisztian-dobmayer", 1)], "the first account's record is back, one try spent");
+        let held: Vec<_> = m
+            .codes
+            .values()
+            .map(|c| (c.user_name.as_str(), c.tries))
+            .collect();
+        assert_eq!(
+            held,
+            [("krisztian-dobmayer", 1)],
+            "the first account's record is back, one try spent"
+        );
     }
     let (status, got) = paste_redeem(&env, &run, &bobs).await;
-    assert_eq!((status, got["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_code")), "{got}");
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_code")),
+        "{got}"
+    );
     let (status, got) = paste_redeem(&env, &run, &shown).await;
-    assert_eq!((status, got["user"].as_str()), (StatusCode::OK, Some("krisztian-dobmayer")), "{got}");
+    assert_eq!(
+        (status, got["user"].as_str()),
+        (StatusCode::OK, Some("krisztian-dobmayer")),
+        "{got}"
+    );
 }
 
 // --- a store without human paging ----------------------------------------------------------------
@@ -2095,33 +2681,96 @@ async fn a_wrong_guess_gets_the_login_back_from_another_accounts_confirm() {
 struct Minimal;
 
 impl WebStore for Minimal {
-    fn user_by_identity(&self, _: &str, _: &str) -> WebResult<Option<WebUser>> { unreachable!() }
-    fn create_user(&self, _: &Identity, _: &str) -> WebResult<CreateUser> { unreachable!() }
-    fn set_profile(&self, _: i64, _: &Identity) -> WebResult<()> { unreachable!() }
-    fn user_disabled(&self, _: i64) -> WebResult<bool> { unreachable!() }
-    fn insert_session(&self, _: &str, _: &SessionRecord) -> WebResult<bool> { unreachable!() }
-    fn session(&self, _: &str) -> WebResult<Option<SessionRecord>> { unreachable!() }
-    fn touch_session(&self, _: &str, _: i64) -> WebResult<()> { unreachable!() }
-    fn delete_session(&self, _: &str) -> WebResult<()> { unreachable!() }
-    fn insert_login(&self, _: &str, _: &LoginTxn) -> WebResult<()> { unreachable!() }
-    fn take_login(&self, _: &str) -> WebResult<Option<LoginTxn>> { unreachable!() }
-    fn insert_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> { unreachable!() }
-    fn take_cli_code(&self, _: &str) -> WebResult<Option<CliCode>> { unreachable!() }
-    fn issue_cli_code(&self, _: &str, _: &CliCode, _: i64) -> WebResult<CliIssued> { unreachable!() }
-    fn restore_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> { unreachable!() }
-    fn end_cli_code(&self, _: &str, _: i64) -> WebResult<()> { unreachable!() }
-    fn insert_key_display(&self, _: &str, _: &KeyDisplay) -> WebResult<()> { unreachable!() }
-    fn take_key_display(&self, _: &str) -> WebResult<Option<KeyDisplay>> { unreachable!() }
-    fn purge_expired(&self, _: i64, _: &Limits) -> WebResult<()> { unreachable!() }
-    fn host_keys(&self, _: i64) -> WebResult<Vec<HostKey>> { unreachable!() }
-    fn host_owner(&self, _: &str) -> WebResult<Option<i64>> { unreachable!() }
-    fn mint_host_key(&self, _: i64, _: &str, _: &str, _: &str, _: i64) -> WebResult<Minted> { unreachable!() }
-    fn revoke_host(&self, _: i64, _: &str, _: i64) -> WebResult<u64> { unreachable!() }
-    fn ensure_user(&self, _: &str) -> WebResult<WebUser> { unreachable!() }
-    fn bind_identity(&self, _: &str, _: &Identity) -> WebResult<BindUser> { unreachable!() }
-    fn all_keys(&self) -> WebResult<Vec<AdminKey>> { unreachable!() }
-    fn revoke_key(&self, _: &str, _: i64) -> WebResult<Option<String>> { unreachable!() }
-    fn set_disabled(&self, _: &str, _: bool) -> WebResult<Option<Vec<String>>> { unreachable!() }
+    fn user_by_identity(&self, _: &str, _: &str) -> WebResult<Option<WebUser>> {
+        unreachable!()
+    }
+    fn create_user(&self, _: &Identity, _: &str) -> WebResult<CreateUser> {
+        unreachable!()
+    }
+    fn set_profile(&self, _: i64, _: &Identity) -> WebResult<()> {
+        unreachable!()
+    }
+    fn user_disabled(&self, _: i64) -> WebResult<bool> {
+        unreachable!()
+    }
+    fn insert_session(&self, _: &str, _: &SessionRecord) -> WebResult<bool> {
+        unreachable!()
+    }
+    fn session(&self, _: &str) -> WebResult<Option<SessionRecord>> {
+        unreachable!()
+    }
+    fn touch_session(&self, _: &str, _: i64) -> WebResult<()> {
+        unreachable!()
+    }
+    fn delete_session(&self, _: &str) -> WebResult<()> {
+        unreachable!()
+    }
+    fn insert_login(&self, _: &str, _: &LoginTxn) -> WebResult<()> {
+        unreachable!()
+    }
+    fn take_login(&self, _: &str) -> WebResult<Option<LoginTxn>> {
+        unreachable!()
+    }
+    fn insert_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> {
+        unreachable!()
+    }
+    fn take_cli_code(&self, _: &str) -> WebResult<Option<CliCode>> {
+        unreachable!()
+    }
+    fn issue_cli_code(&self, _: &str, _: &CliCode, _: i64) -> WebResult<CliIssued> {
+        unreachable!()
+    }
+    fn restore_cli_code(&self, _: &str, _: &CliCode) -> WebResult<()> {
+        unreachable!()
+    }
+    fn end_cli_code(&self, _: &str, _: i64) -> WebResult<()> {
+        unreachable!()
+    }
+    fn insert_key_display(&self, _: &str, _: &KeyDisplay) -> WebResult<()> {
+        unreachable!()
+    }
+    fn take_key_display(&self, _: &str) -> WebResult<Option<KeyDisplay>> {
+        unreachable!()
+    }
+    fn purge_expired(&self, _: i64, _: &Limits) -> WebResult<()> {
+        unreachable!()
+    }
+    fn host_keys(&self, _: i64) -> WebResult<Vec<HostKey>> {
+        unreachable!()
+    }
+    fn host_owner(&self, _: &str) -> WebResult<Option<i64>> {
+        unreachable!()
+    }
+    fn mint_host_key(&self, _: i64, _: &str, _: &str, _: &str, _: i64) -> WebResult<Minted> {
+        unreachable!()
+    }
+    fn revoke_host(&self, _: i64, _: &str, _: i64) -> WebResult<u64> {
+        unreachable!()
+    }
+    fn ensure_user(&self, _: &str) -> WebResult<WebUser> {
+        unreachable!()
+    }
+    fn bind_identity(&self, _: &str, _: &Identity) -> WebResult<BindUser> {
+        unreachable!()
+    }
+    fn claim_invite(&self, _: &Identity, _: &str) -> WebResult<Invite> {
+        unreachable!()
+    }
+    fn invite_user(&self, _: &str, _: &str) -> WebResult<Invited> {
+        unreachable!()
+    }
+    fn list_users(&self) -> WebResult<Vec<AdminUser>> {
+        unreachable!()
+    }
+    fn all_keys(&self) -> WebResult<Vec<AdminKey>> {
+        unreachable!()
+    }
+    fn revoke_key(&self, _: &str, _: i64) -> WebResult<Option<String>> {
+        unreachable!()
+    }
+    fn set_disabled(&self, _: &str, _: bool) -> WebResult<Option<Vec<String>>> {
+        unreachable!()
+    }
 }
 
 /// The trait's default for the Slack member id, called directly: refused.

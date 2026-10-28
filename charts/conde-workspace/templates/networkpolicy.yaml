@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled }}
+# Deny by default; in from the configured sources to 8080 only, out to kube-dns and the configured egress list.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: conde
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.ingressCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- range .Values.networkPolicy.egress }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr }}
+            {{- with .except }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      ports:
+        {{- range .ports }}
+        - protocol: {{ .protocol }}
+          port: {{ .port | int }}
+        {{- end }}
+    {{- end }}
+{{- end }}

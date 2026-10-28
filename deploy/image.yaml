@@ -1,0 +1,6 @@
+# The conde server image every workspace runs; the release workflow writes this file. With a digest the image is
+# repository@digest; the tag only names the build.
+image:
+  repository: europe-west3-docker.pkg.dev/conde-prod/conde/conde
+  tag: gcp
+  digest: sha256:5be17fce802cf4f882a89eafc097b038918f4e06d8376a06a5a1e03ca166bfc6

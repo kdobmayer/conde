@@ -1,0 +1,529 @@
+# ── Keycloak: one installation, realms per workspace; database `keycloak` on conde-pg through the Auth Proxy ──────
+locals {
+  keycloak_labels = { "app.kubernetes.io/name" = "keycloak" }
+  keycloak_secrets = {
+    "db-password"              = "keycloak-db-password"
+    "bootstrap-admin-password" = google_secret_manager_secret.keycloak_bootstrap_admin.secret_id
+  }
+}
+
+resource "kubernetes_namespace_v1" "keycloak" {
+  metadata {
+    name   = "keycloak"
+    labels = local.gateway_label
+  }
+}
+
+resource "google_service_account" "keycloak" {
+  account_id   = "keycloak"
+  display_name = "Keycloak (Cloud SQL Auth Proxy)"
+}
+
+resource "google_project_iam_member" "keycloak_sql_client" {
+  project = local.project
+  role    = "roles/cloudsql.client"
+  member  = google_service_account.keycloak.member
+}
+
+resource "kubernetes_service_account_v1" "keycloak" {
+  metadata {
+    name      = "keycloak"
+    namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    annotations = {
+      "iam.gke.io/gcp-service-account" = google_service_account.keycloak.email
+    }
+  }
+}
+
+resource "google_service_account_iam_member" "keycloak_workload_identity" {
+  service_account_id = google_service_account.keycloak.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${local.wi_pool}[${kubernetes_namespace_v1.keycloak.metadata[0].name}/${kubernetes_service_account_v1.keycloak.metadata[0].name}]"
+}
+
+# The first admin of the master realm; temporary until a named admin with MFA replaces it.
+ephemeral "random_password" "keycloak_bootstrap_admin" {
+  length  = 32
+  special = false
+}
+
+resource "google_secret_manager_secret" "keycloak_bootstrap_admin" {
+  secret_id = "keycloak-bootstrap-admin"
+
+  replication {
+    user_managed {
+      replicas {
+        location = local.region
+      }
+    }
+  }
+}
+
+# Write-only: the generated password is in Secret Manager only, never in this state.
+resource "google_secret_manager_secret_version" "keycloak_bootstrap_admin" {
+  secret                 = google_secret_manager_secret.keycloak_bootstrap_admin.id
+  secret_data_wo         = ephemeral.random_password.keycloak_bootstrap_admin.result
+  secret_data_wo_version = 1
+}
+
+resource "google_secret_manager_secret_iam_member" "keycloak" {
+  for_each = local.keycloak_secrets
+
+  project   = local.project
+  secret_id = "projects/${local.project}/secrets/${each.value}"
+  role      = "roles/secretmanager.secretAccessor"
+  # The CSI add-on reads as the Google service account the pod's KSA is annotated with.
+  member = google_service_account.keycloak.member
+}
+
+resource "kubernetes_manifest" "keycloak_secrets" {
+  manifest = {
+    apiVersion = "secrets-store.csi.x-k8s.io/v1"
+    kind       = "SecretProviderClass"
+    metadata = {
+      name      = "keycloak"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      provider = "gke"
+      parameters = {
+        secrets = yamlencode([for path, secret in local.keycloak_secrets : {
+          resourceName = "projects/${local.project}/secrets/${secret}/versions/latest"
+          path         = path
+        }])
+      }
+    }
+  }
+}
+
+resource "kubernetes_deployment_v1" "keycloak" {
+  metadata {
+    name      = "keycloak"
+    namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    labels    = local.keycloak_labels
+  }
+
+  spec {
+    replicas = 1
+
+    selector {
+      match_labels = local.keycloak_labels
+    }
+
+    strategy {
+      type = "RollingUpdate"
+      rolling_update {
+        max_surge       = "1"
+        max_unavailable = "0"
+      }
+    }
+
+    template {
+      metadata {
+        labels = local.keycloak_labels
+      }
+
+      spec {
+        service_account_name             = kubernetes_service_account_v1.keycloak.metadata[0].name
+        termination_grace_period_seconds = 60
+
+        # Autopilot adds it at admission; stated here so plans stay empty.
+        toleration {
+          key      = "kubernetes.io/arch"
+          operator = "Equal"
+          value    = "amd64"
+          effect   = "NoSchedule"
+        }
+
+        security_context {
+          run_as_non_root = true
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
+        # Native sidecar: Keycloak starts only after the proxy's listener is up.
+        init_container {
+          name           = "cloud-sql-proxy"
+          image          = local.cloud_sql_proxy
+          restart_policy = "Always"
+          args = [
+            "--psc",
+            "--structured-logs",
+            "--address=127.0.0.1",
+            "--port=5432",
+            "--health-check",
+            "--http-address=0.0.0.0",
+            "--http-port=9090",
+            local.platform.sql_connection_name,
+          ]
+
+          startup_probe {
+            http_get {
+              path = "/startup"
+              port = 9090
+            }
+            period_seconds    = 2
+            failure_threshold = 60
+          }
+
+          resources {
+            requests = {
+              cpu                 = "250m"
+              memory              = "256Mi"
+              "ephemeral-storage" = "100Mi"
+            }
+            # Autopilot sets the ephemeral-storage limit to the request; stated here so plans stay empty.
+            limits = {
+              "ephemeral-storage" = "100Mi"
+            }
+          }
+
+          security_context {
+            allow_privilege_escalation = false
+            read_only_root_filesystem  = true
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+        }
+
+        container {
+          name    = "keycloak"
+          image   = local.keycloak_image
+          command = ["/bin/bash", "-c"]
+          # Keycloak has no *_FILE convention: the CSI-mounted files become its environment, then kc.sh replaces the shell.
+          args = [<<-EOT
+            set -e
+            KC_DB_PASSWORD=$(< /secrets/db-password)
+            KC_BOOTSTRAP_ADMIN_PASSWORD=$(< /secrets/bootstrap-admin-password)
+            export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD
+            exec /opt/keycloak/bin/kc.sh start --optimized
+          EOT
+          ]
+
+          dynamic "env" {
+            for_each = {
+              KC_HOSTNAME                 = "https://${local.keycloak_hostname}"
+              KC_PROXY_HEADERS            = "xforwarded"
+              KC_HTTP_ENABLED             = "true"
+              KC_HTTP_PORT                = "8080"
+              KC_HTTP_MANAGEMENT_PORT     = "9000"
+              KC_CACHE                    = "ispn"
+              KC_CACHE_STACK              = "jdbc-ping"
+              KC_DB_URL                   = "jdbc:postgresql://127.0.0.1:5432/keycloak"
+              KC_DB_USERNAME              = "keycloak"
+              KC_BOOTSTRAP_ADMIN_USERNAME = "bootstrap-admin"
+            }
+            content {
+              name  = env.key
+              value = env.value
+            }
+          }
+
+          port {
+            name           = "http"
+            container_port = 8080
+          }
+          port {
+            name           = "management"
+            container_port = 9000
+          }
+
+          startup_probe {
+            http_get {
+              path = "/health/started"
+              port = 9000
+            }
+            timeout_seconds   = 5
+            period_seconds    = 5
+            failure_threshold = 60
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/health/ready"
+              port = 9000
+            }
+            timeout_seconds   = 5
+            period_seconds    = 10
+            failure_threshold = 3
+          }
+
+          liveness_probe {
+            http_get {
+              path = "/health/live"
+              port = 9000
+            }
+            timeout_seconds   = 5
+            period_seconds    = 10
+            failure_threshold = 3
+          }
+
+          resources {
+            requests = {
+              cpu                 = "500m"
+              memory              = "1Gi"
+              "ephemeral-storage" = "1Gi"
+            }
+            limits = {
+              memory              = "2Gi"
+              "ephemeral-storage" = "1Gi"
+            }
+          }
+
+          security_context {
+            allow_privilege_escalation = false
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+
+          volume_mount {
+            name       = "secrets"
+            mount_path = "/secrets"
+            read_only  = true
+          }
+        }
+
+        volume {
+          name = "secrets"
+          csi {
+            driver    = "secrets-store-gke.csi.k8s.io"
+            read_only = true
+            volume_attributes = {
+              secretProviderClass = kubernetes_manifest.keycloak_secrets.manifest.metadata.name
+            }
+          }
+        }
+      }
+    }
+  }
+
+  timeouts {
+    create = "15m"
+    update = "15m"
+  }
+
+  # Autopilot records its resource adjustments in annotations.
+  lifecycle {
+    ignore_changes = [metadata[0].annotations]
+  }
+
+  depends_on = [
+    google_project_iam_member.keycloak_sql_client,
+    google_service_account_iam_member.keycloak_workload_identity,
+    google_secret_manager_secret_iam_member.keycloak,
+    google_secret_manager_secret_version.keycloak_bootstrap_admin,
+  ]
+}
+
+resource "kubernetes_service_v1" "keycloak" {
+  metadata {
+    name      = "keycloak"
+    namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+  }
+
+  # The NEG controller annotates the Service.
+  lifecycle {
+    ignore_changes = [metadata[0].annotations]
+  }
+
+  spec {
+    type     = "ClusterIP"
+    selector = local.keycloak_labels
+
+    port {
+      name        = "http"
+      port        = 8080
+      target_port = "http"
+    }
+  }
+}
+
+# Only the workspace realms, the infra realm (Argo CD sign-in), static resources and the admin paths; Cloud Armor holds
+# admin to the allowlist.
+resource "kubernetes_manifest" "keycloak_route" {
+  manifest = {
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "keycloak"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      parentRefs = [{
+        name        = kubernetes_manifest.gateway.manifest.metadata.name
+        namespace   = kubernetes_namespace_v1.gateway.metadata[0].name
+        sectionName = "https"
+      }]
+      hostnames = [local.keycloak_hostname]
+      rules = [{
+        matches = [for prefix in ["/realms/dakai", "/realms/demo", "/realms/clearscale", "/realms/infra", "/resources", "/admin", "/realms/master"] : {
+          path = { type = "PathPrefix", value = prefix }
+        }]
+        backendRefs = [{
+          name = kubernetes_service_v1.keycloak.metadata[0].name
+          port = 8080
+        }]
+      }]
+    }
+  }
+}
+
+resource "kubernetes_manifest" "keycloak_health_check" {
+  manifest = {
+    apiVersion = "networking.gke.io/v1"
+    kind       = "HealthCheckPolicy"
+    metadata = {
+      name      = "keycloak"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      default = {
+        checkIntervalSec   = 10
+        timeoutSec         = 5
+        healthyThreshold   = 1
+        unhealthyThreshold = 3
+        config = {
+          type = "HTTP"
+          httpHealthCheck = {
+            port        = 9000
+            requestPath = "/health/ready"
+          }
+        }
+      }
+      targetRef = {
+        group = ""
+        kind  = "Service"
+        name  = kubernetes_service_v1.keycloak.metadata[0].name
+      }
+    }
+  }
+}
+
+resource "kubernetes_manifest" "keycloak_backend" {
+  manifest = {
+    apiVersion = "networking.gke.io/v1"
+    kind       = "GCPBackendPolicy"
+    metadata = {
+      name      = "keycloak"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      default = {
+        timeoutSec     = 60
+        securityPolicy = local.platform.cloud_armor_policy_name
+      }
+      targetRef = {
+        group = ""
+        kind  = "Service"
+        name  = kubernetes_service_v1.keycloak.metadata[0].name
+      }
+    }
+  }
+}
+
+# Deny by default; in from the load balancer only, out to DNS, the metadata server, the Cloud SQL PSC endpoint and
+# public HTTPS (the Cloud SQL Admin API, the federated identity providers).
+resource "kubernetes_network_policy_v1" "keycloak" {
+  metadata {
+    name      = "keycloak"
+    namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+  }
+
+  spec {
+    pod_selector {}
+    policy_types = ["Ingress", "Egress"]
+
+    ingress {
+      dynamic "from" {
+        for_each = local.gfe_ranges
+        content {
+          ip_block {
+            cidr = from.value
+          }
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "8080"
+      }
+      ports {
+        protocol = "TCP"
+        port     = "9000"
+      }
+    }
+
+    # JGroups (jdbc-ping discovery) between Keycloak pods once there is more than one.
+    ingress {
+      from {
+        pod_selector {
+          match_labels = local.keycloak_labels
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "7800"
+      }
+      ports {
+        protocol = "TCP"
+        port     = "57800"
+      }
+    }
+
+    egress {
+      to {
+        pod_selector {
+          match_labels = local.keycloak_labels
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "7800"
+      }
+      ports {
+        protocol = "TCP"
+        port     = "57800"
+      }
+    }
+
+    egress {
+      to {
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = "kube-system" }
+        }
+        pod_selector {
+          match_labels = { "k8s-app" = "kube-dns" }
+        }
+      }
+      ports {
+        protocol = "UDP"
+        port     = "53"
+      }
+      ports {
+        protocol = "TCP"
+        port     = "53"
+      }
+    }
+
+    dynamic "egress" {
+      for_each = local.network_policy_egress
+      content {
+        to {
+          ip_block {
+            cidr   = egress.value.cidr
+            except = egress.value.except
+          }
+        }
+        dynamic "ports" {
+          for_each = egress.value.ports
+          content {
+            protocol = ports.value.protocol
+            port     = ports.value.port
+          }
+        }
+      }
+    }
+  }
+}

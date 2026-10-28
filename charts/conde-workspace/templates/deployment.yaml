@@ -1,0 +1,120 @@
+{{- $name := include "conde.name" . }}
+{{- $host := required "hostname is required" .Values.hostname }}
+{{- $env := dict
+  "PORT" "8080"
+  "RUST_LOG" .Values.logLevel
+  "CONDE_HOST" $host
+  "CONDE_BOARD_NAME" (default $name .Values.boardName)
+  "CONDE_DIST_BASE_URL" .Values.distBaseUrl
+  "OIDC_ISSUER" (required "oidc.issuer is required" .Values.oidc.issuer)
+  "OIDC_CLIENT_ID" .Values.oidc.clientId
+  "OIDC_REDIRECT_URI" (default (printf "https://%s/auth/callback" $host) .Values.oidc.redirectUri)
+}}
+{{- if .Values.gcp.enabled }}
+{{- $_ := set $env "DATABASE_URL" (printf "postgresql://%s@127.0.0.1:5432/%s?sslmode=disable" (include "conde.dbUser" . | replace "@" "%40") (include "conde.database" .)) }}
+{{- $_ := set $env "CONDE_ADMIN_KEY_FILE" "/secrets/admin-key" }}
+{{- $_ := set $env "OIDC_CLIENT_SECRET_FILE" "/secrets/oidc-client-secret" }}
+{{- $_ := set $env "CONDE_SLACK_BOT_TOKEN_FILE" "/secrets/slack-bot-token" }}
+{{- end }}
+{{- $envSecret := include "conde.envSecretName" . }}
+{{- if and (not .Values.gcp.enabled) (not $envSecret) }}
+{{- fail "without gcp.enabled, set existingSecret or externalSecret.enabled" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conde
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "conde.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "conde.labels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "conde.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: conde
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "conde.podSecurityContext" . | nindent 6 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "conde.labels" . | nindent 14 }}
+      {{- if .Values.gcp.enabled }}
+      initContainers:
+        {{- include "conde.proxySidecar" (dict "ctx" . "iam" true) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: conde
+          image: {{ include "conde.image" . }}
+          {{- with .Values.image.pullPolicy }}
+          imagePullPolicy: {{ . }}
+          {{- end }}
+          # Sorted by name, as the map renders.
+          env:
+            {{- range $k, $v := $env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if not .Values.gcp.enabled }}
+          envFrom:
+            - secretRef:
+                name: {{ $envSecret }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+          # /healthz answers 200 only when the store does; the startup budget covers the migrations at boot.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          {{- if .Values.gcp.enabled }}
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+          {{- end }}
+      {{- if .Values.gcp.enabled }}
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: conde
+      {{- end }}

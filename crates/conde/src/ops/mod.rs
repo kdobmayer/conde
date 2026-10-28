@@ -16,13 +16,28 @@ use crate::dispatch::OpSpec;
 
 macro_rules! op {
     ($name:literal, $run:path, mutation) => {
-        OpSpec { name: $name, mutation: true, bridge_only: false, run: $run }
+        OpSpec {
+            name: $name,
+            mutation: true,
+            bridge_only: false,
+            run: $run,
+        }
     };
     ($name:literal, $run:path, query) => {
-        OpSpec { name: $name, mutation: false, bridge_only: false, run: $run }
+        OpSpec {
+            name: $name,
+            mutation: false,
+            bridge_only: false,
+            run: $run,
+        }
     };
     ($name:literal, $run:path, bridge) => {
-        OpSpec { name: $name, mutation: true, bridge_only: true, run: $run }
+        OpSpec {
+            name: $name,
+            mutation: true,
+            bridge_only: true,
+            run: $run,
+        }
     };
 }
 

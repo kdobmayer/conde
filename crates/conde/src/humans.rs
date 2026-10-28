@@ -10,8 +10,14 @@ use crate::util::{iso_from_ms, new_ulid, now_ms};
 pub const HUMAN_NAME: &str = "human";
 
 /// The ops a human actor never runs on a shared board: each sends, or posts in a channel.
-pub const SEND_OPS: &[&str] =
-    &["message.send", "reaction.set", "channel.invite", "channel.join", "channel.create", "human.page"];
+pub const SEND_OPS: &[&str] = &[
+    "message.send",
+    "reaction.set",
+    "channel.invite",
+    "channel.join",
+    "channel.create",
+    "human.page",
+];
 
 /// The refusal of a send by a human on a shared board.
 pub fn no_sending(board: &str) -> String {
@@ -28,12 +34,19 @@ pub fn web_address(owner: &str) -> Address {
 
 /// The refusal of an op that would change the human row's binding or membership.
 pub fn protected(a: &Agent) -> String {
-    format!("{} is its owner's human name: the board keeps it, and nothing binds, moves or renames it", a.canonical())
+    format!(
+        "{} is its owner's human name: the board keeps it, and nothing binds, moves or renames it",
+        a.canonical()
+    )
 }
 
 /// The owner's human row: the human-kind row with the highest binding version.
 pub fn of_owner(tx: &dyn Tx, owner_id: i64) -> StoreResult<Option<Agent>> {
-    Ok(tx.owner_agents(owner_id)?.into_iter().filter(Agent::is_human).max_by_key(|a| a.binding_version))
+    Ok(tx
+        .owner_agents(owner_id)?
+        .into_iter()
+        .filter(Agent::is_human)
+        .max_by_key(|a| a.binding_version))
 }
 
 /// What [`ensure`] did.
@@ -54,8 +67,14 @@ pub enum Ensured {
 /// Extra human rows (several per owner) are unbound and retired, the one with the highest
 /// binding version kept.
 pub fn ensure(tx: &dyn Tx, user_id: i64) -> StoreResult<Option<Ensured>> {
-    let Some(user) = tx.user_by_id(user_id)? else { return Ok(None) };
-    let mut humans: Vec<Agent> = tx.owner_agents(user_id)?.into_iter().filter(Agent::is_human).collect();
+    let Some(user) = tx.user_by_id(user_id)? else {
+        return Ok(None);
+    };
+    let mut humans: Vec<Agent> = tx
+        .owner_agents(user_id)?
+        .into_iter()
+        .filter(Agent::is_human)
+        .collect();
     humans.sort_by_key(|a| std::cmp::Reverse(a.binding_version));
     let at = iso_from_ms(now_ms());
     for extra in humans.iter().skip(1) {
@@ -81,7 +100,11 @@ pub fn ensure(tx: &dyn Tx, user_id: i64) -> StoreResult<Option<Ensured>> {
         // name, say): it becomes the human name
         if taken.retired || taken.address.is_none() {
             // unbind and retire keep channel seats; a human name sits in no channel
-            for m in tx.owner_memberships(user_id)?.into_iter().filter(|m| m.agent_id == taken.id) {
+            for m in tx
+                .owner_memberships(user_id)?
+                .into_iter()
+                .filter(|m| m.agent_id == taken.id)
+            {
                 tx.delete_membership(&m.channel_id, &taken.id)?;
             }
             tx.set_binding(&taken.id, Some(&address))?;

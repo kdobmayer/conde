@@ -68,10 +68,14 @@ fn v1_hello_is_unchanged() {
 #[test]
 fn a_hello_as_the_slack_instance_is_refused() {
     for instance in ["slack", "Slack"] {
-        let hello: Hello =
-            serde_json::from_value(json!({"v": 1, "type": "hello", "host_id": "box", "bridge_instance": instance}))
-                .unwrap();
-        assert!(hello.check().unwrap_err().contains("reserved"), "{instance}");
+        let hello: Hello = serde_json::from_value(
+            json!({"v": 1, "type": "hello", "host_id": "box", "bridge_instance": instance}),
+        )
+        .unwrap();
+        assert!(
+            hello.check().unwrap_err().contains("reserved"),
+            "{instance}"
+        );
     }
 }
 

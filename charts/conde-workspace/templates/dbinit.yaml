@@ -1,0 +1,96 @@
+{{- if and .Values.gcp.enabled .Values.gcp.dbinit.enabled }}
+# Without a GSA annotation, so the instance admin password is readable by this Job only, not by the server.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dbinit
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: dbinit
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  provider: gke
+  parameters:
+    secrets: |
+      - "path": "pg-admin-password"
+        "resourceName": "projects/{{ .Values.gcp.project }}/secrets/{{ .Values.gcp.dbinit.adminSecret }}/versions/latest"
+---
+# Once per workspace, as the instance's admin user: gives the IAM user its database and public schema. Idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dbinit
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dbinit
+    spec:
+      serviceAccountName: dbinit
+      restartPolicy: Never
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "conde.podSecurityContext" . | nindent 6 }}
+      initContainers:
+        {{- include "conde.proxySidecar" (dict "ctx" . "iam" false) | nindent 8 }}
+      containers:
+        - name: psql
+          image: {{ .Values.gcp.dbinit.image }}
+          command:
+            - /bin/sh
+            - -c
+          # The admin must be a member of the role it hands the database to.
+          args:
+            - |
+              set -eu
+              PGPASSWORD=$(cat /secrets/pg-admin-password)
+              export PGPASSWORD
+              psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres \
+                -c "GRANT \"$ROLE\" TO postgres" \
+                -c "ALTER DATABASE \"$DB\" OWNER TO \"$ROLE\""
+              psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d "$DB" \
+                -c "ALTER SCHEMA public OWNER TO \"$ROLE\""
+          env:
+            - name: ROLE
+              value: {{ include "conde.dbUser" . }}
+            - name: DB
+              value: {{ include "conde.database" . }}
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 100Mi
+            limits:
+              ephemeral-storage: 100Mi
+          securityContext:
+            runAsUser: 70
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: dbinit
+{{- end }}

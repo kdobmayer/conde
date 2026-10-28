@@ -16,7 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use conde_remote::{BridgeClient, Endpoint, Notify, NotifyFields, NotifyKind, OutcomeReason, OutcomeStatus};
+use conde_remote::{
+    BridgeClient, Endpoint, Notify, NotifyFields, NotifyKind, OutcomeReason, OutcomeStatus,
+};
 use serde_json::{Value, json};
 
 use crate::address::{Address, Kind};
@@ -222,8 +224,15 @@ pub struct Mux {
 impl Mux {
     pub fn new(tuning: Tuning) -> Mux {
         let mut state = State::default();
-        state.origins.insert(LOCAL_BOARD.into(), Origin::new(tuning.local_queue, tuning.receipt_budget, true));
-        Mux { state: Mutex::new(state), wake: Condvar::new(), tuning }
+        state.origins.insert(
+            LOCAL_BOARD.into(),
+            Origin::new(tuning.local_queue, tuning.receipt_budget, true),
+        );
+        Mux {
+            state: Mutex::new(state),
+            wake: Condvar::new(),
+            tuning,
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -237,7 +246,11 @@ impl Mux {
     /// Adds a board origin (its connection starts unreconciled).
     pub fn add_board(&self, alias: &str, client: BridgeClient) {
         let mut st = self.lock();
-        let mut origin = Origin::new(self.tuning.window as usize, self.tuning.receipt_budget, false);
+        let mut origin = Origin::new(
+            self.tuning.window as usize,
+            self.tuning.receipt_budget,
+            false,
+        );
         origin.client = Some(client);
         st.origins.insert(alias.to_string(), origin);
     }
@@ -266,13 +279,18 @@ impl Mux {
     pub fn push(&self, alias: &str, n: Notify) {
         let mut st = self.lock();
         let rev = next_rev(&mut st);
-        let Some(o) = st.origins.get_mut(alias) else { return };
+        let Some(o) = st.origins.get_mut(alias) else {
+            return;
+        };
         if o.stopped.is_some() || o.held.contains(&n.attempt_id) {
             return;
         }
         o.held.insert(n.attempt_id.clone());
         if o.jobs.len() >= o.cap {
-            tracing::warn!(board = alias, "notify beyond the admission window; settled failed for a retry");
+            tracing::warn!(
+                board = alias,
+                "notify beyond the admission window; settled failed for a retry"
+            );
             let token = new_ulid();
             o.outcomes.insert(
                 token.clone(),
@@ -295,8 +313,11 @@ impl Mux {
     /// The board's outcomes in record order, for its book.
     pub(crate) fn outcomes(&self, alias: &str) -> Vec<OutcomeRecord> {
         let st = self.lock();
-        let mut out: Vec<OutcomeRecord> =
-            st.origins.get(alias).map(|o| o.outcomes.values().cloned().collect()).unwrap_or_default();
+        let mut out: Vec<OutcomeRecord> = st
+            .origins
+            .get(alias)
+            .map(|o| o.outcomes.values().cloned().collect())
+            .unwrap_or_default();
         out.sort_by_key(|r| r.rev);
         out
     }
@@ -305,7 +326,9 @@ impl Mux {
     /// and resolve the attempt when it was the last.
     pub(crate) fn accepted(&self, alias: &str, r: &OutcomeRecord) {
         let mut st = self.lock();
-        let Some(o) = st.origins.get_mut(alias) else { return };
+        let Some(o) = st.origins.get_mut(alias) else {
+            return;
+        };
         if o.outcomes.get(&r.token).is_some_and(|cur| cur.rev == r.rev) {
             o.outcomes.remove(&r.token);
             if r.last {
@@ -327,7 +350,8 @@ impl Mux {
     /// reloaded board's new connection is never stopped by its predecessor.
     pub fn stop_client(&self, alias: &str, client: &BridgeClient, why: &str) {
         self.stop_if(alias, why, |o| {
-            o.and_then(|o| o.client.as_ref()).is_some_and(|c| c.bridge_instance() == client.bridge_instance())
+            o.and_then(|o| o.client.as_ref())
+                .is_some_and(|c| c.bridge_instance() == client.bridge_instance())
         });
     }
 
@@ -336,8 +360,12 @@ impl Mux {
         if !current(st.origins.get(alias)) {
             return;
         }
-        let tokens: Vec<String> =
-            st.entries.iter().filter(|(_, e)| e.origin == alias).map(|(t, _)| t.clone()).collect();
+        let tokens: Vec<String> = st
+            .entries
+            .iter()
+            .filter(|(_, e)| e.origin == alias)
+            .map(|(t, _)| t.clone())
+            .collect();
         for t in tokens {
             release(&mut st, &t);
         }
@@ -390,7 +418,15 @@ impl Mux {
     }
 
     /// Records a board outcome for the book (the latest wins; terminal over non-terminal).
-    fn record(&self, alias: &str, token: &str, attempt_id: &str, status: OutcomeStatus, reason: Option<OutcomeReason>, last: bool) {
+    fn record(
+        &self,
+        alias: &str,
+        token: &str,
+        attempt_id: &str,
+        status: OutcomeStatus,
+        reason: Option<OutcomeReason>,
+        last: bool,
+    ) {
         let mut st = self.lock();
         let rev = next_rev(&mut st);
         if last && let Some(e) = st.entries.get_mut(token) {
@@ -399,7 +435,9 @@ impl Mux {
         if let Some(e) = st.entries.get_mut(token) {
             e.status = status;
         }
-        let Some(o) = st.origins.get_mut(alias) else { return };
+        let Some(o) = st.origins.get_mut(alias) else {
+            return;
+        };
         if o.stopped.is_some() {
             return;
         }
@@ -411,7 +449,14 @@ impl Mux {
         }
         o.outcomes.insert(
             token.to_string(),
-            OutcomeRecord { token: token.to_string(), attempt_id: attempt_id.to_string(), status, reason, last, rev },
+            OutcomeRecord {
+                token: token.to_string(),
+                attempt_id: attempt_id.to_string(),
+                status,
+                reason,
+                last,
+                rev,
+            },
         );
     }
 
@@ -450,11 +495,18 @@ pub fn render(alias: &str, n: &Notify, f: &NotifyFields) -> String {
     let id = format!("{alias}:{}", n.message_id);
     let place = &f.place;
     let mut text = match f.kind {
-        NotifyKind::Dm => format!("conde [{alias}]: new message {id} from {}. Read it with: conde read {id}", f.sender),
+        NotifyKind::Dm => format!(
+            "conde [{alias}]: new message {id} from {}. Read it with: conde read {id}",
+            f.sender
+        ),
         NotifyKind::Mention => format!(
             "conde [{alias}]: you were mentioned in {place} by {} (message {id}). Read it with: conde read '{place}' --board {alias}{}",
             f.sender,
-            if f.member { String::new() } else { format!(" after joining: conde join '{place}' --board {alias}") }
+            if f.member {
+                String::new()
+            } else {
+                format!(" after joining: conde join '{place}' --board {alias}")
+            }
         ),
         NotifyKind::Post => format!(
             "conde [{alias}]: {} posted in {place} (message {id}). Read it with: conde read '{place}' --board {alias}",
@@ -462,7 +514,11 @@ pub fn render(alias: &str, n: &Notify, f: &NotifyFields) -> String {
         ),
     };
     if !f.badges.is_empty() {
-        let badges: Vec<String> = f.badges.iter().map(|b| format!("{} {}", b.place, b.unread)).collect();
+        let badges: Vec<String> = f
+            .badges
+            .iter()
+            .map(|b| format!("{} {}", b.place, b.unread))
+            .collect();
         text.push_str(&format!(" | Also unread on {alias}: {}", badges.join(", ")));
     }
     text
@@ -470,7 +526,12 @@ pub fn render(alias: &str, n: &Notify, f: &NotifyFields) -> String {
 
 /// What admission decided for a board's job, at the moment of injection.
 enum Admission {
-    Inject { agent_id: String, incarnation: i64, address: Address, text: String },
+    Inject {
+        agent_id: String,
+        incarnation: i64,
+        address: Address,
+        text: String,
+    },
     Settle(OutcomeStatus, OutcomeReason),
 }
 
@@ -508,7 +569,9 @@ enum Recording {
 
 impl Delivery {
     fn local_call(&self, op: &str, body: Value) -> anyhow::Result<Value> {
-        let resp = self.local.dispatch(&self.bridge, &Request::new(new_ulid(), op, body));
+        let resp = self
+            .local
+            .dispatch(&self.bridge, &Request::new(new_ulid(), op, body));
         match (resp.result, resp.error) {
             (Some(r), None) => Ok(r),
             (_, Some(e)) => Err(anyhow::anyhow!("{op}: {}", e.message)),
@@ -519,21 +582,41 @@ impl Delivery {
     /// Records a local attempt's outcome on the local board (v1 statuses and details).
     fn local_report(&self, attempt_id: &str, outcome: &str, reason: Option<&str>) -> Recording {
         let body = json!({"attempt_id": attempt_id, "outcome": outcome, "reason": reason});
-        let resp = self.local.dispatch(&self.bridge, &Request::new(new_ulid(), "bridge.report", body));
+        let resp = self.local.dispatch(
+            &self.bridge,
+            &Request::new(new_ulid(), "bridge.report", body),
+        );
         match (resp.result, resp.error) {
             (Some(r), None) => {
                 match r.get("ignored").and_then(Value::as_str) {
-                    Some(why) => tracing::info!(attempt = attempt_id, outcome, "receipt ignored: {why}"),
-                    None => tracing::info!(attempt = attempt_id, outcome, reason = reason.unwrap_or_default(), "attempt settled"),
+                    Some(why) => {
+                        tracing::info!(attempt = attempt_id, outcome, "receipt ignored: {why}")
+                    }
+                    None => tracing::info!(
+                        attempt = attempt_id,
+                        outcome,
+                        reason = reason.unwrap_or_default(),
+                        "attempt settled"
+                    ),
                 }
                 Recording::Recorded
             }
             (_, Some(e)) if e.code == crate::protocol::ErrorCode::Internal => {
-                tracing::warn!(attempt = attempt_id, outcome, "outcome not recorded yet: {}", e.message);
+                tracing::warn!(
+                    attempt = attempt_id,
+                    outcome,
+                    "outcome not recorded yet: {}",
+                    e.message
+                );
                 Recording::Retry
             }
             (_, Some(e)) => {
-                tracing::warn!(attempt = attempt_id, outcome, "report refused: {}", e.message);
+                tracing::warn!(
+                    attempt = attempt_id,
+                    outcome,
+                    "report refused: {}",
+                    e.message
+                );
                 Recording::Refused
             }
             _ => Recording::Retry,
@@ -542,28 +625,49 @@ impl Delivery {
 
     /// Queues a local outcome; a releasing one resolves its attempt now (later receipts are
     /// ignored) and frees the slot once recorded.
-    fn queue_local(&self, token: &str, attempt_id: &str, status: &str, reason: Option<&str>, release: bool) {
+    fn queue_local(
+        &self,
+        token: &str,
+        attempt_id: &str,
+        status: &str,
+        reason: Option<&str>,
+        release: bool,
+    ) {
         if release && let Some(e) = self.mux.lock().entries.get_mut(token) {
             e.resolved = true;
         }
-        self.pending.lock().unwrap_or_else(|p| p.into_inner()).push_back(LocalOutcome {
-            token: token.to_string(),
-            attempt_id: attempt_id.to_string(),
-            status: status.to_string(),
-            reason: reason.map(str::to_string),
-            release,
-        });
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push_back(LocalOutcome {
+                token: token.to_string(),
+                attempt_id: attempt_id.to_string(),
+                status: status.to_string(),
+                reason: reason.map(str::to_string),
+                release,
+            });
         self.flush_local();
     }
 
     /// Records the queued local outcomes in order; stops at the first one storage did not take.
     fn flush_local(&self) {
         loop {
-            let Some(next) = self.pending.lock().unwrap_or_else(|p| p.into_inner()).front().cloned() else { return };
+            let Some(next) = self
+                .pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .front()
+                .cloned()
+            else {
+                return;
+            };
             match self.local_report(&next.attempt_id, &next.status, next.reason.as_deref()) {
                 Recording::Retry => return,
                 Recording::Recorded | Recording::Refused => {
-                    self.pending.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .pop_front();
                     if next.release {
                         self.mux.release_now(&next.token);
                     }
@@ -593,7 +697,10 @@ impl Delivery {
         let o = st.origins.get_mut(LOCAL_BOARD).expect("local origin");
         for job in claim["jobs"].as_array().into_iter().flatten() {
             let attempt_id = job["attempt_id"].as_str().unwrap_or_default().to_string();
-            let Ok(address) = Address::parse(job["address"].as_str().unwrap_or_default(), &self.bridge.host) else {
+            let Ok(address) = Address::parse(
+                job["address"].as_str().unwrap_or_default(),
+                &self.bridge.host,
+            ) else {
                 continue;
             };
             o.held.insert(attempt_id.clone());
@@ -629,14 +736,24 @@ impl Delivery {
     }
 
     fn admit<N: Notifier>(&self, alias: &str, n: &Notify, notifier: &mut N) -> Admission {
-        let unavailable = Admission::Settle(OutcomeStatus::Refused, OutcomeReason::RecipientUnavailable);
-        let Endpoint::Mailbox { mailbox_id } = &n.endpoint else { return unavailable };
-        let Some(fields) = n.structured() else { return unavailable };
-        let Some(sqlite) = self.local.sqlite() else { return unavailable };
+        let unavailable =
+            Admission::Settle(OutcomeStatus::Refused, OutcomeReason::RecipientUnavailable);
+        let Endpoint::Mailbox { mailbox_id } = &n.endpoint else {
+            return unavailable;
+        };
+        let Some(fields) = n.structured() else {
+            return unavailable;
+        };
+        let Some(sqlite) = self.local.sqlite() else {
+            return unavailable;
+        };
         let found = (|| {
             let tx = sqlite.begin_local()?;
             let publication = tx.publication_by_mailbox(alias, mailbox_id)?;
-            let publishing = tx.pending_ops(Some(alias))?.iter().any(|op| op.kind == BoardOpKind::Publish);
+            let publishing = tx
+                .pending_ops(Some(alias))?
+                .iter()
+                .any(|op| op.kind == BoardOpKind::Publish);
             let agent = match &publication {
                 Some(p) => tx.agent_by_id(&p.agent_id)?,
                 None => None,
@@ -666,7 +783,9 @@ impl Delivery {
             // The board routes a newer generation here than applied yet: retried after its routes.
             return Admission::Settle(OutcomeStatus::Failed, OutcomeReason::RecipientUnavailable);
         }
-        let Some(agent) = agent else { return unavailable };
+        let Some(agent) = agent else {
+            return unavailable;
+        };
         let Some(address) = agent.address.clone() else {
             return Admission::Settle(OutcomeStatus::Failed, OutcomeReason::RecipientOffline);
         };
@@ -674,7 +793,10 @@ impl Delivery {
             return unavailable;
         }
         if !notifier.is_live(&address) {
-            self.mux.fail(format!("{alias}: {} ({address}) has no live session", agent.canonical()));
+            self.mux.fail(format!(
+                "{alias}: {} ({address}) has no live session",
+                agent.canonical()
+            ));
             return Admission::Settle(OutcomeStatus::Failed, OutcomeReason::RecipientOffline);
         }
         Admission::Inject {
@@ -686,7 +808,14 @@ impl Delivery {
     }
 
     /// Reserves a slot and records the entry; returns the token.
-    fn reserve(&self, origin: &str, attempt_id: &str, agent: AgentRef, incarnation: i64, address: &Address) -> String {
+    fn reserve(
+        &self,
+        origin: &str,
+        attempt_id: &str,
+        agent: AgentRef,
+        incarnation: i64,
+        address: &Address,
+    ) -> String {
         let token = new_ulid();
         let mut st = self.mux.lock();
         if let Some(o) = st.origins.get_mut(origin) {
@@ -711,41 +840,73 @@ impl Delivery {
     fn inject<N: Notifier>(&self, origin: &str, job: Job, notifier: &mut N) {
         match job {
             Job::Local(j) => {
-                let token = self.reserve(origin, &j.attempt_id, AgentRef::Name(j.recipient.clone()), j.binding_version, &j.address);
+                let token = self.reserve(
+                    origin,
+                    &j.attempt_id,
+                    AgentRef::Name(j.recipient.clone()),
+                    j.binding_version,
+                    &j.address,
+                );
                 let result = notifier.notify(&j.address, &j.text, &token);
                 let (status, reason) = result.report();
                 // A receipt can follow only a Claude acceptance.
-                let awaits_receipt = j.address.kind == Kind::Claude && result == NotifyOutcome::Accepted;
+                let awaits_receipt =
+                    j.address.kind == Kind::Claude && result == NotifyOutcome::Accepted;
                 self.queue_local(&token, &j.attempt_id, status, reason, !awaits_receipt);
             }
             Job::Board(n) => match self.admit(origin, &n, notifier) {
                 Admission::Settle(status, reason) => {
                     let token = new_ulid();
-                    self.mux.record(origin, &token, &n.attempt_id, status, Some(reason), true);
+                    self.mux
+                        .record(origin, &token, &n.attempt_id, status, Some(reason), true);
                 }
-                Admission::Inject { agent_id, incarnation, address, text } => {
+                Admission::Inject {
+                    agent_id,
+                    incarnation,
+                    address,
+                    text,
+                } => {
                     // The mailbox goes out as an endpoint before any outcome for it: the board
                     // takes a hold for a mailbox it does not list as one whose session ended.
-                    let client = self.mux.lock().origins.get(origin).and_then(|o| o.client.clone());
+                    let client = self
+                        .mux
+                        .lock()
+                        .origins
+                        .get(origin)
+                        .and_then(|o| o.client.clone());
                     if let (Some(sqlite), Some(client)) = (self.local.sqlite(), client) {
                         self.announce(sqlite, origin, &client, notifier);
                     }
-                    let token = self.reserve(origin, &n.attempt_id, AgentRef::Id(agent_id), incarnation, &address);
+                    let token = self.reserve(
+                        origin,
+                        &n.attempt_id,
+                        AgentRef::Id(agent_id),
+                        incarnation,
+                        &address,
+                    );
                     let result = notifier.notify(&address, &text, &token);
                     let (status, reason, last) = match (&result, address.kind) {
                         // Claude's provisional acceptance: receipts follow.
-                        (NotifyOutcome::Accepted, Kind::Claude) => (OutcomeStatus::Accepted, None, false),
+                        (NotifyOutcome::Accepted, Kind::Claude) => {
+                            (OutcomeStatus::Accepted, None, false)
+                        }
                         // Codex: an accepted injection is the confirmed reach.
                         (NotifyOutcome::Accepted, _) => (OutcomeStatus::Delivered, None, true),
                         // Codex queued it for the thread's next turn; the board settles it on
                         // the read, so nothing more is reported from here.
                         (NotifyOutcome::Held, _) => (OutcomeStatus::Held, None, true),
                         (NotifyOutcome::Failed(detail), _) => {
-                            self.mux.fail(format!("{origin}: delivery to {address} failed: {detail}"));
-                            (OutcomeStatus::Failed, Some(OutcomeReason::TransportError), true)
+                            self.mux
+                                .fail(format!("{origin}: delivery to {address} failed: {detail}"));
+                            (
+                                OutcomeStatus::Failed,
+                                Some(OutcomeReason::TransportError),
+                                true,
+                            )
                         }
                     };
-                    self.mux.record(origin, &token, &n.attempt_id, status, reason, last);
+                    self.mux
+                        .record(origin, &token, &n.attempt_id, status, reason, last);
                 }
             },
         }
@@ -764,7 +925,10 @@ impl Delivery {
             };
             // An unknown token (released, or minted by an earlier process) is ignored.
             let Some((origin, attempt_id)) = found else {
-                tracing::debug!(token = r.attempt_id, "receipt for an unknown or resolved token ignored");
+                tracing::debug!(
+                    token = r.attempt_id,
+                    "receipt for an unknown or resolved token ignored"
+                );
                 continue;
             };
             let terminal = !matches!(r.status, ReceiptStatus::Held);
@@ -784,18 +948,36 @@ impl Delivery {
                 ReceiptStatus::Refused => (OutcomeStatus::Refused, None),
                 ReceiptStatus::Dropped { reason } => {
                     if !reason.is_empty() && reason != "duplicate" {
-                        self.mux.fail(format!("{origin}: attempt dropped by the harness: {reason}"));
+                        self.mux.fail(format!(
+                            "{origin}: attempt dropped by the harness: {reason}"
+                        ));
                     }
-                    (OutcomeStatus::Dropped, (reason == "duplicate").then_some(OutcomeReason::Duplicate))
+                    (
+                        OutcomeStatus::Dropped,
+                        (reason == "duplicate").then_some(OutcomeReason::Duplicate),
+                    )
                 }
             };
-            self.mux.record(&origin, &r.attempt_id, &attempt_id, status, reason, terminal);
+            self.mux.record(
+                &origin,
+                &r.attempt_id,
+                &attempt_id,
+                status,
+                reason,
+                terminal,
+            );
         }
         n
     }
 
     /// Reports `alias`'s published mailboxes whose sessions are live as the bridge's endpoints.
-    fn announce<N: Notifier>(&self, sqlite: &SqliteStore, alias: &str, client: &BridgeClient, notifier: &mut N) {
+    fn announce<N: Notifier>(
+        &self,
+        sqlite: &SqliteStore,
+        alias: &str,
+        client: &BridgeClient,
+        notifier: &mut N,
+    ) {
         let rows = (|| {
             let tx = sqlite.begin_local()?;
             let mut out = Vec::new();
@@ -833,13 +1015,19 @@ impl Delivery {
             st.entries
                 .iter()
                 .filter(|(_, e)| {
-                    !e.resolved && e.status == OutcomeStatus::Accepted && e.address.kind == Kind::Claude && e.injected.elapsed() >= grace
+                    !e.resolved
+                        && e.status == OutcomeStatus::Accepted
+                        && e.address.kind == Kind::Claude
+                        && e.injected.elapsed() >= grace
                 })
                 .map(|(t, _)| t.clone())
                 .collect()
         };
         for token in expired {
-            tracing::debug!(token, "accepted with no receipt within the grace; slot released");
+            tracing::debug!(
+                token,
+                "accepted with no receipt within the grace; slot released"
+            );
             self.mux.release_now(&token);
         }
     }
@@ -847,7 +1035,9 @@ impl Delivery {
     /// Endpoint reporting, then session replacement and liveness of every unresolved attempt.
     fn rescan<N: Notifier>(&self, notifier: &mut N) {
         self.expire_silent_acceptances();
-        let Some(sqlite) = self.local.sqlite() else { return };
+        let Some(sqlite) = self.local.sqlite() else {
+            return;
+        };
         let clients: Vec<(String, BridgeClient)> = {
             let st = self.mux.lock();
             st.origins
@@ -860,19 +1050,39 @@ impl Delivery {
             self.announce(sqlite, &alias, &client, notifier);
         }
 
-        let open: Vec<(String, String, AgentRef, i64, Address, OutcomeStatus, String)> = {
+        let open: Vec<(
+            String,
+            String,
+            AgentRef,
+            i64,
+            Address,
+            OutcomeStatus,
+            String,
+        )> = {
             let st = self.mux.lock();
             st.entries
                 .iter()
                 .filter(|(_, e)| !e.resolved)
-                .map(|(t, e)| (t.clone(), e.origin.clone(), e.agent.clone(), e.incarnation, e.address.clone(), e.status, e.attempt_id.clone()))
+                .map(|(t, e)| {
+                    (
+                        t.clone(),
+                        e.origin.clone(),
+                        e.agent.clone(),
+                        e.incarnation,
+                        e.address.clone(),
+                        e.status,
+                        e.attempt_id.clone(),
+                    )
+                })
                 .collect()
         };
         for (token, origin, agent, incarnation, address, status, attempt_id) in open {
             let current = self.local.with_conn(|tx| match &agent {
                 AgentRef::Id(id) => tx.agent_by_id(id),
                 AgentRef::Name(canonical) => {
-                    let name = canonical.split_once('/').map_or(canonical.as_str(), |(_, n)| n);
+                    let name = canonical
+                        .split_once('/')
+                        .map_or(canonical.as_str(), |(_, n)| n);
                     tx.agent_by_name(self.bridge.user_id, name)
                 }
             });
@@ -883,14 +1093,22 @@ impl Delivery {
                     continue;
                 }
             };
-            let bound = current.as_ref().and_then(|a| a.address.clone().map(|addr| (a.binding_version, addr)));
+            let bound = current
+                .as_ref()
+                .and_then(|a| a.address.clone().map(|addr| (a.binding_version, addr)));
             if origin == LOCAL_BOARD {
                 // The local board abandons rebound attempts itself at its next claim.
                 match bound {
                     Some((version, _)) if version == incarnation => {
                         if !notifier.is_live(&address) {
                             if status == OutcomeStatus::Held {
-                                self.queue_local(&token, &attempt_id, "abandoned", Some("recipient session gone"), true);
+                                self.queue_local(
+                                    &token,
+                                    &attempt_id,
+                                    "abandoned",
+                                    Some("recipient session gone"),
+                                    true,
+                                );
                             } else {
                                 self.mux.release_now(&token);
                             }
@@ -902,7 +1120,10 @@ impl Delivery {
             }
             // The route went away (unpublished, taken, unbound): the board re-attempts it.
             let routed = match &agent {
-                AgentRef::Id(id) => match sqlite.begin_local().and_then(|tx| tx.publication(&origin, id)) {
+                AgentRef::Id(id) => match sqlite
+                    .begin_local()
+                    .and_then(|tx| tx.publication(&origin, id))
+                {
                     Ok(p) => p.is_some_and(|p| p.state == PublicationState::Published),
                     // A lookup that failed says nothing about the route: ask again next rescan.
                     Err(e) => {
@@ -915,13 +1136,26 @@ impl Delivery {
             let reason = match bound {
                 _ if !routed => Some(OutcomeReason::RecipientUnavailable),
                 None => Some(OutcomeReason::RecipientOffline),
-                Some((version, _)) if version != incarnation => Some(OutcomeReason::RecipientSessionReplaced),
+                Some((version, _)) if version != incarnation => {
+                    Some(OutcomeReason::RecipientSessionReplaced)
+                }
                 Some(_) if !notifier.is_live(&address) => Some(OutcomeReason::RecipientOffline),
                 Some(_) => None,
             };
             if let Some(reason) = reason {
-                tracing::info!(board = origin, reason = reason.as_str(), "unresolved attempt abandoned");
-                self.mux.record(&origin, &token, &attempt_id, OutcomeStatus::Abandoned, Some(reason), true);
+                tracing::info!(
+                    board = origin,
+                    reason = reason.as_str(),
+                    "unresolved attempt abandoned"
+                );
+                self.mux.record(
+                    &origin,
+                    &token,
+                    &attempt_id,
+                    OutcomeStatus::Abandoned,
+                    Some(reason),
+                    true,
+                );
             }
         }
     }
@@ -964,7 +1198,8 @@ impl Delivery {
             }
             if injected == 0 && receipts == 0 {
                 let until_claim = next_claim.saturating_duration_since(Instant::now());
-                self.mux.wait(until_claim.clamp(Duration::from_millis(5), Duration::from_millis(50)));
+                self.mux
+                    .wait(until_claim.clamp(Duration::from_millis(5), Duration::from_millis(50)));
             }
         }
     }
@@ -982,10 +1217,18 @@ mod tests {
             attempt_id: "a".into(),
             recipient: "kdobmayer/worker".into(),
             binding_version: 3,
-            endpoint: Endpoint::Mailbox { mailbox_id: "01MB".into() },
+            endpoint: Endpoint::Mailbox {
+                mailbox_id: "01MB".into(),
+            },
             message_id: "01MSG".into(),
             text: "conde: the v1 text, never shown on v2".into(),
-            fields: Some(NotifyFields { kind, sender: "balazs-rozsenich/relay".into(), place: place.into(), badges, member }),
+            fields: Some(NotifyFields {
+                kind,
+                sender: "balazs-rozsenich/relay".into(),
+                place: place.into(),
+                badges,
+                member,
+            }),
         }
     }
 
@@ -996,7 +1239,15 @@ mod tests {
             render("dakai", &n, n.fields.as_ref().unwrap()),
             "conde [dakai]: new message dakai:01MSG from balazs-rozsenich/relay. Read it with: conde read dakai:01MSG"
         );
-        let n = notify(NotifyKind::Mention, "#dev", false, vec![Badge { place: "#ops".into(), unread: 2 }]);
+        let n = notify(
+            NotifyKind::Mention,
+            "#dev",
+            false,
+            vec![Badge {
+                place: "#ops".into(),
+                unread: 2,
+            }],
+        );
         assert_eq!(
             render("dakai", &n, n.fields.as_ref().unwrap()),
             "conde [dakai]: you were mentioned in #dev by balazs-rozsenich/relay (message dakai:01MSG). Read it with: \

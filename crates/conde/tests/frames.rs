@@ -12,7 +12,10 @@ async fn newline_terminated_frame_over_max_is_refused() {
 #[tokio::test]
 async fn unterminated_frame_over_max_is_refused() {
     let mut input = &b"abcdef"[..];
-    assert_eq!(read_frame(&mut input, 5).await.unwrap_err().kind(), ErrorKind::InvalidData);
+    assert_eq!(
+        read_frame(&mut input, 5).await.unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
 }
 
 #[tokio::test]

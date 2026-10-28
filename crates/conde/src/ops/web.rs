@@ -23,10 +23,12 @@ use super::agents::{self, Agent};
 use super::channels;
 use super::messages::{self, MsgRow};
 use crate::address::{Kind, split_qualified};
-use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, not_found, opt_i64, opt_str, str_param};
+use crate::dispatch::{
+    Ctx, OpResult, bad_request, forbidden, not_found, opt_i64, opt_str, str_param,
+};
 use crate::protocol::PAGE;
 use crate::store::{Delivery, FeedBy, FeedPosts, FeedRange, Membership, Party, Tx};
-use crate::util::{iso_from_ms, is_ulid};
+use crate::util::{is_ulid, iso_from_ms};
 
 /// A bridge is online while its last heartbeat is younger than this (three ping periods).
 pub const ONLINE_TTL_MS: i64 = 90_000;
@@ -46,13 +48,22 @@ const THREAD_PAGE: usize = 200;
 const THREAD_PATH: usize = 100;
 
 /// Attempt outcomes that end an attempt without reaching the recipient.
-const FAILED: &[&str] = &["expired", "dropped", "failed", "abandoned", "denied", "refused"];
+const FAILED: &[&str] = &[
+    "expired",
+    "dropped",
+    "failed",
+    "abandoned",
+    "denied",
+    "refused",
+];
 
 /// The owner view is the signed-in human's, never an agent's: an agent reads its own
 /// conversations only (DESIGN §3). Only the browser principal passes; an actor never does.
 fn browser_only(ctx: &Ctx) -> OpResult<()> {
     if !ctx.p.browser || ctx.actor.is_some() {
-        return Err(forbidden("the owner view is for the signed-in owner in the browser, not for agents"));
+        return Err(forbidden(
+            "the owner view is for the signed-in owner in the browser, not for agents",
+        ));
     }
     Ok(())
 }
@@ -62,7 +73,12 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     browser_only(ctx)?;
     let owner = ctx.p.user_id;
     let mut agents: BTreeMap<String, Value> = BTreeMap::new();
-    for a in ctx.db.owner_agents(owner)?.into_iter().filter(|a| !a.retired) {
+    for a in ctx
+        .db
+        .owner_agents(owner)?
+        .into_iter()
+        .filter(|a| !a.retired)
+    {
         agents.insert(
             a.id.clone(),
             json!({"name": a.canonical(), "kind": a.address.as_ref().map(|x| x.kind.as_str()),
@@ -76,8 +92,10 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     }
     for c in ctx.db.owner_channel_threads(owner)? {
         if let Some(Value::Array(chs)) = agents.get_mut(&c.agent_id).map(|a| &mut a["channels"]) {
-            chs.push(json!({"channel": format!("#{}", c.name), "topic": c.topic, "last_seq": c.last_seq,
-                            "last_at": c.last_at, "unread": c.unread}));
+            chs.push(
+                json!({"channel": format!("#{}", c.name), "topic": c.topic, "last_seq": c.last_seq,
+                            "last_at": c.last_at, "unread": c.unread}),
+            );
         }
     }
     let mut agents: Vec<Value> = agents.into_values().collect();
@@ -88,11 +106,13 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
 /// The owner's agent a request names (`"agent": "name"` or `"owner/name"` in the owner's namespace).
 pub(crate) fn own_agent(ctx: &Ctx, body: &Value) -> OpResult<Agent> {
     let raw = str_param(body, "agent")?;
-    let (owner, name) = split_qualified(raw).ok_or_else(|| bad_request(format!("invalid name '{raw}'")))?;
+    let (owner, name) =
+        split_qualified(raw).ok_or_else(|| bad_request(format!("invalid name '{raw}'")))?;
     if owner.as_deref().is_some_and(|o| o != ctx.p.user) {
         return Err(forbidden(format!("'{raw}' is not one of your agents")));
     }
-    agents::by_name(ctx.db, ctx.p.user_id, &name)?.ok_or_else(|| not_found(format!("you have no agent named '{name}'")))
+    agents::by_name(ctx.db, ctx.p.user_id, &name)?
+        .ok_or_else(|| not_found(format!("you have no agent named '{name}'")))
 }
 
 /// `owner.history`: `{"agent", "with"}` (a DM thread) or `{"agent", "channel"}` (a channel the
@@ -102,18 +122,30 @@ pub fn history(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let owner = ctx.p.user_id;
     let agent = own_agent(ctx, body)?;
     let before = opt_i64(body, "before")?.unwrap_or(i64::MAX);
-    let limit = opt_i64(body, "limit")?.unwrap_or(HISTORY_PAGE).clamp(1, PAGE as i64);
+    let limit = opt_i64(body, "limit")?
+        .unwrap_or(HISTORY_PAGE)
+        .clamp(1, PAGE as i64);
     let (mut rows, mut head) = if let Some(raw) = opt_str(body, "channel")? {
         let channel = channels::member_channel(ctx, &agent, raw)?;
-        let rows = ctx.db.owner_channel_history(owner, &channel.id, before, limit + 1)?;
-        (rows, json!({"channel": format!("#{}", channel.name), "topic": channel.topic}))
+        let rows = ctx
+            .db
+            .owner_channel_history(owner, &channel.id, before, limit + 1)?;
+        (
+            rows,
+            json!({"channel": format!("#{}", channel.name), "topic": channel.topic}),
+        )
     } else if let Some(name) = opt_str(body, "with")? {
-        let partner = agents::find(ctx, name)?.ok_or_else(|| not_found(format!("no agent named '{name}'")))?;
-        let rows = ctx.db.owner_dm_history(owner, &agent.id, &partner.id, before, limit + 1)?;
+        let partner = agents::find(ctx, name)?
+            .ok_or_else(|| not_found(format!("no agent named '{name}'")))?;
+        let rows = ctx
+            .db
+            .owner_dm_history(owner, &agent.id, &partner.id, before, limit + 1)?;
         let kind = partner.address.as_ref().map(|a| a.kind.as_str());
         (rows, json!({"with": partner.canonical(), "kind": kind}))
     } else {
-        return Err(bad_request("name the conversation: {\"agent\", \"with\": \"owner/name\"} or {\"agent\", \"channel\": \"#name\"}"));
+        return Err(bad_request(
+            "name the conversation: {\"agent\", \"with\": \"owner/name\"} or {\"agent\", \"channel\": \"#name\"}",
+        ));
     };
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
@@ -144,7 +176,8 @@ pub(crate) fn owner_ranges(
 ) -> OpResult<(Vec<FeedRange>, Vec<Membership>, Place)> {
     let owner = ctx.p.user_id;
     let memberships = ctx.db.owner_memberships(owner)?;
-    let mut owned_channels: Vec<String> = memberships.iter().map(|m| m.channel_id.clone()).collect();
+    let mut owned_channels: Vec<String> =
+        memberships.iter().map(|m| m.channel_id.clone()).collect();
     owned_channels.sort();
     owned_channels.dedup();
     // place: DMs only, one channel an own agent is in, or both
@@ -152,7 +185,8 @@ pub(crate) fn owner_ranges(
         None => (true, None),
         Some("dm") => (true, Some(None)),
         Some(raw) => {
-            let name = crate::address::normalize_channel(raw).ok_or_else(|| bad_request(format!("invalid place '{raw}'")))?;
+            let name = crate::address::normalize_channel(raw)
+                .ok_or_else(|| bad_request(format!("invalid place '{raw}'")))?;
             let m = memberships
                 .iter()
                 .find(|m| m.channel == name)
@@ -161,25 +195,52 @@ pub(crate) fn owner_ranges(
         }
     };
     let in_place = |c: &String| place_channel.as_ref().is_none_or(|p| p.as_ref() == Some(c));
-    let own_ids: Vec<String> = ctx.db.owner_agents(owner)?.into_iter().map(|a| a.id).collect();
+    let own_ids: Vec<String> = ctx
+        .db
+        .owner_agents(owner)?
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
     let picked = |id: &String| agent.as_ref().is_none_or(|a| &a.id == id);
-    let owned_here: Vec<String> = owned_channels.iter().filter(|c| in_place(c)).cloned().collect();
+    let owned_here: Vec<String> = owned_channels
+        .iter()
+        .filter(|c| in_place(c))
+        .cloned()
+        .collect();
     // the channels the rows may be in: the agent's (it is a current member), else every own one
     let channels: Vec<String> = match &agent {
-        Some(a) => memberships.iter().filter(|m| m.agent_id == a.id && in_place(&m.channel_id)).map(|m| m.channel_id.clone()).collect(),
+        Some(a) => memberships
+            .iter()
+            .filter(|m| m.agent_id == a.id && in_place(&m.channel_id))
+            .map(|m| m.channel_id.clone())
+            .collect(),
         None => owned_here.clone(),
     };
     let mut ranges = Vec::new();
     let mut range = |by: FeedBy, id: &String, dms: Option<Party>, posts: Option<FeedPosts>| {
-        ranges.push(FeedRange { by, id: id.clone(), dms: dms.filter(|_| dms_wanted), posts });
+        ranges.push(FeedRange {
+            by,
+            id: id.clone(),
+            dms: dms.filter(|_| dms_wanted),
+            posts,
+        });
     };
     if direction == Some("out") {
         // Every `out` row has an own sender: the own senders' ranges alone, never a channel's
         // range filtered down to its few own posts. The named agent's own posts reach every
         // channel an own agent is in (it may have left one); the others', the agent's channels.
         for id in &own_ids {
-            let posts = if agent.is_some() && picked(id) { &owned_here } else { &channels };
-            range(FeedBy::Sender, id, picked(id).then_some(Party::Other), Some(FeedPosts::In(posts.clone())));
+            let posts = if agent.is_some() && picked(id) {
+                &owned_here
+            } else {
+                &channels
+            };
+            range(
+                FeedBy::Sender,
+                id,
+                picked(id).then_some(Party::Other),
+                Some(FeedPosts::In(posts.clone())),
+            );
         }
     } else {
         // The party at the other end of a DM, from a sender range and from a recipient range,
@@ -190,7 +251,8 @@ pub(crate) fn owner_ranges(
             _ => (None, Some(Party::Other), Some(Party::Other)),
         };
         // An agent's own posts in a channel it left are still readable through another own member.
-        let left_posts = (agent.is_some() && direction.is_none()).then(|| FeedPosts::In(owned_here.clone()));
+        let left_posts =
+            (agent.is_some() && direction.is_none()).then(|| FeedPosts::In(owned_here.clone()));
         for id in own_ids.iter().filter(|id| picked(id)) {
             range(FeedBy::Sender, id, sent_to, left_posts.clone());
             range(FeedBy::Recipient, id, received_from, None);
@@ -224,7 +286,9 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let owner = ctx.p.user_id;
     let after = opt_i64(body, "after")?.unwrap_or(0);
     let before = opt_i64(body, "before")?.unwrap_or(i64::MAX);
-    let limit = opt_i64(body, "limit")?.unwrap_or(FEED_PAGE).clamp(1, FEED_MAX);
+    let limit = opt_i64(body, "limit")?
+        .unwrap_or(FEED_PAGE)
+        .clamp(1, FEED_MAX);
     let agent = match opt_str(body, "agent")? {
         Some(_) => Some(own_agent(ctx, body)?),
         None => None,
@@ -238,9 +302,13 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if direction.is_some_and(|d| !["in", "out", "own"].contains(&d)) {
         return Err(bad_request("direction is one of in, out, own"));
     }
-    let (ranges, memberships, place_channel) = owner_ranges(ctx, agent.as_ref(), direction, opt_str(body, "place")?)?;
+    let (ranges, memberships, place_channel) =
+        owner_ranges(ctx, agent.as_ref(), direction, opt_str(body, "place")?)?;
     let direction_of = |m: &MsgRow| {
-        let (from_own, to_own) = (owned(ctx, &m.sender), m.recipient.as_deref().is_some_and(|r| owned(ctx, r)));
+        let (from_own, to_own) = (
+            owned(ctx, &m.sender),
+            m.recipient.as_deref().is_some_and(|r| owned(ctx, r)),
+        );
         match (&m.channel_id, from_own, to_own) {
             (None, true, true) => "own",
             (_, true, _) => "out",
@@ -262,7 +330,11 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             let by_agent = agent.as_ref().is_none_or(|a| {
                 m.sender_id == a.id
                     || m.recipient_id.as_ref() == Some(&a.id)
-                    || m.channel_id.as_ref().is_some_and(|c| memberships.iter().any(|x| x.agent_id == a.id && &x.channel_id == c))
+                    || m.channel_id.as_ref().is_some_and(|c| {
+                        memberships
+                            .iter()
+                            .any(|x| x.agent_id == a.id && &x.channel_id == c)
+                    })
             });
             in_place && by_agent && direction.is_none_or(|d| d == direction_of(m))
         };
@@ -273,7 +345,10 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
                     continue;
                 }
                 let d = delivery(ctx, &m)?;
-                let problem = d["recipients"].as_array().is_some_and(|rs| rs.iter().any(|r| PROBLEMS.contains(&r["state"].as_str().unwrap_or(""))));
+                let problem = d["recipients"].as_array().is_some_and(|rs| {
+                    rs.iter()
+                        .any(|r| PROBLEMS.contains(&r["state"].as_str().unwrap_or("")))
+                });
                 if problem {
                     rows.push((m, Some(d)));
                     if rows.len() as i64 > limit {
@@ -283,21 +358,36 @@ pub fn feed(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             }
         }
     } else {
-        rows = ctx.db.owner_feed(owner, &ranges, after, before, limit + 1, false)?.into_iter().map(|m| (m, None)).collect();
+        rows = ctx
+            .db
+            .owner_feed(owner, &ranges, after, before, limit + 1, false)?
+            .into_iter()
+            .map(|m| (m, None))
+            .collect();
     }
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
     let mut out = Vec::with_capacity(rows.len());
     for (m, d) in rows {
         let m = &m;
-        let (from_own, to_own) = (owned(ctx, &m.sender), m.recipient.as_deref().is_some_and(|r| owned(ctx, r)));
+        let (from_own, to_own) = (
+            owned(ctx, &m.sender),
+            m.recipient.as_deref().is_some_and(|r| owned(ctx, r)),
+        );
         let direction = direction_of(m);
         let via: Vec<&str> = match &m.channel_id {
-            Some(c) => memberships.iter().filter(|x| &x.channel_id == c).map(|x| x.agent.as_str()).collect(),
-            None => [from_own.then_some(m.sender.as_str()), m.recipient.as_deref().filter(|_| to_own)]
-                .into_iter()
-                .flatten()
+            Some(c) => memberships
+                .iter()
+                .filter(|x| &x.channel_id == c)
+                .map(|x| x.agent.as_str())
                 .collect(),
+            None => [
+                from_own.then_some(m.sender.as_str()),
+                m.recipient.as_deref().filter(|_| to_own),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         };
         let mut v = messages::view(ctx.db, m)?;
         v["delivery"] = match d {
@@ -323,10 +413,17 @@ pub fn thread(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let id = str_param(body, "id")?;
     visible(ctx, id)?;
     let up = ctx.db.owner_thread_up(owner, id)?;
-    let Some(real_top) = up.last() else { return Err(not_found(format!("no message '{id}' visible to your agents"))) };
+    let Some(real_top) = up.last() else {
+        return Err(not_found(format!(
+            "no message '{id}' visible to your agents"
+        )));
+    };
     let hidden_parent = real_top.2.is_some();
-    let (top_at, start) =
-        if up.len() > THREAD_PATH { (THREAD_PATH - 1, Some(real_top.1.clone())) } else { (up.len() - 1, None) };
+    let (top_at, start) = if up.len() > THREAD_PATH {
+        (THREAD_PATH - 1, Some(real_top.1.clone()))
+    } else {
+        (up.len() - 1, None)
+    };
     let top = up[top_at].1.clone();
     let (mut seqs, next) = match opt_i64(body, "after")? {
         None => {
@@ -334,7 +431,10 @@ pub fn thread(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             let path: Vec<i64> = up[..=top_at].iter().map(|p| p.0).collect();
             let room = THREAD_PAGE - path.len();
             let (mut picked, mut more) = (Vec::new(), false);
-            for s in ctx.db.owner_thread_down(owner, &top, 0, THREAD_PAGE as i64 + 1)? {
+            for s in ctx
+                .db
+                .owner_thread_down(owner, &top, 0, THREAD_PAGE as i64 + 1)?
+            {
                 if path.contains(&s) {
                     continue;
                 }
@@ -348,7 +448,9 @@ pub fn thread(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             (path.into_iter().chain(picked).collect::<Vec<_>>(), next)
         }
         Some(after) => {
-            let mut sub = ctx.db.owner_thread_down(owner, &top, after, THREAD_PAGE as i64 + 1)?;
+            let mut sub = ctx
+                .db
+                .owner_thread_down(owner, &top, after, THREAD_PAGE as i64 + 1)?;
             let more = sub.len() > THREAD_PAGE;
             sub.truncate(THREAD_PAGE);
             let next = if more { sub.last().copied() } else { None };
@@ -364,7 +466,9 @@ pub fn thread(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         v["delivery"] = delivery(ctx, m)?;
         out.push(v);
     }
-    Ok(json!({"top": top, "start": start, "hidden_parent": hidden_parent, "messages": out, "next": next}))
+    Ok(
+        json!({"top": top, "start": start, "hidden_parent": hidden_parent, "messages": out, "next": next}),
+    )
 }
 
 /// `owner.message`: one message an agent of the owner can read.
@@ -383,7 +487,9 @@ pub fn search(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     browser_only(ctx)?;
     let owner = ctx.p.user_id;
     messages::search_in(ctx, body, |after, scope, from_day| {
-        Ok(ctx.db.owner_search_scan(owner, after, scope, from_day, messages::SEARCH_BATCH)?)
+        Ok(ctx
+            .db
+            .owner_search_scan(owner, after, scope, from_day, messages::SEARCH_BATCH)?)
     })
 }
 
@@ -394,8 +500,10 @@ pub fn attachment(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let missing = || not_found(format!("no attachment '{id}' visible to your agents"));
     let att = ctx.db.attachment(id)?.ok_or_else(missing)?;
     visible(ctx, &att.message_id).map_err(|_| missing())?;
-    Ok(json!({"attachment_id": id, "message_id": att.message_id, "filename": att.filename,
-              "size": att.bytes.len(), "data": B64.encode(&att.bytes)}))
+    Ok(
+        json!({"attachment_id": id, "message_id": att.message_id, "filename": att.filename,
+              "size": att.bytes.len(), "data": B64.encode(&att.bytes)}),
+    )
 }
 
 fn visible(ctx: &Ctx, id: &str) -> OpResult<MsgRow> {
@@ -407,7 +515,9 @@ fn visible(ctx: &Ctx, id: &str) -> OpResult<MsgRow> {
 }
 
 fn owned(ctx: &Ctx, canonical: &str) -> bool {
-    canonical.split_once('/').is_some_and(|(owner, _)| owner == ctx.p.user)
+    canonical
+        .split_once('/')
+        .is_some_and(|(owner, _)| owner == ctx.p.user)
 }
 
 /// Per-recipient delivery state of `m`: every recipient when one of the owner's agents sent
@@ -456,7 +566,9 @@ fn recipient_state(db: &dyn Tx, m: &MsgRow, d: &Delivery) -> OpResult<Value> {
         };
     // A human has no push transport: until read, their notification is the unread badge
     // (a bridge marks it so; a human on a host without a bridge stays pending).
-    let human = || -> OpResult<bool> { Ok(agents::by_id(db, &d.recipient_id)?.is_some_and(|a| a.is_human())) };
+    let human = || -> OpResult<bool> {
+        Ok(agents::by_id(db, &d.recipient_id)?.is_some_and(|a| a.is_human()))
+    };
     let state = match d.status.as_str() {
         _ if read => "read",
         "pending" | "dispatching" if human()? => "unread",
@@ -505,18 +617,28 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         .collect();
     // Reached: delivered, or accepted on a codex row; a mailbox row counts delivered only, which
     // is what a confirmed Codex reach is normalized to (the rule lives in `agent_health`).
-    let health: HashMap<String, _> =
-        ctx.db.agent_health(ctx.p.user_id, &stuck_before)?.into_iter().map(|h| (h.agent_id.clone(), h)).collect();
+    let health: HashMap<String, _> = ctx
+        .db
+        .agent_health(ctx.p.user_id, &stuck_before)?
+        .into_iter()
+        .map(|h| (h.agent_id.clone(), h))
+        .collect();
     let mut agents = Vec::new();
     for a in ctx.db.bound_agents()? {
         let Some(address) = &a.address else { continue };
-        hosts.entry((a.owner.clone(), address.host.clone())).or_insert_with(|| {
-            json!({"host": address.host, "owner": a.owner, "bridge": false, "online": false,
+        hosts
+            .entry((a.owner.clone(), address.host.clone()))
+            .or_insert_with(|| {
+                json!({"host": address.host, "owner": a.owner, "bridge": false, "online": false,
                    "heartbeat": null, "last_seen": null})
-        });
+            });
         let discovered = match address.kind {
             Kind::Human => None,
-            kind => endpoints.get(&(address.host.clone(), kind.as_str().to_string(), address.target.clone())),
+            kind => endpoints.get(&(
+                address.host.clone(),
+                kind.as_str().to_string(),
+                address.target.clone(),
+            )),
         };
         let own = a.owner_id == ctx.p.user_id;
         let h = health.get(&a.id);

@@ -108,7 +108,10 @@ impl Response {
             request_id: request_id.into(),
             ok: false,
             result: None,
-            error: Some(ErrorBody { code, message: message.into() }),
+            error: Some(ErrorBody {
+                code,
+                message: message.into(),
+            }),
         }
     }
 }

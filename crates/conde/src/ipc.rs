@@ -57,16 +57,27 @@ pub fn connect(path: &Path) -> io::Result<Stream> {
         let own = win::own_user_sid()?;
         let server = pipe.server_pid().and_then(win::process_user_sid);
         crate::util::same_sid(server, &own).map_err(|why| {
-            io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is not this user's daemon: {why}", path.display()))
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is not this user's daemon: {why}", path.display()),
+            )
         })?;
-        Ok(Stream { pipe: Arc::new(pipe), read_timeout: None, write_timeout: None })
+        Ok(Stream {
+            pipe: Arc::new(pipe),
+            read_timeout: None,
+            write_timeout: None,
+        })
     }
 }
 
 #[cfg(windows)]
 impl Stream {
     pub fn try_clone(&self) -> io::Result<Stream> {
-        Ok(Stream { pipe: self.pipe.clone(), read_timeout: self.read_timeout, write_timeout: self.write_timeout })
+        Ok(Stream {
+            pipe: self.pipe.clone(),
+            read_timeout: self.read_timeout,
+            write_timeout: self.write_timeout,
+        })
     }
 
     pub fn set_read_timeout(&mut self, t: Option<Duration>) -> io::Result<()> {
@@ -83,7 +94,8 @@ impl Stream {
 #[cfg(windows)]
 impl io::Read for &Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.pipe.read(buf, self.read_timeout.map(|t| Instant::now() + t))
+        self.pipe
+            .read(buf, self.read_timeout.map(|t| Instant::now() + t))
     }
 }
 
@@ -97,7 +109,9 @@ impl io::Read for Stream {
 #[cfg(windows)]
 impl io::Write for &Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.pipe.write_all(buf, self.write_timeout.map(|t| Instant::now() + t)).map(|()| buf.len())
+        self.pipe
+            .write_all(buf, self.write_timeout.map(|t| Instant::now() + t))
+            .map(|()| buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -139,11 +153,17 @@ pub struct Listener {
 }
 
 #[cfg(windows)]
-fn create(name: &std::ffi::OsStr, security: &conde_transport::win::Security, first: bool) -> io::Result<Conn> {
+fn create(
+    name: &std::ffi::OsStr,
+    security: &conde_transport::win::Security,
+    first: bool,
+) -> io::Result<Conn> {
     let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
     opts.first_pipe_instance(first).reject_remote_clients(true);
     // SAFETY: the attributes and their descriptor outlive the call (owned by the caller).
-    unsafe { opts.create_with_security_attributes_raw(name, security.attributes().cast_mut().cast()) }
+    unsafe {
+        opts.create_with_security_attributes_raw(name, security.attributes().cast_mut().cast())
+    }
 }
 
 /// Create the pipe at `path` (owner-only), refusing to run beside a live daemon.
@@ -152,17 +172,26 @@ fn create(name: &std::ffi::OsStr, security: &conde_transport::win::Security, fir
 pub fn bind(path: &Path) -> anyhow::Result<Listener> {
     use anyhow::Context;
     use conde_transport::win;
-    let security = win::Security::owner_only(false).context("building the pipe's security descriptor")?;
+    let security =
+        win::Security::owner_only(false).context("building the pipe's security descriptor")?;
     let name = path.as_os_str().to_owned();
     let next = match create(&name, &security, true) {
         Ok(p) => p,
         // a first instance of an existing pipe is refused with ERROR_ACCESS_DENIED
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-            anyhow::bail!("another conde daemon (or another program) is listening on {}", path.display())
+            anyhow::bail!(
+                "another conde daemon (or another program) is listening on {}",
+                path.display()
+            )
         }
         Err(e) => return Err(e).with_context(|| format!("creating the pipe {}", path.display())),
     };
-    Ok(Listener { name, next, security, own_sid: win::own_user_sid()? })
+    Ok(Listener {
+        name,
+        next,
+        security,
+        own_sid: win::own_user_sid()?,
+    })
 }
 
 /// The next connection, and Err(why) when its peer is another user.
@@ -170,7 +199,8 @@ pub async fn accept(l: &mut Listener) -> io::Result<(Conn, Result<(), String>)> 
     #[cfg(unix)]
     {
         let (stream, _) = l.accept().await?;
-        let check = crate::util::same_user(stream.peer_cred().map(|c| c.uid()), crate::util::own_euid());
+        let check =
+            crate::util::same_user(stream.peer_cred().map(|c| c.uid()), crate::util::own_euid());
         Ok((stream, check))
     }
     #[cfg(windows)]
@@ -178,7 +208,8 @@ pub async fn accept(l: &mut Listener) -> io::Result<(Conn, Result<(), String>)> 
         l.next.connect().await?;
         let fresh = create(&l.name, &l.security, false)?;
         let conn = std::mem::replace(&mut l.next, fresh);
-        let peer = conde_transport::win::client_pid(&conn).and_then(conde_transport::win::process_user_sid);
+        let peer = conde_transport::win::client_pid(&conn)
+            .and_then(conde_transport::win::process_user_sid);
         let check = crate::util::same_sid(peer, &l.own_sid);
         Ok((conn, check))
     }

@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use conde_remote::{
-    Authenticator, BridgeClient, BridgeConfig, BridgeState, Dispatcher, Endpoint, FenceResult,
-    NotificationSource, Notify, Outcome, Principal, Recorded, ServerConfig, ServerHandle,
-    StopReason,
+    Authenticator, BridgeClient, BridgeConfig, BridgeState, CallError, Dispatcher, Endpoint,
+    FenceResult, NotificationSource, Notify, Outcome, Principal, Recorded, ServerConfig,
+    ServerHandle, StopReason,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -152,7 +152,12 @@ impl NotificationSource for FakeSource {
         FenceResult::Active
     }
 
-    fn endpoints(&self, _host_id: &str, _bridge_instance: &str, endpoints: &[Endpoint]) -> Recorded {
+    fn endpoints(
+        &self,
+        _host_id: &str,
+        _bridge_instance: &str,
+        endpoints: &[Endpoint],
+    ) -> Recorded {
         let mut sorted = endpoints.to_vec();
         sorted.sort_by_key(|e| format!("{e:?}"));
         if sorted.contains(&claude("slow")) {
@@ -186,7 +191,9 @@ impl NotificationSource for FakeSource {
 }
 
 fn claude(session: &str) -> Endpoint {
-    Endpoint::Claude { session_id: session.into() }
+    Endpoint::Claude {
+        session_id: session.into(),
+    }
 }
 
 fn notify(attempt: &str) -> Notify {
@@ -329,7 +336,9 @@ async fn recv_close(ws: &mut RawWs) -> Option<(u16, String)> {
             .await
             .expect("close within timeout")
         {
-            Some(Ok(Message::Close(Some(f)))) => return Some((f.code.into(), f.reason.to_string())),
+            Some(Ok(Message::Close(Some(f)))) => {
+                return Some((f.code.into(), f.reason.to_string()));
+            }
             Some(Ok(Message::Close(None))) | None | Some(Err(_)) => return None,
             Some(Ok(_)) => continue,
         }
@@ -341,7 +350,11 @@ fn outcome_frame(attempt: &str) -> Value {
 }
 
 fn endpoints_frame(added: &[&str], removed: &[&str]) -> Value {
-    let list = |s: &[&str]| s.iter().map(|id| json!({"kind":"claude","session_id":id})).collect::<Vec<_>>();
+    let list = |s: &[&str]| {
+        s.iter()
+            .map(|id| json!({"kind":"claude","session_id":id}))
+            .collect::<Vec<_>>()
+    };
     json!({"v":1,"type":"endpoints","added":list(added),"removed":list(removed)})
 }
 
@@ -469,14 +482,28 @@ async fn a_hello_breaking_its_protocol_shape_is_refused() {
     ];
     for extra in bad {
         let mut frame = hello("host-a", "i-1");
-        frame.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        frame
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         let mut ws = raw_ws(addr, "tok-a").await.unwrap();
         send_json(&mut ws, frame).await;
         let err = recv_json(&mut ws).await.expect("error frame");
-        assert_eq!((err["type"].as_str(), err["code"].as_str()), (Some("error"), Some("bad_hello")), "{extra}");
-        assert_eq!(recv_json(&mut ws).await, None, "connection closed after the error");
+        assert_eq!(
+            (err["type"].as_str(), err["code"].as_str()),
+            (Some("error"), Some("bad_hello")),
+            "{extra}"
+        );
+        assert_eq!(
+            recv_json(&mut ws).await,
+            None,
+            "connection closed after the error"
+        );
     }
-    assert!(source.state().fence_calls.is_empty(), "no fence for a refused hello");
+    assert!(
+        source.state().fence_calls.is_empty(),
+        "no fence for a refused hello"
+    );
     server.shutdown().await.unwrap();
 }
 
@@ -772,7 +799,12 @@ async fn only_an_answered_ping_writes_a_heartbeat_once() {
 
     // The first ping: answered by a burst of pongs (the reader's automatic one included).
     loop {
-        match tokio::time::timeout(WAIT, ws.next()).await.expect("a ping").unwrap().unwrap() {
+        match tokio::time::timeout(WAIT, ws.next())
+            .await
+            .expect("a ping")
+            .unwrap()
+            .unwrap()
+        {
             Message::Ping(_) => break,
             _ => continue,
         }
@@ -781,7 +813,11 @@ async fn only_an_answered_ping_writes_a_heartbeat_once() {
         ws.send(Message::Pong(Default::default())).await.unwrap();
     }
     tokio::time::sleep(Duration::from_millis(250)).await;
-    assert_eq!(source.state().heartbeats, 1, "one write for one answered ping");
+    assert_eq!(
+        source.state().heartbeats,
+        1,
+        "one write for one answered ping"
+    );
     server.shutdown().await.unwrap();
 }
 
@@ -1544,7 +1580,13 @@ async fn endpoints_are_recorded_behind_the_outcomes_sent_before_them() {
     wait_until("all written", || source.state().writes.len() == 5).await;
     assert_eq!(
         source.state().writes,
-        vec!["endpoints []", "endpoints [s1]", "outcome slow-a", "endpoints []", "outcome b"]
+        vec![
+            "endpoints []",
+            "endpoints [s1]",
+            "outcome slow-a",
+            "endpoints []",
+            "outcome b"
+        ]
     );
     server.shutdown().await.unwrap();
 }
@@ -1560,7 +1602,10 @@ async fn an_endpoints_write_that_fails_closes_the_connection_before_later_outcom
     source.state().endpoints_fail_next = 1;
     send_json(&mut ws, endpoints_frame(&[], &["s1"])).await;
     send_json(&mut ws, outcome_frame("after")).await;
-    assert_eq!(recv_close(&mut ws).await, Some((1011, "endpoints not recorded".into())));
+    assert_eq!(
+        recv_close(&mut ws).await,
+        Some((1011, "endpoints not recorded".into()))
+    );
     // The outcome read after the unrecorded snapshot is left for the bridge to resend.
     assert_eq!(source.state().writes, vec!["endpoints []"]);
     assert_eq!(source.record_calls_for("after"), 0);
@@ -1579,7 +1624,10 @@ async fn a_replaced_connections_snapshot_does_not_overwrite_the_new_hello() {
     // The old connection's snapshot is mid-write when the bridge reconnects with a fresh hello.
     source.state().hold_slow_endpoints = true;
     send_json(&mut old, endpoints_frame(&["slow"], &[])).await;
-    wait_until("old snapshot writing", || source.state().slow_endpoints_writing).await;
+    wait_until("old snapshot writing", || {
+        source.state().slow_endpoints_writing
+    })
+    .await;
     let mut new = raw_ws(addr, "tok-a").await.unwrap();
     let mut fresh = hello("host-a", "i-2");
     fresh["endpoints"] = json!([{"kind":"claude","session_id":"s2"}]);
@@ -1587,10 +1635,19 @@ async fn a_replaced_connections_snapshot_does_not_overwrite_the_new_hello() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     source.state().hold_slow_endpoints = false;
 
-    wait_until("new hello snapshot", || source.state().writes.contains(&"endpoints [s2]".to_string())).await;
+    wait_until("new hello snapshot", || {
+        source
+            .state()
+            .writes
+            .contains(&"endpoints [s2]".to_string())
+    })
+    .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(source.state().endpoints, vec![claude("s2")]);
-    assert_eq!(source.state().writes.last().map(String::as_str), Some("endpoints [s2]"));
+    assert_eq!(
+        source.state().writes.last().map(String::as_str),
+        Some("endpoints [s2]")
+    );
     drop(old);
     drop(new);
     server.shutdown().await.unwrap();
@@ -1610,8 +1667,15 @@ async fn a_full_work_queue_closes_the_connection_instead_of_pausing_it() {
         send_json(&mut ws, outcome_frame(&format!("slow-{i}"))).await;
     }
     let t = tokio::time::Instant::now();
-    assert_eq!(recv_close(&mut ws).await, Some((1011, "work queue full".into())));
-    assert!(t.elapsed() < Duration::from_secs(1), "closed after {:?}", t.elapsed());
+    assert_eq!(
+        recv_close(&mut ws).await,
+        Some((1011, "work queue full".into()))
+    );
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "closed after {:?}",
+        t.elapsed()
+    );
     server.shutdown().await.unwrap();
 }
 
@@ -1657,7 +1721,9 @@ async fn an_endpoint_change_goes_out_before_an_outcome_reported_after_it() {
         let unbounded = tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(None)
             .max_frame_size(None);
-        let mut ws = tokio_tungstenite::accept_async_with_config(tcp, Some(unbounded)).await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async_with_config(tcp, Some(unbounded))
+            .await
+            .unwrap();
         let _hello = ws.next().await;
         // The big request has started to arrive: its sender is stuck until this side reads.
         let mut buf = vec![0u8; 1 << 16];
@@ -1682,21 +1748,117 @@ async fn an_endpoint_change_goes_out_before_an_outcome_reported_after_it() {
     // session and reports a hold for it.
     let big = client.clone();
     tokio::spawn(async move {
-        let _ = big.call(json!({"op": "big", "pad": "x".repeat(32 << 20)})).await;
+        let _ = big
+            .call(json!({"op": "big", "pad": "x".repeat(32 << 20)}))
+            .await;
     });
-    tokio::time::timeout(WAIT, stuck_rx).await.expect("big request on the wire").unwrap();
+    tokio::time::timeout(WAIT, stuck_rx)
+        .await
+        .expect("big request on the wire")
+        .unwrap();
     client.set_endpoints(vec![
-        Endpoint::Codex { thread_id: "th-1".into() },
-        Endpoint::Codex { thread_id: "th-2".into() },
+        Endpoint::Codex {
+            thread_id: "th-1".into(),
+        },
+        Endpoint::Codex {
+            thread_id: "th-2".into(),
+        },
     ]);
     client.report("att-th-2", "held", None).unwrap();
     resume.notify_one();
 
     let mut order = Vec::new();
     while order.len() < 2 {
-        let kind = tokio::time::timeout(WAIT, seen_rx.recv()).await.expect("frames arrive").unwrap();
+        let kind = tokio::time::timeout(WAIT, seen_rx.recv())
+            .await
+            .expect("frames arrive")
+            .unwrap();
         order.push(kind);
     }
     assert_eq!(order, ["endpoints", "outcome"]);
     client.shutdown();
+}
+
+/// A board that moved (`moved_to`): `/healthz` still answers, every other request is a 308 to
+/// the new address with `{"moved_to"}`; a bridge stops for good on it (no reconnect) and an RPC
+/// call reports it, both as [`StopReason::Moved`].
+#[tokio::test(flavor = "multi_thread")]
+async fn a_moved_board_answers_308_everywhere_but_healthz_and_clients_stop() {
+    const NEW: &str = "https://dakai.conde.cloud";
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = ServerConfig {
+        moved_to: Some(NEW.into()),
+        ..test_config()
+    };
+    let server = start_server(local(), config, Arc::default()).await;
+    let addr = server.local_addr();
+    assert_eq!(
+        http(addr, "GET", "/healthz", None, "").await,
+        (200, "ok".into())
+    );
+    let web = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    for (method, path) in [
+        ("POST", "/v1/rpc"),
+        ("GET", "/v1/bridge"),
+        ("GET", "/keys"),
+        ("POST", "/v1/admin/users"),
+        ("GET", "/install.sh"),
+        ("GET", "/no/such/path"),
+    ] {
+        let r = web
+            .request(method.parse().unwrap(), format!("http://{addr}{path}"))
+            .bearer_auth("tok-a")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 308, "{method} {path}");
+        assert_eq!(r.headers()["location"], NEW, "{method} {path}");
+        assert_eq!(
+            r.json::<Value>().await.unwrap(),
+            json!({"moved_to": NEW}),
+            "{method} {path}"
+        );
+    }
+    match raw_ws(addr, "tok-a").await {
+        Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 308),
+        other => panic!("expected a 308 handshake, got {:?}", other.map(|_| ())),
+    }
+    let called = conde_remote::rpc(
+        &format!("http://{addr}/v1/rpc"),
+        "tok-a",
+        json!({"op": "board.info", "body": {}}),
+        WAIT,
+    )
+    .await;
+    assert!(
+        matches!(&called, Err(CallError::Stopped(StopReason::Moved(url))) if url == NEW),
+        "{called:?}"
+    );
+
+    let (client, _rx) = start_client(client_config(addr, "tok-a", "host-a", "i-moved"));
+    let reason = tokio::time::timeout(WAIT, client.stopped()).await.unwrap();
+    assert_eq!(reason, StopReason::Moved(NEW.into()));
+    assert_eq!(client.connects(), 0, "never connected, never retried");
+    server.shutdown().await.unwrap();
+}
+
+#[test]
+fn a_move_is_read_from_the_body_else_the_location() {
+    assert_eq!(
+        conde_remote::moved_to(308, Some("https://b"), br#"{"moved_to":"https://a"}"#).as_deref(),
+        Some("https://a")
+    );
+    assert_eq!(
+        conde_remote::moved_to(308, Some("https://b"), b"not json").as_deref(),
+        Some("https://b")
+    );
+    assert_eq!(conde_remote::moved_to(308, None, b""), None);
+    assert_eq!(
+        conde_remote::moved_to(307, Some("https://b"), br#"{"moved_to":"https://a"}"#),
+        None
+    );
 }

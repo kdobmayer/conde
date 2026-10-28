@@ -15,7 +15,9 @@ use conde_remote::{BridgeClient, BridgeConfig, BridgeState, Endpoint, Notify, Ou
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use super::{BoxFuture, ENDPOINT_RESCAN, Handler, Options, Socket, bind, runtime, serve, termination};
+use super::{
+    BoxFuture, ENDPOINT_RESCAN, Handler, Options, Socket, bind, runtime, serve, termination,
+};
 use crate::address::{Address, Kind};
 use crate::credentials;
 use crate::harness::{HarnessNotifier, doctor_checks};
@@ -35,7 +37,11 @@ impl Handler for Remote {
             let doctor = req.op == "doctor";
             let actor = req.actor.clone();
             let resp = forward(&self.client, &req, doctor).await;
-            if doctor { self.with_local_checks(resp, actor.as_deref()) } else { resp }
+            if doctor {
+                self.with_local_checks(resp, actor.as_deref())
+            } else {
+                resp
+            }
         })
     }
 }
@@ -60,7 +66,10 @@ impl Remote {
                     self.client.connects()
                 ),
             ),
-            other => add(false, format!("bridge: not connected to {} ({other:?})", self.url)),
+            other => add(
+                false,
+                format!("bridge: not connected to {} ({other:?})", self.url),
+            ),
         }
         let (ok, text) = crate::private::doctor(&self.credentials);
         add(ok, text);
@@ -68,7 +77,10 @@ impl Remote {
             add(ok, text);
         }
         let issues = lines.iter().filter(|l| l["ok"] == false).count();
-        Response::ok(&resp.request_id, json!({"checks": lines, "issues": issues, "build": crate::VERSION}))
+        Response::ok(
+            &resp.request_id,
+            json!({"checks": lines, "issues": issues, "build": crate::VERSION}),
+        )
     }
 }
 
@@ -93,23 +105,36 @@ async fn serve_until(
 
 async fn forward(client: &BridgeClient, req: &Request, doctor: bool) -> Response {
     let unreachable = |why: String| {
-        Response::err(&req.request_id, ErrorCode::Internal, format!("conde server unreachable through the bridge: {why}"))
+        Response::err(
+            &req.request_id,
+            ErrorCode::Internal,
+            format!("conde server unreachable through the bridge: {why}"),
+        )
     };
     let frame = match serde_json::to_value(req) {
         Ok(v) => v,
         Err(e) => return unreachable(e.to_string()),
     };
     // doctor must answer even while the bridge is down
-    let wait = if doctor { Duration::from_secs(5) } else { Duration::from_secs(120) };
+    let wait = if doctor {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(120)
+    };
     match tokio::time::timeout(wait, client.call(frame)).await {
-        Ok(Ok(v)) => serde_json::from_value(v).unwrap_or_else(|e| unreachable(format!("bad response frame: {e}"))),
+        Ok(Ok(v)) => serde_json::from_value(v)
+            .unwrap_or_else(|e| unreachable(format!("bad response frame: {e}"))),
         Ok(Err(e)) => unreachable(e.to_string()),
         Err(_) => unreachable(format!("no answer within {wait:?}")),
     }
 }
 
 fn endpoints(notifier: &HarnessNotifier) -> Vec<Endpoint> {
-    notifier.live_claude().into_iter().map(|session_id| Endpoint::Claude { session_id }).collect()
+    notifier
+        .live_claude()
+        .into_iter()
+        .map(|session_id| Endpoint::Claude { session_id })
+        .collect()
 }
 
 /// `conde daemon --v1-bridge <url>`: the v1 cloud bridge.
@@ -150,7 +175,12 @@ pub fn run(opts: Options, server: &str) -> anyhow::Result<()> {
             .name("deliver".into())
             .spawn(move || deliver(notifier, client, jobs, host, stop, endpoints))?
     };
-    let daemon = Arc::new(Remote { client: client.clone(), url, host: creds.host_id.clone(), credentials: cred_path });
+    let daemon = Arc::new(Remote {
+        client: client.clone(),
+        url,
+        host: creds.host_id.clone(),
+        credentials: cred_path,
+    });
     let stopped = {
         let (client, stop) = (client.clone(), stop.clone());
         async move {
@@ -159,10 +189,14 @@ pub fn run(opts: Options, server: &str) -> anyhow::Result<()> {
             stop.store(true, Ordering::Relaxed);
             match reason {
                 conde_remote::StopReason::Fenced => {
-                    anyhow!("fenced: a newer bridge for host took over (another daemon with this host's credential?)")
+                    anyhow!(
+                        "fenced: a newer bridge for host took over (another daemon with this host's credential?)"
+                    )
                 }
                 conde_remote::StopReason::Unauthorized => {
-                    anyhow!("the server rejected this host's credential (revoked?); re-enroll with conde enroll")
+                    anyhow!(
+                        "the server rejected this host's credential (revoked?); re-enroll with conde enroll"
+                    )
                 }
                 other => anyhow!("bridge stopped: {other:?}"),
             }
@@ -203,7 +237,9 @@ fn deliver<N: Notifier>(
     let report = |attempt: &str, status: &str, reason: Option<&str>| loop {
         match client.report(attempt, status, reason) {
             Ok(_) => break,
-            Err(conde_remote::CallError::Backpressure) if !stop.load(Ordering::Relaxed) && !bridge_stopped(&client) => {
+            Err(conde_remote::CallError::Backpressure)
+                if !stop.load(Ordering::Relaxed) && !bridge_stopped(&client) =>
+            {
                 std::thread::sleep(Duration::from_millis(200));
             }
             // Permanent: never retried as is. Settle the attempt as failed with a short reason;
@@ -211,7 +247,8 @@ fn deliver<N: Notifier>(
             Err(e @ conde_remote::CallError::TooLarge { .. }) => {
                 tracing::error!(attempt = %attempt.chars().take(80).collect::<String>(), status, "outcome too large to report: {e}");
                 if status != "failed"
-                    && let Err(e) = client.report(attempt, "failed", Some("outcome too large to report"))
+                    && let Err(e) =
+                        client.report(attempt, "failed", Some("outcome too large to report"))
                 {
                     tracing::error!("attempt not settled: {e}");
                 }
@@ -227,13 +264,20 @@ fn deliver<N: Notifier>(
     while !stop.load(Ordering::Relaxed) && !bridge_stopped(&client) {
         match jobs.recv_timeout(Duration::from_millis(200)) {
             Ok(n) if stop.load(Ordering::Relaxed) || bridge_stopped(&client) => {
-                tracing::info!(attempt = n.attempt_id, "bridge stopped: queued notification left to the next instance");
+                tracing::info!(
+                    attempt = n.attempt_id,
+                    "bridge stopped: queued notification left to the next instance"
+                );
                 break;
             }
             Ok(n) => {
                 let address = match &n.endpoint {
-                    Endpoint::Claude { session_id } => Some(Address::new(Kind::Claude, session_id, &host)),
-                    Endpoint::Codex { thread_id } => Some(Address::new(Kind::Codex, thread_id, &host)),
+                    Endpoint::Claude { session_id } => {
+                        Some(Address::new(Kind::Claude, session_id, &host))
+                    }
+                    Endpoint::Codex { thread_id } => {
+                        Some(Address::new(Kind::Codex, thread_id, &host))
+                    }
                     // A v1 daemon publishes nothing, so no mailbox is routed here.
                     Endpoint::Mailbox { .. } => None,
                 };
@@ -243,7 +287,11 @@ fn deliver<N: Notifier>(
                         let (status, reason) = result.report();
                         report(&n.attempt_id, status, reason);
                     }
-                    None => report(&n.attempt_id, "refused", Some(OutcomeReason::RecipientUnavailable.as_str())),
+                    None => report(
+                        &n.attempt_id,
+                        "refused",
+                        Some(OutcomeReason::RecipientUnavailable.as_str()),
+                    ),
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -274,16 +322,19 @@ mod tests {
         Principal as RemotePrincipal, Recorded, StopReason,
     };
 
+    use super::super::runtime;
     use super::*;
     use crate::notify::{NotifyOutcome, Receipt};
-    use super::super::runtime;
 
     /// A server that accepts every bridge of host `box`; the newer of two
     /// connections fences the older one.
     struct Source;
     impl Authenticator for Source {
         fn authenticate(&self, _: &str) -> Option<RemotePrincipal> {
-            Some(RemotePrincipal { user_id: "1".into(), host_id: "box".into() })
+            Some(RemotePrincipal {
+                user_id: "1".into(),
+                host_id: "box".into(),
+            })
         }
     }
     impl RemoteDispatcher for Source {
@@ -330,7 +381,9 @@ mod tests {
             attempt_id: attempt.into(),
             recipient: "u/r".into(),
             binding_version: 1,
-            endpoint: Endpoint::Claude { session_id: "s".into() },
+            endpoint: Endpoint::Claude {
+                session_id: "s".into(),
+            },
             message_id: format!("m-{attempt}"),
             text: "t".into(),
             fields: None,
@@ -351,14 +404,25 @@ mod tests {
                 source,
             ))
             .unwrap();
-        let config = || BridgeConfig::new(format!("ws://{}/v1/bridge", server.local_addr()), "k", "box");
+        let config = || {
+            BridgeConfig::new(
+                format!("ws://{}/v1/bridge", server.local_addr()),
+                "k",
+                "box",
+            )
+        };
         let old = BridgeClient::start(config(), |_| {});
         rt.block_on(old.call(json!({"op": "barrier"}))).unwrap();
 
         let (started_tx, started) = channel();
         let (release, release_rx) = channel();
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let gate = Gate { hold: "running", started: started_tx, release: release_rx, seen: seen.clone() };
+        let gate = Gate {
+            hold: "running",
+            started: started_tx,
+            release: release_rx,
+            seen: seen.clone(),
+        };
         // The client callback's queue stays open, as in the daemon.
         let (jobs_tx, jobs) = channel();
         jobs_tx.send(job("running")).unwrap();
@@ -366,17 +430,31 @@ mod tests {
         let (done_tx, done) = channel();
         let worker_client = old.clone();
         std::thread::spawn(move || {
-            deliver(gate, worker_client, jobs, "box".into(), Arc::new(AtomicBool::new(false)), |_| Vec::new());
+            deliver(
+                gate,
+                worker_client,
+                jobs,
+                "box".into(),
+                Arc::new(AtomicBool::new(false)),
+                |_| Vec::new(),
+            );
             done_tx.send(()).unwrap();
         });
 
-        started.recv_timeout(Duration::from_secs(5)).expect("first delivery starts");
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first delivery starts");
         let new = BridgeClient::start(config(), |_| {});
         assert_eq!(rt.block_on(old.stopped()), StopReason::Fenced);
         jobs_tx.send(job("after-fence")).unwrap();
         release.send(()).unwrap();
-        done.recv_timeout(Duration::from_secs(5)).expect("the worker stops with its client, not with the daemon");
-        assert_eq!(*seen.lock().unwrap(), ["running"], "only the delivery admitted before the takeover ran");
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the worker stops with its client, not with the daemon");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["running"],
+            "only the delivery admitted before the takeover ran"
+        );
         new.shutdown();
         rt.block_on(server.shutdown()).unwrap();
     }

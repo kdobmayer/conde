@@ -261,18 +261,20 @@ fn page(
     response
 }
 
-pub(crate) fn keys(
-    header: Header<'_>,
-    server: &str,
-    keys: &[HostKey],
-    idp: &str,
-) -> Response {
+pub(crate) fn keys(header: Header<'_>, server: &str, keys: &[HostKey], idp: &str) -> Response {
     let body = render(&KeysBody {
         csrf: header.csrf,
         server,
         rows: keys.iter().map(KeyRow::from).collect(),
     });
-    page(StatusCode::OK, "Host keys", Some(header), &body, false, &[idp])
+    page(
+        StatusCode::OK,
+        "Host keys",
+        Some(header),
+        &body,
+        false,
+        &[idp],
+    )
 }
 
 pub(crate) fn created(
@@ -289,19 +291,51 @@ pub(crate) fn created(
         server,
         replaced,
     });
-    page(StatusCode::OK, "New host key", Some(header), &body, true, &[idp])
+    page(
+        StatusCode::OK,
+        "New host key",
+        Some(header),
+        &body,
+        true,
+        &[idp],
+    )
 }
 
 /// The pasted-code flow's confirm page: asks the signed-in user before any code exists.
-pub(crate) fn cli_confirm(header: Header<'_>, account: &str, state: &str, challenge: &str, idp: &str) -> Response {
-    let body = render(&CliConfirmBody { account, csrf: header.csrf, state, challenge });
-    page(StatusCode::OK, "Confirm conde login", Some(header), &body, false, &[idp])
+pub(crate) fn cli_confirm(
+    header: Header<'_>,
+    account: &str,
+    state: &str,
+    challenge: &str,
+    idp: &str,
+) -> Response {
+    let body = render(&CliConfirmBody {
+        account,
+        csrf: header.csrf,
+        state,
+        challenge,
+    });
+    page(
+        StatusCode::OK,
+        "Confirm conde login",
+        Some(header),
+        &body,
+        false,
+        &[idp],
+    )
 }
 
 /// The pasted-code flow's code, shown to the signed-in user who completed that login.
 pub(crate) fn cli_code(header: Header<'_>, code: &str, minutes: u64, idp: &str) -> Response {
     let body = render(&CliCodeBody { code, minutes });
-    page(StatusCode::OK, "conde login code", Some(header), &body, true, &[idp])
+    page(
+        StatusCode::OK,
+        "conde login code",
+        Some(header),
+        &body,
+        true,
+        &[idp],
+    )
 }
 
 /// A public document page (no header, no script) in the keys page's style.

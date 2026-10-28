@@ -9,12 +9,16 @@ use std::path::Path;
 use std::ptr;
 
 use conde_transport::win::{Security, wide};
-use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+use windows_sys::Wdk::System::Threading::{
+    NtQueryInformationProcess, ProcessCommandLineInformation,
+};
 use windows_sys::Win32::Foundation::{GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING};
-use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL};
+use windows_sys::Win32::Storage::FileSystem::{
+    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
+};
 use windows_sys::Win32::System::Console::{
-    ENABLE_ECHO_INPUT, FreeConsole, GetConsoleMode, GetConsoleProcessList, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
-    SetConsoleMode, SetStdHandle,
+    ENABLE_ECHO_INPUT, FreeConsole, GetConsoleMode, GetConsoleProcessList, STD_ERROR_HANDLE,
+    STD_OUTPUT_HANDLE, SetConsoleMode, SetStdHandle,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -58,14 +62,25 @@ pub fn create_private_file(path: &Path) -> io::Result<File> {
     let w = wide(path.as_os_str());
     // SAFETY: NUL-terminated path, attributes alive for the call.
     let h = unsafe {
-        CreateFileW(w.as_ptr(), GENERIC_WRITE, 0, security.attributes(), CREATE_NEW, FILE_ATTRIBUTE_NORMAL, ptr::null_mut())
+        CreateFileW(
+            w.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            security.attributes(),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
     };
     owned(h).map(File::from)
 }
 
 /// Read one line from the console with echo off, after `prompt`.
 pub fn read_secret(prompt: &str) -> io::Result<String> {
-    let input = std::fs::OpenOptions::new().read(true).write(true).open("CONIN$")?;
+    let input = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONIN$")?;
     let mut output = std::fs::OpenOptions::new().write(true).open("CONOUT$")?;
     let h = input.as_raw_handle() as HANDLE;
     let mut saved = 0u32;
@@ -98,7 +113,10 @@ pub fn detach_console(log: &Path) -> io::Result<bool> {
         // the data directory: created owner-only here, before the board opens in it
         crate::private::create_dir(dir)?;
     }
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
     let h = file.into_raw_handle() as HANDLE;
     // SAFETY: the log handle stays open for the process lifetime (never closed).
     unsafe {
@@ -121,8 +139,18 @@ pub fn process_snapshot() -> io::Result<HashMap<u32, (u32, String)>> {
     // SAFETY: a snapshot handle and an initialized entry.
     let mut more = unsafe { Process32FirstW(h, &mut e) } != 0;
     while more {
-        let len = e.szExeFile.iter().position(|c| *c == 0).unwrap_or(e.szExeFile.len());
-        out.insert(e.th32ProcessID, (e.th32ParentProcessID, String::from_utf16_lossy(&e.szExeFile[..len])));
+        let len = e
+            .szExeFile
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(e.szExeFile.len());
+        out.insert(
+            e.th32ProcessID,
+            (
+                e.th32ParentProcessID,
+                String::from_utf16_lossy(&e.szExeFile[..len]),
+            ),
+        );
         // SAFETY: as above.
         more = unsafe { Process32NextW(h, &mut e) } != 0;
     }
@@ -136,13 +164,30 @@ pub fn command_line(pid: u32) -> Option<String> {
     let h = process.as_raw_handle() as HANDLE;
     let mut len = 0u32;
     // SAFETY: size query with an empty buffer.
-    unsafe { NtQueryInformationProcess(h, ProcessCommandLineInformation, ptr::null_mut(), 0, &mut len) };
+    unsafe {
+        NtQueryInformationProcess(
+            h,
+            ProcessCommandLineInformation,
+            ptr::null_mut(),
+            0,
+            &mut len,
+        )
+    };
     if (len as usize) < std::mem::size_of::<UNICODE_STRING>() {
         return None;
     }
     let mut buf = vec![0u64; (len as usize).div_ceil(8)];
     // SAFETY: the buffer holds `len` bytes, u64-aligned for the UNICODE_STRING header.
-    if unsafe { NtQueryInformationProcess(h, ProcessCommandLineInformation, buf.as_mut_ptr().cast(), len, &mut len) } != 0 {
+    if unsafe {
+        NtQueryInformationProcess(
+            h,
+            ProcessCommandLineInformation,
+            buf.as_mut_ptr().cast(),
+            len,
+            &mut len,
+        )
+    } != 0
+    {
         return None;
     }
     // SAFETY: the call wrote a UNICODE_STRING whose buffer points into `buf`.

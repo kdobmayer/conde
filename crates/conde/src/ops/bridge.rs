@@ -23,10 +23,21 @@ use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, opt_i64, opt_str, s
 use crate::store::topics;
 use crate::util::new_ulid;
 
-const TERMINAL: &[&str] = &["delivered", "denied", "refused", "expired", "dropped", "failed", "abandoned"];
+const TERMINAL: &[&str] = &[
+    "delivered",
+    "denied",
+    "refused",
+    "expired",
+    "dropped",
+    "failed",
+    "abandoned",
+];
 
 fn instance<'a>(ctx: &'a Ctx) -> OpResult<&'a str> {
-    ctx.p.bridge_instance.as_deref().ok_or_else(|| forbidden("not a bridge connection"))
+    ctx.p
+        .bridge_instance
+        .as_deref()
+        .ok_or_else(|| forbidden("not a bridge connection"))
 }
 
 /// Refuses an instance that a fence superseded (cloud mode; local mode never fences).
@@ -64,9 +75,17 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = instance(ctx)?;
     let window = opt_i64(body, "window")?;
     match (window.is_some(), ctx.mailbox_only) {
-        (true, false) => return Err(forbidden(format!("host '{}' has not migrated to v2", ctx.p.host))),
+        (true, false) => {
+            return Err(forbidden(format!(
+                "host '{}' has not migrated to v2",
+                ctx.p.host
+            )));
+        }
         (false, true) => {
-            return Err(forbidden(format!("host '{}' migrated to v2 and takes no v1 bridge; upgrade conde", ctx.p.host)));
+            return Err(forbidden(format!(
+                "host '{}' migrated to v2 and takes no v1 bridge; upgrade conde",
+                ctx.p.host
+            )));
         }
         _ => {}
     }
@@ -78,19 +97,29 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     };
     let v2 = window.is_some();
 
-    let due = if limit > 0 { ctx.db.due_notifications(ctx.now_ms, &ctx.p.host, limit)? } else { Vec::new() };
+    let due = if limit > 0 {
+        ctx.db.due_notifications(ctx.now_ms, &ctx.p.host, limit)?
+    } else {
+        Vec::new()
+    };
     if !due.is_empty() {
         ctx.db.announce(topics::DELIVERY);
     }
     let mut jobs = Vec::new();
     for n in due {
-        let (notification_id, message_id, rcpt_id, kind) = (n.id, n.message_id, n.recipient_id, n.kind);
+        let (notification_id, message_id, rcpt_id, kind) =
+            (n.id, n.message_id, n.recipient_id, n.kind);
         let set_status = |status: &str| ctx.db.set_notification_status(&notification_id, status);
-        let (Some(m), Some(rcpt)) = (msg_by_id(ctx.db, &message_id)?, agents::by_id(ctx.db, &rcpt_id)?) else {
+        let (Some(m), Some(rcpt)) = (
+            msg_by_id(ctx.db, &message_id)?,
+            agents::by_id(ctx.db, &rcpt_id)?,
+        ) else {
             set_status("gone")?;
             continue;
         };
-        let Some(address) = rcpt.address.clone() else { continue };
+        let Some(address) = rcpt.address.clone() else {
+            continue;
+        };
         let member_seq = member_seq(ctx, &m, &rcpt.id)?;
         if read_by(ctx, &m, &rcpt.id, member_seq)? {
             set_status("read")?;
@@ -103,14 +132,24 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         }
         let place = m.place();
         let mut text = match kind.as_str() {
-            "dm" => format!("conde: new message {} from {}. Read it with: conde read {}", m.id, m.sender, m.id),
+            "dm" => format!(
+                "conde: new message {} from {}. Read it with: conde read {}",
+                m.id, m.sender, m.id
+            ),
             "mention" => format!(
                 "conde: you were mentioned in {place} by {} (message {}). Read it with: conde read '{place}'{}",
                 m.sender,
                 m.id,
-                if member_seq.is_some() { String::new() } else { format!(" after joining: conde join '{place}'") }
+                if member_seq.is_some() {
+                    String::new()
+                } else {
+                    format!(" after joining: conde join '{place}'")
+                }
             ),
-            _ => format!("conde: {} posted in {place} (message {}). Read it with: conde read '{place}'", m.sender, m.id),
+            _ => format!(
+                "conde: {} posted in {place} (message {}). Read it with: conde read '{place}'",
+                m.sender, m.id
+            ),
         };
         let badges = unread_badges(ctx, &rcpt.id)?;
         if !badges.is_empty() {
@@ -119,7 +158,14 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         // v2: the daemon renders the text from the fields with its alias for the board.
         let text = if v2 { String::new() } else { text };
         let attempt_id = new_ulid();
-        ctx.db.insert_attempt(&attempt_id, &notification_id, me, rcpt.binding_version, &ctx.p.host, &text)?;
+        ctx.db.insert_attempt(
+            &attempt_id,
+            &notification_id,
+            me,
+            rcpt.binding_version,
+            &ctx.p.host,
+            &text,
+        )?;
         set_status("dispatching")?;
         let mut j = job(
             &attempt_id,
@@ -155,7 +201,13 @@ pub fn claim(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 
 /// The structured fields of a v2 notify (DESIGN-v2.md §4): `kind`, `sender`, `place`, the
 /// recipient's unread channels as `badges`, and whether it is a `member` of the place.
-fn fields(ctx: &Ctx, kind: &str, m: &super::messages::MsgRow, rcpt: &str, member: bool) -> OpResult<Value> {
+fn fields(
+    ctx: &Ctx,
+    kind: &str,
+    m: &super::messages::MsgRow,
+    rcpt: &str,
+    member: bool,
+) -> OpResult<Value> {
     let badges: Vec<Value> = ctx
         .db
         .unread_badges(rcpt)?
@@ -173,8 +225,15 @@ fn fields(ctx: &Ctx, kind: &str, m: &super::messages::MsgRow, rcpt: &str, member
 fn open_attempts(ctx: &Ctx, me: &str, v2: bool) -> OpResult<Vec<Value>> {
     let mut out = Vec::new();
     for a in ctx.db.open_attempts(me)? {
-        let mut j =
-            job(&a.attempt_id, &a.notification_id, &a.address, &a.text, &a.recipient, &a.message_id, a.binding_version);
+        let mut j = job(
+            &a.attempt_id,
+            &a.notification_id,
+            &a.address,
+            &a.text,
+            &a.recipient,
+            &a.message_id,
+            a.binding_version,
+        );
         if v2 && let Some(m) = msg_by_id(ctx.db, &a.message_id)? {
             let member = match &m.channel_id {
                 Some(c) => channels::read_seq(ctx.db, c, &a.recipient_id)?.is_some(),
@@ -195,7 +254,10 @@ pub fn fence(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if ctx.board.is_some() {
         let proto = opt_i64(body, "proto")?.unwrap_or(1);
         let refused = match (proto, ctx.mailbox_only) {
-            (1, true) => Some(format!("upgrade conde: host '{}' migrated to v2 and takes no v1 bridge", ctx.p.host)),
+            (1, true) => Some(format!(
+                "upgrade conde: host '{}' migrated to v2 and takes no v1 bridge",
+                ctx.p.host
+            )),
             (2, false) => Some(format!(
                 "host '{}' has not migrated to v2 on this board; its human runs conde setup before a v2 bridge connects",
                 ctx.p.host
@@ -245,9 +307,14 @@ pub fn endpoints(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         }
         live.push((kind, target));
     }
-    ctx.db.replace_endpoints(&ctx.p.host, me, &live, &ctx.now_iso())?;
+    ctx.db
+        .replace_endpoints(&ctx.p.host, me, &live, &ctx.now_iso())?;
     ctx.db.announce(topics::FLEET);
-    let why = if ctx.mailbox_only { "recipient offline" } else { "recipient session gone" };
+    let why = if ctx.mailbox_only {
+        "recipient offline"
+    } else {
+        "recipient session gone"
+    };
     let mut gone = Vec::new();
     for attempt_id in ctx.db.gone_holds(me, &ctx.p.host)? {
         if abandon(ctx, &attempt_id, why, None)?["status"] == "abandoned" {
@@ -279,15 +346,24 @@ fn abandon(ctx: &Ctx, attempt_id: &str, reason: &str, event_seq: Option<i64>) ->
     if let Some((notification_id, message_id, recipient_id)) = ctx.db.attempt_target(attempt_id)?
         && settled_as_read(ctx, &notification_id, &message_id, &recipient_id)?
     {
-        return Ok(json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": "read"}));
+        return Ok(
+            json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": "read"}),
+        );
     }
     apply(ctx, attempt_id, "abandoned", Some(reason), event_seq)
 }
 
 /// Whether the recipient has read the notification's message; if so the notification is
 /// settled as read (nothing is left to deliver).
-fn settled_as_read(ctx: &Ctx, notification_id: &str, message_id: &str, recipient_id: &str) -> OpResult<bool> {
-    let Some(m) = msg_by_id(ctx.db, message_id)? else { return Ok(false) };
+fn settled_as_read(
+    ctx: &Ctx,
+    notification_id: &str,
+    message_id: &str,
+    recipient_id: &str,
+) -> OpResult<bool> {
+    let Some(m) = msg_by_id(ctx.db, message_id)? else {
+        return Ok(false);
+    };
     if !read_by(ctx, &m, recipient_id, member_seq(ctx, &m, recipient_id)?)? {
         return Ok(false);
     }
@@ -313,7 +389,12 @@ fn read_by(ctx: &Ctx, m: &MsgRow, rcpt: &str, member_seq: Option<i64>) -> OpResu
 }
 
 fn unread_badges(ctx: &Ctx, agent_id: &str) -> OpResult<Vec<String>> {
-    Ok(ctx.db.unread_badges(agent_id)?.into_iter().map(|(channel, n)| format!("#{channel} {n}")).collect())
+    Ok(ctx
+        .db
+        .unread_badges(agent_id)?
+        .into_iter()
+        .map(|(channel, n)| format!("#{channel} {n}"))
+        .collect())
 }
 
 /// `bridge.report`: an outcome for one attempt, from the bridge that claimed
@@ -345,10 +426,20 @@ pub fn report(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     // never ends the notification: the attempt is abandoned and re-attempted at the current
     // route, as the stale-attempt rule would at the next claim; a message the recipient has read
     // meanwhile settles the notification as read instead.
-    if ctx.db.attempt_route(attempt_id)?.is_some_and(|(target, current)| target != current) {
+    if ctx
+        .db
+        .attempt_route(attempt_id)?
+        .is_some_and(|(target, current)| target != current)
+    {
         return abandon(ctx, attempt_id, "recipient rebound", event_seq);
     }
-    let applied = apply(ctx, attempt_id, outcome, opt_str(body, "reason")?, event_seq)?;
+    let applied = apply(
+        ctx,
+        attempt_id,
+        outcome,
+        opt_str(body, "reason")?,
+        event_seq,
+    )?;
     // A hold for a mailbox that already left the endpoints (the removal committed while the
     // attempt was dispatching) is abandoned now, as the endpoints frame would have: on a v2 host
     // the server records endpoints and outcomes in the order the bridge sent them, so absent
@@ -356,7 +447,11 @@ pub fn report(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     if outcome == "held"
         && applied["status"] == "held"
         && ctx.mailbox_only
-        && ctx.db.gone_holds(me, &ctx.p.host)?.iter().any(|a| a == attempt_id)
+        && ctx
+            .db
+            .gone_holds(me, &ctx.p.host)?
+            .iter()
+            .any(|a| a == attempt_id)
     {
         return abandon(ctx, attempt_id, "recipient offline", None);
     }
@@ -365,7 +460,13 @@ pub fn report(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 
 /// The one ownership rule for outcomes, local and remote: the reporting
 /// connection's host and bridge instance must be the attempt's.
-fn check_owner(ctx: &Ctx, me: &str, attempt_id: &str, instance: &str, host: Option<&str>) -> OpResult<()> {
+fn check_owner(
+    ctx: &Ctx,
+    me: &str,
+    attempt_id: &str,
+    instance: &str,
+    host: Option<&str>,
+) -> OpResult<()> {
     if instance != me || host.is_some_and(|h| h != ctx.p.host) {
         return Err(forbidden(format!(
             "attempt {attempt_id} belongs to bridge {instance} on host {}; this connection is bridge {me} on host {}",
@@ -376,18 +477,27 @@ fn check_owner(ctx: &Ctx, me: &str, attempt_id: &str, instance: &str, host: Opti
     Ok(())
 }
 
-fn apply(ctx: &Ctx, attempt_id: &str, outcome: &str, reason: Option<&str>, event_seq: Option<i64>) -> OpResult<Value> {
+fn apply(
+    ctx: &Ctx,
+    attempt_id: &str,
+    outcome: &str,
+    reason: Option<&str>,
+    event_seq: Option<i64>,
+) -> OpResult<Value> {
     let Some((notification_id, status)) = ctx.db.attempt(attempt_id)? else {
         return Ok(json!({"attempt_id": attempt_id, "ignored": "unknown attempt"}));
     };
     if TERMINAL.contains(&status.as_str()) {
-        return Ok(json!({"attempt_id": attempt_id, "ignored": format!("attempt already settled as {status}")}));
+        return Ok(
+            json!({"attempt_id": attempt_id, "ignored": format!("attempt already settled as {status}")}),
+        );
     }
     if outcome == "dropped" && reason == Some("duplicate") {
         // The earlier frame with this id is still pending at the recipient.
         return Ok(json!({"attempt_id": attempt_id, "ignored": "duplicate"}));
     }
-    ctx.db.update_attempt(attempt_id, outcome, reason, event_seq, &ctx.now_iso())?;
+    ctx.db
+        .update_attempt(attempt_id, outcome, reason, event_seq, &ctx.now_iso())?;
     ctx.db.announce(topics::DELIVERY | topics::FLEET);
     let current = ctx.db.latest_attempt(&notification_id)?.as_deref() == Some(attempt_id);
     // An outcome can land after the recipient read the message (a resent outcome, or one the
@@ -397,7 +507,9 @@ fn apply(ctx: &Ctx, attempt_id: &str, outcome: &str, reason: Option<&str>, event
         && let Some((_, message_id, recipient_id)) = ctx.db.attempt_target(attempt_id)?
         && settled_as_read(ctx, &notification_id, &message_id, &recipient_id)?
     {
-        return Ok(json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": "read", "current": current}));
+        return Ok(
+            json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": "read", "current": current}),
+        );
     }
     if current {
         let (status, next) = match outcome {
@@ -410,5 +522,7 @@ fn apply(ctx: &Ctx, attempt_id: &str, outcome: &str, reason: Option<&str>, event
         };
         ctx.db.settle_notification(&notification_id, status, next)?;
     }
-    Ok(json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": outcome, "current": current}))
+    Ok(
+        json!({"attempt_id": attempt_id, "notification_id": notification_id, "status": outcome, "current": current}),
+    )
 }

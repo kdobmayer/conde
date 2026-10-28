@@ -59,11 +59,17 @@ impl Fake {
 
 impl Host for Fake {
     fn which(&self, prog: &str) -> Option<PathBuf> {
-        self.on_path.contains(prog).then(|| PathBuf::from(format!("/fake/bin/{prog}")))
+        self.on_path
+            .contains(prog)
+            .then(|| PathBuf::from(format!("/fake/bin/{prog}")))
     }
 
     fn run(&mut self, prog: &str, args: &[&str]) -> anyhow::Result<CmdOut> {
-        let name = Path::new(prog).file_name().unwrap().to_string_lossy().into_owned();
+        let name = Path::new(prog)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let line = format!("{name} {}", args.join(" "));
         self.calls.push(line.clone());
         let mut ok = self.fail.is_none_or(|f| !line.starts_with(f));
@@ -72,7 +78,10 @@ impl Host for Fake {
             ("claude", ["mcp", "add", "--scope", "user", server, rest @ ..]) => {
                 // what the real CLI (2.1.296) does: a user-scope stdio entry in ~/.claude.json,
                 // its -e KEY=VALUE pairs as env
-                let dash = rest.iter().position(|a| *a == "--").expect("-- before the command");
+                let dash = rest
+                    .iter()
+                    .position(|a| *a == "--")
+                    .expect("-- before the command");
                 let mut env = serde_json::Map::new();
                 for pair in rest[..dash].chunks(2) {
                     assert_eq!(pair[0], "-e", "{line}");
@@ -82,10 +91,14 @@ impl Host for Fake {
                 let (cmd, args) = (rest[dash + 1], &rest[dash + 2..]);
                 let text = std::fs::read_to_string(&self.claude_json).unwrap_or_default();
                 let entry = json!({"type": "stdio", "command": cmd, "args": args, "env": env});
-                std::fs::write(&self.claude_json, setup::json_set(&text, &["mcpServers", server], &entry)?)?;
+                std::fs::write(
+                    &self.claude_json,
+                    setup::json_set(&text, &["mcpServers", server], &entry)?,
+                )?;
             }
             ("claude", ["mcp", "remove", "--scope", "user", server]) => {
-                let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&self.claude_json)?)?;
+                let mut v: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&self.claude_json)?)?;
                 v["mcpServers"].as_object_mut().unwrap().remove(*server);
                 std::fs::write(&self.claude_json, v.to_string())?;
             }
@@ -94,7 +107,8 @@ impl Host for Fake {
                 stdout = self.print_out.clone();
             }
             ("systemctl", ["--user", "show", ..]) => stdout = self.show_out.clone(),
-            ("loginctl", ["show-user", "501", "--property=Linger", "--value"]) => match self.linger {
+            ("loginctl", ["show-user", "501", "--property=Linger", "--value"]) => match self.linger
+            {
                 Some(v) => stdout = format!("{v}\n"),
                 None => ok = false,
             },
@@ -102,11 +116,19 @@ impl Host for Fake {
             ("launchctl", ["bootout", _]) => self.launchd_loaded = false,
             _ => {}
         }
-        Ok(CmdOut { ok, stdout, stderr: if ok { String::new() } else { "boom".into() } })
+        Ok(CmdOut {
+            ok,
+            stdout,
+            stderr: if ok { String::new() } else { "boom".into() },
+        })
     }
 
     fn reach(&mut self, _socket: &Path) -> Result<(), String> {
-        if self.alive { Ok(()) } else { Err("No such file or directory (os error 2)".into()) }
+        if self.alive {
+            Ok(())
+        } else {
+            Err("No such file or directory (os error 2)".into())
+        }
     }
 
     fn terminal(&self) -> bool {
@@ -119,9 +141,19 @@ impl Host for Fake {
         Some(answer)
     }
 
-    fn daemon(&mut self, _socket: &Path, op: &str, board: Option<&str>, body: Value) -> Result<Value, String> {
-        self.daemon_calls.push((op.to_string(), board.map(Into::into), body));
-        self.daemon.get(op).cloned().unwrap_or_else(|| Err(format!("unknown op {op}")))
+    fn daemon(
+        &mut self,
+        _socket: &Path,
+        op: &str,
+        board: Option<&str>,
+        body: Value,
+    ) -> Result<Value, String> {
+        self.daemon_calls
+            .push((op.to_string(), board.map(Into::into), body));
+        self.daemon
+            .get(op)
+            .cloned()
+            .unwrap_or_else(|| Err(format!("unknown op {op}")))
     }
 
     fn board_info(&mut self, _server: &str, _key: &str) -> anyhow::Result<BoardInfo> {
@@ -159,7 +191,11 @@ fn env(root: &Path, os: Os) -> Env {
 
 /// The `claude mcp add` setup runs for MCP server `name`.
 fn add_call(env: &Env, name: &str) -> String {
-    format!("claude mcp add --scope user {name} -e CONDE_SOCK={} -- {} mcp", env.socket.display(), env.exe.display())
+    format!(
+        "claude mcp add --scope user {name} -e CONDE_SOCK={} -- {} mcp",
+        env.socket.display(),
+        env.exe.display()
+    )
 }
 
 /// The Codex entry setup writes for MCP server `name`.
@@ -218,9 +254,18 @@ fn linux_full_setup_then_idempotent_rerun() {
             add_call(&env, "conde"),
         ]
     );
-    assert!(out.contains("service: wrote ~/.config/systemd/user/conde.service"), "{out}");
-    assert!(out.contains("claude: set crossSessionInbound to \"accept\" in ~/.claude/settings.json"), "{out}");
-    assert!(out.contains("codex: added MCP server conde to ~/.codex/config.toml"), "{out}");
+    assert!(
+        out.contains("service: wrote ~/.config/systemd/user/conde.service"),
+        "{out}"
+    );
+    assert!(
+        out.contains("claude: set crossSessionInbound to \"accept\" in ~/.claude/settings.json"),
+        "{out}"
+    );
+    assert!(
+        out.contains("codex: added MCP server conde to ~/.codex/config.toml"),
+        "{out}"
+    );
     assert!(
         out.ends_with(&format!(
             "\n\n{}\n  {}\n{}\n\n{}\n",
@@ -234,14 +279,29 @@ fn linux_full_setup_then_idempotent_rerun() {
     assert!(setup::FEEDBACK_COMMAND.starts_with("conde send kdobmayer/desk "));
 
     let unit = read(&env.systemd_unit());
-    assert!(unit.contains(&format!("ExecStart={exe} daemon\n")), "{unit}");
-    assert!(unit.contains("\nEnvironment=\"PATH=/usr/local/bin:/usr/bin:/bin\"\n"), "{unit}");
+    assert!(
+        unit.contains(&format!("ExecStart={exe} daemon\n")),
+        "{unit}"
+    );
+    assert!(
+        unit.contains("\nEnvironment=\"PATH=/usr/local/bin:/usr/bin:/bin\"\n"),
+        "{unit}"
+    );
     // the service resolves the same socket as the CLI that ran setup (as the launchd agent does)
-    assert!(unit.contains(&format!("\nEnvironment=\"CONDE_SOCK={}\"\n", env.socket.display())), "{unit}");
+    assert!(
+        unit.contains(&format!(
+            "\nEnvironment=\"CONDE_SOCK={}\"\n",
+            env.socket.display()
+        )),
+        "{unit}"
+    );
     assert!(unit.contains("Restart=always"), "{unit}");
     assert_eq!(read(&env.claude_skill()), setup::CLAUDE_SKILL);
     assert_eq!(read(&env.codex_skill()), setup::CODEX_SKILL);
-    assert!(setup::CLAUDE_SKILL.starts_with("---\nname: conde\n") && setup::CODEX_SKILL.contains("Codex"));
+    assert!(
+        setup::CLAUDE_SKILL.starts_with("---\nname: conde\n")
+            && setup::CODEX_SKILL.contains("Codex")
+    );
     let claude_json: Value = serde_json::from_str(&read(&env.claude_json())).unwrap();
     assert_eq!(claude_json["mcpServers"]["conde"]["command"], exe);
     let settings: Value = serde_json::from_str(&read(&env.claude_settings())).unwrap();
@@ -263,7 +323,13 @@ fn linux_full_setup_then_idempotent_rerun() {
     // second run: nothing rewritten, nothing re-registered, nobody asked
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
-    assert_eq!(host.take_calls(), ["systemctl --user enable conde.service", "systemctl --user start conde.service"]);
+    assert_eq!(
+        host.take_calls(),
+        [
+            "systemctl --user enable conde.service",
+            "systemctl --user start conde.service"
+        ]
+    );
     for line in [
         "service: unchanged ~/.config/systemd/user/conde.service",
         "claude: skill unchanged ~/.claude/skills/conde/SKILL.md",
@@ -277,13 +343,27 @@ fn linux_full_setup_then_idempotent_rerun() {
     assert_eq!(files(&root), written);
 
     // the binary moved: the unit restarts, the MCP entry is replaced
-    let moved = Env { exe: root.join("bin2/conde"), ..env.clone() };
+    let moved = Env {
+        exe: root.join("bin2/conde"),
+        ..env.clone()
+    };
     let (ok, out) = run(&moved, &opts, &mut host);
     assert!(ok, "{out}");
     let calls = host.take_calls();
-    assert!(calls.contains(&"systemctl --user restart conde.service".to_string()), "{calls:?}");
-    assert!(calls.contains(&"claude mcp remove --scope user conde".to_string()), "{calls:?}");
-    assert!(read(&env.codex_config()).matches("[mcp_servers.conde]").count() == 1);
+    assert!(
+        calls.contains(&"systemctl --user restart conde.service".to_string()),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&"claude mcp remove --scope user conde".to_string()),
+        "{calls:?}"
+    );
+    assert!(
+        read(&env.codex_config())
+            .matches("[mcp_servers.conde]")
+            .count()
+            == 1
+    );
     assert!(read(&env.codex_config()).contains("bin2/conde"));
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -301,25 +381,49 @@ fn macos_launch_agent_runs_the_single_daemon() {
     assert!(ok, "{out}");
     let target = "gui/501/space.nativeai.conde";
     let bootstrap = format!("launchctl bootstrap gui/501 {}", plist_path.display());
-    assert_eq!(host.take_calls(), [format!("launchctl print {target}"), bootstrap.clone()]);
+    assert_eq!(
+        host.take_calls(),
+        [format!("launchctl print {target}"), bootstrap.clone()]
+    );
     let plist = read(&plist_path);
     for needle in [
         "<key>Label</key>\n  <string>space.nativeai.conde</string>",
-        &format!("<string>{}</string>\n    <string>daemon</string>\n  </array>", env.exe.display()),
+        &format!(
+            "<string>{}</string>\n    <string>daemon</string>\n  </array>",
+            env.exe.display()
+        ),
         "<key>RunAtLoad</key>\n  <true/>",
         "<key>KeepAlive</key>\n  <true/>",
-        &format!("<key>CONDE_SOCK</key>\n    <string>{}</string>", env.socket.display()),
-        &format!("<string>{}</string>", root.join("home/Library/Logs/conde/conde.log").display()),
+        &format!(
+            "<key>CONDE_SOCK</key>\n    <string>{}</string>",
+            env.socket.display()
+        ),
+        &format!(
+            "<string>{}</string>",
+            root.join("home/Library/Logs/conde/conde.log").display()
+        ),
     ] {
         assert!(plist.contains(needle), "missing {needle:?} in\n{plist}");
     }
     assert!(root.join("home/Library/Logs/conde").is_dir());
-    assert!(out.contains("service: loaded space.nativeai.conde"), "{out}");
-    assert!(!files(&root).iter().any(|f| f.contains(".config")), "no systemd unit on macOS");
+    assert!(
+        out.contains("service: loaded space.nativeai.conde"),
+        "{out}"
+    );
+    assert!(
+        !files(&root).iter().any(|f| f.contains(".config")),
+        "no systemd unit on macOS"
+    );
 
     let (ok, _) = run(&env, &opts, &mut host);
     assert!(ok);
-    assert_eq!(host.take_calls(), [format!("launchctl print {target}"), format!("launchctl kickstart {target}")]);
+    assert_eq!(
+        host.take_calls(),
+        [
+            format!("launchctl print {target}"),
+            format!("launchctl kickstart {target}")
+        ]
+    );
 
     // a v1 agent that named a server is rewritten to the single daemon and reloaded
     std::fs::write(&plist_path, plist.replace("<string>daemon</string>", "<string>daemon</string>\n    <string>--server</string>\n    <string>wss://conde.nativeai.space</string>")).unwrap();
@@ -327,7 +431,11 @@ fn macos_launch_agent_runs_the_single_daemon() {
     assert!(ok, "{out}");
     assert_eq!(
         host.take_calls(),
-        [format!("launchctl print {target}"), format!("launchctl bootout {target}"), bootstrap]
+        [
+            format!("launchctl print {target}"),
+            format!("launchctl bootout {target}"),
+            bootstrap
+        ]
     );
     assert!(!read(&plist_path).contains("--server"));
     let _ = std::fs::remove_dir_all(&root);
@@ -350,7 +458,10 @@ fn windows_env(root: &Path) -> Env {
 
 fn utf16(raw: &[u8]) -> String {
     assert_eq!(&raw[..2], &[0xFF, 0xFE], "a byte order mark");
-    let units: Vec<u16> = raw[2..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = raw[2..]
+        .chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     String::from_utf16(&units).unwrap()
 }
 
@@ -362,13 +473,23 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
     let mut host = Fake::new(&env, &["claude", "codex"]);
     let task = env.windows_task();
     assert_eq!(task, root.join("home/AppData/Local/conde/conde-task.xml"));
-    assert_eq!(env.boards_dir(), root.join("home/AppData/Roaming/conde/boards"));
+    assert_eq!(
+        env.boards_dir(),
+        root.join("home/AppData/Roaming/conde/boards")
+    );
 
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
     let create = format!("schtasks /Create /TN conde /XML {} /F", task.display());
     let calls = host.take_calls();
-    assert_eq!(calls[..3], ["schtasks /Query /TN conde".to_string(), create.clone(), "schtasks /Run /TN conde".into()]);
+    assert_eq!(
+        calls[..3],
+        [
+            "schtasks /Query /TN conde".to_string(),
+            create.clone(),
+            "schtasks /Run /TN conde".into()
+        ]
+    );
     assert!(calls.contains(&add_call(&env, "conde")), "{calls:?}");
     assert!(add_call(&env, "conde").contains(r"-e CONDE_SOCK=\\.\pipe\conde-krisz"));
     let xml = utf16(&std::fs::read(&task).unwrap());
@@ -382,58 +503,122 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
         "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
         "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
         "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
-        &format!("<Command>{}</Command>\r\n      <Arguments>daemon</Arguments>", env.exe.display()),
+        &format!(
+            "<Command>{}</Command>\r\n      <Arguments>daemon</Arguments>",
+            env.exe.display()
+        ),
     ] {
         assert!(xml.contains(needle), "missing {needle:?} in\n{xml}");
     }
     assert!(!xml.replace("\r\n", "").contains('\n'), "CRLF only");
     assert!(out.contains("service: started conde"), "{out}");
     assert!(out.contains("conde.log"), "{out}");
-    assert!(!out.contains("logon environment"), "nothing relocated: {out}");
+    assert!(
+        !out.contains("logon environment"),
+        "nothing relocated: {out}"
+    );
     // the Claude and Codex configs at their Windows homes (%USERPROFILE%\.claude.json, .codex)
     let claude = serde_json::from_str::<Value>(&read(&env.claude_json())).unwrap();
-    assert_eq!(claude["mcpServers"]["conde"]["env"]["CONDE_SOCK"], r"\\.\pipe\conde-krisz");
+    assert_eq!(
+        claude["mcpServers"]["conde"]["env"]["CONDE_SOCK"],
+        r"\\.\pipe\conde-krisz"
+    );
     assert_eq!(env.codex_config(), root.join("home/.codex/config.toml"));
-    let (exe, sock) = (env.exe.display().to_string(), env.socket.display().to_string());
-    assert_eq!(setup::codex_config_edit(&read(&env.codex_config()), "conde", &exe, &sock).unwrap(), None, "entry in place");
-    assert!(read(&env.codex_config()).contains(r"CONDE_SOCK = '\\.\pipe\conde-krisz'"), "{}", read(&env.codex_config()));
-    assert!(!files(&root).iter().any(|f| f.contains(".config") || f.contains("Library")), "{:?}", files(&root));
+    let (exe, sock) = (
+        env.exe.display().to_string(),
+        env.socket.display().to_string(),
+    );
+    assert_eq!(
+        setup::codex_config_edit(&read(&env.codex_config()), "conde", &exe, &sock).unwrap(),
+        None,
+        "entry in place"
+    );
+    assert!(
+        read(&env.codex_config()).contains(r"CONDE_SOCK = '\\.\pipe\conde-krisz'"),
+        "{}",
+        read(&env.codex_config())
+    );
+    assert!(
+        !files(&root)
+            .iter()
+            .any(|f| f.contains(".config") || f.contains("Library")),
+        "{:?}",
+        files(&root)
+    );
 
     // a running bridge (one that knows boards) with the same task: nothing to do
     host.alive = true;
-    host.daemon.insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
+    host.daemon
+        .insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
     let (ok, out) = run(&env, &Options::select(false, false, true, false), &mut host);
     assert!(ok, "{out}");
     assert_eq!(host.take_calls(), ["schtasks /Query /TN conde"]);
     assert!(out.contains("service: conde already running"), "{out}");
     let (ok, check) = verify(&env, &Options::select(false, false, true, false), &mut host);
     assert!(ok, "{check}");
-    assert!(check.contains("service: %USERPROFILE%\\AppData") && check.contains("up to date"), "{check}");
+    assert!(
+        check.contains("service: %USERPROFILE%\\AppData") && check.contains("up to date"),
+        "{check}"
+    );
 
     // a moved binary rewrites the task and restarts the running bridge
-    let moved = Env { exe: root.join("bin2/conde.exe"), ..env.clone() };
-    let (ok, out) = run(&moved, &Options::select(false, false, true, false), &mut host);
+    let moved = Env {
+        exe: root.join("bin2/conde.exe"),
+        ..env.clone()
+    };
+    let (ok, out) = run(
+        &moved,
+        &Options::select(false, false, true, false),
+        &mut host,
+    );
     assert!(ok, "{out}");
     assert_eq!(
         host.take_calls(),
-        ["schtasks /Query /TN conde".to_string(), create, "schtasks /End /TN conde".into(), "schtasks /Run /TN conde".into()]
+        [
+            "schtasks /Query /TN conde".to_string(),
+            create,
+            "schtasks /End /TN conde".into(),
+            "schtasks /Run /TN conde".into()
+        ]
     );
     assert!(out.contains("service: restarted conde"), "{out}");
 
     // a restart that did not happen is reported, not claimed
-    let moved_back = Env { exe: root.join("bin3/conde.exe"), ..env.clone() };
+    let moved_back = Env {
+        exe: root.join("bin3/conde.exe"),
+        ..env.clone()
+    };
     host.fail = Some("schtasks /End");
-    let (ok, out) = run(&moved_back, &Options::select(false, false, true, false), &mut host);
+    let (ok, out) = run(
+        &moved_back,
+        &Options::select(false, false, true, false),
+        &mut host,
+    );
     assert!(!ok, "{out}");
-    assert!(out.contains("service: FAILED: restart of conde incomplete: `schtasks /End /TN conde` failed: boom"), "{out}");
+    assert!(
+        out.contains(
+            "service: FAILED: restart of conde incomplete: `schtasks /End /TN conde` failed: boom"
+        ),
+        "{out}"
+    );
     assert!(!out.contains("service: restarted"), "{out}");
     host.fail = None;
     host.take_calls();
 
     // a directory relocated only in this shell does not reach the task: said so
-    let relocated = Env { claude_config_dir: Some(root.join("cc")), ..env.clone() };
-    let (_, out) = run(&relocated, &Options::select(false, false, true, false), &mut host);
-    assert!(out.contains("set CLAUDE_CONFIG_DIR persistently (setx NAME value)"), "{out}");
+    let relocated = Env {
+        claude_config_dir: Some(root.join("cc")),
+        ..env.clone()
+    };
+    let (_, out) = run(
+        &relocated,
+        &Options::select(false, false, true, false),
+        &mut host,
+    );
+    assert!(
+        out.contains("set CLAUDE_CONFIG_DIR persistently (setx NAME value)"),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -461,9 +646,15 @@ fn receiver_policy_unset_becomes_accept_explicit_values_stay() {
         "claude: set crossSessionInbound to \"accept\" in ~/.claude/settings.json (bypass-mode sessions receive conde \
 notifications without approval; --keep-receiver-policy leaves it)"
     ), "{out}");
-    assert_eq!(read(&settings), "{\n  \"crossSessionInbound\": \"accept\",\n  \"theme\": \"dark\",\n  \"a\": [1]\n}\n");
+    assert_eq!(
+        read(&settings),
+        "{\n  \"crossSessionInbound\": \"accept\",\n  \"theme\": \"dark\",\n  \"a\": [1]\n}\n"
+    );
     let (_, out) = run(&env, &opts, &mut host);
-    assert!(out.contains("claude: crossSessionInbound already \"accept\""), "{out}");
+    assert!(
+        out.contains("claude: crossSessionInbound already \"accept\""),
+        "{out}"
+    );
 
     // an explicit hold or refuse is the human's: reported, never changed
     for value in ["hold", "refuse"] {
@@ -478,7 +669,10 @@ notifications without approval; --keep-receiver-policy leaves it)"
     std::fs::remove_file(&settings).unwrap();
     let (ok, _) = run(&env, &opts, &mut host);
     assert!(ok);
-    assert_eq!(read(&settings), "{\n  \"crossSessionInbound\": \"accept\"\n}\n");
+    assert_eq!(
+        read(&settings),
+        "{\n  \"crossSessionInbound\": \"accept\"\n}\n"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -490,7 +684,11 @@ fn without_claude_cli_and_with_relocated_config_dirs() {
     env.codex_home = Some(root.join("codex-home"));
     env.xdg_config_home = Some(root.join("xdg"));
     std::fs::create_dir_all(root.join("claude-cfg")).unwrap();
-    std::fs::write(root.join("claude-cfg/.claude.json"), "{\"numStartups\": 3, \"mcpServers\": {\"x\": {\"command\": \"y\"}}}").unwrap();
+    std::fs::write(
+        root.join("claude-cfg/.claude.json"),
+        "{\"numStartups\": 3, \"mcpServers\": {\"x\": {\"command\": \"y\"}}}",
+    )
+    .unwrap();
     std::fs::create_dir_all(root.join("codex-home")).unwrap();
     let codex_cfg = "# keep me\nmodel = \"gpt\"\n[mcp_servers.docs]\nurl = \"https://d\"";
     std::fs::write(root.join("codex-home/config.toml"), codex_cfg).unwrap();
@@ -500,13 +698,19 @@ fn without_claude_cli_and_with_relocated_config_dirs() {
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
     assert!(out.contains("service: systemctl not found"), "{out}");
-    assert!(out.contains("claude CLI not found; wrote the user-scope MCP entry conde into"), "{out}");
+    assert!(
+        out.contains("claude CLI not found; wrote the user-scope MCP entry conde into"),
+        "{out}"
+    );
     assert!(host.calls.is_empty(), "{:?}", host.calls);
     let cj: Value = serde_json::from_str(&read(&root.join("claude-cfg/.claude.json"))).unwrap();
     assert_eq!(cj["numStartups"], 3);
     assert_eq!(cj["mcpServers"]["x"]["command"], "y");
     let sock = env.socket.display().to_string();
-    assert_eq!(cj["mcpServers"]["conde"], json!({"type": "stdio", "command": env.exe.display().to_string(), "args": ["mcp"], "env": {"CONDE_SOCK": sock}}));
+    assert_eq!(
+        cj["mcpServers"]["conde"],
+        json!({"type": "stdio", "command": env.exe.display().to_string(), "args": ["mcp"], "env": {"CONDE_SOCK": sock}})
+    );
     let toml = read(&root.join("codex-home/config.toml"));
     assert!(toml.starts_with(codex_cfg), "{toml}");
     assert!(toml.ends_with(&codex_entry(&env, "conde")), "{toml}");
@@ -519,11 +723,17 @@ fn without_claude_cli_and_with_relocated_config_dirs() {
     ] {
         assert!(written.contains(&f.to_string()), "{f} not in {written:?}");
     }
-    assert!(!written.iter().any(|f| f.starts_with("home/")), "{written:?}");
+    assert!(
+        !written.iter().any(|f| f.starts_with("home/")),
+        "{written:?}"
+    );
 
     let before = written;
     let (ok, out) = run(&env, &opts, &mut host);
-    assert!(ok && !out.contains("wrote") && !out.contains("updated"), "{out}");
+    assert!(
+        ok && !out.contains("wrote") && !out.contains("updated"),
+        "{out}"
+    );
     assert_eq!(files(&root), before);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -540,9 +750,19 @@ fn a_failing_part_is_reported_and_the_rest_still_runs() {
 
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(!ok);
-    assert!(out.contains("service: FAILED: `systemctl --user enable conde.service` failed: boom"), "{out}");
-    assert!(out.contains("codex: FAILED: ~/.codex/config.toml left as is: not valid TOML"), "{out}");
-    assert_eq!(read(&env.codex_config()), "[mcp_servers.a\ncommand = \"a\"\n", "invalid TOML is never rewritten");
+    assert!(
+        out.contains("service: FAILED: `systemctl --user enable conde.service` failed: boom"),
+        "{out}"
+    );
+    assert!(
+        out.contains("codex: FAILED: ~/.codex/config.toml left as is: not valid TOML"),
+        "{out}"
+    );
+    assert_eq!(
+        read(&env.codex_config()),
+        "[mcp_servers.a\ncommand = \"a\"\n",
+        "invalid TOML is never rewritten"
+    );
     assert!(env.claude_skill().exists() && env.codex_skill().exists());
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -557,8 +777,15 @@ fn existing_codex_entry_is_updated_in_place() {
     let mut host = Fake::new(&env, &[]);
     let (ok, out) = run(&env, &Options::select(false, true, false, false), &mut host);
     assert!(ok, "{out}");
-    assert!(out.contains("codex: updated MCP server conde in ~/.codex/config.toml"), "{out}");
-    let want = format!("{}env = {{ CONDE_SOCK = \"{}\" }}\n", mine.replace("/elsewhere/conde", &env.exe.display().to_string()), env.socket.display());
+    assert!(
+        out.contains("codex: updated MCP server conde in ~/.codex/config.toml"),
+        "{out}"
+    );
+    let want = format!(
+        "{}env = {{ CONDE_SOCK = \"{}\" }}\n",
+        mine.replace("/elsewhere/conde", &env.exe.display().to_string()),
+        env.socket.display()
+    );
     assert_eq!(read(&env.codex_config()), want);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -572,7 +799,11 @@ fn other_instance(root: &Path) -> String {
 }
 
 fn claude_servers(env: &Env, servers: Value) {
-    std::fs::write(env.claude_json(), json!({"numStartups": 3, "mcpServers": servers}).to_string()).unwrap();
+    std::fs::write(
+        env.claude_json(),
+        json!({"numStartups": 3, "mcpServers": servers}).to_string(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -597,10 +828,18 @@ fn another_instances_conde_entry_stays_and_this_one_registers_as_conde_board() {
 
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
-    assert_eq!(host.take_calls(), [add_call(&env, "conde-dakai")], "theirs is never removed");
+    assert_eq!(
+        host.take_calls(),
+        [add_call(&env, "conde-dakai")],
+        "theirs is never removed"
+    );
     for want in [
-        format!("claude: MCP server conde belongs to another conde instance ({other}); this one registers as conde-dakai"),
-        format!("codex: MCP server conde belongs to another conde instance ({other}); this one registers as conde-dakai"),
+        format!(
+            "claude: MCP server conde belongs to another conde instance ({other}); this one registers as conde-dakai"
+        ),
+        format!(
+            "codex: MCP server conde belongs to another conde instance ({other}); this one registers as conde-dakai"
+        ),
         "codex: updated MCP server conde-dakai in ~/.codex/config.toml".into(),
     ] {
         assert!(out.contains(&want), "missing {want:?} in:\n{out}");
@@ -611,16 +850,37 @@ fn another_instances_conde_entry_stays_and_this_one_registers_as_conde_board() {
     let toml = read(&env.codex_config());
     assert!(toml.starts_with(&codex_theirs), "{toml}");
     for skill in [env.claude_skill(), env.codex_skill()] {
-        assert_eq!(read(&skill), "---\nname: conde\n---\ntheirs\n", "the other instance's skill stays");
+        assert_eq!(
+            read(&skill),
+            "---\nname: conde\n---\ntheirs\n",
+            "the other instance's skill stays"
+        );
     }
-    for skill in [env.claude_skill_for("conde-dakai"), env.codex_skill_for("conde-dakai")] {
+    for skill in [
+        env.claude_skill_for("conde-dakai"),
+        env.codex_skill_for("conde-dakai"),
+    ] {
         let text = read(&skill);
-        assert!(text.starts_with("---\nname: conde-dakai\n"), "{}", skill.display());
-        assert!(text.contains("tools of the `conde-dakai` MCP server"), "{}", skill.display());
+        assert!(
+            text.starts_with("---\nname: conde-dakai\n"),
+            "{}",
+            skill.display()
+        );
+        assert!(
+            text.contains("tools of the `conde-dakai` MCP server"),
+            "{}",
+            skill.display()
+        );
         assert!(!text.contains("tools of the `conde` MCP server"));
     }
-    assert!(out.contains("claude: skill wrote ~/.claude/skills/conde-dakai/SKILL.md"), "{out}");
-    assert_eq!(cj["mcpServers"]["conde-dakai"]["env"]["CONDE_SOCK"], env.socket.display().to_string());
+    assert!(
+        out.contains("claude: skill wrote ~/.claude/skills/conde-dakai/SKILL.md"),
+        "{out}"
+    );
+    assert_eq!(
+        cj["mcpServers"]["conde-dakai"]["env"]["CONDE_SOCK"],
+        env.socket.display().to_string()
+    );
     assert!(toml.contains(&codex_entry(&env, "conde-dakai")), "{toml}");
 
     // a rerun finds its own entry under the second name and changes nothing
@@ -638,18 +898,42 @@ fn another_instances_conde_entry_stays_and_this_one_registers_as_conde_board() {
     host.on_path.insert("codex");
     let (ok, out) = verify(&env, &opts, &mut host);
     assert!(ok, "{out}");
-    assert!(out.contains(&format!("ok      claude: MCP server conde-dakai registered at user scope ({exe} mcp)")), "{out}");
-    assert!(out.contains("ok      codex: skill ~/.codex/skills/conde-dakai/SKILL.md up to date"), "{out}");
-    assert!(out.contains("ok      claude: skill ~/.claude/skills/conde-dakai/SKILL.md up to date"), "{out}");
-    assert!(out.contains(&format!("ok      codex: MCP server conde-dakai registered in ~/.codex/config.toml ({exe} mcp)")), "{out}");
+    assert!(
+        out.contains(&format!(
+            "ok      claude: MCP server conde-dakai registered at user scope ({exe} mcp)"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok      codex: skill ~/.codex/skills/conde-dakai/SKILL.md up to date"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok      claude: skill ~/.claude/skills/conde-dakai/SKILL.md up to date"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "ok      codex: MCP server conde-dakai registered in ~/.codex/config.toml ({exe} mcp)"
+        )),
+        "{out}"
+    );
 
     // enrolling another board later does not move the registration
-    let cfg = conde::boards::BoardConfig { server: "https://b.test".into(), host_id: "box".into(), owner: "k".into(), key: "k".into() };
+    let cfg = conde::boards::BoardConfig {
+        server: "https://b.test".into(),
+        host_id: "box".into(),
+        owner: "k".into(),
+        key: "k".into(),
+    };
     conde::boards::store(&env.boards_dir().join("acme.json"), "acme", &cfg).unwrap();
     std::fs::write(env.default_board(), "acme\n").unwrap();
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok && host.take_calls().is_empty(), "{out}");
-    assert!(out.contains("claude: MCP server conde-dakai unchanged (user scope)"), "{out}");
+    assert!(
+        out.contains("claude: MCP server conde-dakai unchanged (user scope)"),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -664,19 +948,34 @@ fn another_socket_or_a_remote_server_is_another_instance_and_without_a_board_the
     claude_servers(&env, json!({"conde": theirs}));
     // a remote server under the name in Codex
     std::fs::create_dir_all(env.codex_config().parent().unwrap()).unwrap();
-    std::fs::write(env.codex_config(), "[mcp_servers.conde]\nurl = \"https://conde.example/mcp\"\n").unwrap();
+    std::fs::write(
+        env.codex_config(),
+        "[mcp_servers.conde]\nurl = \"https://conde.example/mcp\"\n",
+    )
+    .unwrap();
     let mut host = Fake::new(&env, &["claude"]);
 
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
     assert_eq!(host.take_calls(), [add_call(&env, "conde-2")]);
-    assert!(out.contains(&format!("({exe}, CONDE_SOCK=/elsewhere/conde.sock); this one registers as conde-2")), "{out}");
+    assert!(
+        out.contains(&format!(
+            "({exe}, CONDE_SOCK=/elsewhere/conde.sock); this one registers as conde-2"
+        )),
+        "{out}"
+    );
     assert!(out.contains("codex: MCP server conde belongs to another conde instance (a server that runs no local command); this one registers as conde-2"), "{out}");
     let cj: Value = serde_json::from_str(&read(&env.claude_json())).unwrap();
     assert_eq!(cj["mcpServers"]["conde"], theirs);
-    assert!(read(&env.codex_config()).starts_with("[mcp_servers.conde]\nurl = \"https://conde.example/mcp\"\n"));
+    assert!(
+        read(&env.codex_config())
+            .starts_with("[mcp_servers.conde]\nurl = \"https://conde.example/mcp\"\n")
+    );
     assert!(read(&env.codex_skill_for("conde-2")).contains("tools of the `conde-2` MCP server"));
-    assert!(!env.codex_skill().exists() && !env.claude_skill().exists(), "skills/conde is the other instance's");
+    assert!(
+        !env.codex_skill().exists() && !env.claude_skill().exists(),
+        "skills/conde is the other instance's"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -689,19 +988,28 @@ fn our_own_or_a_dead_conde_entry_is_updated_in_place() {
     enrolled(&env);
     // ours on our socket, with other args: updated under its name
     let sock = env.socket.display().to_string();
-    claude_servers(&env, json!({"conde": {"type": "stdio", "command": exe, "args": ["old"], "env": {"CONDE_SOCK": sock}}}));
+    claude_servers(
+        &env,
+        json!({"conde": {"type": "stdio", "command": exe, "args": ["old"], "env": {"CONDE_SOCK": sock}}}),
+    );
     let mut host = Fake::new(&env, &["claude"]);
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
     assert_eq!(
         host.take_calls(),
-        ["claude mcp remove --scope user conde".to_string(), add_call(&env, "conde")]
+        [
+            "claude mcp remove --scope user conde".to_string(),
+            add_call(&env, "conde")
+        ]
     );
     assert!(!out.contains("another conde instance"), "{out}");
     assert_eq!(read(&env.claude_skill()), setup::CLAUDE_SKILL);
 
     // a bare command not on PATH is a dead entry: reclaimed
-    claude_servers(&env, json!({"conde": {"type": "stdio", "command": "conde-gone", "args": ["mcp"]}}));
+    claude_servers(
+        &env,
+        json!({"conde": {"type": "stdio", "command": "conde-gone", "args": ["mcp"]}}),
+    );
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
     assert_eq!(host.take_calls()[1], add_call(&env, "conde"));
@@ -714,9 +1022,13 @@ fn an_entry_without_conde_sock_means_the_default_socket_and_a_bare_name_is_found
     let exe = root.join("bin/conde");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
     std::fs::write(&exe, "#!/bin/sh\n").unwrap();
-    let base = Env { path: format!("/nonexistent:{}", root.join("bin").display()), ..env(&root, Os::Linux) };
+    let base = Env {
+        path: format!("/nonexistent:{}", root.join("bin").display()),
+        ..env(&root, Os::Linux)
+    };
     let opts = Options::select(true, false, false, false);
-    let old_style = json!({"type": "stdio", "command": "conde", "args": ["mcp"], "env": {"TOKEN": "t"}});
+    let old_style =
+        json!({"type": "stdio", "command": "conde", "args": ["mcp"], "env": {"TOKEN": "t"}});
 
     // our binary by its bare name, no CONDE_SOCK, and this instance on the default socket: ours,
     // updated in place to carry the socket, its other env vars kept
@@ -730,17 +1042,29 @@ fn an_entry_without_conde_sock_means_the_default_socket_and_a_bare_name_is_found
         host.take_calls(),
         [
             "claude mcp remove --scope user conde".to_string(),
-            format!("claude mcp add --scope user conde -e CONDE_SOCK={sock} -e TOKEN=t -- {} mcp", exe.display())
+            format!(
+                "claude mcp add --scope user conde -e CONDE_SOCK={sock} -e TOKEN=t -- {} mcp",
+                exe.display()
+            )
         ]
     );
     let cj: Value = serde_json::from_str(&read(&base.claude_json())).unwrap();
-    assert_eq!(cj["mcpServers"]["conde"]["env"], json!({"CONDE_SOCK": sock, "TOKEN": "t"}));
+    assert_eq!(
+        cj["mcpServers"]["conde"]["env"],
+        json!({"CONDE_SOCK": sock, "TOKEN": "t"})
+    );
     let (ok, out) = verify(&base, &opts, &mut host);
-    assert!(out.contains("ok      claude: MCP server conde registered at user scope"), "{ok} {out}");
+    assert!(
+        out.contains("ok      claude: MCP server conde registered at user scope"),
+        "{ok} {out}"
+    );
 
     // the same entry while this instance runs on another socket: it is the default socket's
     // instance, not ours
-    let elsewhere = Env { socket: root.join("run/second.sock"), ..base.clone() };
+    let elsewhere = Env {
+        socket: root.join("run/second.sock"),
+        ..base.clone()
+    };
     claude_servers(&elsewhere, json!({"conde": old_style}));
     let (ok, out) = run(&elsewhere, &opts, &mut host);
     assert!(ok, "{out}");
@@ -755,7 +1079,10 @@ fn both_skills_name_the_mcp_server_in_one_rewritable_place() {
         assert_eq!(skill.matches("tools of the `conde` MCP server").count(), 1);
         assert_eq!(setup::skill_text(skill, "conde"), skill);
         let renamed = setup::skill_text(skill, "conde-dakai");
-        assert!(renamed.contains("tools of the `conde-dakai` MCP server") && renamed.starts_with("---\nname: conde-dakai\n"));
+        assert!(
+            renamed.contains("tools of the `conde-dakai` MCP server")
+                && renamed.starts_with("---\nname: conde-dakai\n")
+        );
         assert_eq!(skill.matches("---\nname: conde\n").count(), 1);
     }
 }
@@ -787,13 +1114,22 @@ fn services_carry_every_relocated_directory() {
             ("CODEX_HOME", "relocated-codex"),
         ] {
             let path = root.join(dir).display().to_string();
-            assert!(unit.contains(&format!("\nEnvironment=\"{name}={path}\"\n")), "{name} not in\n{unit}");
-            assert!(plist.contains(&format!("<key>{name}</key>\n    <string>{path}</string>")), "{name} not in\n{plist}");
+            assert!(
+                unit.contains(&format!("\nEnvironment=\"{name}={path}\"\n")),
+                "{name} not in\n{unit}"
+            );
+            assert!(
+                plist.contains(&format!("<key>{name}</key>\n    <string>{path}</string>")),
+                "{name} not in\n{plist}"
+            );
         }
     }
     // unset overrides are not invented
     let unit = setup::systemd_unit(&env(&root, Os::Linux));
-    assert!(!unit.contains("XDG_CONFIG_HOME") && !unit.contains("CODEX_HOME"), "{unit}");
+    assert!(
+        !unit.contains("XDG_CONFIG_HOME") && !unit.contains("CODEX_HOME"),
+        "{unit}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -813,12 +1149,27 @@ fn check_reports_each_part_and_changes_nothing() {
     let (ok, out) = verify(&env, &opts, &mut host);
     assert!(!ok, "{out}");
     assert!(out.contains("ISSUE   service: ~/Library/LaunchAgents/space.nativeai.conde.plist missing; run: conde setup"), "{out}");
-    assert!(out.contains("ISSUE   service: the bridge does not answer on"), "{out}");
-    assert!(out.contains("launchd: space.nativeai.conde is not loaded"), "{out}");
-    assert!(out.contains("ISSUE   claude: MCP server conde not registered"), "{out}");
-    assert!(out.contains("ISSUE   codex: skill ~/.codex/skills/conde/SKILL.md missing"), "{out}");
+    assert!(
+        out.contains("ISSUE   service: the bridge does not answer on"),
+        "{out}"
+    );
+    assert!(
+        out.contains("launchd: space.nativeai.conde is not loaded"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ISSUE   claude: MCP server conde not registered"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ISSUE   codex: skill ~/.codex/skills/conde/SKILL.md missing"),
+        "{out}"
+    );
     assert!(files(&root).is_empty(), "--check wrote {:?}", files(&root));
-    assert_eq!(host.take_calls(), ["launchctl print gui/501/space.nativeai.conde"]);
+    assert_eq!(
+        host.take_calls(),
+        ["launchctl print gui/501/space.nativeai.conde"]
+    );
 
     let set = opts.clone();
     let (ok, _) = run(&env, &set, &mut host);
@@ -827,11 +1178,17 @@ fn check_reports_each_part_and_changes_nothing() {
     host.alive = true;
     let (ok, out) = verify(&env, &opts, &mut host);
     assert!(ok, "{out}");
-    assert!(out.starts_with(&format!("conde {}\n", conde::VERSION)), "{out}");
+    assert!(
+        out.starts_with(&format!("conde {}\n", conde::VERSION)),
+        "{out}"
+    );
     let exe = env.exe.display();
     for want in [
         "ok      service: ~/Library/LaunchAgents/space.nativeai.conde.plist up to date".to_string(),
-        format!("ok      service: the bridge answers on {}", env.socket.display()),
+        format!(
+            "ok      service: the bridge answers on {}",
+            env.socket.display()
+        ),
         "ok      claude: skill ~/.claude/skills/conde/SKILL.md up to date".into(),
         format!("ok      claude: MCP server conde registered at user scope ({exe} mcp)"),
         "note    claude: crossSessionInbound is \"accept\"".into(),
@@ -849,32 +1206,49 @@ fn check_skips_a_harness_that_is_not_installed_and_reads_toml_semantically() {
     let env = env(&root, Os::Linux);
     // Codex only, with a valid inline mcp_servers layout that toml_edit keeps inline
     std::fs::create_dir_all(env.codex_config().parent().unwrap()).unwrap();
-    std::fs::write(env.codex_config(), "mcp_servers = { docs = { command = \"docs\" } }\n").unwrap();
+    std::fs::write(
+        env.codex_config(),
+        "mcp_servers = { docs = { command = \"docs\" } }\n",
+    )
+    .unwrap();
     let mut host = Fake::new(&env, &["codex", "systemctl"]);
     host.alive = true;
     let (ok, out) = run(&env, &Options::select(false, true, true, false), &mut host);
     assert!(ok, "{out}");
-    assert!(!read(&env.codex_config()).contains("[mcp_servers.conde]"), "the layout stays inline");
+    assert!(
+        !read(&env.codex_config()).contains("[mcp_servers.conde]"),
+        "the layout stays inline"
+    );
 
     let (ok, out) = verify(&env, &Options::select(false, false, false, true), &mut host);
     assert!(ok, "{out}");
     assert!(out.contains("skip    claude: Claude Code not found on this machine; rerun conde setup after installing it"), "{out}");
-    assert!(out.contains("ok      codex: MCP server conde registered in ~/.codex/config.toml"), "{out}");
-    assert!(out.contains("ok      service: the bridge answers on"), "{out}");
+    assert!(
+        out.contains("ok      codex: MCP server conde registered in ~/.codex/config.toml"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok      service: the bridge answers on"),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
 fn setup_and_check_agree_on_whether_codex_is_installed() {
     let opts = Options::select(false, true, false, false);
-    let skip = "skip    codex: Codex not found on this machine; rerun conde setup after installing it\n";
+    let skip =
+        "skip    codex: Codex not found on this machine; rerun conde setup after installing it\n";
 
     // neither the binary nor ~/.codex: both skip with the same line, nothing is written
     let root = temp_root();
     let bare = env(&root, Os::Linux);
     let mut host = Fake::new(&bare, &[]);
     let (ok, out) = run(&bare, &opts, &mut host);
-    assert!(ok && out.contains(skip) && !out.contains("codex: skill"), "{out}");
+    assert!(
+        ok && out.contains(skip) && !out.contains("codex: skill"),
+        "{out}"
+    );
     assert!(!root.join("home/.codex").exists(), "{:?}", files(&root));
     let (ok, out) = verify(&bare, &opts, &mut host);
     assert!(ok && out.contains(skip), "{out}");
@@ -890,11 +1264,17 @@ fn setup_and_check_agree_on_whether_codex_is_installed() {
         let mut host = Fake::new(&env, on_path);
         let (ok, out) = run(&env, &opts, &mut host);
         assert!(ok && !out.contains("skip"), "{out}");
-        assert!(out.contains("codex: added MCP server conde to ~/.codex/config.toml"), "{out}");
+        assert!(
+            out.contains("codex: added MCP server conde to ~/.codex/config.toml"),
+            "{out}"
+        );
         assert_eq!(read(&env.codex_skill()), setup::CODEX_SKILL);
         let (ok, out) = verify(&env, &opts, &mut host);
         assert!(ok && !out.contains("skip"), "{out}");
-        assert!(out.contains("ok      codex: skill ~/.codex/skills/conde/SKILL.md up to date"), "{out}");
+        assert!(
+            out.contains("ok      codex: skill ~/.codex/skills/conde/SKILL.md up to date"),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -909,15 +1289,26 @@ fn setup_and_check_agree_on_whether_claude_code_is_installed() {
     let bare = env(&root, Os::Linux);
     let mut host = Fake::new(&bare, &[]);
     let (ok, out) = run(&bare, &opts, &mut host);
-    assert!(ok && out.contains(skip) && !out.contains("claude: skill"), "{out}");
-    assert!(files(&root).is_empty() && !root.join("home/.claude").exists(), "{:?}", files(&root));
+    assert!(
+        ok && out.contains(skip) && !out.contains("claude: skill"),
+        "{out}"
+    );
+    assert!(
+        files(&root).is_empty() && !root.join("home/.claude").exists(),
+        "{:?}",
+        files(&root)
+    );
     let (ok, out) = verify(&bare, &opts, &mut host);
     assert!(ok && out.contains(skip), "{out}");
     let _ = std::fs::remove_dir_all(&root);
 
     // the binary on PATH, or ~/.claude or ~/.claude.json without one (installed where PATH
     // does not reach)
-    for (on_path, marker) in [(&["claude"][..], None), (&[][..], Some(".claude")), (&[][..], Some(".claude.json"))] {
+    for (on_path, marker) in [
+        (&["claude"][..], None),
+        (&[][..], Some(".claude")),
+        (&[][..], Some(".claude.json")),
+    ] {
         let root = temp_root();
         let env = env(&root, Os::Linux);
         match marker {
@@ -931,7 +1322,10 @@ fn setup_and_check_agree_on_whether_claude_code_is_installed() {
         assert_eq!(read(&env.claude_skill()), setup::CLAUDE_SKILL);
         let (ok, out) = verify(&env, &opts, &mut host);
         assert!(ok && !out.contains("skip"), "{out}");
-        assert!(out.contains("ok      claude: MCP server conde registered at user scope"), "{out}");
+        assert!(
+            out.contains("ok      claude: MCP server conde registered at user scope"),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -945,11 +1339,18 @@ fn an_exited_job_is_not_a_running_bridge() {
     let mac = env(&root, Os::MacOs);
     let mut host = Fake::new(&mac, &[]);
     host.launchd_loaded = true;
-    host.print_out = "gui/501/space.nativeai.conde = {\n\tstate = not running\n\tlast exit code = 1\n}\n".into();
+    host.print_out =
+        "gui/501/space.nativeai.conde = {\n\tstate = not running\n\tlast exit code = 1\n}\n".into();
     let (ok, out) = verify(&mac, &opts, &mut host);
     assert!(!ok, "{out}");
-    assert!(out.contains("ISSUE   service: the bridge does not answer on"), "{out}");
-    assert!(out.contains("launchd: state = not running, last exit code = 1"), "{out}");
+    assert!(
+        out.contains("ISSUE   service: the bridge does not answer on"),
+        "{out}"
+    );
+    assert!(
+        out.contains("launchd: state = not running, last exit code = 1"),
+        "{out}"
+    );
 
     // systemd: the unit failed
     let linux = env(&root, Os::Linux);
@@ -957,13 +1358,21 @@ fn an_exited_job_is_not_a_running_bridge() {
     host.show_out = "ActiveState=failed\nExecMainStatus=1\n".into();
     let (ok, out) = verify(&linux, &opts, &mut host);
     assert!(!ok, "{out}");
-    assert!(out.contains("systemd: ActiveState=failed, ExecMainStatus=1"), "{out}");
-    assert!(host.calls.contains(&"systemctl --user show -p ActiveState,ExecMainStatus conde.service".to_string()));
+    assert!(
+        out.contains("systemd: ActiveState=failed, ExecMainStatus=1"),
+        "{out}"
+    );
+    assert!(host.calls.contains(
+        &"systemctl --user show -p ActiveState,ExecMainStatus conde.service".to_string()
+    ));
 
     // a bridge that answers is ok whatever the manager says
     host.alive = true;
     let (_, out) = verify(&linux, &opts, &mut host);
-    assert!(out.contains("ok      service: the bridge answers on"), "{out}");
+    assert!(
+        out.contains("ok      service: the bridge answers on"),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -987,7 +1396,11 @@ fn the_real_probe_needs_an_answer_within_the_timeout() {
     let started = std::time::Instant::now();
     let err = sys.reach(&silent).unwrap_err();
     assert!(err.contains("no answer within"), "{err}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
     hold.join().unwrap();
 
     // closes at once (the macOS release-run symptom)
@@ -996,7 +1409,10 @@ fn the_real_probe_needs_an_answer_within_the_timeout() {
     let hold = std::thread::spawn(move || drop(listener.accept().unwrap()));
     let err = sys.reach(&closing).unwrap_err();
     hold.join().unwrap();
-    assert!(err.contains("closed") || err.contains("Broken pipe") || err.contains("reset"), "{err}");
+    assert!(
+        err.contains("closed") || err.contains("Broken pipe") || err.contains("reset"),
+        "{err}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1016,7 +1432,11 @@ fn preview() -> Value {
 
 fn manifest(published: &[&str]) -> Value {
     let row = |id: &str, name: &str, addr: &str| {
-        let p = if published.contains(&name) { json!({"mailbox_id": id, "route_generation": 2}) } else { Value::Null };
+        let p = if published.contains(&name) {
+            json!({"mailbox_id": id, "route_generation": 2})
+        } else {
+            Value::Null
+        };
         json!({"agent_id": id, "name": name, "address": addr, "pin": null, "published": p})
     };
     json!({"bindings": [row("01DESK", "desk", "claude:5f2c@box"), row("01LANE", "lane.v0", "codex:th-7@box")],
@@ -1026,7 +1446,12 @@ fn manifest(published: &[&str]) -> Value {
 
 fn enrolled(env: &Env) {
     let path = env.boards_dir().join("dakai.json");
-    let cfg = conde::boards::BoardConfig { server: "https://conde.test".into(), host_id: "box".into(), owner: "krisz".into(), key: "k".into() };
+    let cfg = conde::boards::BoardConfig {
+        server: "https://conde.test".into(),
+        host_id: "box".into(),
+        owner: "krisz".into(),
+        key: "k".into(),
+    };
     conde::boards::store(&path, "dakai", &cfg).unwrap();
 }
 
@@ -1040,20 +1465,41 @@ fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
     let env = env(&root, Os::Linux);
     let cred = env.v1_credential();
     std::fs::create_dir_all(cred.parent().unwrap()).unwrap();
-    conde::credentials::store(&cred, &conde::credentials::Credentials { server: "https://conde.test".into(), host_id: "box".into(), key: "k1".into() }).unwrap();
+    conde::credentials::store(
+        &cred,
+        &conde::credentials::Credentials {
+            server: "https://conde.test".into(),
+            host_id: "box".into(),
+            key: "k1".into(),
+        },
+    )
+    .unwrap();
     let mut host = Fake::new(&env, &["systemctl"]);
     host.info = Some(Ok(serde_json::from_value(board_info(false)).unwrap()));
     host.daemon.insert("board.info", Ok(board_info(false)));
     host.daemon.insert("host.migrate_preview", Ok(preview()));
-    host.daemon.insert("host.migrate_v2", Ok(manifest(&["desk"])));
+    host.daemon
+        .insert("host.migrate_v2", Ok(manifest(&["desk"])));
     host.answers = ["", "y", "dakai"].map(String::from).into();
 
-    let (ok, out) = run(&env, &Options::select(false, false, false, false), &mut host);
+    let (ok, out) = run(
+        &env,
+        &Options::select(false, false, false, false),
+        &mut host,
+    );
     assert!(ok, "{out}");
     // the move: under the advertised alias, pinned to the reported account, before the service restarts
     assert!(!cred.exists());
     let stored = conde::boards::load(&env.boards_dir().join("dakai.json")).unwrap();
-    assert_eq!((stored.server.as_str(), stored.owner.as_str(), stored.host_id.as_str(), stored.key.as_str()), ("https://conde.test", "krisz", "box", "k1"));
+    assert_eq!(
+        (
+            stored.server.as_str(),
+            stored.owner.as_str(),
+            stored.host_id.as_str(),
+            stored.key.as_str()
+        ),
+        ("https://conde.test", "krisz", "box", "k1")
+    );
     let moved = out.find("boards: moved the v1 credential ~/.config/conde/credentials to ~/.config/conde/boards/dakai.json (board dakai, account krisz, host box)").expect(&out);
     assert!(moved < out.find("service: ").unwrap(), "{out}");
     // the preview: candidates with their evidence, the rest in one line
@@ -1068,15 +1514,26 @@ fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
     ] {
         assert!(out.contains(line), "missing {line:?} in\n{out}");
     }
-    assert_eq!(host.prompts[1], "boards: dakai: publish desk; the other 1 names move to this host's local board only. Apply? [y/N] ");
-    assert!(host.prompts[2].contains("Default board (local, dakai) [local]: "), "{:?}", host.prompts);
+    assert_eq!(
+        host.prompts[1],
+        "boards: dakai: publish desk; the other 1 names move to this host's local board only. Apply? [y/N] "
+    );
+    assert!(
+        host.prompts[2].contains("Default board (local, dakai) [local]: "),
+        "{:?}",
+        host.prompts
+    );
     let dakai = Some("dakai".to_string());
     assert_eq!(
         ops(&host),
         [
             ("board.info".to_string(), dakai.clone(), json!({})),
             ("host.migrate_preview".into(), dakai.clone(), json!({})),
-            ("host.migrate_v2".into(), dakai, json!({"publish": ["01DESK"]})),
+            (
+                "host.migrate_v2".into(),
+                dakai,
+                json!({"publish": ["01DESK"]})
+            ),
         ]
     );
     assert_eq!(read(&env.default_board()), "dakai\n");
@@ -1093,8 +1550,13 @@ fn without_an_instruction_nothing_is_published() {
     let mut host = Fake::new(&env, &[]);
     host.daemon.insert("board.info", Ok(board_info(false)));
     host.daemon.insert("host.migrate_preview", Ok(preview()));
-    host.daemon.insert("host.migrate_v2", Ok(manifest(&["desk"])));
-    let (ok, out) = run(&env, &Options::select(false, false, false, false), &mut host);
+    host.daemon
+        .insert("host.migrate_v2", Ok(manifest(&["desk"])));
+    let (ok, out) = run(
+        &env,
+        &Options::select(false, false, false, false),
+        &mut host,
+    );
     assert!(ok, "{out}");
     for line in [
         "boards: dakai: host box (account krisz) still has 2 names bound from v1. A candidate (*) has messages with another owner's agents:\n",
@@ -1105,18 +1567,27 @@ fn without_an_instruction_nothing_is_published() {
         assert!(out.contains(line), "missing {line:?} in\n{out}");
     }
     assert!(host.prompts.is_empty(), "{:?}", host.prompts);
-    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
+    assert!(
+        !ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"),
+        "nothing applied"
+    );
     assert!(!env.default_board().exists());
 
     // the explicit review without an instruction applies nothing either, and fails
     let mut sink = Vec::new();
     assert!(!setup::migrate_review(&env, &mut host, &mut sink, "dakai", true, None).unwrap());
-    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
+    assert!(
+        !ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"),
+        "nothing applied"
+    );
     // the flag sets the default without asking
     let mut opts = Options::select(false, false, false, false);
     opts.default_board = Some("dakai".into());
     let (_, out) = run(&env, &opts, &mut host);
-    assert!(out.contains("boards: default board for names and channels: dakai\n"), "{out}");
+    assert!(
+        out.contains("boards: default board for names and channels: dakai\n"),
+        "{out}"
+    );
     assert_eq!(read(&env.default_board()), "dakai\n");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1130,10 +1601,26 @@ fn each_publish_flag_decides_the_switch() {
     let env = env(&root, Os::Linux);
     enrolled(&env);
     let cases = [
-        (Publish::Names(vec!["lane.v0".into(), "krisz/desk".into()]), json!(["01LANE", "01DESK"]), "--publish lane.v0,krisz/desk publishes lane.v0, desk; the other 0 names"),
-        (Publish::Candidates, json!(["01DESK"]), "--publish-candidates publishes desk; the other 1 names"),
-        (Publish::All, json!(["01DESK", "01LANE"]), "--publish-all publishes desk, lane.v0; the other 0 names"),
-        (Publish::Nothing, json!([]), "--publish-none publishes nothing; the other 2 names"),
+        (
+            Publish::Names(vec!["lane.v0".into(), "krisz/desk".into()]),
+            json!(["01LANE", "01DESK"]),
+            "--publish lane.v0,krisz/desk publishes lane.v0, desk; the other 0 names",
+        ),
+        (
+            Publish::Candidates,
+            json!(["01DESK"]),
+            "--publish-candidates publishes desk; the other 1 names",
+        ),
+        (
+            Publish::All,
+            json!(["01DESK", "01LANE"]),
+            "--publish-all publishes desk, lane.v0; the other 0 names",
+        ),
+        (
+            Publish::Nothing,
+            json!([]),
+            "--publish-none publishes nothing; the other 2 names",
+        ),
     ];
     for (choice, ids, line) in cases {
         let mut host = Fake::new(&env, &[]);
@@ -1143,12 +1630,26 @@ fn each_publish_flag_decides_the_switch() {
         // a terminal is there, and nobody is asked
         host.answers = ["unused"].map(String::from).into();
         let mut out = Vec::new();
-        assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, Some(&choice)).unwrap());
+        assert!(
+            setup::migrate_review(&env, &mut host, &mut out, "dakai", true, Some(&choice)).unwrap()
+        );
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains(&format!("boards: dakai: {line} move to this host's local board only\n")), "{choice:?}: {out}");
-        assert!(out.contains("to change it later: conde publish <name> --board dakai"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "boards: dakai: {line} move to this host's local board only\n"
+            )),
+            "{choice:?}: {out}"
+        );
+        assert!(
+            out.contains("to change it later: conde publish <name> --board dakai"),
+            "{out}"
+        );
         assert!(host.prompts.is_empty(), "{choice:?}: {:?}", host.prompts);
-        assert_eq!(ops(&host).last().unwrap().2, json!({"publish": ids}), "{choice:?}");
+        assert_eq!(
+            ops(&host).last().unwrap().2,
+            json!({"publish": ids}),
+            "{choice:?}"
+        );
     }
 
     // setup takes the flag for every enrolled board's review
@@ -1159,7 +1660,10 @@ fn each_publish_flag_decides_the_switch() {
     let mut opts = Options::select(false, false, false, false);
     opts.publish = Some(Publish::Nothing);
     let (ok, out) = run(&env, &opts, &mut host);
-    assert!(ok && out.contains("boards: dakai: --publish-none publishes nothing"), "{out}");
+    assert!(
+        ok && out.contains("boards: dakai: --publish-none publishes nothing"),
+        "{out}"
+    );
     assert_eq!(ops(&host).last().unwrap().2, json!({"publish": []}));
 
     // an unknown name: nothing applied, and the review failed
@@ -1168,16 +1672,31 @@ fn each_publish_flag_decides_the_switch() {
     host.daemon.insert("host.migrate_preview", Ok(preview()));
     let mut out = Vec::new();
     let names = Publish::Names(vec!["desk".into(), "nope".into()]);
-    assert!(!setup::migrate_review(&env, &mut host, &mut out, "dakai", false, Some(&names)).unwrap());
+    assert!(
+        !setup::migrate_review(&env, &mut host, &mut out, "dakai", false, Some(&names)).unwrap()
+    );
     let out = String::from_utf8(out).unwrap();
     assert!(out.contains("boards: dakai: not migrated: not names of host box on dakai: nope; until then dakai stays local-only on this host"), "{out}");
-    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
+    assert!(
+        !ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"),
+        "nothing applied"
+    );
     // also where the board has no names at all
-    host.daemon.insert("host.migrate_preview", Ok(json!({"rows": []})));
+    host.daemon
+        .insert("host.migrate_preview", Ok(json!({"rows": []})));
     let mut out = Vec::new();
-    assert!(!setup::migrate_review(&env, &mut host, &mut out, "dakai", false, Some(&names)).unwrap());
-    assert!(String::from_utf8(out).unwrap().contains("not names of host box on dakai: desk, nope"));
-    assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"), "nothing applied");
+    assert!(
+        !setup::migrate_review(&env, &mut host, &mut out, "dakai", false, Some(&names)).unwrap()
+    );
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("not names of host box on dakai: desk, nope")
+    );
+    assert!(
+        !ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"),
+        "nothing applied"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1196,16 +1715,29 @@ fn the_review_takes_names_none_or_declines() {
     let mut out = Vec::new();
     assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, None).unwrap());
     let out = String::from_utf8(out).unwrap();
-    assert!(out.contains("boards: dakai: not names of this host: nope\n"), "{out}");
-    assert!(out.contains("boards: dakai: not migrated (declined)"), "{out}");
-    assert_eq!(host.prompts[2], "boards: dakai: publish lane.v0, desk; the other 0 names move to this host's local board only. Apply? [y/N] ");
+    assert!(
+        out.contains("boards: dakai: not names of this host: nope\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("boards: dakai: not migrated (declined)"),
+        "{out}"
+    );
+    assert_eq!(
+        host.prompts[2],
+        "boards: dakai: publish lane.v0, desk; the other 0 names move to this host's local board only. Apply? [y/N] "
+    );
     assert!(!ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"));
 
     // none: the host switches with nothing published
     host.answers = ["none", "yes"].map(String::from).into();
     let mut out = Vec::new();
     assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, None).unwrap());
-    assert!(String::from_utf8(out).unwrap().contains("switched to v2; published: nothing; on this host's local board only: 2 names"));
+    assert!(
+        String::from_utf8(out).unwrap().contains(
+            "switched to v2; published: nothing; on this host's local board only: 2 names"
+        )
+    );
     assert_eq!(ops(&host).last().unwrap().2, json!({"publish": []}));
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1244,16 +1776,24 @@ fn a_migrated_host_is_not_reviewed_and_an_empty_one_switches_with_nothing_publis
     let mut out = Vec::new();
     assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", true, None).unwrap());
     let text = String::from_utf8(out).unwrap();
-    assert_eq!(text, "boards: dakai: host box (account krisz) is on v2; publish names with: conde publish <name> --board dakai\n");
+    assert_eq!(
+        text,
+        "boards: dakai: host box (account krisz) is on v2; publish names with: conde publish <name> --board dakai\n"
+    );
     assert_eq!(ops(&host).len(), 1);
 
     host.daemon.insert("board.info", Ok(board_info(false)));
-    host.daemon.insert("host.migrate_preview", Ok(json!({"rows": []})));
-    host.daemon.insert("host.migrate_v2", Ok(json!({"bindings": []})));
+    host.daemon
+        .insert("host.migrate_preview", Ok(json!({"rows": []})));
+    host.daemon
+        .insert("host.migrate_v2", Ok(json!({"bindings": []})));
     let mut out = Vec::new();
     assert!(setup::migrate_review(&env, &mut host, &mut out, "dakai", false, None).unwrap());
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("no names of host box are bound there; switching it to v2 publishes nothing"), "{text}");
+    assert!(
+        text.contains("no names of host box are bound there; switching it to v2 publishes nothing"),
+        "{text}"
+    );
     assert!(host.prompts.is_empty(), "nothing to decide, nobody asked");
     assert_eq!(ops(&host).last().unwrap().0, "host.migrate_v2");
 
@@ -1274,12 +1814,21 @@ fn check_reports_the_boards() {
     std::fs::write(&cred, "{}").unwrap();
     enrolled(&env);
     let mut host = Fake::new(&env, &[]);
-    let opts = Options { boards: true, ..Options::default() };
+    let opts = Options {
+        boards: true,
+        ..Options::default()
+    };
     let (ok, out) = verify(&env, &opts, &mut host);
     assert!(!ok, "{out}");
     assert!(out.contains("ISSUE   boards: the v1 credential ~/.config/conde/credentials is not moved to boards/ yet; run: conde setup\n"), "{out}");
-    assert!(out.contains("ok      boards: dakai: https://conde.test as host box (account krisz)\n"), "{out}");
-    assert!(out.contains("ok      boards: default board for names and channels: local\n"), "{out}");
+    assert!(
+        out.contains("ok      boards: dakai: https://conde.test as host box (account krisz)\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok      boards: default board for names and channels: local\n"),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1290,24 +1839,36 @@ fn check_reports_the_boards() {
 fn a_running_bridge_of_another_build_is_reported_and_restarted() {
     for os in [Os::Linux, Os::MacOs, Os::Windows] {
         let root = temp_root();
-        let env = if os == Os::Windows { windows_env(&root) } else { env(&root, os) };
+        let env = if os == Os::Windows {
+            windows_env(&root)
+        } else {
+            env(&root, os)
+        };
         let opts = Options::select(false, false, true, false);
         let mut host = Fake::new(&env, &["systemctl"]);
         run(&env, &opts, &mut host);
         host.take_calls();
         host.alive = true;
         host.launchd_loaded = true;
-        host.daemon.insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
+        host.daemon
+            .insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
         let restarted = |host: &mut Fake| {
             let calls = host.take_calls();
             match os {
                 Os::Linux => calls.contains(&"systemctl --user restart conde.service".to_string()),
-                Os::MacOs => calls.contains(&"launchctl kickstart -k gui/501/space.nativeai.conde".to_string()),
-                Os::Windows => calls.ends_with(&["schtasks /End /TN conde".to_string(), "schtasks /Run /TN conde".to_string()]),
+                Os::MacOs => calls
+                    .contains(&"launchctl kickstart -k gui/501/space.nativeai.conde".to_string()),
+                Os::Windows => calls.ends_with(&[
+                    "schtasks /End /TN conde".to_string(),
+                    "schtasks /Run /TN conde".to_string(),
+                ]),
             }
         };
 
-        host.daemon.insert("doctor", Ok(json!({"checks": [], "issues": 0, "build": "0.1.0 (0000000 2026-01-01)"})));
+        host.daemon.insert(
+            "doctor",
+            Ok(json!({"checks": [], "issues": 0, "build": "0.1.0 (0000000 2026-01-01)"})),
+        );
         let (ok, out) = verify(&env, &opts, &mut host);
         assert!(!ok, "{out}");
         assert!(out.contains(&format!(
@@ -1323,28 +1884,58 @@ fn a_running_bridge_of_another_build_is_reported_and_restarted() {
         assert!(restarted(&mut host), "{os:?}");
 
         // too old to report a build: the same
-        host.daemon.insert("doctor", Ok(json!({"checks": [], "issues": 0})));
+        host.daemon
+            .insert("doctor", Ok(json!({"checks": [], "issues": 0})));
         let (ok, out) = verify(&env, &opts, &mut host);
-        assert!(!ok && out.contains("ISSUE   service: the bridge does not report its build (older than "), "{out}");
+        assert!(
+            !ok && out
+                .contains("ISSUE   service: the bridge does not report its build (older than "),
+            "{out}"
+        );
         let (_, out) = run(&env, &opts, &mut host);
-        assert!(out.contains("service: the running bridge does not report its build"), "{out}");
+        assert!(
+            out.contains("service: the running bridge does not report its build"),
+            "{out}"
+        );
         assert!(restarted(&mut host), "{os:?}");
 
         // this build: reported as fine, not restarted
-        host.daemon.insert("doctor", Ok(json!({"checks": [], "issues": 0, "build": conde::VERSION})));
+        host.daemon.insert(
+            "doctor",
+            Ok(json!({"checks": [], "issues": 0, "build": conde::VERSION})),
+        );
         let (_, out) = verify(&env, &opts, &mut host);
-        assert!(out.contains(&format!("ok      service: the bridge runs this build ({})\n", conde::VERSION)), "{out}");
+        assert!(
+            out.contains(&format!(
+                "ok      service: the bridge runs this build ({})\n",
+                conde::VERSION
+            )),
+            "{out}"
+        );
         let (_, out) = run(&env, &opts, &mut host);
         assert!(!out.contains("restarting"), "{out}");
-        assert!(!host.take_calls().iter().any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End")));
+        assert!(
+            !host
+                .take_calls()
+                .iter()
+                .any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End"))
+        );
 
         // a bridge that does not answer doctor: no claim either way
         host.daemon.remove("doctor");
         let (_, out) = verify(&env, &opts, &mut host);
-        assert!(!out.contains("the bridge runs") && !out.contains("report its build"), "{out}");
+        assert!(
+            !out.contains("the bridge runs") && !out.contains("report its build"),
+            "{out}"
+        );
         let (_, out) = run(&env, &opts, &mut host);
         assert!(!out.contains("restarting"), "{out}");
-        assert!(!host.take_calls().iter().any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End")));
+        assert!(
+            !host
+                .take_calls()
+                .iter()
+                .any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -1356,7 +1947,8 @@ fn the_linger_hint_appears_only_when_linger_is_off() {
     let root = temp_root();
     let env = env(&root, Os::Linux);
     let opts = Options::select(false, false, true, false);
-    let hint = "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"";
+    let hint =
+        "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"";
     for (on_path, linger, shown) in [
         (&["systemctl", "loginctl"][..], Some("yes"), false),
         (&["systemctl", "loginctl"][..], Some("Linger=yes"), false),
@@ -1371,7 +1963,10 @@ fn the_linger_hint_appears_only_when_linger_is_off() {
         assert_eq!(out.contains(hint), shown, "{on_path:?} {linger:?}: {out}");
         if on_path.contains(&"loginctl") {
             // the environment's uid (501), not this process's
-            assert!(host.take_calls().contains(&"loginctl show-user 501 --property=Linger --value".to_string()));
+            assert!(
+                host.take_calls()
+                    .contains(&"loginctl show-user 501 --property=Linger --value".to_string())
+            );
         }
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -1381,7 +1976,11 @@ fn the_linger_hint_appears_only_when_linger_is_off() {
 fn a_running_bridge_that_predates_boards_is_restarted() {
     for os in [Os::Linux, Os::MacOs, Os::Windows] {
         let root = temp_root();
-        let env = if os == Os::Windows { windows_env(&root) } else { env(&root, os) };
+        let env = if os == Os::Windows {
+            windows_env(&root)
+        } else {
+            env(&root, os)
+        };
         let opts = Options::select(false, false, true, false);
         let mut host = Fake::new(&env, &["systemctl"]);
         run(&env, &opts, &mut host);
@@ -1391,25 +1990,49 @@ fn a_running_bridge_that_predates_boards_is_restarted() {
         host.launchd_loaded = true;
         let (ok, out) = run(&env, &opts, &mut host);
         assert!(ok, "{out}");
-        assert!(out.contains("service: the running bridge predates boards (an older conde); restarting it"), "{out}");
+        assert!(
+            out.contains(
+                "service: the running bridge predates boards (an older conde); restarting it"
+            ),
+            "{out}"
+        );
         let calls = host.take_calls();
         let restarted = match os {
             Os::Linux => calls.contains(&"systemctl --user restart conde.service".to_string()),
-            Os::MacOs => calls.contains(&"launchctl kickstart -k gui/501/space.nativeai.conde".to_string()),
-            Os::Windows => calls.ends_with(&["schtasks /End /TN conde".to_string(), "schtasks /Run /TN conde".to_string()]),
+            Os::MacOs => {
+                calls.contains(&"launchctl kickstart -k gui/501/space.nativeai.conde".to_string())
+            }
+            Os::Windows => calls.ends_with(&[
+                "schtasks /End /TN conde".to_string(),
+                "schtasks /Run /TN conde".to_string(),
+            ]),
         };
         assert!(restarted, "{calls:?}");
         // a bridge that knows boards is left running
-        host.daemon.insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
+        host.daemon
+            .insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
         let (_, out) = run(&env, &opts, &mut host);
         assert!(!out.contains("restarting"), "{out}");
-        assert!(!host.take_calls().iter().any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End")));
+        assert!(
+            !host
+                .take_calls()
+                .iter()
+                .any(|c| c.contains("restart") || c.contains("-k") || c.contains("/End"))
+        );
         // until a board is enrolled that it has not loaded
         if os == Os::Linux {
             enrolled(&env);
             let (_, out) = run(&env, &opts, &mut host);
-            assert!(out.contains("service: the running bridge started before dakai was enrolled; restarting it"), "{out}");
-            assert!(host.take_calls().contains(&"systemctl --user restart conde.service".to_string()));
+            assert!(
+                out.contains(
+                    "service: the running bridge started before dakai was enrolled; restarting it"
+                ),
+                "{out}"
+            );
+            assert!(
+                host.take_calls()
+                    .contains(&"systemctl --user restart conde.service".to_string())
+            );
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1422,21 +2045,37 @@ fn a_running_bridge_that_predates_boards_is_restarted() {
 fn a_bounded_probe_that_hangs_is_cut_off() {
     use conde::setup::Host as _;
     let t = std::time::Instant::now();
-    let r = conde::setup::System.run_bounded("sleep", &["30"], std::time::Duration::from_millis(300));
-    let Err(e) = r else { panic!("a hanging program must not answer") };
+    let r =
+        conde::setup::System.run_bounded("sleep", &["30"], std::time::Duration::from_millis(300));
+    let Err(e) = r else {
+        panic!("a hanging program must not answer")
+    };
     assert!(e.to_string().contains("did not answer within"), "{e}");
-    assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
-    let r = conde::setup::System.run_bounded("echo", &["yes"], std::time::Duration::from_secs(5)).unwrap();
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
+    let r = conde::setup::System
+        .run_bounded("echo", &["yes"], std::time::Duration::from_secs(5))
+        .unwrap();
     assert_eq!((r.ok, r.stdout.trim()), (true, "yes"));
 
     // A program that exits but leaves a descendant holding its output: answered within the
     // limit all the same (the sleep's pid comes back as the output, and is cleaned up by it).
     let t = std::time::Instant::now();
-    let r = conde::setup::System.run_bounded("sh", &["-c", "sleep 30 & echo $!"], std::time::Duration::from_millis(300));
+    let r = conde::setup::System.run_bounded(
+        "sh",
+        &["-c", "sleep 30 & echo $!"],
+        std::time::Duration::from_millis(300),
+    );
     let elapsed = t.elapsed();
     let r = r.expect("the program itself exited at once");
     let pid = r.stdout.trim().to_string();
     let _ = std::process::Command::new("kill").arg(&pid).status();
-    assert!(elapsed < std::time::Duration::from_millis(1000), "took {elapsed:?}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1000),
+        "took {elapsed:?}"
+    );
     assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
 }

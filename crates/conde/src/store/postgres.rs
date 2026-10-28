@@ -16,24 +16,27 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use postgres::config::{Host, SslMode};
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::types::ToSql;
 use postgres::{Client, Config, Row, Statement};
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::{
-    Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary, ChannelThread, CredentialRow,
-    Delivery, DmDelivery, DmThread, DueNotification, SlackDue, UserSlack, EndpointRow, EvidenceRow, HostBridge, ImportState, ImportedAgent, McpCodeRow, McpGrantRow, McpRefreshRow, Message, Mode, NewMessage, NewNotification, NotificationRow, OpenAttempt, StaleAttempt,
-    FeedArg, FeedRange, Membership, problem_seqs_sql, thread_down_sql, thread_up_sql, PendingSignal, SearchScope, Store, StoreError, StoreResult, Tx, UserRow, Wake, Wakes,
-    WebSessionRow, address_of, feed_seqs_sql,
+    Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary,
+    ChannelThread, CredentialRow, Delivery, DmDelivery, DmThread, DueNotification, EndpointRow,
+    EvidenceRow, FeedArg, FeedRange, HostBridge, ImportState, ImportedAgent, McpCodeRow,
+    McpGrantRow, McpRefreshRow, Membership, Message, Mode, NewMessage, NewNotification,
+    NotificationRow, OpenAttempt, PendingSignal, SearchScope, SlackDue, StaleAttempt, Store,
+    StoreError, StoreResult, Tx, UserRow, UserSlack, Wake, Wakes, WebSessionRow, address_of,
+    feed_seqs_sql, problem_seqs_sql, thread_down_sql, thread_up_sql,
 };
 use crate::address::Address;
 use crate::util::sha256_hex;
@@ -61,21 +64,74 @@ impl From<r2d2::Error> for StoreError {
 /// migration must never change (its checksum is verified at startup).
 pub const MIGRATIONS: &[(i32, &str, &str)] = &[
     (1, "init", include_str!("migrations/0001_init.sql")),
-    (2, "channel_topic", include_str!("migrations/0002_channel_topic.sql")),
+    (
+        2,
+        "channel_topic",
+        include_str!("migrations/0002_channel_topic.sql"),
+    ),
     (3, "web", include_str!("migrations/0003_web.sql")),
-    (4, "notifications_by_recipient", include_str!("migrations/0004_notifications_by_recipient.sql")),
-    (5, "attempt_settled_at", include_str!("migrations/0005_attempt_settled_at.sql")),
+    (
+        4,
+        "notifications_by_recipient",
+        include_str!("migrations/0004_notifications_by_recipient.sql"),
+    ),
+    (
+        5,
+        "attempt_settled_at",
+        include_str!("migrations/0005_attempt_settled_at.sql"),
+    ),
     (6, "mailbox", include_str!("migrations/0006_mailbox.sql")),
-    (7, "route_revision", include_str!("migrations/0007_route_revision.sql")),
+    (
+        7,
+        "route_revision",
+        include_str!("migrations/0007_route_revision.sql"),
+    ),
     (8, "mcp", include_str!("migrations/0008_mcp.sql")),
-    (9, "mcp_expiry", include_str!("migrations/0009_mcp_expiry.sql")),
-    (10, "mcp_grant_code", include_str!("migrations/0010_mcp_grant_code.sql")),
-    (11, "messages_by_day", include_str!("migrations/0011_messages_by_day.sql")),
-    (12, "messages_dm_by_sender", include_str!("migrations/0012_messages_dm_by_sender.sql")),
-    (13, "messages_by_reply_to", include_str!("migrations/0013_messages_by_reply_to.sql")),
-    (14, "agents_retired_at", include_str!("migrations/0014_agents_retired_at.sql")),
-    (15, "attempt_not_before", include_str!("migrations/0015_attempt_not_before.sql")),
-    (16, "human_paging", include_str!("migrations/0016_human_paging.sql")),
+    (
+        9,
+        "mcp_expiry",
+        include_str!("migrations/0009_mcp_expiry.sql"),
+    ),
+    (
+        10,
+        "mcp_grant_code",
+        include_str!("migrations/0010_mcp_grant_code.sql"),
+    ),
+    (
+        11,
+        "messages_by_day",
+        include_str!("migrations/0011_messages_by_day.sql"),
+    ),
+    (
+        12,
+        "messages_dm_by_sender",
+        include_str!("migrations/0012_messages_dm_by_sender.sql"),
+    ),
+    (
+        13,
+        "messages_by_reply_to",
+        include_str!("migrations/0013_messages_by_reply_to.sql"),
+    ),
+    (
+        14,
+        "agents_retired_at",
+        include_str!("migrations/0014_agents_retired_at.sql"),
+    ),
+    (
+        15,
+        "attempt_not_before",
+        include_str!("migrations/0015_attempt_not_before.sql"),
+    ),
+    (
+        16,
+        "human_paging",
+        include_str!("migrations/0016_human_paging.sql"),
+    ),
+    (
+        17,
+        "identity_issuer",
+        include_str!("migrations/0017_identity_issuer.sql"),
+    ),
 ];
 
 /// Session lock held while migrating.
@@ -94,8 +150,10 @@ const POOL_SIZE: u32 = 8;
 /// Session settings unless DATABASE_URL sets them: a client that dies inside
 /// a write transaction must not hold the board's writer lock until TCP
 /// keepalive notices; no op idles inside a transaction.
-const SESSION_DEFAULTS: &[(&str, &str)] =
-    &[("idle_in_transaction_session_timeout", "15s"), ("statement_timeout", "60s")];
+const SESSION_DEFAULTS: &[(&str, &str)] = &[
+    ("idle_in_transaction_session_timeout", "15s"),
+    ("statement_timeout", "60s"),
+];
 
 // --- configuration ----------------------------------------------------------
 
@@ -136,7 +194,9 @@ const PASSTHROUGH: &[&str] = &[
 pub fn parse_url(url: &str) -> StoreResult<PgUrl> {
     let secrets = password_forms(url);
     parse_url_unmasked(url).map_err(|e| {
-        let text = secrets.iter().fold(e.0, |t, p| t.replace(p.as_str(), "***"));
+        let text = secrets
+            .iter()
+            .fold(e.0, |t, p| t.replace(p.as_str(), "***"));
         StoreError(text)
     })
 }
@@ -175,26 +235,37 @@ fn parse_url_unmasked(url: &str) -> StoreResult<PgUrl> {
                     }
                 });
             }
-            "sslrootcert" => root_cert = (value != "system" && !value.is_empty()).then(|| PathBuf::from(value)),
+            "sslrootcert" => {
+                root_cert = (value != "system" && !value.is_empty()).then(|| PathBuf::from(value))
+            }
             "sslcert" | "sslkey" | "sslpassword" => {
                 return Err(StoreError(format!(
                     "DATABASE_URL: {key} (client certificates) is not supported; remove it"
                 )));
             }
             k if PASSTHROUGH.contains(&k) => kept.push(raw),
-            other => return Err(StoreError(format!("DATABASE_URL: unknown parameter '{other}'"))),
+            other => {
+                return Err(StoreError(format!(
+                    "DATABASE_URL: unknown parameter '{other}'"
+                )));
+            }
         }
     }
     if let Some(mode) = ssl_mode {
         kept.push(format!("sslmode={mode}"));
     }
     let rebuilt = if is_url {
-        if kept.is_empty() { base } else { format!("{base}?{}", kept.join("&")) }
+        if kept.is_empty() {
+            base
+        } else {
+            format!("{base}?{}", kept.join("&"))
+        }
     } else {
         kept.join(" ")
     };
-    let mut config: Config =
-        rebuilt.parse().map_err(|e| StoreError(format!("DATABASE_URL: invalid connection string: {e}")))?;
+    let mut config: Config = rebuilt
+        .parse()
+        .map_err(|e| StoreError(format!("DATABASE_URL: invalid connection string: {e}")))?;
     if config.get_ssl_mode() != SslMode::Require
         && let Some(remote) = remote_destination(&config)
     {
@@ -212,7 +283,9 @@ fn parse_url_unmasked(url: &str) -> StoreResult<PgUrl> {
     let mut options = config.get_options().unwrap_or_default().to_string();
     for (name, value) in SESSION_DEFAULTS {
         if !options.contains(name) {
-            options = format!("{options} -c {name}={value}").trim_start().to_string();
+            options = format!("{options} -c {name}={value}")
+                .trim_start()
+                .to_string();
         }
     }
     config.options(&options);
@@ -223,20 +296,37 @@ fn parse_url_unmasked(url: &str) -> StoreResult<PgUrl> {
 /// every hostaddr (the postgres crate dials a hostaddr in preference to its host).
 fn remote_destination(config: &Config) -> Option<String> {
     let names = config.get_hosts().iter().filter_map(|h| match h {
-        Host::Tcp(name) if !matches!(name.as_str(), "localhost" | "127.0.0.1" | "::1") => Some(name.clone()),
+        Host::Tcp(name) if !matches!(name.as_str(), "localhost" | "127.0.0.1" | "::1") => {
+            Some(name.clone())
+        }
         _ => None,
     });
-    let addrs = config.get_hostaddrs().iter().filter(|a| !a.is_loopback()).map(ToString::to_string);
+    let addrs = config
+        .get_hostaddrs()
+        .iter()
+        .filter(|a| !a.is_loopback())
+        .map(ToString::to_string);
     names.chain(addrs).next()
 }
 
 /// The password as written and as decoded, for masking (URL userinfo or `password=`).
 fn password_forms(url: &str) -> Vec<String> {
-    let raw = if let Some(rest) = url.strip_prefix("postgres://").or_else(|| url.strip_prefix("postgresql://")) {
+    let raw = if let Some(rest) = url
+        .strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))
+    {
         let authority = rest.split(['/', '?']).next().unwrap_or("");
-        authority.rsplit_once('@').and_then(|(userinfo, _)| userinfo.split_once(':')).map(|(_, p)| p.to_string())
+        authority
+            .rsplit_once('@')
+            .and_then(|(userinfo, _)| userinfo.split_once(':'))
+            .map(|(_, p)| p.to_string())
     } else {
-        keyword_pairs(url).ok().and_then(|pairs| pairs.into_iter().find(|(k, _, _)| k == "password").map(|(_, v, _)| v))
+        keyword_pairs(url).ok().and_then(|pairs| {
+            pairs
+                .into_iter()
+                .find(|(k, _, _)| k == "password")
+                .map(|(_, v, _)| v)
+        })
     };
     let mut forms: Vec<String> = raw.into_iter().filter(|p| !p.is_empty()).collect();
     if let Some(p) = forms.first().map(|p| percent_decode(p))
@@ -273,21 +363,29 @@ fn keyword_pairs(s: &str) -> StoreResult<Vec<(String, String, String)>> {
     let mut chars = s.char_indices().peekable();
     loop {
         while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
-        let Some(&(start, _)) = chars.peek() else { return Ok(out) };
+        let Some(&(start, _)) = chars.peek() else {
+            return Ok(out);
+        };
         let mut key = String::new();
         while let Some((_, c)) = chars.next_if(|(_, c)| *c != '=' && !c.is_whitespace()) {
             key.push(c);
         }
         while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
         if chars.next_if(|(_, c)| *c == '=').is_none() {
-            return Err(StoreError(format!("DATABASE_URL: expected '=' after '{key}'")));
+            return Err(StoreError(format!(
+                "DATABASE_URL: expected '=' after '{key}'"
+            )));
         }
         while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
         let mut value = String::new();
         let quoted = chars.next_if(|(_, c)| *c == '\'').is_some();
         loop {
             match chars.next() {
-                None if quoted => return Err(StoreError(format!("DATABASE_URL: unterminated quote in '{key}'"))),
+                None if quoted => {
+                    return Err(StoreError(format!(
+                        "DATABASE_URL: unterminated quote in '{key}'"
+                    )));
+                }
                 None => break,
                 Some((_, '\\')) => value.extend(chars.next().map(|(_, c)| c)),
                 Some((_, '\'')) if quoted => break,
@@ -305,14 +403,26 @@ fn tls(config: &Config, root_cert: Option<&Path>) -> StoreResult<MakeRustlsConne
     let mut roots = rustls::RootCertStore::empty();
     match root_cert {
         Some(path) => {
-            let pem = std::fs::read(path)
-                .map_err(|e| StoreError(format!("sslrootcert {}: cannot read it: {e}", path.display())))?;
+            let pem = std::fs::read(path).map_err(|e| {
+                StoreError(format!(
+                    "sslrootcert {}: cannot read it: {e}",
+                    path.display()
+                ))
+            })?;
             let certs = CertificateDer::pem_slice_iter(&pem)
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| StoreError(format!("sslrootcert {}: not a PEM bundle: {e}", path.display())))?;
+                .map_err(|e| {
+                    StoreError(format!(
+                        "sslrootcert {}: not a PEM bundle: {e}",
+                        path.display()
+                    ))
+                })?;
             roots.add_parsable_certificates(certs);
             if roots.is_empty() {
-                return Err(StoreError(format!("sslrootcert {}: no certificates in it", path.display())));
+                return Err(StoreError(format!(
+                    "sslrootcert {}: no certificates in it",
+                    path.display()
+                )));
             }
         }
         None => {
@@ -320,13 +430,17 @@ fn tls(config: &Config, root_cert: Option<&Path>) -> StoreResult<MakeRustlsConne
         }
     }
     if roots.is_empty() && config.get_ssl_mode() == SslMode::Require {
-        return Err(StoreError("no CA certificates found in the system bundle (install ca-certificates)".into()));
+        return Err(StoreError(
+            "no CA certificates found in the system bundle (install ca-certificates)".into(),
+        ));
     }
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| StoreError(format!("tls: {e}")))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| StoreError(format!("tls: {e}")))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     Ok(MakeRustlsConnect::new(config))
 }
 
@@ -364,7 +478,11 @@ impl r2d2::ManageConnection for Manager {
     type Error = StoreError;
 
     fn connect(&self) -> StoreResult<Conn> {
-        Ok(Conn { client: connect(&self.config, &self.tls)?, statements: HashMap::new(), broken: false })
+        Ok(Conn {
+            client: connect(&self.config, &self.tls)?,
+            statements: HashMap::new(),
+            broken: false,
+        })
     }
 
     fn is_valid(&self, conn: &mut Conn) -> StoreResult<()> {
@@ -394,9 +512,18 @@ pub struct PgOpen {
 }
 
 impl PgOpen {
-    pub const SERVER: PgOpen = PgOpen { migrate: true, listen: true };
-    pub const COMMAND: PgOpen = PgOpen { migrate: true, listen: false };
-    pub const INSPECT: PgOpen = PgOpen { migrate: false, listen: false };
+    pub const SERVER: PgOpen = PgOpen {
+        migrate: true,
+        listen: true,
+    };
+    pub const COMMAND: PgOpen = PgOpen {
+        migrate: true,
+        listen: false,
+    };
+    pub const INSPECT: PgOpen = PgOpen {
+        migrate: false,
+        listen: false,
+    };
 }
 
 impl PgStore {
@@ -422,7 +549,10 @@ impl PgStore {
             .connection_timeout(Duration::from_secs(15))
             .idle_timeout(Some(Duration::from_secs(300)))
             .max_lifetime(Some(Duration::from_secs(1800)))
-            .build(Manager { config: config.clone(), tls: tls.clone() })?;
+            .build(Manager {
+                config: config.clone(),
+                tls: tls.clone(),
+            })?;
         let signal = Arc::new(PendingSignal::default());
         let stop = Arc::new(AtomicBool::new(false));
         if how.listen {
@@ -434,16 +564,25 @@ impl PgStore {
                 .map_err(|e| StoreError(format!("starting the listener: {e}")))?;
             // A store handed out before LISTEN would miss the first commits' wake-ups.
             if ready.recv_timeout(LISTEN_READY_WAIT).is_err() {
-                tracing::warn!("pending listener not ready after {LISTEN_READY_WAIT:?}; wake-ups start when it connects");
+                tracing::warn!(
+                    "pending listener not ready after {LISTEN_READY_WAIT:?}; wake-ups start when it connects"
+                );
             }
         }
-        Ok(PgStore { pool: Some(pool), signal, stop })
+        Ok(PgStore {
+            pool: Some(pool),
+            signal,
+            stop,
+        })
     }
 
     /// Whether the board's tables exist (a dry run against a fresh database sees none).
     pub fn has_schema(&self) -> StoreResult<bool> {
         let mut conn = self.pool().get()?;
-        Ok(conn.client.query_one("SELECT to_regclass('messages') IS NOT NULL", &[])?.get(0))
+        Ok(conn
+            .client
+            .query_one("SELECT to_regclass('messages') IS NOT NULL", &[])?
+            .get(0))
     }
 }
 
@@ -459,7 +598,9 @@ impl Drop for PgStore {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(pool) = self.pool.take() {
-            let closed = std::thread::Builder::new().name("conde-pg-close".into()).spawn(move || drop(pool));
+            let closed = std::thread::Builder::new()
+                .name("conde-pg-close".into())
+                .spawn(move || drop(pool));
             if let Err(e) = closed {
                 tracing::warn!("no thread to close the pool on ({e}); it was closed in place");
             }
@@ -495,7 +636,9 @@ impl Store for PgStore {
     }
 
     fn ping(&self) -> bool {
-        self.pool().get().is_ok_and(|mut c| c.client.simple_query("").is_ok())
+        self.pool()
+            .get()
+            .is_ok_and(|mut c| c.client.simple_query("").is_ok())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -532,7 +675,11 @@ fn apply_migrations(client: &mut Client) -> StoreResult<Vec<i32>> {
         .collect();
     let known = MIGRATIONS.iter().map(|m| m.0).max().unwrap_or(0);
     if let Some(newer) = done.keys().find(|v| **v > known) {
-        tracing::warn!(version = newer, known, "database schema is newer than this binary; continuing");
+        tracing::warn!(
+            version = newer,
+            known,
+            "database schema is newer than this binary; continuing"
+        );
     }
     let mut applied = Vec::new();
     for (version, name, sql) in MIGRATIONS {
@@ -540,7 +687,9 @@ fn apply_migrations(client: &mut Client) -> StoreResult<Vec<i32>> {
         match done.get(version) {
             Some(stored) if *stored == checksum => continue,
             Some(_) => {
-                return Err(StoreError(format!("migration {version} ({name}) changed after it was applied")));
+                return Err(StoreError(format!(
+                    "migration {version} ({name}) changed after it was applied"
+                )));
             }
             None => {}
         }
@@ -605,7 +754,10 @@ fn relay(client: &mut Client, signal: &PendingSignal, stop: &AtomicBool) -> Opti
         if stop.load(Ordering::Relaxed) {
             return None;
         }
-        let next = client.notifications().timeout_iter(Duration::from_millis(250)).next();
+        let next = client
+            .notifications()
+            .timeout_iter(Duration::from_millis(250))
+            .next();
         match next {
             Ok(Some(n)) => {
                 let payload = n.payload();
@@ -654,7 +806,8 @@ impl Drop for PgTx {
 
 type Params<'a> = &'a [&'a (dyn ToSql + Sync)];
 
-const AGENT_SELECT: &str = "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
+const AGENT_SELECT: &str =
+    "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
     a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL
     FROM agents a JOIN users u ON u.user_id = a.owner_id";
 
@@ -680,7 +833,8 @@ const MSG_SELECT: &str = "SELECT m.commit_seq, m.message_id, m.sender_agent_id, 
     LEFT JOIN agents r ON r.agent_id = m.recipient_agent_id LEFT JOIN users ru ON ru.user_id = r.owner_id
     LEFT JOIN channels c ON c.channel_id = m.channel_id";
 
-const MCP_GRANT_SELECT: &str = "SELECT grant_id, user_id, client_id, client_host, client_name, resource, created_at,
+const MCP_GRANT_SELECT: &str =
+    "SELECT grant_id, user_id, client_id, client_host, client_name, resource, created_at,
     last_used_at, expires_at, revoked_at FROM mcp_grants";
 
 fn mcp_grant_row(r: &Row) -> McpGrantRow {
@@ -729,11 +883,17 @@ fn user_slack_row(r: &Row) -> UserSlack {
     }
 }
 
-const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled, i.user_id IS NOT NULL
-    FROM users u LEFT JOIN identities i ON i.user_id = u.user_id";
+const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled,
+    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email FROM users u";
 
 fn user_row(r: &Row) -> UserRow {
-    UserRow { user_id: r.get(0), name: r.get(1), disabled: r.get(2), bound: r.get(3) }
+    UserRow {
+        user_id: r.get(0),
+        name: r.get(1),
+        disabled: r.get(2),
+        bound: r.get(3),
+        email: r.get(4),
+    }
 }
 
 impl PgTx {
@@ -780,10 +940,19 @@ impl PgTx {
     }
 
     fn msgs(&self, where_clause: &str, params: Params) -> StoreResult<Vec<Message>> {
-        Ok(self.query(&format!("{MSG_SELECT} WHERE {where_clause}"), params)?.iter().map(msg_row).collect())
+        Ok(self
+            .query(&format!("{MSG_SELECT} WHERE {where_clause}"), params)?
+            .iter()
+            .map(msg_row)
+            .collect())
     }
 
-    fn set<T: Eq + Hash>(&self, sql: &str, params: Params, f: impl FnMut(&Row) -> T) -> StoreResult<HashSet<T>> {
+    fn set<T: Eq + Hash>(
+        &self,
+        sql: &str,
+        params: Params,
+        f: impl FnMut(&Row) -> T,
+    ) -> StoreResult<HashSet<T>> {
         Ok(self.query(sql, params)?.iter().map(f).collect())
     }
 
@@ -792,14 +961,20 @@ impl PgTx {
         A: for<'r> postgres::types::FromSql<'r>,
         B: for<'r> postgres::types::FromSql<'r>,
     {
-        Ok(self.query(sql, params)?.iter().map(|r| (r.get(0), r.get(1))).collect())
+        Ok(self
+            .query(sql, params)?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect())
     }
 }
 
 impl Tx for PgTx {
     fn commit(self: Box<Self>) -> StoreResult<()> {
         if self.failed.get() {
-            return Err(StoreError("transaction aborted by an earlier failed statement".into()));
+            return Err(StoreError(
+                "transaction aborted by an earlier failed statement".into(),
+            ));
         }
         let wakes = std::mem::take(&mut *self.wakes.borrow_mut());
         if !wakes.is_empty() {
@@ -807,7 +982,10 @@ impl Tx for PgTx {
             let hosts: Vec<String> = wakes.hosts.into_iter().collect();
             let fenced: Vec<String> = wakes.fenced.into_iter().collect();
             let revoked: Vec<String> = wakes.revoked.into_iter().collect();
-            let board: Vec<String> = (wakes.board != 0).then(|| wakes.board.to_string()).into_iter().collect();
+            let board: Vec<String> = (wakes.board != 0)
+                .then(|| wakes.board.to_string())
+                .into_iter()
+                .collect();
             self.query(
                 "SELECT pg_notify('conde_pending', h) FROM (
                     SELECT a.host_id AS h FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
@@ -827,17 +1005,29 @@ impl Tx for PgTx {
     // principals and credentials
 
     fn ensure_user(&self, name: &str) -> StoreResult<i64> {
-        self.execute("INSERT INTO users(name) VALUES ($1) ON CONFLICT DO NOTHING", &[&name])?;
-        Ok(self.query_one("SELECT user_id FROM users WHERE name = $1", &[&name])?.get(0))
+        self.execute(
+            "INSERT INTO users(name) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&name],
+        )?;
+        Ok(self
+            .query_one("SELECT user_id FROM users WHERE name = $1", &[&name])?
+            .get(0))
     }
 
     fn ensure_host(&self, host: &str, user_id: i64) -> StoreResult<i64> {
-        self.execute("INSERT INTO hosts(host_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", &[&host, &user_id])?;
-        Ok(self.query_one("SELECT user_id FROM hosts WHERE host_id = $1", &[&host])?.get(0))
+        self.execute(
+            "INSERT INTO hosts(host_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            &[&host, &user_id],
+        )?;
+        Ok(self
+            .query_one("SELECT user_id FROM hosts WHERE host_id = $1", &[&host])?
+            .get(0))
     }
 
     fn user_id(&self, name: &str) -> StoreResult<Option<i64>> {
-        Ok(self.query_opt("SELECT user_id FROM users WHERE name = $1", &[&name])?.map(|r| r.get(0)))
+        Ok(self
+            .query_opt("SELECT user_id FROM users WHERE name = $1", &[&name])?
+            .map(|r| r.get(0)))
     }
 
     fn host_owner(&self, host: &str) -> StoreResult<Option<(i64, String)>> {
@@ -913,12 +1103,18 @@ impl Tx for PgTx {
 
     fn host_mailbox_only(&self, host: &str) -> StoreResult<bool> {
         Ok(self
-            .query_opt("SELECT mailbox_only FROM hosts WHERE host_id = $1", &[&host])?
+            .query_opt(
+                "SELECT mailbox_only FROM hosts WHERE host_id = $1",
+                &[&host],
+            )?
             .is_some_and(|r| r.get::<_, bool>(0)))
     }
 
     fn set_host_mailbox_only(&self, host: &str) -> StoreResult<()> {
-        self.execute("UPDATE hosts SET mailbox_only = true WHERE host_id = $1", &[&host])?;
+        self.execute(
+            "UPDATE hosts SET mailbox_only = true WHERE host_id = $1",
+            &[&host],
+        )?;
         Ok(())
     }
 
@@ -937,7 +1133,12 @@ impl Tx for PgTx {
     }
 
     fn host_last_seen(&self, host: &str) -> StoreResult<Option<String>> {
-        Ok(self.query_one("SELECT MAX(updated_at) FROM bridge_instances WHERE host_id = $1", &[&host])?.get(0))
+        Ok(self
+            .query_one(
+                "SELECT MAX(updated_at) FROM bridge_instances WHERE host_id = $1",
+                &[&host],
+            )?
+            .get(0))
     }
 
     fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>> {
@@ -950,62 +1151,118 @@ impl Tx for PgTx {
             .map(|r| (r.get(0), r.get(1))))
     }
 
-    // users, Entra identities and browser sign-in
+    // users, sign-in identities and browser sign-in
 
-    fn user_by_identity(&self, tid: &str, oid: &str) -> StoreResult<Option<UserRow>> {
-        Ok(self.query_opt(&format!("{USER_SELECT} WHERE i.tid = $1 AND i.oid = $2"), &[&tid, &oid])?.map(|r| user_row(&r)))
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> StoreResult<Option<UserRow>> {
+        let sql = format!(
+            "{USER_SELECT} WHERE u.user_id = (SELECT user_id FROM identities WHERE issuer = $1 AND subject = $2)"
+        );
+        Ok(self
+            .query_opt(&sql, &[&issuer, &subject])?
+            .map(|r| user_row(&r)))
     }
 
     fn user_by_name(&self, name: &str) -> StoreResult<Option<UserRow>> {
-        Ok(self.query_opt(&format!("{USER_SELECT} WHERE u.name = $1"), &[&name])?.map(|r| user_row(&r)))
+        Ok(self
+            .query_opt(&format!("{USER_SELECT} WHERE u.name = $1"), &[&name])?
+            .map(|r| user_row(&r)))
     }
 
     fn user_by_id(&self, user_id: i64) -> StoreResult<Option<UserRow>> {
-        Ok(self.query_opt(&format!("{USER_SELECT} WHERE u.user_id = $1"), &[&user_id])?.map(|r| user_row(&r)))
+        Ok(self
+            .query_opt(&format!("{USER_SELECT} WHERE u.user_id = $1"), &[&user_id])?
+            .map(|r| user_row(&r)))
+    }
+
+    fn users_by_email(&self, email: &str) -> StoreResult<Vec<UserRow>> {
+        let sql = format!(
+            "{USER_SELECT} WHERE lower(u.email) = lower($1 COLLATE \"C\") ORDER BY u.user_id"
+        );
+        Ok(self.query(&sql, &[&email])?.iter().map(user_row).collect())
+    }
+
+    fn users(&self) -> StoreResult<Vec<UserRow>> {
+        Ok(self
+            .query(&format!("{USER_SELECT} ORDER BY u.name"), &[])?
+            .iter()
+            .map(user_row)
+            .collect())
+    }
+
+    fn identity_issuers(&self, user_id: i64) -> StoreResult<Vec<String>> {
+        Ok(self
+            .query(
+                "SELECT issuer FROM identities WHERE user_id = $1 ORDER BY issuer",
+                &[&user_id],
+            )?
+            .iter()
+            .map(|r| r.get(0))
+            .collect())
     }
 
     fn bind_identity(
         &self,
         user_id: i64,
-        tid: &str,
-        oid: &str,
+        issuer: &str,
+        subject: &str,
         display: Option<&str>,
         upn: Option<&str>,
     ) -> StoreResult<()> {
         self.execute(
-            "INSERT INTO identities(tid, oid, user_id, display_name, preferred_username) VALUES ($1, $2, $3, $4, $5)",
-            &[&tid, &oid, &user_id, &display, &upn],
+            "INSERT INTO identities(issuer, subject, user_id, display_name, preferred_username) VALUES ($1, $2, $3, $4, $5)",
+            &[&issuer, &subject, &user_id, &display, &upn],
         )?;
         Ok(())
     }
 
-    fn set_identity_profile(&self, user_id: i64, display: Option<&str>, upn: Option<&str>) -> StoreResult<()> {
+    fn set_identity_profile(
+        &self,
+        issuer: &str,
+        subject: &str,
+        display: Option<&str>,
+        upn: Option<&str>,
+    ) -> StoreResult<()> {
         self.execute(
-            "UPDATE identities SET display_name = $2, preferred_username = $3 WHERE user_id = $1",
-            &[&user_id, &display, &upn],
+            "UPDATE identities SET display_name = $3, preferred_username = $4 WHERE issuer = $1 AND subject = $2",
+            &[&issuer, &subject, &display, &upn],
         )?;
         Ok(())
     }
 
     fn users_slack(&self) -> StoreResult<Vec<UserSlack>> {
-        Ok(self.query(&format!("{USER_SLACK_SELECT} ORDER BY user_id"), &[])?.iter().map(user_slack_row).collect())
+        Ok(self
+            .query(&format!("{USER_SLACK_SELECT} ORDER BY user_id"), &[])?
+            .iter()
+            .map(user_slack_row)
+            .collect())
     }
 
     fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>> {
-        Ok(self.query_opt(&format!("{USER_SLACK_SELECT} WHERE user_id = $1"), &[&user_id])?.as_ref().map(user_slack_row))
+        Ok(self
+            .query_opt(
+                &format!("{USER_SLACK_SELECT} WHERE user_id = $1"),
+                &[&user_id],
+            )?
+            .as_ref()
+            .map(user_slack_row))
     }
 
     fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()> {
-        self.execute("UPDATE users SET email = $2 WHERE user_id = $1", &[&user_id, &email])?;
+        self.execute(
+            "UPDATE users SET email = $2 WHERE user_id = $1",
+            &[&user_id, &email],
+        )?;
         Ok(())
     }
 
     fn backfill_emails(&self) -> StoreResult<u64> {
         self.execute(
             "UPDATE users SET email = (SELECT MIN(i.preferred_username) FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')
              WHERE email IS NULL AND EXISTS (SELECT 1 FROM identities i
-                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%')",
+                 WHERE i.user_id = users.user_id AND i.preferred_username LIKE '%@%'
+                     AND i.issuer LIKE 'https://login.microsoftonline.com/%')",
             &[],
         )
     }
@@ -1019,22 +1276,34 @@ impl Tx for PgTx {
     }
 
     fn set_done_pages(&self, user_id: i64, on: bool) -> StoreResult<()> {
-        self.execute("UPDATE users SET done_pages = $2 WHERE user_id = $1", &[&user_id, &on])?;
+        self.execute(
+            "UPDATE users SET done_pages = $2 WHERE user_id = $1",
+            &[&user_id, &on],
+        )?;
         Ok(())
     }
 
     fn set_user_disabled(&self, user_id: i64, disabled: bool) -> StoreResult<Vec<String>> {
-        self.execute("UPDATE users SET disabled = $2 WHERE user_id = $1", &[&user_id, &disabled])?;
+        self.execute(
+            "UPDATE users SET disabled = $2 WHERE user_id = $1",
+            &[&user_id, &disabled],
+        )?;
         if disabled {
             self.execute("DELETE FROM web_sessions WHERE user_id = $1", &[&user_id])?;
         }
         let hosts: Vec<String> = self
-            .query("SELECT host_id FROM hosts WHERE user_id = $1 ORDER BY host_id", &[&user_id])?
+            .query(
+                "SELECT host_id FROM hosts WHERE user_id = $1 ORDER BY host_id",
+                &[&user_id],
+            )?
             .iter()
             .map(|r| r.get(0))
             .collect();
         if disabled {
-            self.wakes.borrow_mut().revoked.extend(hosts.iter().cloned());
+            self.wakes
+                .borrow_mut()
+                .revoked
+                .extend(hosts.iter().cloned());
         }
         Ok(hosts)
     }
@@ -1043,7 +1312,14 @@ impl Tx for PgTx {
         self.execute(
             "INSERT INTO web_sessions(id_digest, user_id, display, csrf, created_at, last_seen)
              VALUES ($1, $2, $3, $4, $5, $6)",
-            &[&id_digest, &w.user_id, &w.display, &w.csrf, &w.created_at, &w.last_seen],
+            &[
+                &id_digest,
+                &w.user_id,
+                &w.display,
+                &w.csrf,
+                &w.created_at,
+                &w.last_seen,
+            ],
         )?;
         Ok(())
     }
@@ -1066,16 +1342,28 @@ impl Tx for PgTx {
     }
 
     fn touch_web_session(&self, id_digest: &str, at: i64) -> StoreResult<()> {
-        self.execute("UPDATE web_sessions SET last_seen = $2 WHERE id_digest = $1", &[&id_digest, &at])?;
+        self.execute(
+            "UPDATE web_sessions SET last_seen = $2 WHERE id_digest = $1",
+            &[&id_digest, &at],
+        )?;
         Ok(())
     }
 
     fn delete_web_session(&self, id_digest: &str) -> StoreResult<()> {
-        self.execute("DELETE FROM web_sessions WHERE id_digest = $1", &[&id_digest])?;
+        self.execute(
+            "DELETE FROM web_sessions WHERE id_digest = $1",
+            &[&id_digest],
+        )?;
         Ok(())
     }
 
-    fn put_web_token(&self, kind: &str, digest: &str, payload: &str, created_at: i64) -> StoreResult<()> {
+    fn put_web_token(
+        &self,
+        kind: &str,
+        digest: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> StoreResult<()> {
         self.execute(
             "INSERT INTO web_tokens(kind, digest, payload, created_at) VALUES ($1, $2, $3, $4)",
             &[&kind, &digest, &payload, &created_at],
@@ -1092,7 +1380,13 @@ impl Tx for PgTx {
             .map(|r| (r.get(0), r.get(1))))
     }
 
-    fn purge_web(&self, now: i64, session_idle: i64, session_max: i64, ttls: &[(&str, i64)]) -> StoreResult<()> {
+    fn purge_web(
+        &self,
+        now: i64,
+        session_idle: i64,
+        session_max: i64,
+        ttls: &[(&str, i64)],
+    ) -> StoreResult<()> {
         self.execute(
             "DELETE FROM web_sessions WHERE last_seen < $1::BIGINT - $2::BIGINT OR created_at < $1::BIGINT - $3::BIGINT",
             &[&now, &session_idle, &session_max],
@@ -1108,7 +1402,12 @@ impl Tx for PgTx {
 
     // idempotency
 
-    fn idempotency_get(&self, actor_id: &str, op: &str, key: &str) -> StoreResult<Option<(String, String)>> {
+    fn idempotency_get(
+        &self,
+        actor_id: &str,
+        op: &str,
+        key: &str,
+    ) -> StoreResult<Option<(String, String)>> {
         Ok(self
             .query_opt(
                 "SELECT request_hash, result_json FROM idempotency WHERE actor_id = $1 AND op = $2 AND key = $3",
@@ -1129,7 +1428,14 @@ impl Tx for PgTx {
         self.execute(
             "INSERT INTO idempotency(actor_id, op, key, request_hash, result_json, created_at)
              VALUES ($1, $2, $3, $4, $5, $6)",
-            &[&actor_id, &op, &key, &request_hash, &result_json, &created_at],
+            &[
+                &actor_id,
+                &op,
+                &key,
+                &request_hash,
+                &result_json,
+                &created_at,
+            ],
         )?;
         Ok(())
     }
@@ -1137,12 +1443,18 @@ impl Tx for PgTx {
     // agents
 
     fn agent_by_id(&self, id: &str) -> StoreResult<Option<Agent>> {
-        Ok(self.query_opt(&format!("{AGENT_SELECT} WHERE a.agent_id = $1"), &[&id])?.as_ref().map(agent_row))
+        Ok(self
+            .query_opt(&format!("{AGENT_SELECT} WHERE a.agent_id = $1"), &[&id])?
+            .as_ref()
+            .map(agent_row))
     }
 
     fn agent_by_name(&self, owner_id: i64, name: &str) -> StoreResult<Option<Agent>> {
         Ok(self
-            .query_opt(&format!("{AGENT_SELECT} WHERE a.owner_id = $1 AND a.name_lower = $2"), &[&owner_id, &name])?
+            .query_opt(
+                &format!("{AGENT_SELECT} WHERE a.owner_id = $1 AND a.name_lower = $2"),
+                &[&owner_id, &name],
+            )?
             .as_ref()
             .map(agent_row))
     }
@@ -1171,7 +1483,12 @@ impl Tx for PgTx {
 
     fn bound_agents(&self) -> StoreResult<Vec<Agent>> {
         Ok(self
-            .query(&format!("{AGENT_SELECT} WHERE a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"), &[])?
+            .query(
+                &format!(
+                    "{AGENT_SELECT} WHERE a.address_kind IS NOT NULL ORDER BY u.name, a.name_lower"
+                ),
+                &[],
+            )?
             .iter()
             .map(agent_row)
             .collect())
@@ -1199,8 +1516,12 @@ impl Tx for PgTx {
     }
 
     fn set_binding(&self, agent_id: &str, address: Option<&Address>) -> StoreResult<()> {
-        let old: Option<String> =
-            self.query_opt("SELECT host_id FROM agents WHERE agent_id = $1", &[&agent_id])?.and_then(|r| r.get(0));
+        let old: Option<String> = self
+            .query_opt(
+                "SELECT host_id FROM agents WHERE agent_id = $1",
+                &[&agent_id],
+            )?
+            .and_then(|r| r.get(0));
         self.wakes.borrow_mut().hosts.extend(old.clone());
         self.execute(
             "UPDATE agents SET address_kind = $2, address_target = $3, host_id = $4,
@@ -1225,22 +1546,36 @@ impl Tx for PgTx {
     }
 
     fn route_revision(&self, host: &str) -> StoreResult<u64> {
-        let r: Option<i64> = self.query_opt("SELECT route_revision FROM hosts WHERE host_id = $1", &[&host])?.map(|r| r.get(0));
+        let r: Option<i64> = self
+            .query_opt(
+                "SELECT route_revision FROM hosts WHERE host_id = $1",
+                &[&host],
+            )?
+            .map(|r| r.get(0));
         Ok(r.unwrap_or_default() as u64)
     }
 
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()> {
-        self.execute("UPDATE agents SET pinned_address = $2 WHERE agent_id = $1", &[&agent_id, &pinned])?;
+        self.execute(
+            "UPDATE agents SET pinned_address = $2 WHERE agent_id = $1",
+            &[&agent_id, &pinned],
+        )?;
         Ok(())
     }
 
     fn set_display(&self, agent_id: &str, display: Option<&str>) -> StoreResult<()> {
-        self.execute("UPDATE agents SET display = $2 WHERE agent_id = $1", &[&agent_id, &display])?;
+        self.execute(
+            "UPDATE agents SET display = $2 WHERE agent_id = $1",
+            &[&agent_id, &display],
+        )?;
         Ok(())
     }
 
     fn rename_agent(&self, agent_id: &str, name: &str) -> StoreResult<()> {
-        self.execute("UPDATE agents SET name_lower = $2 WHERE agent_id = $1", &[&agent_id, &name])?;
+        self.execute(
+            "UPDATE agents SET name_lower = $2 WHERE agent_id = $1",
+            &[&agent_id, &name],
+        )?;
         Ok(())
     }
 
@@ -1253,7 +1588,12 @@ impl Tx for PgTx {
     }
 
     fn channel_id_by_name(&self, name: &str) -> StoreResult<Option<String>> {
-        Ok(self.query_opt("SELECT channel_id FROM channels WHERE name_lower = $1", &[&name])?.map(|r| r.get(0)))
+        Ok(self
+            .query_opt(
+                "SELECT channel_id FROM channels WHERE name_lower = $1",
+                &[&name],
+            )?
+            .map(|r| r.get(0)))
     }
 
     fn insert_channel(&self, channel: &Channel) -> StoreResult<()> {
@@ -1265,13 +1605,19 @@ impl Tx for PgTx {
     }
 
     fn set_channel_topic(&self, channel_id: &str, topic: Option<&str>) -> StoreResult<()> {
-        self.execute("UPDATE channels SET topic = $2 WHERE channel_id = $1", &[&channel_id, &topic])?;
+        self.execute(
+            "UPDATE channels SET topic = $2 WHERE channel_id = $1",
+            &[&channel_id, &topic],
+        )?;
         Ok(())
     }
 
     fn channel_member_ids(&self, channel_id: &str) -> StoreResult<Vec<String>> {
         Ok(self
-            .query("SELECT agent_id FROM memberships WHERE channel_id = $1 ORDER BY agent_id", &[&channel_id])?
+            .query(
+                "SELECT agent_id FROM memberships WHERE channel_id = $1 ORDER BY agent_id",
+                &[&channel_id],
+            )?
             .iter()
             .map(|r| r.get(0))
             .collect())
@@ -1296,11 +1642,19 @@ impl Tx for PgTx {
 
     fn channel_last_seq(&self, channel_id: &str) -> StoreResult<i64> {
         Ok(self
-            .query_one("SELECT COALESCE(MAX(commit_seq), 0) FROM messages WHERE channel_id = $1", &[&channel_id])?
+            .query_one(
+                "SELECT COALESCE(MAX(commit_seq), 0) FROM messages WHERE channel_id = $1",
+                &[&channel_id],
+            )?
             .get(0))
     }
 
-    fn insert_membership(&self, channel_id: &str, agent_id: &str, read_seq: i64) -> StoreResult<()> {
+    fn insert_membership(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        read_seq: i64,
+    ) -> StoreResult<()> {
         self.execute(
             "INSERT INTO memberships(channel_id, agent_id, read_seq) VALUES ($1, $2, $3)",
             &[&channel_id, &agent_id, &read_seq],
@@ -1309,7 +1663,10 @@ impl Tx for PgTx {
     }
 
     fn delete_membership(&self, channel_id: &str, agent_id: &str) -> StoreResult<()> {
-        self.execute("DELETE FROM memberships WHERE channel_id = $1 AND agent_id = $2", &[&channel_id, &agent_id])?;
+        self.execute(
+            "DELETE FROM memberships WHERE channel_id = $1 AND agent_id = $2",
+            &[&channel_id, &agent_id],
+        )?;
         Ok(())
     }
 
@@ -1323,7 +1680,12 @@ impl Tx for PgTx {
                 &[],
             )?
             .iter()
-            .map(|r| ChannelSummary { name: r.get(0), topic: r.get(1), members: r.get(2), messages: r.get(3) })
+            .map(|r| ChannelSummary {
+                name: r.get(0),
+                topic: r.get(1),
+                members: r.get(2),
+                messages: r.get(3),
+            })
             .collect())
     }
 
@@ -1339,7 +1701,10 @@ impl Tx for PgTx {
 
     fn channel_message_ids(&self, channel_id: &str) -> StoreResult<Vec<String>> {
         Ok(self
-            .query("SELECT message_id FROM messages WHERE channel_id = $1 ORDER BY commit_seq", &[&channel_id])?
+            .query(
+                "SELECT message_id FROM messages WHERE channel_id = $1 ORDER BY commit_seq",
+                &[&channel_id],
+            )?
             .iter()
             .map(|r| r.get(0))
             .collect())
@@ -1364,7 +1729,11 @@ impl Tx for PgTx {
         )? > 0)
     }
 
-    fn attachment_sizes(&self, message_id: &str, filename: &str) -> StoreResult<Option<(i64, i64)>> {
+    fn attachment_sizes(
+        &self,
+        message_id: &str,
+        filename: &str,
+    ) -> StoreResult<Option<(i64, i64)>> {
         Ok(self
             .query_opt(
                 "SELECT size, octet_length(bytes)::bigint FROM attachments WHERE message_id = $1 AND filename = $2
@@ -1399,7 +1768,10 @@ impl Tx for PgTx {
     }
 
     fn set_message_page(&self, message_id: &str, kind: &str) -> StoreResult<()> {
-        self.execute("UPDATE messages SET page = $2 WHERE message_id = $1", &[&message_id, &kind])?;
+        self.execute(
+            "UPDATE messages SET page = $2 WHERE message_id = $1",
+            &[&message_id, &kind],
+        )?;
         Ok(())
     }
 
@@ -1412,7 +1784,13 @@ impl Tx for PgTx {
             .get(0))
     }
 
-    fn insert_attachment(&self, id: &str, message_id: &str, filename: &str, bytes: &[u8]) -> StoreResult<()> {
+    fn insert_attachment(
+        &self,
+        id: &str,
+        message_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> StoreResult<()> {
         self.execute(
             "INSERT INTO attachments(attachment_id, message_id, filename, bytes, size) VALUES ($1, $2, $3, $4, $5)",
             &[&id, &message_id, &filename, &bytes, &(bytes.len() as i64)],
@@ -1421,7 +1799,10 @@ impl Tx for PgTx {
     }
 
     fn message_by_id(&self, id: &str) -> StoreResult<Option<Message>> {
-        Ok(self.query_opt(&format!("{MSG_SELECT} WHERE m.message_id = $1"), &[&id])?.as_ref().map(msg_row))
+        Ok(self
+            .query_opt(&format!("{MSG_SELECT} WHERE m.message_id = $1"), &[&id])?
+            .as_ref()
+            .map(msg_row))
     }
 
     fn inbox(&self, agent_id: &str, after: i64, limit: i64) -> StoreResult<Vec<Message>> {
@@ -1436,7 +1817,12 @@ impl Tx for PgTx {
         )
     }
 
-    fn unread_in_channel(&self, channel_id: &str, agent_id: &str, limit: i64) -> StoreResult<Vec<Message>> {
+    fn unread_in_channel(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>> {
         self.msgs(
             "m.channel_id = $1 AND m.commit_seq > (SELECT read_seq FROM memberships
                 WHERE channel_id = $1 AND agent_id = $2) ORDER BY m.commit_seq LIMIT $3",
@@ -1491,9 +1877,10 @@ impl Tx for PgTx {
         let (filter, arg) = match scope {
             SearchScope::All => ("$4::text IS NULL", None),
             SearchScope::Channel(name) => ("c.name_lower = $4", Some(name)),
-            SearchScope::Partner(id) => {
-                ("m.channel_id IS NULL AND (m.sender_agent_id = $4 OR m.recipient_agent_id = $4)", Some(id))
-            }
+            SearchScope::Partner(id) => (
+                "m.channel_id IS NULL AND (m.sender_agent_id = $4 OR m.recipient_agent_id = $4)",
+                Some(id),
+            ),
         };
         self.msgs(
             &format!(
@@ -1505,7 +1892,9 @@ impl Tx for PgTx {
     }
 
     fn last_seq(&self) -> StoreResult<i64> {
-        Ok(self.query_one("SELECT COALESCE(MAX(commit_seq), 0) FROM messages", &[])?.get(0))
+        Ok(self
+            .query_one("SELECT COALESCE(MAX(commit_seq), 0) FROM messages", &[])?
+            .get(0))
     }
 
     fn feed_scan(
@@ -1549,8 +1938,15 @@ impl Tx for PgTx {
 
     fn attachment(&self, id: &str) -> StoreResult<Option<Attachment>> {
         Ok(self
-            .query_opt("SELECT message_id, filename, bytes FROM attachments WHERE attachment_id = $1", &[&id])?
-            .map(|r| Attachment { message_id: r.get(0), filename: r.get(1), bytes: r.get(2) }))
+            .query_opt(
+                "SELECT message_id, filename, bytes FROM attachments WHERE attachment_id = $1",
+                &[&id],
+            )?
+            .map(|r| Attachment {
+                message_id: r.get(0),
+                filename: r.get(1),
+                bytes: r.get(2),
+            }))
     }
 
     fn reactions(&self, message_id: &str) -> StoreResult<Vec<(String, String)>> {
@@ -1562,7 +1958,13 @@ impl Tx for PgTx {
         )
     }
 
-    fn set_reaction(&self, message_id: &str, actor_id: &str, emoji: &str, present: bool) -> StoreResult<()> {
+    fn set_reaction(
+        &self,
+        message_id: &str,
+        actor_id: &str,
+        emoji: &str,
+        present: bool,
+    ) -> StoreResult<()> {
         self.execute(
             "INSERT INTO reactions(message_id, actor_id, emoji, present) VALUES ($1, $2, $3, $4)
              ON CONFLICT (message_id, actor_id, emoji) DO UPDATE SET present = excluded.present",
@@ -1587,7 +1989,12 @@ impl Tx for PgTx {
             .map(|r| r.get(0)))
     }
 
-    fn channel_read_count(&self, channel_id: &str, except_agent: &str, seq: i64) -> StoreResult<(i64, i64)> {
+    fn channel_read_count(
+        &self,
+        channel_id: &str,
+        except_agent: &str,
+        seq: i64,
+    ) -> StoreResult<(i64, i64)> {
         let r = self.query_one(
             "SELECT COUNT(*) FILTER (WHERE read_seq >= $3), COUNT(*) FROM memberships
              WHERE channel_id = $1 AND agent_id <> $2",
@@ -1608,11 +2015,19 @@ impl Tx for PgTx {
              status, next_attempt_at) VALUES ($1, $2, $3, $4, $5, 'pending', $6) ON CONFLICT DO NOTHING",
             &[&n.id, &n.message_id, &n.recipient_id, &n.kind, &n.binding_version, &n.next_attempt_at],
         )?;
-        self.wakes.borrow_mut().notifications.insert(n.id.to_string());
+        self.wakes
+            .borrow_mut()
+            .notifications
+            .insert(n.id.to_string());
         Ok(())
     }
 
-    fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>> {
+    fn due_notifications(
+        &self,
+        now: i64,
+        host: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<DueNotification>> {
         Ok(self
             .query(
                 "SELECT n.notification_id, n.message_id, n.recipient_agent_id, n.kind
@@ -1622,7 +2037,12 @@ impl Tx for PgTx {
                 &[&now, &host, &limit],
             )?
             .iter()
-            .map(|r| DueNotification { id: r.get(0), message_id: r.get(1), recipient_id: r.get(2), kind: r.get(3) })
+            .map(|r| DueNotification {
+                id: r.get(0),
+                message_id: r.get(1),
+                recipient_id: r.get(2),
+                kind: r.get(3),
+            })
             .collect())
     }
 
@@ -1695,13 +2115,19 @@ impl Tx for PgTx {
     }
 
     fn set_attempt_not_before(&self, id: &str, not_before: i64) -> StoreResult<()> {
-        self.execute("UPDATE attempts SET not_before = $2 WHERE attempt_id = $1", &[&id, &not_before])?;
+        self.execute(
+            "UPDATE attempts SET not_before = $2 WHERE attempt_id = $1",
+            &[&id, &not_before],
+        )?;
         Ok(())
     }
 
     fn attempt_not_before(&self, id: &str) -> StoreResult<Option<i64>> {
         Ok(self
-            .query_opt("SELECT not_before FROM attempts WHERE attempt_id = $1", &[&id])?
+            .query_opt(
+                "SELECT not_before FROM attempts WHERE attempt_id = $1",
+                &[&id],
+            )?
             .and_then(|r| r.get::<_, Option<i64>>(0)))
     }
 
@@ -1709,7 +2135,12 @@ impl Tx for PgTx {
         self.settle_notification(id, status, None)
     }
 
-    fn settle_read_in_channel(&self, channel_id: &str, recipient_id: &str, cursor: i64) -> StoreResult<u64> {
+    fn settle_read_in_channel(
+        &self,
+        channel_id: &str,
+        recipient_id: &str,
+        cursor: i64,
+    ) -> StoreResult<u64> {
         self.execute(
             "UPDATE notifications SET status = 'read'
              WHERE recipient_agent_id = $2 AND status IN ('pending', 'dispatching', 'notified', 'held')
@@ -1726,7 +2157,12 @@ impl Tx for PgTx {
         )? > 0)
     }
 
-    fn settle_notification(&self, id: &str, status: &str, next_attempt_at: Option<i64>) -> StoreResult<()> {
+    fn settle_notification(
+        &self,
+        id: &str,
+        status: &str,
+        next_attempt_at: Option<i64>,
+    ) -> StoreResult<()> {
         self.execute(
             "UPDATE notifications SET status = $2, next_attempt_at = COALESCE($3, next_attempt_at)
              WHERE notification_id = $1",
@@ -1808,7 +2244,10 @@ impl Tx for PgTx {
 
     fn attempt(&self, id: &str) -> StoreResult<Option<(String, String)>> {
         Ok(self
-            .query_opt("SELECT notification_id, status FROM attempts WHERE attempt_id = $1", &[&id])?
+            .query_opt(
+                "SELECT notification_id, status FROM attempts WHERE attempt_id = $1",
+                &[&id],
+            )?
             .map(|r| (r.get(0), r.get(1))))
     }
 
@@ -1980,7 +2419,10 @@ impl Tx for PgTx {
 
     fn bridge_instance(&self, instance: &str) -> StoreResult<Option<(String, String)>> {
         Ok(self
-            .query_opt("SELECT host_id, state FROM bridge_instances WHERE instance = $1", &[&instance])?
+            .query_opt(
+                "SELECT host_id, state FROM bridge_instances WHERE instance = $1",
+                &[&instance],
+            )?
             .map(|r| (r.get(0), r.get(1))))
     }
 
@@ -2012,7 +2454,10 @@ impl Tx for PgTx {
         )?;
         let mut fenced = fenced;
         fenced.sort();
-        self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
+        self.wakes
+            .borrow_mut()
+            .fenced
+            .extend(fenced.iter().cloned());
         Ok(fenced)
     }
 
@@ -2027,11 +2472,20 @@ impl Tx for PgTx {
             .map(|r| r.get(0))
             .collect();
         fenced.sort();
-        self.wakes.borrow_mut().fenced.extend(fenced.iter().cloned());
+        self.wakes
+            .borrow_mut()
+            .fenced
+            .extend(fenced.iter().cloned());
         Ok(fenced)
     }
 
-    fn replace_endpoints(&self, host: &str, instance: &str, endpoints: &[(&str, &str)], at: &str) -> StoreResult<()> {
+    fn replace_endpoints(
+        &self,
+        host: &str,
+        instance: &str,
+        endpoints: &[(&str, &str)],
+        at: &str,
+    ) -> StoreResult<()> {
         self.execute("DELETE FROM endpoints WHERE host_id = $1", &[&host])?;
         for (kind, target) in endpoints {
             self.execute(
@@ -2045,14 +2499,19 @@ impl Tx for PgTx {
     }
 
     fn count_endpoints(&self) -> StoreResult<i64> {
-        Ok(self.query_one("SELECT COUNT(*) FROM endpoints", &[])?.get(0))
+        Ok(self
+            .query_one("SELECT COUNT(*) FROM endpoints", &[])?
+            .get(0))
     }
 
     // web UI: owner-scoped reads
 
     fn owner_agents(&self, owner_id: i64) -> StoreResult<Vec<Agent>> {
         Ok(self
-            .query(&format!("{AGENT_SELECT} WHERE a.owner_id = $1 ORDER BY a.name_lower"), &[&owner_id])?
+            .query(
+                &format!("{AGENT_SELECT} WHERE a.owner_id = $1 ORDER BY a.name_lower"),
+                &[&owner_id],
+            )?
             .iter()
             .map(agent_row)
             .collect())
@@ -2183,9 +2642,20 @@ impl Tx for PgTx {
             .collect())
     }
 
-    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64, oldest_first: bool)
-    -> StoreResult<Vec<Message>> {
-        let Some((seqs, args)) = feed_seqs_sql(owner_id, ranges, after, before, limit, oldest_first, |n| format!("${n}")) else {
+    fn owner_feed(
+        &self,
+        owner_id: i64,
+        ranges: &[FeedRange],
+        after: i64,
+        before: i64,
+        limit: i64,
+        oldest_first: bool,
+    ) -> StoreResult<Vec<Message>> {
+        let Some((seqs, args)) =
+            feed_seqs_sql(owner_id, ranges, after, before, limit, oldest_first, |n| {
+                format!("${n}")
+            })
+        else {
             return Ok(Vec::new());
         };
         let args: Vec<&(dyn ToSql + Sync)> = args
@@ -2196,23 +2666,50 @@ impl Tx for PgTx {
             })
             .collect();
         let order = if oldest_first { "ASC" } else { "DESC" };
-        let sql = format!("{MSG_SELECT} WHERE m.commit_seq IN ({seqs}) ORDER BY m.commit_seq {order}");
-        Ok(self.query_planned(&sql, &args)?.iter().map(msg_row).collect())
+        let sql =
+            format!("{MSG_SELECT} WHERE m.commit_seq IN ({seqs}) ORDER BY m.commit_seq {order}");
+        Ok(self
+            .query_planned(&sql, &args)?
+            .iter()
+            .map(msg_row)
+            .collect())
     }
 
     fn owner_problem_seqs(&self, owner_id: i64, after: i64, before: i64) -> StoreResult<Vec<i64>> {
         let sql = problem_seqs_sql(|n| format!("${n}"));
-        Ok(self.query_planned(&sql, &[&owner_id, &after, &before])?.iter().map(|r| r.get(0)).collect())
+        Ok(self
+            .query_planned(&sql, &[&owner_id, &after, &before])?
+            .iter()
+            .map(|r| r.get(0))
+            .collect())
     }
 
-    fn owner_thread_up(&self, owner_id: i64, id: &str) -> StoreResult<Vec<(i64, String, Option<String>)>> {
+    fn owner_thread_up(
+        &self,
+        owner_id: i64,
+        id: &str,
+    ) -> StoreResult<Vec<(i64, String, Option<String>)>> {
         let sql = thread_up_sql(|n| format!("${n}"));
-        Ok(self.query_planned(&sql, &[&owner_id, &id])?.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+        Ok(self
+            .query_planned(&sql, &[&owner_id, &id])?
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect())
     }
 
-    fn owner_thread_down(&self, owner_id: i64, top: &str, after: i64, limit: i64) -> StoreResult<Vec<i64>> {
+    fn owner_thread_down(
+        &self,
+        owner_id: i64,
+        top: &str,
+        after: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<i64>> {
         let sql = thread_down_sql(|n| format!("${n}"));
-        Ok(self.query_planned(&sql, &[&owner_id, &top, &after, &limit])?.iter().map(|r| r.get(0)).collect())
+        Ok(self
+            .query_planned(&sql, &[&owner_id, &top, &after, &limit])?
+            .iter()
+            .map(|r| r.get(0))
+            .collect())
     }
 
     fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>> {
@@ -2220,7 +2717,10 @@ impl Tx for PgTx {
             return Ok(Vec::new());
         }
         let seqs = seqs.to_vec();
-        self.msgs("m.commit_seq = ANY($1) ORDER BY m.commit_seq DESC", &[&seqs])
+        self.msgs(
+            "m.commit_seq = ANY($1) ORDER BY m.commit_seq DESC",
+            &[&seqs],
+        )
     }
 
     fn owner_search_scan(
@@ -2237,9 +2737,10 @@ impl Tx for PgTx {
         let (filter, arg) = match scope {
             SearchScope::All => ("$4::text IS NULL", None),
             SearchScope::Channel(name) => ("c.name_lower = $4", Some(name)),
-            SearchScope::Partner(id) => {
-                ("m.channel_id IS NULL AND (m.sender_agent_id = $4 OR m.recipient_agent_id = $4)", Some(id))
-            }
+            SearchScope::Partner(id) => (
+                "m.channel_id IS NULL AND (m.sender_agent_id = $4 OR m.recipient_agent_id = $4)",
+                Some(id),
+            ),
         };
         self.msgs(
             &format!(
@@ -2290,7 +2791,13 @@ impl Tx for PgTx {
         Ok(())
     }
 
-    fn insert_mcp_token(&self, token_digest: &str, grant_id: &str, audience: &str, expires_at: i64) -> StoreResult<()> {
+    fn insert_mcp_token(
+        &self,
+        token_digest: &str,
+        grant_id: &str,
+        audience: &str,
+        expires_at: i64,
+    ) -> StoreResult<()> {
         self.execute(
             "INSERT INTO mcp_tokens(token_digest, grant_id, audience, expires_at) VALUES ($1, $2, $3, $4)",
             &[&token_digest, &grant_id, &audience, &expires_at],
@@ -2298,7 +2805,13 @@ impl Tx for PgTx {
         Ok(())
     }
 
-    fn insert_mcp_refresh(&self, digest: &str, grant_id: &str, issued_at: i64, expires_at: i64) -> StoreResult<()> {
+    fn insert_mcp_refresh(
+        &self,
+        digest: &str,
+        grant_id: &str,
+        issued_at: i64,
+        expires_at: i64,
+    ) -> StoreResult<()> {
         self.execute(
             "INSERT INTO mcp_refresh(digest, grant_id, issued_at, expires_at) VALUES ($1, $2, $3, $4)",
             &[&digest, &grant_id, &issued_at, &expires_at],
@@ -2307,12 +2820,20 @@ impl Tx for PgTx {
     }
 
     fn mcp_grant(&self, grant_id: &str) -> StoreResult<Option<McpGrantRow>> {
-        Ok(self.query_opt(&format!("{MCP_GRANT_SELECT} WHERE grant_id = $1"), &[&grant_id])?.map(|r| mcp_grant_row(&r)))
+        Ok(self
+            .query_opt(
+                &format!("{MCP_GRANT_SELECT} WHERE grant_id = $1"),
+                &[&grant_id],
+            )?
+            .map(|r| mcp_grant_row(&r)))
     }
 
     fn mcp_token(&self, token_digest: &str) -> StoreResult<Option<(String, String, i64)>> {
         Ok(self
-            .query_opt("SELECT grant_id, audience, expires_at FROM mcp_tokens WHERE token_digest = $1", &[&token_digest])?
+            .query_opt(
+                "SELECT grant_id, audience, expires_at FROM mcp_tokens WHERE token_digest = $1",
+                &[&token_digest],
+            )?
             .map(|r| (r.get(0), r.get(1), r.get(2))))
     }
 
@@ -2334,7 +2855,10 @@ impl Tx for PgTx {
     }
 
     fn touch_mcp_grant(&self, grant_id: &str, at: i64) -> StoreResult<()> {
-        self.execute("UPDATE mcp_grants SET last_used_at = $2 WHERE grant_id = $1", &[&grant_id, &at])?;
+        self.execute(
+            "UPDATE mcp_grants SET last_used_at = $2 WHERE grant_id = $1",
+            &[&grant_id, &at],
+        )?;
         Ok(())
     }
 
@@ -2367,35 +2891,55 @@ impl Tx for PgTx {
     }
 
     fn set_mcp_grant_code(&self, grant_id: &str, code_digest: &str) -> StoreResult<()> {
-        self.execute("UPDATE mcp_grants SET code_digest = $2 WHERE grant_id = $1", &[&grant_id, &code_digest])?;
+        self.execute(
+            "UPDATE mcp_grants SET code_digest = $2 WHERE grant_id = $1",
+            &[&grant_id, &code_digest],
+        )?;
         Ok(())
     }
 
     fn mcp_grant_of_code(&self, code_digest: &str) -> StoreResult<Option<String>> {
         Ok(self
-            .query_opt("SELECT grant_id FROM mcp_grants WHERE code_digest = $1", &[&code_digest])?
+            .query_opt(
+                "SELECT grant_id FROM mcp_grants WHERE code_digest = $1",
+                &[&code_digest],
+            )?
             .map(|r| r.get(0)))
     }
 
     fn mcp_grants_of(&self, user_id: i64) -> StoreResult<Vec<McpGrantRow>> {
         Ok(self
-            .query(&format!("{MCP_GRANT_SELECT} WHERE user_id = $1 ORDER BY created_at DESC, grant_id"), &[&user_id])?
+            .query(
+                &format!(
+                    "{MCP_GRANT_SELECT} WHERE user_id = $1 ORDER BY created_at DESC, grant_id"
+                ),
+                &[&user_id],
+            )?
             .iter()
             .map(mcp_grant_row)
             .collect())
     }
 
     fn purge_mcp(&self, now: i64, code_ttl: i64) -> StoreResult<()> {
-        self.execute("DELETE FROM mcp_codes WHERE created_at < $1::BIGINT - $2::BIGINT", &[&now, &code_ttl])?;
+        self.execute(
+            "DELETE FROM mcp_codes WHERE created_at < $1::BIGINT - $2::BIGINT",
+            &[&now, &code_ttl],
+        )?;
         self.execute("DELETE FROM mcp_tokens WHERE expires_at < $1", &[&now])?;
         // A consumed refresh token stays while its grant lives, so a replay is still recognised.
-        self.execute("DELETE FROM mcp_refresh WHERE consumed_at IS NULL AND expires_at < $1", &[&now])?;
+        self.execute(
+            "DELETE FROM mcp_refresh WHERE consumed_at IS NULL AND expires_at < $1",
+            &[&now],
+        )?;
         self.execute(
             "DELETE FROM mcp_refresh WHERE grant_id IN
                  (SELECT grant_id FROM mcp_grants WHERE expires_at < $1 OR revoked_at IS NOT NULL)",
             &[&now],
         )?;
-        self.execute("DELETE FROM mcp_grants WHERE expires_at < $1 OR revoked_at IS NOT NULL", &[&now])?;
+        self.execute(
+            "DELETE FROM mcp_grants WHERE expires_at < $1 OR revoked_at IS NOT NULL",
+            &[&now],
+        )?;
         Ok(())
     }
 
@@ -2438,7 +2982,12 @@ impl Tx for PgTx {
                 &[],
             )?
             .iter()
-            .map(|r| HostBridge { host: r.get(0), owner: r.get(1), heartbeat: r.get(2), last_seen: r.get(3) })
+            .map(|r| HostBridge {
+                host: r.get(0),
+                owner: r.get(1),
+                heartbeat: r.get(2),
+                last_seen: r.get(3),
+            })
             .collect())
     }
 
@@ -2557,13 +3106,27 @@ impl Tx for PgTx {
 
     /// "ok" when the schema is at the version this binary carries.
     fn integrity_check(&self) -> StoreResult<String> {
-        let at: i32 = self.query_one("SELECT COALESCE(MAX(version), 0) FROM schema_migrations", &[])?.get(0);
+        let at: i32 = self
+            .query_one(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                &[],
+            )?
+            .get(0);
         let known = MIGRATIONS.iter().map(|m| m.0).max().unwrap_or(0);
-        Ok(if at == known { "ok".into() } else { format!("schema version {at}, this binary expects {known}") })
+        Ok(if at == known {
+            "ok".into()
+        } else {
+            format!("schema version {at}, this binary expects {known}")
+        })
     }
 
     fn count_bound_agents(&self) -> StoreResult<i64> {
-        Ok(self.query_one("SELECT COUNT(*) FROM agents WHERE address_kind IS NOT NULL", &[])?.get(0))
+        Ok(self
+            .query_one(
+                "SELECT COUNT(*) FROM agents WHERE address_kind IS NOT NULL",
+                &[],
+            )?
+            .get(0))
     }
 
     fn unbound_waiting(&self, owner_id: i64) -> StoreResult<Vec<(String, i64)>> {
@@ -2592,34 +3155,59 @@ mod tests {
 
     #[test]
     fn verify_full_maps_to_verified_require() {
-        let c = parse_url("postgres://u:p@db.example.com:5432/conde?sslmode=verify-full").unwrap().config;
+        let c = parse_url("postgres://u:p@db.example.com:5432/conde?sslmode=verify-full")
+            .unwrap()
+            .config;
         assert_eq!(c.get_ssl_mode(), SslMode::Require);
-        let c = parse_url("postgresql://u@db.example.com/conde?connect_timeout=3&sslmode=verify-ca").unwrap().config;
+        let c =
+            parse_url("postgresql://u@db.example.com/conde?connect_timeout=3&sslmode=verify-ca")
+                .unwrap()
+                .config;
         assert_eq!(c.get_ssl_mode(), SslMode::Require);
         assert_eq!(c.get_connect_timeout(), Some(&Duration::from_secs(3)));
-        let c = parse_url("host=db.example.com sslmode=verify-full dbname=conde").unwrap().config;
+        let c = parse_url("host=db.example.com sslmode=verify-full dbname=conde")
+            .unwrap()
+            .config;
         assert_eq!(c.get_ssl_mode(), SslMode::Require);
         assert_eq!(c.get_application_name(), Some("conde"));
-        assert_eq!(c.get_options(), Some("-c idle_in_transaction_session_timeout=15s -c statement_timeout=60s"));
-        let c = parse_url("host=/s dbname=c options='-c statement_timeout=5s'").unwrap().config;
-        assert_eq!(c.get_options(), Some("-c statement_timeout=5s -c idle_in_transaction_session_timeout=15s"));
+        assert_eq!(
+            c.get_options(),
+            Some("-c idle_in_transaction_session_timeout=15s -c statement_timeout=60s")
+        );
+        let c = parse_url("host=/s dbname=c options='-c statement_timeout=5s'")
+            .unwrap()
+            .config;
+        assert_eq!(
+            c.get_options(),
+            Some("-c statement_timeout=5s -c idle_in_transaction_session_timeout=15s")
+        );
     }
 
     #[test]
     fn plaintext_only_to_loopback_or_socket() {
-        let err = parse_url("postgres://u@db.example.com/conde").err().expect("refused");
+        let err = parse_url("postgres://u@db.example.com/conde")
+            .err()
+            .expect("refused");
         assert!(err.0.contains("sslmode=verify-full"), "{err}");
         assert!(parse_url("postgres://u@db.example.com/conde?sslmode=disable").is_err());
         assert!(parse_url("postgres://u@localhost/conde?sslmode=disable").is_ok());
         assert!(parse_url("host=/tmp/pg user=u dbname=conde sslmode=disable").is_ok());
         // every effective destination counts: hostaddr is dialed in preference to host
-        let err = parse_url("hostaddr=192.0.2.1 user=u dbname=conde sslmode=disable").err().expect("refused");
+        let err = parse_url("hostaddr=192.0.2.1 user=u dbname=conde sslmode=disable")
+            .err()
+            .expect("refused");
         assert!(err.0.contains("192.0.2.1"), "{}", err.0);
-        let err = parse_url("host=localhost hostaddr=192.0.2.1 dbname=conde sslmode=disable").err().expect("refused");
+        let err = parse_url("host=localhost hostaddr=192.0.2.1 dbname=conde sslmode=disable")
+            .err()
+            .expect("refused");
         assert!(err.0.contains("192.0.2.1"), "{}", err.0);
-        let err = parse_url("postgres://u@localhost,db.example.com/conde?sslmode=disable").err().expect("refused");
+        let err = parse_url("postgres://u@localhost,db.example.com/conde?sslmode=disable")
+            .err()
+            .expect("refused");
         assert!(err.0.contains("db.example.com"), "{}", err.0);
-        assert!(parse_url("host=localhost hostaddr=127.0.0.1 dbname=conde sslmode=disable").is_ok());
+        assert!(
+            parse_url("host=localhost hostaddr=127.0.0.1 dbname=conde sslmode=disable").is_ok()
+        );
         assert!(parse_url("hostaddr=192.0.2.1 dbname=conde sslmode=verify-full").is_ok());
     }
 
@@ -2630,19 +3218,35 @@ mod tests {
     fn the_azure_libpq_url_parses() {
         let u = parse_url(AZURE).unwrap();
         let c = &u.config;
-        assert_eq!(c.get_hosts(), &[Host::Tcp("psql-conde.postgres.database.azure.com".into())]);
+        assert_eq!(
+            c.get_hosts(),
+            &[Host::Tcp("psql-conde.postgres.database.azure.com".into())]
+        );
         assert_eq!(c.get_ports(), &[5432]);
-        assert_eq!((c.get_user(), c.get_dbname()), (Some("conde"), Some("conde")));
+        assert_eq!(
+            (c.get_user(), c.get_dbname()),
+            (Some("conde"), Some("conde"))
+        );
         assert_eq!(c.get_password(), Some(PASSWORD.as_bytes()));
         assert_eq!(c.get_ssl_mode(), SslMode::Require);
-        assert_eq!(u.root_cert.as_deref(), Some(Path::new("/etc/ssl/certs/ca-certificates.crt")));
+        assert_eq!(
+            u.root_cert.as_deref(),
+            Some(Path::new("/etc/ssl/certs/ca-certificates.crt"))
+        );
         let pinned = tls(c, u.root_cert.as_deref());
-        assert!(pinned.is_ok(), "the named bundle loads: {:?}", pinned.err().map(|e| e.0));
+        assert!(
+            pinned.is_ok(),
+            "the named bundle loads: {:?}",
+            pinned.err().map(|e| e.0)
+        );
     }
 
     #[test]
     fn sslrootcert_absent_or_system_uses_the_system_bundle() {
-        for url in ["postgres://u@db.example.com/conde?sslmode=require", "postgres://u@db.example.com/conde?sslmode=verify-full&sslrootcert=system"] {
+        for url in [
+            "postgres://u@db.example.com/conde?sslmode=require",
+            "postgres://u@db.example.com/conde?sslmode=verify-full&sslrootcert=system",
+        ] {
             let u = parse_url(url).unwrap();
             assert_eq!(u.root_cert, None, "{url}");
             assert!(tls(&u.config, None).is_ok());
@@ -2653,9 +3257,19 @@ mod tests {
 
     #[test]
     fn a_missing_root_bundle_is_a_named_startup_error() {
-        let u = parse_url("postgres://u@db.example.com/conde?sslmode=verify-full&sslrootcert=/nonexistent/ca.pem").unwrap();
-        let err = tls(&u.config, u.root_cert.as_deref()).err().expect("refused");
-        assert!(err.0.contains("sslrootcert /nonexistent/ca.pem: cannot read it"), "{}", err.0);
+        let u = parse_url(
+            "postgres://u@db.example.com/conde?sslmode=verify-full&sslrootcert=/nonexistent/ca.pem",
+        )
+        .unwrap();
+        let err = tls(&u.config, u.root_cert.as_deref())
+            .err()
+            .expect("refused");
+        assert!(
+            err.0
+                .contains("sslrootcert /nonexistent/ca.pem: cannot read it"),
+            "{}",
+            err.0
+        );
     }
 
     #[test]
@@ -2663,18 +3277,46 @@ mod tests {
         let unknown = format!("{AZURE}&sslcrl=/x");
         let err = parse_url(&unknown).err().expect("refused");
         assert!(err.0.contains("unknown parameter 'sslcrl'"), "{}", err.0);
-        let err = parse_url(&format!("{AZURE}&sslcert=/c.pem")).err().expect("refused");
-        assert!(err.0.contains("sslcert (client certificates) is not supported"), "{}", err.0);
-        let err = parse_url("host=db.example.com password=s3cr3t-pw sslmode=require sslkey=/k").err().expect("refused");
-        assert!(err.0.contains("sslkey") && !err.0.contains("s3cr3t-pw"), "{}", err.0);
+        let err = parse_url(&format!("{AZURE}&sslcert=/c.pem"))
+            .err()
+            .expect("refused");
+        assert!(
+            err.0
+                .contains("sslcert (client certificates) is not supported"),
+            "{}",
+            err.0
+        );
+        let err = parse_url("host=db.example.com password=s3cr3t-pw sslmode=require sslkey=/k")
+            .err()
+            .expect("refused");
+        assert!(
+            err.0.contains("sslkey") && !err.0.contains("s3cr3t-pw"),
+            "{}",
+            err.0
+        );
         // whatever the postgres crate says about the rest, the password is masked
         let bad_port = AZURE.replace(":5432", ":notaport");
         let err = parse_url(&bad_port).err().expect("refused");
         assert!(!err.0.contains(PASSWORD), "{}", err.0);
-        let err = parse_url(&format!("postgresql://conde:{PASSWORD}@db.example.com/conde")).err().expect("refused");
-        assert!(err.0.contains("sslmode=verify-full") && !err.0.contains(PASSWORD), "{}", err.0);
-        let encoded = parse_url("postgresql://conde:p%40ss%3Aword@db.example.com:bad/conde?sslmode=require").err().expect("refused");
-        assert!(!encoded.0.contains("p%40ss%3Aword") && !encoded.0.contains("p@ss:word"), "{}", encoded.0);
+        let err = parse_url(&format!(
+            "postgresql://conde:{PASSWORD}@db.example.com/conde"
+        ))
+        .err()
+        .expect("refused");
+        assert!(
+            err.0.contains("sslmode=verify-full") && !err.0.contains(PASSWORD),
+            "{}",
+            err.0
+        );
+        let encoded =
+            parse_url("postgresql://conde:p%40ss%3Aword@db.example.com:bad/conde?sslmode=require")
+                .err()
+                .expect("refused");
+        assert!(
+            !encoded.0.contains("p%40ss%3Aword") && !encoded.0.contains("p@ss:word"),
+            "{}",
+            encoded.0
+        );
     }
 
     #[test]
@@ -2683,6 +3325,23 @@ mod tests {
         assert_eq!(u.root_cert.as_deref(), Some(Path::new("/a b/ca.pem")));
         assert!(u.config.get_options().unwrap().starts_with("-c x=1"));
         assert!(parse_url("host=/tmp/pg dbname='unterminated").is_err());
+    }
+
+    /// The Cloud SQL Auth Proxy shape: IAM database authentication, so a user and no password,
+    /// plaintext to the sidecar on loopback (the proxy holds the TLS to the instance).
+    #[test]
+    fn a_proxy_url_without_a_password_parses() {
+        let u = parse_url(
+            "postgresql://conde-dakai%40conde-prod.iam@127.0.0.1:5432/conde_dakai?sslmode=disable",
+        )
+        .unwrap();
+        let c = &u.config;
+        assert_eq!(c.get_user(), Some("conde-dakai@conde-prod.iam"));
+        assert_eq!(c.get_password(), None);
+        assert_eq!(c.get_dbname(), Some("conde_dakai"));
+        assert_eq!(c.get_ssl_mode(), SslMode::Disable);
+        let k = parse_url("host=127.0.0.1 port=5432 user=conde-dakai@conde-prod.iam dbname=conde_dakai sslmode=disable").unwrap();
+        assert_eq!(k.config.get_password(), None);
     }
 
     #[test]

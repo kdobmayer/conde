@@ -19,7 +19,9 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
-use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
+use windows_sys::Win32::Security::Cryptography::{
+    BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorDacl,
     GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
@@ -102,10 +104,17 @@ pub fn random_hex(n: usize) -> io::Result<String> {
     let mut buf = vec![0u8; n];
     // SAFETY: the buffer is valid for its length; the system-preferred RNG needs no handle.
     let status = unsafe {
-        BCryptGenRandom(ptr::null_mut(), buf.as_mut_ptr(), n as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+        BCryptGenRandom(
+            ptr::null_mut(),
+            buf.as_mut_ptr(),
+            n as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
     };
     if status != 0 {
-        return Err(io::Error::other(format!("BCryptGenRandom failed: {status:#x}")));
+        return Err(io::Error::other(format!(
+            "BCryptGenRandom failed: {status:#x}"
+        )));
     }
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -142,7 +151,16 @@ fn token_user_sid(process: HANDLE) -> io::Result<String> {
     // u64 storage keeps TOKEN_USER aligned.
     let mut buf = vec![0u64; (len as usize).div_ceil(8)];
     // SAFETY: the buffer holds `len` bytes.
-    if unsafe { GetTokenInformation(raw(&token), TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } == 0 {
+    if unsafe {
+        GetTokenInformation(
+            raw(&token),
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            len,
+            &mut len,
+        )
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: the call filled a TOKEN_USER at the start of the buffer.
@@ -177,7 +195,15 @@ impl Security {
         let w = wide(OsStr::new(sddl));
         let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
         // SAFETY: valid NUL-terminated SDDL; the descriptor is LocalAlloc'd, freed in Drop.
-        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), SDDL_REVISION_1, &mut sd, ptr::null_mut()) } == 0 {
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                w.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
             return Err(io::Error::last_os_error());
         }
         let attrs = SECURITY_ATTRIBUTES {
@@ -202,7 +228,9 @@ impl Security {
         let (mut present, mut defaulted) = (0, 0);
         let mut dacl: *mut ACL = ptr::null_mut();
         // SAFETY: a valid descriptor; out-parameters valid.
-        if unsafe { GetSecurityDescriptorDacl(self.sd, &mut present, &mut dacl, &mut defaulted) } == 0 {
+        if unsafe { GetSecurityDescriptorDacl(self.sd, &mut present, &mut dacl, &mut defaulted) }
+            == 0
+        {
             return Err(io::Error::last_os_error());
         }
         let w = wide(path.as_os_str());
@@ -296,7 +324,11 @@ impl Event {
 
 /// One overlapped operation on `handle` waited for until `deadline`; past it the
 /// operation is cancelled and reported as TimedOut.
-fn overlapped(handle: HANDLE, deadline: Option<Instant>, start: impl FnOnce(*mut OVERLAPPED) -> i32) -> io::Result<u32> {
+fn overlapped(
+    handle: HANDLE,
+    deadline: Option<Instant>,
+    start: impl FnOnce(*mut OVERLAPPED) -> i32,
+) -> io::Result<u32> {
     let event = Event::new()?;
     // SAFETY: OVERLAPPED is plain data; zeroed is its documented initial state.
     let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
@@ -316,11 +348,13 @@ fn overlapped(handle: HANDLE, deadline: Option<Instant>, start: impl FnOnce(*mut
                 return Ok(n);
             }
             let err = io::Error::last_os_error();
-            return Err(if err.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
-                io::Error::new(io::ErrorKind::TimedOut, "pipe operation timed out")
-            } else {
-                err
-            });
+            return Err(
+                if err.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
+                    io::Error::new(io::ErrorKind::TimedOut, "pipe operation timed out")
+                } else {
+                    err
+                },
+            );
         }
     }
     let mut n = 0u32;
@@ -334,7 +368,9 @@ fn overlapped(handle: HANDLE, deadline: Option<Instant>, start: impl FnOnce(*mut
 fn read_handle(h: &OwnedHandle, buf: &mut [u8], deadline: Option<Instant>) -> io::Result<usize> {
     let len = buf.len().min(u32::MAX as usize) as u32;
     // SAFETY: `buf` stays borrowed until the operation completes inside `overlapped`.
-    match overlapped(raw(h), deadline, |ov| unsafe { ReadFile(raw(h), buf.as_mut_ptr(), len, ptr::null_mut(), ov) }) {
+    match overlapped(raw(h), deadline, |ov| unsafe {
+        ReadFile(raw(h), buf.as_mut_ptr(), len, ptr::null_mut(), ov)
+    }) {
         Ok(n) => Ok(n as usize),
         Err(e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
         Err(e) => Err(e),
@@ -345,7 +381,9 @@ fn write_handle(h: &OwnedHandle, mut data: &[u8], deadline: Option<Instant>) -> 
     while !data.is_empty() {
         let len = data.len().min(u32::MAX as usize) as u32;
         // SAFETY: `data` stays borrowed until the operation completes inside `overlapped`.
-        let n = overlapped(raw(h), deadline, |ov| unsafe { WriteFile(raw(h), data.as_ptr(), len, ptr::null_mut(), ov) })?;
+        let n = overlapped(raw(h), deadline, |ov| unsafe {
+            WriteFile(raw(h), data.as_ptr(), len, ptr::null_mut(), ov)
+        })?;
         if n == 0 {
             return Err(io::ErrorKind::WriteZero.into());
         }
@@ -476,7 +514,11 @@ pub struct PipeListener {
 impl PipeListener {
     /// Create `name` (it must not exist yet), local clients only, DACL from `security`.
     pub fn bind(name: &OsStr, security: Security) -> io::Result<PipeListener> {
-        let mut l = PipeListener { name: wide(name), security, waiting: Vec::new() };
+        let mut l = PipeListener {
+            name: wide(name),
+            security,
+            waiting: Vec::new(),
+        };
         let first = l.instance(true)?;
         l.waiting.push(first);
         l.refill()?;
@@ -484,7 +526,13 @@ impl PipeListener {
     }
 
     fn instance(&self, first: bool) -> io::Result<Listening> {
-        let flags = PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
+        let flags = PIPE_ACCESS_INBOUND
+            | FILE_FLAG_OVERLAPPED
+            | if first {
+                FILE_FLAG_FIRST_PIPE_INSTANCE
+            } else {
+                0
+            };
         // SAFETY: NUL-terminated name, attributes owned by `self`.
         let h = unsafe {
             CreateNamedPipeW(
@@ -504,7 +552,12 @@ impl PipeListener {
         let mut ov: Box<OVERLAPPED> = Box::new(unsafe { std::mem::zeroed() });
         ov.hEvent = raw(&event.0);
         let h = raw(&handle);
-        let mut l = Listening { handle: Some(handle), event, ov, connected: false };
+        let mut l = Listening {
+            handle: Some(handle),
+            event,
+            ov,
+            connected: false,
+        };
         // SAFETY: the OVERLAPPED lives in `l` until the connect completes or is cancelled.
         if unsafe { ConnectNamedPipe(h, &mut *l.ov) } == 0 {
             // SAFETY: plain call.
@@ -547,7 +600,14 @@ impl PipeListener {
             }
             let events: Vec<HANDLE> = self.waiting.iter().map(|l| raw(&l.event.0)).collect();
             // SAFETY: the events outlive the wait.
-            let w = unsafe { WaitForMultipleObjects(events.len() as u32, events.as_ptr(), 0, millis_until(Some(deadline))) };
+            let w = unsafe {
+                WaitForMultipleObjects(
+                    events.len() as u32,
+                    events.as_ptr(),
+                    0,
+                    millis_until(Some(deadline)),
+                )
+            };
             if w == WAIT_TIMEOUT {
                 return Ok(None);
             }

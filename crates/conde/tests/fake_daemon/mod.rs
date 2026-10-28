@@ -23,7 +23,10 @@ pub struct FakeDaemon {
 }
 
 impl FakeDaemon {
-    pub fn start(socket: &Path, respond: impl Fn(&Value) -> Answer + Send + Sync + 'static) -> FakeDaemon {
+    pub fn start(
+        socket: &Path,
+        respond: impl Fn(&Value) -> Answer + Send + Sync + 'static,
+    ) -> FakeDaemon {
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let _ = std::fs::remove_file(socket);
         let listener = UnixListener::bind(socket).unwrap();
@@ -45,7 +48,12 @@ impl FakeDaemon {
                 }
             }
         });
-        FakeDaemon { socket: socket.to_path_buf(), log, stop, thread: Some(thread) }
+        FakeDaemon {
+            socket: socket.to_path_buf(),
+            log,
+            stop,
+            thread: Some(thread),
+        }
     }
 
     /// Every request frame received so far, in order.
@@ -66,9 +74,13 @@ fn serve(conn: UnixStream, log: &Mutex<Vec<Value>>, respond: &Responder) {
         let req: Value = serde_json::from_str(&line).unwrap();
         log.lock().unwrap().push(req.clone());
         let frame = match respond(&req) {
-            Ok(result) => json!({"v": 1, "type": "response", "request_id": req["request_id"], "ok": true, "result": result}),
-            Err((code, message)) => json!({"v": 1, "type": "response", "request_id": req["request_id"], "ok": false,
-                                           "error": {"code": code, "message": message}}),
+            Ok(result) => {
+                json!({"v": 1, "type": "response", "request_id": req["request_id"], "ok": true, "result": result})
+            }
+            Err((code, message)) => {
+                json!({"v": 1, "type": "response", "request_id": req["request_id"], "ok": false,
+                                           "error": {"code": code, "message": message}})
+            }
         };
         if writeln!(writer, "{frame}").is_err() {
             return;

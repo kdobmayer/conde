@@ -1,9 +1,9 @@
 //! Claude Code transport: discovery, the cross-session frame, receipts.
 
 use std::fs;
-use std::io::{self, Read};
 #[cfg(unix)]
 use std::io::Write;
+use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
@@ -130,7 +130,13 @@ pub(crate) fn proc_start(pid: u32) -> Option<String> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let got = unsafe {
-        libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast::<libc::c_void>(), size)
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&raw mut info).cast::<libc::c_void>(),
+            size,
+        )
     };
     (got == size).then(|| lstart_utc(info.pbi_start_tvsec as i64))
 }
@@ -151,7 +157,9 @@ pub(crate) fn proc_start(_pid: u32) -> Option<String> {
 #[cfg(any(target_os = "macos", all(test, unix)))]
 fn lstart_utc(secs: i64) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let (days, sod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Howard Hinnant's days -> civil date.
     let z = days + 719_468;
@@ -188,7 +196,10 @@ fn same_start_ft(published: &str, observed: &str) -> bool {
     if published == observed {
         return true;
     }
-    match (published.trim().parse::<u64>(), observed.trim().parse::<u64>()) {
+    match (
+        published.trim().parse::<u64>(),
+        observed.trim().parse::<u64>(),
+    ) {
         (Ok(p), Ok(o)) => (p > TICKS_FLOOR) != (o > TICKS_FLOOR),
         _ => false,
     }
@@ -197,7 +208,11 @@ fn same_start_ft(published: &str, observed: &str) -> bool {
 /// The start-time fingerprint a session record publishes for this platform.
 fn published_start(info: &Value) -> Option<String> {
     let field = |k: &str| info.get(k).and_then(scalar).filter(|s| !s.is_empty());
-    if cfg!(windows) { field("procStartFt").or_else(|| field("procStart")) } else { field("procStart") }
+    if cfg!(windows) {
+        field("procStartFt").or_else(|| field("procStart"))
+    } else {
+        field("procStart")
+    }
 }
 
 fn start_matches(published: &str, observed: &str) -> bool {
@@ -234,13 +249,22 @@ pub(crate) fn pipe_name(path: &str) -> Option<String> {
         Some(_) => return None,
         None => (false, rest),
     };
-    if name.is_empty() || name.contains(sep) || name == "." || name == ".." || name.ends_with(['.', ' ']) {
+    if name.is_empty()
+        || name.contains(sep)
+        || name == "."
+        || name == ".."
+        || name.ends_with(['.', ' '])
+    {
         return None;
     }
     if path.starts_with("\\\\?\\") && path.contains('/') {
         return None;
     }
-    Some(if local { format!("LOCAL\\{name}") } else { name.to_owned() })
+    Some(if local {
+        format!("LOCAL\\{name}")
+    } else {
+        name.to_owned()
+    })
 }
 
 /// The form Claude Code hashes into a key file name: a pipe as `\\.\pipe\` plus its
@@ -255,7 +279,10 @@ fn canonical_endpoint(sock: &str) -> String {
 
 /// `<pid>.<sha256hex(canonical endpoint)>.key`, the peer-token file of an inbox.
 pub(crate) fn key_file_name(pid: u32, sock: &str) -> String {
-    format!("{pid}.{}.key", sha256_hex(canonical_endpoint(sock).as_bytes()))
+    format!(
+        "{pid}.{}.key",
+        sha256_hex(canonical_endpoint(sock).as_bytes())
+    )
 }
 
 /// Whether the session's inbox exists: the socket file; on Windows a local pipe.
@@ -627,7 +654,10 @@ impl ClaudeSender {
     pub fn new(sessions_dir: &Path) -> io::Result<Self> {
         use crate::win;
         let name = format!("\\\\.\\pipe\\LOCAL\\cc-msg-{}", win::random_hex(16)?);
-        let listener = win::PipeListener::bind(std::ffi::OsStr::new(&name), win::Security::owner_only(false)?)?;
+        let listener = win::PipeListener::bind(
+            std::ffi::OsStr::new(&name),
+            win::Security::owner_only(false)?,
+        )?;
         let token = win::random_hex(16)?;
         let pid = std::process::id();
         let key_file = sessions_dir.join(key_file_name(pid, &name));
@@ -635,7 +665,11 @@ impl ClaudeSender {
         if let Some(ft) = win::process_created(pid) {
             key["procStartFt"] = json!(ft.to_string());
         }
-        let tmp = sessions_dir.join(format!("{}.tmp.{}", key_file.file_name().unwrap_or_default().to_string_lossy(), win::random_hex(4)?));
+        let tmp = sessions_dir.join(format!(
+            "{}.tmp.{}",
+            key_file.file_name().unwrap_or_default().to_string_lossy(),
+            win::random_hex(4)?
+        ));
         fs::write(&tmp, key.to_string())?;
         if let Err(e) = fs::rename(&tmp, &key_file) {
             let _ = fs::remove_file(&tmp);
@@ -643,7 +677,13 @@ impl ClaudeSender {
         }
         let path = PathBuf::from(&name);
         let address = uds_address(&path);
-        Ok(Self { path, address, listener: std::sync::Mutex::new(listener), key_file, token })
+        Ok(Self {
+            path,
+            address,
+            listener: std::sync::Mutex::new(listener),
+            key_file,
+            token,
+        })
     }
 
     /// Writes one frame to the session's pipe. Claude Code requires the auth line
@@ -652,7 +692,10 @@ impl ClaudeSender {
         if peer_token(&s.key_path).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("no peer token at {}; Claude Code on Windows refuses frames without one", s.key_path.display()),
+                format!(
+                    "no peer token at {}; Claude Code on Windows refuses frames without one",
+                    s.key_path.display()
+                ),
             ));
         }
         let payload = frame_payload(s, text, msg_id, &self.address);
@@ -663,7 +706,11 @@ impl ClaudeSender {
         if server != s.pid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("{} is served by pid {server}, not by the session's pid {}", s.sock.display(), s.pid),
+                format!(
+                    "{} is served by pid {server}, not by the session's pid {}",
+                    s.sock.display(),
+                    s.pid
+                ),
             ));
         }
         pipe.write_all(payload.as_bytes(), deadline)
@@ -680,9 +727,15 @@ impl ClaudeSender {
                 return out;
             };
             deadline = Instant::now();
-            let reader = PipeReader { conn: &conn, deadline: Instant::now() + RECEIPT_READ_TIMEOUT };
+            let reader = PipeReader {
+                conn: &conn,
+                deadline: Instant::now() + RECEIPT_READ_TIMEOUT,
+            };
             let data = drain(reader, 2);
-            out.extend(authed_receipts(&String::from_utf8_lossy(&data), &self.token));
+            out.extend(authed_receipts(
+                &String::from_utf8_lossy(&data),
+                &self.token,
+            ));
         }
     }
 }
@@ -801,8 +854,14 @@ mod tests {
         assert_eq!(lstart_utc(1_755_228_303), "Fri Aug 15 03:25:03 2025");
         assert_eq!(lstart_utc(1_791_498_000), "Thu Oct  8 22:20:00 2026");
         assert_eq!(lstart_utc(0), "Thu Jan  1 00:00:00 1970");
-        assert!(same_start("Thu Oct  8 22:20:00 2026", "Thu Oct 8 22:20:00 2026"));
-        assert!(!same_start("Thu Oct  8 22:20:00 2026", "Thu Oct  8 22:20:01 2026"));
+        assert!(same_start(
+            "Thu Oct  8 22:20:00 2026",
+            "Thu Oct 8 22:20:00 2026"
+        ));
+        assert!(!same_start(
+            "Thu Oct  8 22:20:00 2026",
+            "Thu Oct  8 22:20:01 2026"
+        ));
     }
 
     fn decode_uds(addr: &str) -> PathBuf {
@@ -1245,13 +1304,30 @@ mod windows_tests {
 
     #[test]
     fn windows_pipe_names_parse_as_claude_code_does() {
-        assert_eq!(pipe_name(r"\\.\pipe\LOCAL\cc-msg-0123").as_deref(), Some(r"LOCAL\cc-msg-0123"));
-        assert_eq!(pipe_name(r"\\?\PIPE\local\cc-msg-0123").as_deref(), Some(r"LOCAL\cc-msg-0123"));
-        assert_eq!(pipe_name("//./pipe/cc-msg-0123").as_deref(), Some("cc-msg-0123"));
+        assert_eq!(
+            pipe_name(r"\\.\pipe\LOCAL\cc-msg-0123").as_deref(),
+            Some(r"LOCAL\cc-msg-0123")
+        );
+        assert_eq!(
+            pipe_name(r"\\?\PIPE\local\cc-msg-0123").as_deref(),
+            Some(r"LOCAL\cc-msg-0123")
+        );
+        assert_eq!(
+            pipe_name("//./pipe/cc-msg-0123").as_deref(),
+            Some("cc-msg-0123")
+        );
         assert_eq!(pipe_name(r"\\.\pipe\LOCAL").as_deref(), Some("LOCAL"));
         for bad in [
-            r"\\host\pipe\x", r"\\.\pipe\a\b", r"\\.\pipe\x.", r"\\.\pipe\x ", r"\\.\pipe\..", r"\\.\pipe\",
-            r"\\?\pipe/x", r"\\.\nopipe\x", "/tmp/cc-socks/1.sock", "",
+            r"\\host\pipe\x",
+            r"\\.\pipe\a\b",
+            r"\\.\pipe\x.",
+            r"\\.\pipe\x ",
+            r"\\.\pipe\..",
+            r"\\.\pipe\",
+            r"\\?\pipe/x",
+            r"\\.\nopipe\x",
+            "/tmp/cc-socks/1.sock",
+            "",
         ] {
             assert_eq!(pipe_name(bad), None, "{bad}");
         }
@@ -1260,12 +1336,26 @@ mod windows_tests {
     #[test]
     fn windows_key_file_hashes_the_canonical_pipe() {
         let canonical = sha256_hex(br"\\.\pipe\local\cc-msg-abcdef");
-        for spelled in [r"\\.\pipe\LOCAL\cc-msg-ABCDEF", r"\\?\pipe\local\cc-msg-abcdef", "//./PIPE/Local/cc-msg-AbCdEf"] {
-            assert_eq!(key_file_name(42, spelled), format!("42.{canonical}.key"), "{spelled}");
+        for spelled in [
+            r"\\.\pipe\LOCAL\cc-msg-ABCDEF",
+            r"\\?\pipe\local\cc-msg-abcdef",
+            "//./PIPE/Local/cc-msg-AbCdEf",
+        ] {
+            assert_eq!(
+                key_file_name(42, spelled),
+                format!("42.{canonical}.key"),
+                "{spelled}"
+            );
         }
         // a socket path is hashed as published, as before
-        assert_eq!(key_file_name(7, "/tmp/cc-socks/7.sock"), format!("7.{}.key", sha256_hex(b"/tmp/cc-socks/7.sock")));
-        assert_eq!(uds_address(Path::new(r"\\.\pipe\LOCAL\cc-msg-ab12")), r"uds:\\.\pipe\LOCAL\cc-msg-ab12");
+        assert_eq!(
+            key_file_name(7, "/tmp/cc-socks/7.sock"),
+            format!("7.{}.key", sha256_hex(b"/tmp/cc-socks/7.sock"))
+        );
+        assert_eq!(
+            uds_address(Path::new(r"\\.\pipe\LOCAL\cc-msg-ab12")),
+            r"uds:\\.\pipe\LOCAL\cc-msg-ab12"
+        );
     }
 
     #[test]
@@ -1285,9 +1375,21 @@ mod windows_tests {
         let auth = r#"{"type":"auth","token":"t0k"}"#;
         let got = authed_receipts(&format!("{auth}\n{receipt}\n"), "t0k");
         assert_eq!(got.len(), 1);
-        assert_eq!((got[0].msg_id.as_str(), &got[0].status), ("m1", &ReceiptStatus::Held));
-        assert!(authed_receipts(&format!("{receipt}\n"), "t0k").is_empty(), "no auth line");
-        assert!(authed_receipts(&format!("{}\n{receipt}\n", auth.replace("t0k", "bad")), "t0k").is_empty());
+        assert_eq!(
+            (got[0].msg_id.as_str(), &got[0].status),
+            ("m1", &ReceiptStatus::Held)
+        );
+        assert!(
+            authed_receipts(&format!("{receipt}\n"), "t0k").is_empty(),
+            "no auth line"
+        );
+        assert!(
+            authed_receipts(
+                &format!("{}\n{receipt}\n", auth.replace("t0k", "bad")),
+                "t0k"
+            )
+            .is_empty()
+        );
         assert!(authed_receipts("", "t0k").is_empty());
     }
 }

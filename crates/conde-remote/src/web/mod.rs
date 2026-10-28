@@ -1,4 +1,4 @@
-//! Browser surface of the cloud server: Entra ID sign-in (OIDC authorization code + PKCE),
+//! Browser surface of the cloud server: OIDC sign-in (authorization code + PKCE; Keycloak or Entra),
 //! the keys page (list, create shown once, revoke) and the `conde login` browser leg.
 //!
 //! The server stays stateless: login transactions, browser sessions and one-time CLI codes
@@ -41,17 +41,19 @@ pub use ratelimit::RateLimits;
 /// Everything the web surface needs to know about the deployment.
 #[derive(Clone)]
 pub struct WebConfig {
-    /// `https://login.microsoftonline.com/<tenant>/v2.0`; discovery is read from here.
+    /// The OIDC issuer (a Keycloak realm URL, or Entra's `https://login.microsoftonline.com/<tenant>/v2.0`);
+    /// discovery is read from here and every id token's `iss` must equal it.
     pub issuer: String,
-    /// The only tenant whose users may sign in (the `tid` claim must equal it).
-    pub tenant_id: String,
+    /// Set when the issuer is an Entra tenant: the subject is then the `oid` claim and
+    /// `preferred_username` (the UPN) counts as a verified email.
+    pub entra_tenant: Option<String>,
     pub client_id: String,
     pub client_secret: String,
     /// The registered redirect URI, `https://<host>/auth/callback`.
     pub redirect_uri: String,
     /// The server's public origin (`https://<host>`), derived from the redirect URI.
     pub public_url: String,
-    /// Where Entra sends the browser after sign-out.
+    /// Where the provider sends the browser after sign-out.
     pub post_logout_redirect_uri: String,
     /// A browser session ends after this long without a request.
     pub session_idle: Duration,
@@ -81,14 +83,31 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("CONDE_ADMIN_KEY must be at least {0} characters")]
     AdminKey(usize),
-    #[error("ENTRA_REDIRECT_URI '{0}' must be an https URL ending in /auth/callback")]
+    #[error("OIDC_REDIRECT_URI '{0}' must be an https URL ending in /auth/callback")]
     RedirectUri(String),
+    #[error("OIDC_ISSUER '{0}' must be an https URL")]
+    Issuer(String),
+    #[error(transparent)]
+    Secret(#[from] crate::SecretError),
+}
+
+/// Entra's v2.0 issuer for `tenant`.
+pub fn entra_issuer(tenant: &str) -> String {
+    format!("https://login.microsoftonline.com/{tenant}/v2.0")
+}
+
+/// The tenant of an Entra v2.0 issuer URL; None for any other issuer.
+pub fn entra_tenant_of(issuer: &str) -> Option<String> {
+    let tenant = issuer
+        .strip_prefix("https://login.microsoftonline.com/")?
+        .strip_suffix("/v2.0")?;
+    (!tenant.is_empty() && !tenant.contains('/')).then(|| tenant.to_string())
 }
 
 impl WebConfig {
-    /// Builds the Entra configuration for `tenant_id` with the default lifetimes.
-    pub fn entra(
-        tenant_id: &str,
+    /// Builds the configuration for the OIDC `issuer` with the default lifetimes.
+    pub fn oidc(
+        issuer: &str,
         client_id: &str,
         client_secret: &str,
         redirect_uri: &str,
@@ -99,8 +118,8 @@ impl WebConfig {
             .ok_or_else(|| ConfigError::RedirectUri(redirect_uri.to_string()))?
             .to_string();
         Ok(WebConfig {
-            issuer: format!("https://login.microsoftonline.com/{tenant_id}/v2.0"),
-            tenant_id: tenant_id.to_string(),
+            issuer: issuer.to_string(),
+            entra_tenant: entra_tenant_of(issuer),
             client_id: client_id.to_string(),
             client_secret: client_secret.to_string(),
             redirect_uri: redirect_uri.to_string(),
@@ -114,22 +133,63 @@ impl WebConfig {
         })
     }
 
-    /// From `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI`.
-    /// `Ok(None)` when none is set (web sign-in disabled); an error when only some are.
+    /// Builds the Entra configuration for `tenant_id` with the default lifetimes.
+    pub fn entra(
+        tenant_id: &str,
+        client_id: &str,
+        client_secret: &str,
+        redirect_uri: &str,
+    ) -> Result<WebConfig, ConfigError> {
+        WebConfig::oidc(
+            &entra_issuer(tenant_id),
+            client_id,
+            client_secret,
+            redirect_uri,
+        )
+    }
+
+    /// From the process environment; see [`WebConfig::from_vars`].
     pub fn from_env() -> Result<Option<WebConfig>, ConfigError> {
-        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-        let names = [
-            "ENTRA_TENANT_ID",
-            "ENTRA_CLIENT_ID",
-            "ENTRA_CLIENT_SECRET",
-            "ENTRA_REDIRECT_URI",
-        ];
-        let values: Vec<Option<String>> = names.iter().copied().map(var).collect();
-        if values.iter().all(Option::is_none) {
-            return Ok(None);
+        WebConfig::from_vars(|k| std::env::var(k).ok())
+    }
+
+    /// From `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` (or `OIDC_CLIENT_SECRET_FILE`)
+    /// and `OIDC_REDIRECT_URI`, each falling back to its Entra variable (`ENTRA_TENANT_ID` gives
+    /// the tenant's issuer, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI`).
+    /// `Ok(None)` when none is set (web sign-in disabled); an error when only some are.
+    pub fn from_vars(
+        var: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<WebConfig>, ConfigError> {
+        let var = |name: &str| var(name).filter(|v| !v.is_empty());
+        let secret = |name: &str| crate::secret_from(name, var);
+        let issuer =
+            var("OIDC_ISSUER").or_else(|| var("ENTRA_TENANT_ID").map(|t| entra_issuer(&t)));
+        let client_id = var("OIDC_CLIENT_ID").or_else(|| var("ENTRA_CLIENT_ID"));
+        // a set OIDC_CLIENT_SECRET_FILE decides alone: an empty one is unset, never the Entra secret
+        let client_secret = match secret("OIDC_CLIENT_SECRET")? {
+            None if var("OIDC_CLIENT_SECRET_FILE").is_none() => secret("ENTRA_CLIENT_SECRET")?,
+            other => other,
+        };
+        let redirect_uri = var("OIDC_REDIRECT_URI").or_else(|| var("ENTRA_REDIRECT_URI"));
+        let (Some(issuer), Some(client_id), Some(client_secret), Some(redirect_uri)) =
+            (&issuer, &client_id, &client_secret, &redirect_uri)
+        else {
+            return match (&issuer, &client_id, &client_secret, &redirect_uri) {
+                (None, None, None, None) => Ok(None),
+                (None, ..) => Err(ConfigError::Missing("OIDC_ISSUER (or ENTRA_TENANT_ID)")),
+                (_, None, ..) => Err(ConfigError::Missing("OIDC_CLIENT_ID (or ENTRA_CLIENT_ID)")),
+                (_, _, None, _) => Err(ConfigError::Missing(
+                    "OIDC_CLIENT_SECRET (or ENTRA_CLIENT_SECRET)",
+                )),
+                _ => Err(ConfigError::Missing(
+                    "OIDC_REDIRECT_URI (or ENTRA_REDIRECT_URI)",
+                )),
+            };
+        };
+        if !issuer.starts_with("https://") {
+            return Err(ConfigError::Issuer(issuer.clone()));
         }
-        let get = |i: usize| values[i].as_deref().ok_or(ConfigError::Missing(names[i]));
-        let config = WebConfig::entra(get(0)?, get(1)?, get(2)?, get(3)?)?;
+        let config = WebConfig::oidc(issuer, client_id, client_secret, redirect_uri)?;
         if !config.public_url.starts_with("https://") {
             return Err(ConfigError::RedirectUri(config.redirect_uri));
         }
@@ -159,23 +219,27 @@ pub struct WebUser {
     pub disabled: bool,
 }
 
-/// A validated Entra identity. `(tid, oid)` is the key; the rest is shown, never matched.
+/// A validated sign-in identity. `(issuer, subject)` is the key; `verified_email` is matched
+/// once, by the invite gate; the rest is shown, never matched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
-    pub tid: String,
-    pub oid: String,
+    pub issuer: String,
+    /// The `sub` claim; for Entra the `oid` (the directory object, stable across apps).
+    pub subject: String,
     pub display_name: Option<String>,
     pub preferred_username: Option<String>,
     /// What the Slack worker looks the person up by: `preferred_username` (the UPN), else the
     /// `email` claim when the UPN is not an address.
     pub email: Option<String>,
+    /// The address the provider vouches for: `email` with `email_verified`, or Entra's UPN.
+    pub verified_email: Option<String>,
 }
 
 /// Result of [`WebStore::create_user`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CreateUser {
     Created(WebUser),
-    /// The name exists; `bound` says whether it already belongs to an Entra identity.
+    /// The name exists; `bound` says whether any identity is bound to it.
     NameTaken {
         bound: bool,
     },
@@ -186,10 +250,48 @@ pub enum CreateUser {
 pub enum BindUser {
     /// No user had the name; it was created bound to the identity.
     Created(WebUser),
-    /// An existing user without an identity was bound to it.
+    /// An existing user without an identity of this issuer was bound to it.
     Bound(WebUser),
-    /// The name belongs to another identity already.
+    /// The name holds another identity of this issuer already.
     NameBound,
+}
+
+/// Result of [`WebStore::claim_invite`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Invite {
+    /// The identity is bound to the user (now, or by a concurrent sign-in).
+    Bound(WebUser),
+    /// No user has the email.
+    NoUser,
+    /// More than one user has the email.
+    Ambiguous,
+    /// The one user with the email holds another identity of this issuer.
+    IssuerBound,
+}
+
+/// Result of [`WebStore::invite_user`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Invited {
+    /// A new user with the email.
+    Created(WebUser),
+    /// An existing user without an email got this one.
+    EmailSet(WebUser),
+    /// The user exists with this email already.
+    Exists(WebUser),
+    /// The user exists with another email.
+    OtherEmail(String),
+    /// Another user has the email.
+    EmailTaken(String),
+}
+
+/// A user as the admin API lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminUser {
+    pub name: String,
+    pub email: Option<String>,
+    /// The issuers the user has an identity of.
+    pub issuers: Vec<String>,
+    pub disabled: bool,
 }
 
 /// A credential as the admin API lists it.
@@ -304,7 +406,11 @@ pub enum Minted {
 /// (SQLite locally, Postgres in the cloud); every method is one transaction and is called
 /// from a blocking thread. Times are unix seconds.
 pub trait WebStore: Send + Sync {
-    fn user_by_identity(&self, tid: &str, oid: &str) -> WebResult<Option<WebUser>>;
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> WebResult<Option<WebUser>>;
+    /// The invite gate, in one transaction: binds the identity to the one user whose email is
+    /// `email` (compared ASCII case-insensitively) when that user holds no identity of the
+    /// identity's issuer yet.
+    fn claim_invite(&self, identity: &Identity, email: &str) -> WebResult<Invite>;
     /// Creates user `name` bound to the identity, or reports the name as taken.
     fn create_user(&self, identity: &Identity, name: &str) -> WebResult<CreateUser>;
     /// Records the display-only profile fields seen at sign-in.
@@ -369,8 +475,14 @@ pub trait WebStore: Send + Sync {
     // admin API
     /// The user named `name`, created without an identity on first sight.
     fn ensure_user(&self, name: &str) -> WebResult<WebUser>;
-    /// Creates `name` bound to the identity, or binds an existing unbound `name` to it.
+    /// Creates `name` bound to the identity, or binds an existing `name` that holds no identity
+    /// of the identity's issuer to it.
     fn bind_identity(&self, name: &str, identity: &Identity) -> WebResult<BindUser>;
+    /// The invite: creates user `name` with `email`, or gives an existing `name` without an email
+    /// this one; an email another user has is refused.
+    fn invite_user(&self, name: &str, email: &str) -> WebResult<Invited>;
+    /// Every user, by name.
+    fn list_users(&self) -> WebResult<Vec<AdminUser>>;
     /// Every credential, newest first.
     fn all_keys(&self) -> WebResult<Vec<AdminKey>>;
     /// Revokes the live key whose id is `key_id`; returns its host.
@@ -531,13 +643,11 @@ impl std::fmt::Debug for WebSetup {
 }
 
 impl WebSetup {
-    /// Entra sign-in from `ENTRA_*`, the admin API from `CONDE_ADMIN_KEY`; `Ok(None)` when
-    /// neither is configured.
+    /// Sign-in from `OIDC_*` (or `ENTRA_*`), the admin API from `CONDE_ADMIN_KEY` (or
+    /// `CONDE_ADMIN_KEY_FILE`); `Ok(None)` when neither is configured.
     pub fn from_env(store: Arc<dyn WebStore>) -> Result<Option<WebSetup>, ConfigError> {
         let entra = WebConfig::from_env()?;
-        let admin_key = std::env::var("CONDE_ADMIN_KEY")
-            .ok()
-            .filter(|k| !k.is_empty());
+        let admin_key = crate::secret_env("CONDE_ADMIN_KEY")?;
         if admin_key
             .as_ref()
             .is_some_and(|k| k.len() < admin::MIN_KEY_LEN)
@@ -563,10 +673,9 @@ impl WebSetup {
     /// web app's routes authenticate browsers with it).
     pub fn into_parts(self, registry: Arc<dyn BridgeRegistry>) -> (Router, Option<WebState>) {
         let mut app = Router::new();
-        let tenant = self.entra.as_ref().map(|c| c.tenant_id.clone());
         let mut state = None;
-        if let Some(config) = self.entra {
-            let web = WebState::new(config, self.store.clone(), registry.clone());
+        if let Some(config) = &self.entra {
+            let web = WebState::new(config.clone(), self.store.clone(), registry.clone());
             app = app.merge(router(web.clone()));
             state = Some(web);
         }
@@ -576,7 +685,11 @@ impl WebSetup {
                 registry,
                 clock: system_clock(),
             };
-            app = app.merge(admin::router(AdminState::new(core, &key, tenant)));
+            app = app.merge(admin::router(AdminState::new(
+                core,
+                &key,
+                self.entra.as_ref(),
+            )));
         }
         (app, state)
     }

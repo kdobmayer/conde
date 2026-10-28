@@ -85,7 +85,11 @@ impl Agent {
 }
 
 /// Builds the address from the three nullable columns; any NULL means unbound.
-pub(crate) fn address_of(kind: Option<String>, target: Option<String>, host: Option<String>) -> Option<Address> {
+pub(crate) fn address_of(
+    kind: Option<String>,
+    target: Option<String>,
+    host: Option<String>,
+) -> Option<Address> {
     match (kind.as_deref().and_then(Kind::parse), target, host) {
         (Some(k), Some(t), Some(h)) => Some(Address::new(k, &t, &h)),
         _ => None,
@@ -121,15 +125,25 @@ pub struct Message {
 
 impl Message {
     pub fn place(&self) -> String {
-        self.channel.as_ref().map_or_else(|| "dm".to_string(), |c| format!("#{c}"))
+        self.channel
+            .as_ref()
+            .map_or_else(|| "dm".to_string(), |c| format!("#{c}"))
     }
 
     pub fn to(&self) -> String {
-        self.channel.as_ref().map(|c| format!("#{c}")).or_else(|| self.recipient.clone()).unwrap_or_default()
+        self.channel
+            .as_ref()
+            .map(|c| format!("#{c}"))
+            .or_else(|| self.recipient.clone())
+            .unwrap_or_default()
     }
 
     pub fn preview(&self) -> String {
-        let first = self.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let first = self
+            .text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         first.chars().take(80).collect()
     }
 }
@@ -304,7 +318,11 @@ pub(crate) fn feed_seqs_sql(
     ph: impl Fn(usize) -> String,
 ) -> Option<(String, Vec<FeedArg>)> {
     let order = if oldest_first { "ASC" } else { "DESC" };
-    let mut args = vec![FeedArg::Int(after), FeedArg::Int(before), FeedArg::Int(limit)];
+    let mut args = vec![
+        FeedArg::Int(after),
+        FeedArg::Int(before),
+        FeedArg::Int(limit),
+    ];
     let (after, before, limit) = (ph(1), ph(2), ph(3));
     let mut arg = |a: FeedArg| {
         if let Some(n) = args.iter().position(|x| *x == a) {
@@ -314,9 +332,14 @@ pub(crate) fn feed_seqs_sql(
         ph(args.len())
     };
     let sided = |p: Option<Party>| matches!(p, Some(Party::Own | Party::Other));
-    let names_a_side = ranges.iter().any(|r| sided(r.dms) || matches!(r.posts, Some(FeedPosts::By(p)) if sided(Some(p))));
+    let names_a_side = ranges
+        .iter()
+        .any(|r| sided(r.dms) || matches!(r.posts, Some(FeedPosts::By(p)) if sided(Some(p))));
     let own = if names_a_side {
-        format!("(SELECT agent_id FROM agents WHERE owner_id = {})", arg(FeedArg::Int(owner_id)))
+        format!(
+            "(SELECT agent_id FROM agents WHERE owner_id = {})",
+            arg(FeedArg::Int(owner_id))
+        )
     } else {
         String::new()
     };
@@ -331,9 +354,14 @@ pub(crate) fn feed_seqs_sql(
         // A recipient range is DMs only (a DM recipient is never set on a channel post); naming
         // `channel_id IS NULL` there would offer SQLite messages_by_channel, every DM on the board.
         match (r.dms, r.by) {
-            (Some(p), FeedBy::Recipient) => keep.push(side("sender_agent_id", p).unwrap_or_else(|| "1 = 1".into())),
+            (Some(p), FeedBy::Recipient) => {
+                keep.push(side("sender_agent_id", p).unwrap_or_else(|| "1 = 1".into()))
+            }
             (Some(p), _) => keep.push(
-                std::iter::once("channel_id IS NULL".to_string()).chain(side("recipient_agent_id", p)).collect::<Vec<_>>().join(" AND "),
+                std::iter::once("channel_id IS NULL".to_string())
+                    .chain(side("recipient_agent_id", p))
+                    .collect::<Vec<_>>()
+                    .join(" AND "),
             ),
             (None, _) => {}
         }
@@ -342,7 +370,9 @@ pub(crate) fn feed_seqs_sql(
                 let list: Vec<String> = ids.iter().map(|c| arg(FeedArg::Text(c.clone()))).collect();
                 keep.push(format!("channel_id IN ({})", list.join(", ")));
             }
-            Some(FeedPosts::By(p)) => keep.push(side("sender_agent_id", *p).unwrap_or_else(|| "1 = 1".into())),
+            Some(FeedPosts::By(p)) => {
+                keep.push(side("sender_agent_id", *p).unwrap_or_else(|| "1 = 1".into()))
+            }
             _ => {}
         }
         if keep.is_empty() {
@@ -370,7 +400,10 @@ pub(crate) fn feed_seqs_sql(
         .enumerate()
         .map(|(n, g)| format!("SELECT commit_seq FROM ({}) AS g{n}", g.join(" UNION ")))
         .collect();
-    let sql = format!("SELECT commit_seq FROM ({}) AS u ORDER BY commit_seq {order} LIMIT {limit}", groups.join(" UNION "));
+    let sql = format!(
+        "SELECT commit_seq FROM ({}) AS u ORDER BY commit_seq {order} LIMIT {limit}",
+        groups.join(" UNION ")
+    );
     Some((sql, args))
 }
 
@@ -560,8 +593,10 @@ pub struct UserRow {
     pub user_id: i64,
     pub name: String,
     pub disabled: bool,
-    /// Whether an Entra identity is bound to the user.
+    /// Whether any sign-in identity is bound to the user.
     pub bound: bool,
+    /// The sign-in email (the invite's, or the one sign-in reported).
+    pub email: Option<String>,
 }
 
 /// A browser session (unix seconds).
@@ -697,8 +732,14 @@ pub trait Tx {
     fn user_id(&self, name: &str) -> StoreResult<Option<i64>>;
     /// (user id, user name) owning `host`.
     fn host_owner(&self, host: &str) -> StoreResult<Option<(i64, String)>>;
-    fn insert_credential(&self, digest: &str, user_id: i64, host: &str, label: &str, created_at: &str)
-    -> StoreResult<()>;
+    fn insert_credential(
+        &self,
+        digest: &str,
+        user_id: i64,
+        host: &str,
+        label: &str,
+        created_at: &str,
+    ) -> StoreResult<()>;
     /// Every credential, oldest first (undated first), then by host.
     fn credentials(&self) -> StoreResult<Vec<CredentialRow>>;
     /// Revokes the live credential(s) whose digest starts with `key_id`; returns how many.
@@ -716,14 +757,33 @@ pub trait Tx {
     /// an agent of another owner posted or is a member. By agent, then message order.
     fn host_evidence(&self, owner_id: i64, host: &str) -> StoreResult<Vec<EvidenceRow>>;
 
-    // users, Entra identities and browser sign-in (times in unix seconds)
-    fn user_by_identity(&self, tid: &str, oid: &str) -> StoreResult<Option<UserRow>>;
+    // users, sign-in identities and browser sign-in (times in unix seconds)
+    fn user_by_identity(&self, issuer: &str, subject: &str) -> StoreResult<Option<UserRow>>;
     fn user_by_name(&self, name: &str) -> StoreResult<Option<UserRow>>;
     fn user_by_id(&self, user_id: i64) -> StoreResult<Option<UserRow>>;
-    /// Binds (tid, oid) to the user, with the display-only profile.
-    fn bind_identity(&self, user_id: i64, tid: &str, oid: &str, display: Option<&str>, upn: Option<&str>)
-    -> StoreResult<()>;
-    fn set_identity_profile(&self, user_id: i64, display: Option<&str>, upn: Option<&str>) -> StoreResult<()>;
+    /// The users whose email is `email`, compared ASCII case-insensitively; by user id.
+    fn users_by_email(&self, email: &str) -> StoreResult<Vec<UserRow>>;
+    /// Every user, by name.
+    fn users(&self) -> StoreResult<Vec<UserRow>>;
+    /// The issuers the user holds an identity of, sorted.
+    fn identity_issuers(&self, user_id: i64) -> StoreResult<Vec<String>>;
+    /// Binds (issuer, subject) to the user, with the display-only profile; a user holds at most
+    /// one identity per issuer.
+    fn bind_identity(
+        &self,
+        user_id: i64,
+        issuer: &str,
+        subject: &str,
+        display: Option<&str>,
+        upn: Option<&str>,
+    ) -> StoreResult<()>;
+    fn set_identity_profile(
+        &self,
+        issuer: &str,
+        subject: &str,
+        display: Option<&str>,
+        upn: Option<&str>,
+    ) -> StoreResult<()>;
     /// Sets the user's disabled flag; returns the user's hosts. Disabling also deletes the
     /// user's browser sessions and announces the hosts as revoked on commit.
     fn set_user_disabled(&self, user_id: i64, disabled: bool) -> StoreResult<Vec<String>>;
@@ -732,11 +792,23 @@ pub trait Tx {
     fn touch_web_session(&self, id_digest: &str, at: i64) -> StoreResult<()>;
     fn delete_web_session(&self, id_digest: &str) -> StoreResult<()>;
     /// Stores a one-time record (login transaction, CLI code, key display) under its digest.
-    fn put_web_token(&self, kind: &str, digest: &str, payload: &str, created_at: i64) -> StoreResult<()>;
+    fn put_web_token(
+        &self,
+        kind: &str,
+        digest: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> StoreResult<()>;
     /// Returns and deletes a one-time record as (payload, created_at).
     fn take_web_token(&self, kind: &str, digest: &str) -> StoreResult<Option<(String, i64)>>;
     /// Deletes expired sessions and one-time records (`ttls` per kind, seconds).
-    fn purge_web(&self, now: i64, session_idle: i64, session_max: i64, ttls: &[(&str, i64)]) -> StoreResult<()>;
+    fn purge_web(
+        &self,
+        now: i64,
+        session_idle: i64,
+        session_max: i64,
+        ttls: &[(&str, i64)],
+    ) -> StoreResult<()>;
     /// (user id, host) of a live credential with this digest whose user is not disabled.
     fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>>;
 
@@ -746,8 +818,9 @@ pub trait Tx {
     fn user_slack(&self, user_id: i64) -> StoreResult<Option<UserSlack>>;
     /// The sign-in email (`preferred_username`, else the `email` claim when that is no address).
     fn set_user_email(&self, user_id: i64, email: Option<&str>) -> StoreResult<()>;
-    /// Fills every NULL email from the user's identity by the sign-in rule (`preferred_username`
-    /// when it holds an `@`); a stored email is never replaced. The number filled.
+    /// Fills every NULL email from the user's Entra identity by the sign-in rule
+    /// (`preferred_username`, the tenant-controlled UPN, when it holds an `@`; another issuer's
+    /// is unverified); a stored email is never replaced. The number filled.
     fn backfill_emails(&self) -> StoreResult<u64>;
     /// The Slack member id and its source (`env`, `lookup`, `admin`).
     fn set_user_slack(&self, user_id: i64, member_id: &str, source: &str) -> StoreResult<()>;
@@ -755,7 +828,12 @@ pub trait Tx {
 
     // idempotency
     /// (request_hash, result_json) stored for this key.
-    fn idempotency_get(&self, actor_id: &str, op: &str, key: &str) -> StoreResult<Option<(String, String)>>;
+    fn idempotency_get(
+        &self,
+        actor_id: &str,
+        op: &str,
+        key: &str,
+    ) -> StoreResult<Option<(String, String)>>;
     fn idempotency_put(
         &self,
         actor_id: &str,
@@ -804,7 +882,8 @@ pub trait Tx {
     fn advance_cursor(&self, channel_id: &str, agent_id: &str, seq: i64) -> StoreResult<()>;
     /// Highest commit_seq posted in the channel, 0 when empty.
     fn channel_last_seq(&self, channel_id: &str) -> StoreResult<i64>;
-    fn insert_membership(&self, channel_id: &str, agent_id: &str, read_seq: i64) -> StoreResult<()>;
+    fn insert_membership(&self, channel_id: &str, agent_id: &str, read_seq: i64)
+    -> StoreResult<()>;
     fn delete_membership(&self, channel_id: &str, agent_id: &str) -> StoreResult<()>;
     /// Every channel with member and message counts, by name.
     fn channel_summaries(&self) -> StoreResult<Vec<ChannelSummary>>;
@@ -824,12 +903,23 @@ pub trait Tx {
     fn pages_since(&self, sender_id: &str, since: &str) -> StoreResult<i64>;
     /// Inserts unless the id exists; true when inserted.
     fn insert_message_if_absent(&self, m: &NewMessage) -> StoreResult<bool>;
-    fn insert_attachment(&self, id: &str, message_id: &str, filename: &str, bytes: &[u8]) -> StoreResult<()>;
+    fn insert_attachment(
+        &self,
+        id: &str,
+        message_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> StoreResult<()>;
     fn message_by_id(&self, id: &str) -> StoreResult<Option<Message>>;
     /// Unread DMs to `agent_id` plus unread channel posts by others, after `after`.
     fn inbox(&self, agent_id: &str, after: i64, limit: i64) -> StoreResult<Vec<Message>>;
     /// Unread messages of one channel the agent is a member of.
-    fn unread_in_channel(&self, channel_id: &str, agent_id: &str, limit: i64) -> StoreResult<Vec<Message>>;
+    fn unread_in_channel(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>>;
     /// Unread DMs plus unread channel messages, own posts included.
     fn unread_all(&self, agent_id: &str, limit: i64) -> StoreResult<Vec<Message>>;
     fn sent_by(&self, agent_id: &str, after: i64, limit: i64) -> StoreResult<Vec<Message>>;
@@ -869,18 +959,35 @@ pub trait Tx {
     fn attachment_list(&self, message_id: &str) -> StoreResult<Vec<AttachmentMeta>>;
     fn attachment(&self, id: &str) -> StoreResult<Option<Attachment>>;
     /// (recorded size, stored byte length) of a message's attachment by filename.
-    fn attachment_sizes(&self, message_id: &str, filename: &str) -> StoreResult<Option<(i64, i64)>>;
+    fn attachment_sizes(&self, message_id: &str, filename: &str)
+    -> StoreResult<Option<(i64, i64)>>;
     /// Present reactions as (emoji, canonical reactor), by emoji then reactor.
     fn reactions(&self, message_id: &str) -> StoreResult<Vec<(String, String)>>;
-    fn set_reaction(&self, message_id: &str, actor_id: &str, emoji: &str, present: bool) -> StoreResult<()>;
+    fn set_reaction(
+        &self,
+        message_id: &str,
+        actor_id: &str,
+        emoji: &str,
+        present: bool,
+    ) -> StoreResult<()>;
     /// Inserts unless the (message, actor, emoji) row exists; true when inserted.
-    fn insert_reaction_if_absent(&self, message_id: &str, actor_id: &str, emoji: &str, present: bool)
-    -> StoreResult<bool>;
+    fn insert_reaction_if_absent(
+        &self,
+        message_id: &str,
+        actor_id: &str,
+        emoji: &str,
+        present: bool,
+    ) -> StoreResult<bool>;
     /// Records the first read only; true when this call recorded it.
     fn mark_dm_read(&self, message_id: &str, agent_id: &str, at: &str) -> StoreResult<bool>;
     fn dm_read_at(&self, message_id: &str, agent_id: &str) -> StoreResult<Option<String>>;
     /// (members other than `except_agent` read past `seq`, members other than `except_agent`).
-    fn channel_read_count(&self, channel_id: &str, except_agent: &str, seq: i64) -> StoreResult<(i64, i64)>;
+    fn channel_read_count(
+        &self,
+        channel_id: &str,
+        except_agent: &str,
+        seq: i64,
+    ) -> StoreResult<(i64, i64)>;
     fn message_count(&self) -> StoreResult<i64>;
 
     // notifications and attempts
@@ -888,7 +995,12 @@ pub trait Tx {
     fn insert_notification(&self, n: &NewNotification) -> StoreResult<()>;
     /// Pending notifications due at `now` whose recipient is bound on `host`,
     /// by due time then insertion order.
-    fn due_notifications(&self, now: i64, host: &str, limit: i64) -> StoreResult<Vec<DueNotification>>;
+    fn due_notifications(
+        &self,
+        now: i64,
+        host: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<DueNotification>>;
     /// The Slack worker's candidates: the dm notifications of pages to humans whose owner has a
     /// Slack member id, pending or badged (a bridge only badges a human), created in [since, now],
     /// unread by their human, and whose message has no [`SLACK_INSTANCE`] attempt that is final
@@ -911,9 +1023,19 @@ pub trait Tx {
     fn settle_read(&self, message_id: &str, recipient_id: &str) -> StoreResult<bool>;
     /// The same for every message of the channel up to `cursor` (the recipient's read cursor
     /// there); the number settled.
-    fn settle_read_in_channel(&self, channel_id: &str, recipient_id: &str, cursor: i64) -> StoreResult<u64>;
+    fn settle_read_in_channel(
+        &self,
+        channel_id: &str,
+        recipient_id: &str,
+        cursor: i64,
+    ) -> StoreResult<u64>;
     /// Sets the status and, when given, the next attempt time.
-    fn settle_notification(&self, id: &str, status: &str, next_attempt_at: Option<i64>) -> StoreResult<()>;
+    fn settle_notification(
+        &self,
+        id: &str,
+        status: &str,
+        next_attempt_at: Option<i64>,
+    ) -> StoreResult<()>;
     /// The push state of the DM `message_id` to `recipient`. Here and in [`Tx::latest_attempt`],
     /// [`Tx::deliveries`] and [`Tx::agent_health`], [`SLACK_INSTANCE`] attempts do not count: the
     /// Slack copy never changes what the board shows.
@@ -958,8 +1080,14 @@ pub trait Tx {
     fn attempt_owner(&self, id: &str) -> StoreResult<Option<(String, Option<String>, i64)>>;
     /// Sets status and reason, and last_event_seq when given.
     /// Sets status and reason, and last_event_seq when given; `at` is when the outcome was recorded.
-    fn update_attempt(&self, id: &str, status: &str, reason: Option<&str>, event_seq: Option<i64>, at: &str)
-    -> StoreResult<()>;
+    fn update_attempt(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&str>,
+        event_seq: Option<i64>,
+        at: &str,
+    ) -> StoreResult<()>;
     /// The notification's most recently created bridge attempt.
     fn latest_attempt(&self, notification_id: &str) -> StoreResult<Option<String>>;
     fn notifications(&self) -> StoreResult<Vec<NotificationRow>>;
@@ -975,8 +1103,13 @@ pub trait Tx {
     /// Fences every active bridge instance of `host` (announced on commit); returns them.
     fn fence_host(&self, host: &str, at: &str) -> StoreResult<Vec<String>>;
     /// Replaces the host's live endpoints with `endpoints` as (kind, target).
-    fn replace_endpoints(&self, host: &str, instance: &str, endpoints: &[(&str, &str)], at: &str)
-    -> StoreResult<()>;
+    fn replace_endpoints(
+        &self,
+        host: &str,
+        instance: &str,
+        endpoints: &[(&str, &str)],
+        at: &str,
+    ) -> StoreResult<()>;
     fn count_endpoints(&self) -> StoreResult<i64>;
 
     // web UI: owner-scoped reads (what the owner's own agents can read)
@@ -988,12 +1121,23 @@ pub trait Tx {
     fn owner_channel_threads(&self, owner_id: i64) -> StoreResult<Vec<ChannelThread>>;
     /// DMs between `agent_id` and `partner_id` (either way) before `before`, newest first; none
     /// unless `agent_id` belongs to `owner_id`.
-    fn owner_dm_history(&self, owner_id: i64, agent_id: &str, partner_id: &str, before: i64, limit: i64)
-    -> StoreResult<Vec<Message>>;
+    fn owner_dm_history(
+        &self,
+        owner_id: i64,
+        agent_id: &str,
+        partner_id: &str,
+        before: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>>;
     /// A channel's messages before `before`, newest first; none unless one of the owner's
     /// agents is a member.
-    fn owner_channel_history(&self, owner_id: i64, channel_id: &str, before: i64, limit: i64)
-    -> StoreResult<Vec<Message>>;
+    fn owner_channel_history(
+        &self,
+        owner_id: i64,
+        channel_id: &str,
+        before: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<Message>>;
     /// The message, when one of the owner's agents sent it, received it as a DM, or is a member
     /// of its channel.
     fn owner_message(&self, owner_id: i64, message_id: &str) -> StoreResult<Option<Message>>;
@@ -1015,8 +1159,15 @@ pub trait Tx {
     /// The newest messages over `ranges` (see [`feed_seqs_sql`]) with `after < seq < before`, at
     /// most `limit`, newest first (`oldest_first`: oldest first). The ranges decide what is read;
     /// the caller builds them from what the owner's agents can read.
-    fn owner_feed(&self, owner_id: i64, ranges: &[FeedRange], after: i64, before: i64, limit: i64, oldest_first: bool)
-    -> StoreResult<Vec<Message>>;
+    fn owner_feed(
+        &self,
+        owner_id: i64,
+        ranges: &[FeedRange],
+        after: i64,
+        before: i64,
+        limit: i64,
+        oldest_first: bool,
+    ) -> StoreResult<Vec<Message>>;
     /// The seqs of messages with `after < seq < before`, newest first, that the owner's agents can
     /// read and that have a notification in a problem status (held, denied, refused, gone, or
     /// pending after an attempt) for a recipient the owner may judge: any recipient of an own
@@ -1028,10 +1179,20 @@ pub trait Tx {
     fn messages_at(&self, seqs: &[i64]) -> StoreResult<Vec<Message>>;
     /// `id` and its ancestors through `reply_to` while the owner can read each, nearest first:
     /// (seq, id, reply_to). `id` itself is not checked (the caller has).
-    fn owner_thread_up(&self, owner_id: i64, id: &str) -> StoreResult<Vec<(i64, String, Option<String>)>>;
+    fn owner_thread_up(
+        &self,
+        owner_id: i64,
+        id: &str,
+    ) -> StoreResult<Vec<(i64, String, Option<String>)>>;
     /// The seqs of `top` and every message under it reached through messages the owner can read,
     /// above `after`, in seq order, at most `limit`.
-    fn owner_thread_down(&self, owner_id: i64, top: &str, after: i64, limit: i64) -> StoreResult<Vec<i64>>;
+    fn owner_thread_down(
+        &self,
+        owner_id: i64,
+        top: &str,
+        after: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<i64>>;
     /// Like [`Tx::search_scan`] over what the owner's agents can read (the
     /// [`Tx::owner_message`] rule), after `after`, oldest first.
     fn owner_search_scan(
@@ -1048,8 +1209,20 @@ pub trait Tx {
     /// Returns and deletes the code.
     fn take_mcp_code(&self, code_digest: &str) -> StoreResult<Option<McpCodeRow>>;
     fn insert_mcp_grant(&self, g: &McpGrantRow) -> StoreResult<()>;
-    fn insert_mcp_token(&self, token_digest: &str, grant_id: &str, audience: &str, expires_at: i64) -> StoreResult<()>;
-    fn insert_mcp_refresh(&self, digest: &str, grant_id: &str, issued_at: i64, expires_at: i64) -> StoreResult<()>;
+    fn insert_mcp_token(
+        &self,
+        token_digest: &str,
+        grant_id: &str,
+        audience: &str,
+        expires_at: i64,
+    ) -> StoreResult<()>;
+    fn insert_mcp_refresh(
+        &self,
+        digest: &str,
+        grant_id: &str,
+        issued_at: i64,
+        expires_at: i64,
+    ) -> StoreResult<()>;
     fn mcp_grant(&self, grant_id: &str) -> StoreResult<Option<McpGrantRow>>;
     /// The access token's (grant_id, audience, expires_at).
     fn mcp_token(&self, token_digest: &str) -> StoreResult<Option<(String, String, i64)>>;
@@ -1164,7 +1337,11 @@ pub struct PendingSignal {
 
 impl Default for PendingSignal {
     fn default() -> PendingSignal {
-        PendingSignal { tx: broadcast::channel(256).0, generation: Mutex::new(0), changed: Condvar::new() }
+        PendingSignal {
+            tx: broadcast::channel(256).0,
+            generation: Mutex::new(0),
+            changed: Condvar::new(),
+        }
     }
 }
 
@@ -1179,7 +1356,9 @@ impl PendingSignal {
     }
 
     pub fn subscribe(&self) -> PendingWatch {
-        PendingWatch { rx: self.tx.subscribe() }
+        PendingWatch {
+            rx: self.tx.subscribe(),
+        }
     }
 
     /// Every event, fences included (the server's connection registry).
@@ -1198,7 +1377,11 @@ impl PendingSignal {
             if left.is_zero() {
                 return false;
             }
-            generation = self.changed.wait_timeout(generation, left).unwrap_or_else(|e| e.into_inner()).0;
+            generation = self
+                .changed
+                .wait_timeout(generation, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
         true
     }

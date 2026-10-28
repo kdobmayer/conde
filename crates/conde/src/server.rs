@@ -12,17 +12,17 @@ use std::sync::Arc;
 
 #[cfg(unix)]
 use anyhow::{Context, bail};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::io::BufReader;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(unix)]
 use crate::dispatch::{Dispatcher, Principal};
+use crate::protocol::Response;
 #[cfg(unix)]
 use crate::protocol::{ErrorCode, MAX_FRAME, Request};
-use crate::protocol::Response;
 #[cfg(unix)]
 use crate::util::{own_euid, same_user};
 
@@ -43,13 +43,18 @@ pub fn bind(path: &Path) -> anyhow::Result<UnixListener> {
         }
         std::fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?;
     }
-    let listener = UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(listener)
 }
 
 #[cfg(unix)]
-pub async fn serve(listener: UnixListener, dispatcher: Arc<Dispatcher>, principal: Principal) -> anyhow::Result<()> {
+pub async fn serve(
+    listener: UnixListener,
+    dispatcher: Arc<Dispatcher>,
+    principal: Principal,
+) -> anyhow::Result<()> {
     let uid = own_euid();
     loop {
         let (stream, _) = listener.accept().await?;
@@ -74,12 +79,22 @@ async fn connection(stream: UnixStream, dispatcher: Arc<Dispatcher>, principal: 
                     let (d, p) = (dispatcher.clone(), principal.clone());
                     tokio::task::spawn_blocking(move || d.dispatch(&p, &req))
                         .await
-                        .unwrap_or_else(|e| Response::err("", ErrorCode::Internal, format!("dispatch panicked: {e}")))
+                        .unwrap_or_else(|e| {
+                            Response::err(
+                                "",
+                                ErrorCode::Internal,
+                                format!("dispatch panicked: {e}"),
+                            )
+                        })
                 }
                 Err(e) => Response::err("", ErrorCode::BadRequest, format!("bad frame: {e}")),
             },
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                let resp = Response::err("", ErrorCode::TooLarge, format!("frame exceeds {MAX_FRAME} bytes"));
+                let resp = Response::err(
+                    "",
+                    ErrorCode::TooLarge,
+                    format!("frame exceeds {MAX_FRAME} bytes"),
+                );
                 let _ = write_frame(&mut write, &resp).await;
                 return;
             }
@@ -99,7 +114,10 @@ async fn write_frame(w: &mut (impl AsyncWriteExt + Unpin), resp: &Response) -> i
 }
 
 /// One newline-terminated frame, or None at EOF; InvalidData past `max`.
-pub async fn read_frame(r: &mut (impl AsyncBufRead + Unpin), max: usize) -> io::Result<Option<Vec<u8>>> {
+pub async fn read_frame(
+    r: &mut (impl AsyncBufRead + Unpin),
+    max: usize,
+) -> io::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
     loop {
         let available = r.fill_buf().await?;
@@ -111,7 +129,10 @@ pub async fn read_frame(r: &mut (impl AsyncBufRead + Unpin), max: usize) -> io::
         buf.extend_from_slice(&available[..take]);
         r.consume(newline.map_or(take, |pos| pos + 1));
         if buf.len() > max {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
         }
         if newline.is_some() {
             return Ok(Some(buf));

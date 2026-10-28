@@ -1,6 +1,6 @@
 //! The admin API under `/v1/admin`, authenticated by the `CONDE_ADMIN_KEY` bearer: mint, list
-//! and revoke host keys, pre-create (or bind) users by Entra identity, disable and enable
-//! users. The key is compared through its digest in constant time and never logged; every
+//! and revoke host keys, invite users by email, bind users to an identity, list, disable and
+//! enable users. The key is compared through its digest in constant time and never logged; every
 //! answer is `no-store`.
 
 use std::sync::Arc;
@@ -17,17 +17,25 @@ use serde_json::{Value, json};
 use super::auth::base_name;
 use super::keys::{MintError, host_slug, mint};
 use super::session::digest;
-use super::{BindUser, Clock, ConfigError, Core, CreateUser, Identity, WebStore};
-use super::{BridgeRegistry, WebUser};
+use super::{
+    BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, WebConfig, WebStore,
+};
+use super::{BridgeRegistry, WebUser, entra_issuer};
 
 /// The shortest admin key accepted.
 pub(crate) const MIN_KEY_LEN: usize = 32;
 
+/// The sign-in issuer bindings are checked against.
+struct Issuer {
+    url: String,
+    entra_tenant: Option<String>,
+}
+
 struct Inner {
     core: Core,
     key_digest: String,
-    /// With Entra configured, pre-created identities must be in its tenant.
-    tenant: Option<String>,
+    /// With sign-in configured, bound identities must be of its issuer.
+    issuer: Option<Issuer>,
 }
 
 /// Shared state of the admin routes.
@@ -35,20 +43,24 @@ struct Inner {
 pub struct AdminState(Arc<Inner>);
 
 impl AdminState {
-    pub(crate) fn new(core: Core, key: &str, tenant: Option<String>) -> AdminState {
+    pub(crate) fn new(core: Core, key: &str, sign_in: Option<&WebConfig>) -> AdminState {
         AdminState(Arc::new(Inner {
             core,
             key_digest: digest(key),
-            tenant,
+            issuer: sign_in.map(|c| Issuer {
+                url: c.issuer.clone(),
+                entra_tenant: c.entra_tenant.clone(),
+            }),
         }))
     }
 
-    /// The admin API over `store` with `key` (at least 32 characters) and a given clock.
+    /// The admin API over `store` with `key` (at least 32 characters), the sign-in it binds
+    /// identities for, and a given clock.
     pub fn with_clock(
         store: Arc<dyn WebStore>,
         registry: Arc<dyn BridgeRegistry>,
         key: &str,
-        tenant: Option<String>,
+        sign_in: Option<&WebConfig>,
         clock: Clock,
     ) -> Result<AdminState, ConfigError> {
         if key.len() < MIN_KEY_LEN {
@@ -59,7 +71,7 @@ impl AdminState {
             registry,
             clock,
         };
-        Ok(AdminState::new(core, key, tenant))
+        Ok(AdminState::new(core, key, sign_in))
     }
 
     fn core(&self) -> &Core {
@@ -139,7 +151,7 @@ pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/v1/admin/keys", get(list_keys).post(create_key))
         .route("/v1/admin/keys/{id}/revoke", post(revoke_key))
-        .route("/v1/admin/users", post(create_user))
+        .route("/v1/admin/users", get(list_users).post(create_user))
         .route("/v1/admin/users/{name}/disable", post(disable_user))
         .route("/v1/admin/users/{name}/enable", post(enable_user))
         .route("/v1/admin/users/{name}/slack", post(set_slack))
@@ -246,13 +258,25 @@ async fn revoke_key(State(state): State<AdminState>, Path(id): Path<String>) -> 
 
 #[derive(Deserialize)]
 struct CreateUserRequest {
-    tid: String,
-    oid: String,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    /// The Entra form of `issuer` (the tenant), for older callers.
+    #[serde(default)]
+    tid: Option<String>,
+    /// The Entra form of `subject` (the object id), for older callers.
+    #[serde(default)]
+    oid: Option<String>,
+    /// The invite's email.
+    #[serde(default)]
+    email: Option<String>,
     #[serde(default)]
     display: Option<String>,
     #[serde(default)]
     preferred_username: Option<String>,
-    /// Bind this existing user (or create it under this name) instead of deriving a name.
+    /// The invited user, or the existing user to bind (or create under this name) instead of
+    /// deriving a name.
     #[serde(default)]
     name: Option<String>,
 }
@@ -264,51 +288,106 @@ fn user_reply(status: StatusCode, user: &WebUser, outcome: &str) -> Response {
     )
 }
 
-/// `POST /v1/admin/users {tid, oid, display, preferred_username?, name?}`: pre-creates the
-/// user an Entra identity signs in as, or binds an existing user (`name`) to it once.
+fn bad_request(message: &str) -> Response {
+    fail(StatusCode::BAD_REQUEST, "bad_request", message)
+}
+
+/// An email address as an invite takes it: trimmed, one `@` between a local part and a domain,
+/// no spaces or control characters, at most 254 characters.
+pub(crate) fn email_address(input: &str) -> Option<String> {
+    let email = input.trim();
+    let ok = email.len() <= 254
+        && !email.chars().any(|c| c.is_whitespace() || c.is_control())
+        && email.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+        });
+    ok.then(|| email.to_string())
+}
+
+/// The issuer a binding request names: `{issuer, subject}`, or Entra's `{tid, oid}` mapped to
+/// the tenant's issuer; with sign-in configured, it must be the configured issuer.
+fn binding_key(state: &AdminState, req: &CreateUserRequest) -> Result<(String, String), String> {
+    let configured = state.0.issuer.as_ref();
+    match (&req.issuer, &req.subject, &req.tid, &req.oid) {
+        (Some(issuer), Some(subject), None, None) => {
+            let issuer = issuer.trim();
+            let url_ok = (issuer.starts_with("https://") || issuer.starts_with("http://"))
+                && issuer.len() <= 512
+                && !issuer.chars().any(|c| c.is_whitespace() || c.is_control());
+            if !url_ok {
+                return Err("issuer is the provider's issuer URL".into());
+            }
+            if configured.is_some_and(|c| c.url != issuer) {
+                return Err("issuer is not the configured issuer".into());
+            }
+            if configured.is_none() && !issuer.starts_with("https://") {
+                return Err("issuer is the provider's https issuer URL".into());
+            }
+            if subject.is_empty() || subject.len() > 255 || subject.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err("subject is the identity's sub claim, 1 to 255 characters".into());
+            }
+            Ok((issuer.to_string(), subject.clone()))
+        }
+        (None, None, Some(tid), Some(oid)) => {
+            let valid = |s: &str| {
+                (1..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            };
+            if !valid(tid) || !valid(oid) {
+                return Err("tid and oid are directory GUIDs".into());
+            }
+            match configured {
+                None => Ok((entra_issuer(tid), oid.clone())),
+                Some(Issuer { url, entra_tenant: Some(tenant) }) if tenant == tid => Ok((url.clone(), oid.clone())),
+                Some(Issuer { entra_tenant: Some(_), .. }) => Err("tid is not the configured tenant".into()),
+                Some(Issuer { url, entra_tenant: None }) => Err(format!("this board signs in with {url}, not Entra; pass issuer and subject")),
+            }
+        }
+        _ => Err(
+            "pass {name, email} to invite a user, or {issuer, subject} (or Entra's {tid, oid}) to bind an identity".into(),
+        ),
+    }
+}
+
+/// `POST /v1/admin/users`: `{name, email}` invites a user (created with the email the first
+/// sign-in must verify); `{issuer, subject, display?, preferred_username?, name?}` (or Entra's
+/// `{tid, oid, ...}`) pre-creates the user an identity signs in as, or binds an existing user
+/// (`name`) to it once per issuer.
 async fn create_user(
     State(state): State<AdminState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Response {
-    let valid = |s: &str| {
-        (1..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    let binding = [&req.issuer, &req.subject, &req.tid, &req.oid]
+        .iter()
+        .any(|v| v.is_some());
+    if !binding {
+        return invite_user(state, req).await;
+    }
+    if req.email.is_some() {
+        return bad_request("email goes with the invite, {name, email}, not with an identity");
+    }
+    let (issuer, subject) = match binding_key(&state, &req) {
+        Ok(key) => key,
+        Err(message) => return bad_request(&message),
     };
-    if !valid(&req.tid) || !valid(&req.oid) {
-        return fail(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "tid and oid are directory GUIDs",
-        );
-    }
-    if state.0.tenant.as_deref().is_some_and(|t| t != req.tid) {
-        return fail(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "tid is not the configured tenant",
-        );
-    }
     let name = match req.name.as_deref().map(owner_name) {
-        Some(None) => {
-            return fail(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "name must be [a-z0-9_-], 1 to 40 characters",
-            );
-        }
+        Some(None) => return bad_request("name must be [a-z0-9_-], 1 to 40 characters"),
         other => other.flatten(),
     };
     let preferred_username = req.preferred_username.filter(|u| !u.trim().is_empty());
+    // the admin vouches for the address it gives
+    let email = super::auth::lookup_email(preferred_username.as_deref(), None);
     let identity = Identity {
-        tid: req.tid,
-        oid: req.oid,
+        issuer,
+        subject,
         display_name: req.display.filter(|d| !d.trim().is_empty()),
-        email: super::auth::lookup_email(preferred_username.as_deref(), None),
+        verified_email: email.clone(),
+        email,
         preferred_username,
     };
     let result = state
         .core()
         .store(move |s| {
-            if let Some(user) = s.user_by_identity(&identity.tid, &identity.oid)? {
+            if let Some(user) = s.user_by_identity(&identity.issuer, &identity.subject)? {
                 if name.as_ref().is_some_and(|n| *n != user.name) {
                     return Ok(Err(format!("the identity is already bound to '{}'", user.name)));
                 }
@@ -318,7 +397,7 @@ async fn create_user(
                 return Ok(match s.bind_identity(&name, &identity)? {
                     BindUser::Created(u) => Ok((u, "created")),
                     BindUser::Bound(u) => Ok((u, "bound")),
-                    BindUser::NameBound => Err(format!("'{name}' is bound to another identity")),
+                    BindUser::NameBound => Err(format!("'{name}' is bound to another identity of this issuer")),
                 });
             }
             let base = base_name(&identity);
@@ -343,6 +422,58 @@ async fn create_user(
             user_reply(StatusCode::OK, &user, outcome)
         }
         Ok(Err(conflict)) => fail(StatusCode::CONFLICT, "conflict", &conflict),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// The invite form of `POST /v1/admin/users`: `{name, email}`.
+async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
+    let (Some(name), Some(email)) = (req.name.as_deref(), req.email.as_deref()) else {
+        return bad_request("an invite is {name, email}");
+    };
+    let Some(name) = owner_name(name) else {
+        return bad_request("name must be [a-z0-9_-], 1 to 40 characters");
+    };
+    let Some(email) = email_address(email) else {
+        return bad_request("email must be an address like name@example.com");
+    };
+    let (target, address) = (name.clone(), email.clone());
+    let result = state
+        .core()
+        .store(move |s| s.invite_user(&target, &address))
+        .await;
+    let (user, outcome) = match result {
+        Ok(Invited::Created(u)) => (u, "invited"),
+        Ok(Invited::EmailSet(u)) => (u, "email set"),
+        Ok(Invited::Exists(u)) => (u, "exists"),
+        Ok(Invited::OtherEmail(other)) => {
+            return fail(
+                StatusCode::CONFLICT,
+                "conflict",
+                &format!("'{name}' exists with another email ({other})"),
+            );
+        }
+        Ok(Invited::EmailTaken(other)) => {
+            return fail(
+                StatusCode::CONFLICT,
+                "conflict",
+                &format!("user '{other}' has this email already"),
+            );
+        }
+        Err(e) => return store_failed(e),
+    };
+    tracing::info!(user = %user.name, outcome, "admin invited a user");
+    reply(
+        StatusCode::OK,
+        json!({"user": user.name, "email": email, "status": outcome, "disabled": user.disabled}),
+    )
+}
+
+/// `GET /v1/admin/users`: every user with their email, the issuers they are bound to, and
+/// whether they are disabled.
+async fn list_users(State(state): State<AdminState>) -> Response {
+    match state.core().store(|s| s.list_users()).await {
+        Ok(users) => reply(StatusCode::OK, json!({"users": users})),
         Err(e) => store_failed(e),
     }
 }
@@ -396,24 +527,41 @@ fn member_id(input: &str) -> Option<String> {
     let id = input.trim();
     let ok = (3..=32).contains(&id.len())
         && id.starts_with(['U', 'W'])
-        && id.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        && id
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
     ok.then(|| id.to_string())
 }
 
 /// `POST /v1/admin/users/{name}/slack {member_id}`: the Slack member id pages to the user's human
 /// reach; set by the admin, it is never replaced by a lookup by email.
-async fn set_slack(State(state): State<AdminState>, Path(name): Path<String>, Json(req): Json<SlackMember>) -> Response {
+async fn set_slack(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+    Json(req): Json<SlackMember>,
+) -> Response {
     let Some(name) = owner_name(&name) else {
         return fail(StatusCode::BAD_REQUEST, "bad_request", "bad user name");
     };
     let Some(id) = member_id(&req.member_id) else {
-        return fail(StatusCode::BAD_REQUEST, "bad_request", "member_id is a Slack member id (U... or W...)");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "member_id is a Slack member id (U... or W...)",
+        );
     };
     let (target, member) = (name.clone(), id.clone());
-    match state.core().store(move |s| s.set_slack_member(&target, &member)).await {
+    match state
+        .core()
+        .store(move |s| s.set_slack_member(&target, &member))
+        .await
+    {
         Ok(Some(user)) => {
             tracing::info!(user = %user.name, "admin set the user's Slack member id");
-            reply(StatusCode::OK, json!({"user": user.name, "slack_member_id": id, "slack_source": "admin"}))
+            reply(
+                StatusCode::OK,
+                json!({"user": user.name, "slack_member_id": id, "slack_source": "admin"}),
+            )
         }
         Ok(None) => fail(StatusCode::NOT_FOUND, "not_found", "no such user"),
         Err(e) => store_failed(e),
@@ -430,6 +578,25 @@ mod tests {
         assert_eq!(member_id("W99").as_deref(), Some("W99"));
         for bad in ["", "U1", "u0123", "C0123ABC", "U01 23", "U0123abc"] {
             assert_eq!(member_id(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn invite_emails() {
+        assert_eq!(
+            email_address(" Ann.B@Example.com ").as_deref(),
+            Some("Ann.B@Example.com")
+        );
+        for bad in [
+            "",
+            "ann",
+            "@example.com",
+            "ann@",
+            "a@b@c",
+            "ann b@example.com",
+            "ann\u{7}@x.io",
+        ] {
+            assert_eq!(email_address(bad), None, "{bad}");
         }
     }
 

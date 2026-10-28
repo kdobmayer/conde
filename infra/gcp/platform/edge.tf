@@ -73,6 +73,18 @@ resource "google_compute_security_policy" "web" {
     }
   }
 
+  # Argo CD has its own sign-in, but its host is an admin surface: allowlisted addresses only until IAP (S4).
+  rule {
+    priority    = 1003
+    action      = "deny(403)"
+    description = "Argo CD host only from admin_cidrs"
+    match {
+      expr {
+        expression = "request.headers['host'].lower().startsWith('argocd.conde.cloud') && !(${local.admin_from_allowlist})"
+      }
+    }
+  }
+
   # Keycloak normalises percent-encoded dot segments (`/realms/demo/%2e%2e/master/...` serves the master
   # realm). Cloud Armor evaluates the normalised path, so rule 1000 already catches that (verified from a
   # non-allowlisted address); this rule is defence in depth should that evaluation ever change.

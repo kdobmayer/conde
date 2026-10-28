@@ -131,29 +131,27 @@
 
 <div class="feedpage">
 	<FeedList bind:this={list} {feed} {filters} filterPath={path} selected={threadId} {inThread} {link} onopen={open} onfilters={setFilters} />
-	{#if wide.current}
-		{#if view && threadId}
-			<aside class="side" aria-label="Thread">
-				<Thread bind:this={aside} {view} selected={threadId} {link} onopen={open} onclose={close} />
-			</aside>
-		{/if}
-	{:else}
-		<div class="sheet">
-			<Sheet
-				label={title}
-				bind:open={
-					() => threadId !== null,
-					(v) => {
-						if (!v) close();
-					}
-				}
-			>
-				{#if view && threadId}
-					<Thread {view} selected={threadId} inSheet {link} onopen={open} />
-				{/if}
-			</Sheet>
-		</div>
+	{#if wide.current && view && threadId}
+		<aside class="side" aria-label="Thread">
+			<Thread bind:this={aside} {view} selected={threadId} {link} onopen={open} onclose={close} />
+		</aside>
 	{/if}
+	<!-- mounted at every width: widening closes it through `open`, so it leaves its history entry -->
+	<div class="sheet">
+		<Sheet
+			label={title}
+			bind:open={
+				() => !wide.current && threadId !== null,
+				(v) => {
+					if (!v && !wide.current) close();
+				}
+			}
+		>
+			{#if view && threadId}
+				<Thread {view} selected={threadId} inSheet {link} onopen={open} />
+			{/if}
+		</Sheet>
+	</div>
 </div>
 
 <style>

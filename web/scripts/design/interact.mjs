@@ -1,5 +1,6 @@
-// Design-only: drives the primitives harness (routes/_design/primitives) and the Feed headless, by
-// keyboard at 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844, and exits
+// Drives the app's Feed and Fleet pages headless on the mock API: the filter menu, the thread
+// beside the Feed and in the sheet, the disclosure, the error line and the live announcer, by
+// keyboard at 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844. Exits
 // non-zero when a check fails. Serves the built app through mock-server.mjs.
 // Usage: node scripts/design/interact.mjs [build-dir]
 // Needs playwright-core 1.64.0 (npm i --no-save) and a Chromium headless shell (CHROME, as in
@@ -16,7 +17,6 @@ const port = 5900 + Math.floor(Math.random() * 90);
 const args = [join(here, 'mock-server.mjs'), ...(process.argv[2] ? [process.argv[2]] : [join(here, '../../../crates/conde-remote/web-dist')]), String(port)];
 const mock = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((resolve) => mock.stdout.once('data', resolve));
-const URL = `http://127.0.0.1:${port}/#/_design/primitives`;
 
 const executablePath =
 	process.env.CHROME ??
@@ -39,23 +39,6 @@ function expect(cond, what) {
 	if (!cond) throw new Error(what);
 }
 
-async function open(size) {
-	where = `${size.width}`;
-	const context = await browser.newContext({
-		viewport: size,
-		...(size.width < 720 ? { isMobile: true, hasTouch: true } : {}),
-		reducedMotion: 'reduce'
-	});
-	const page = await context.newPage();
-	page.on('pageerror', (e) => {
-		failed++;
-		console.log(`not ok  page error: ${e.message}`);
-	});
-	await page.goto(URL, { waitUntil: 'networkidle' });
-	await page.waitForSelector('[data-test=open-sheet]');
-	return { context, page };
-}
-
 /** Facts about the focused element and the page, read in the browser. */
 const focus = (page) =>
 	page.evaluate(() => {
@@ -70,267 +53,20 @@ const focus = (page) =>
 			active: a?.getAttribute('aria-activedescendant') ? document.getElementById(a.getAttribute('aria-activedescendant'))?.textContent?.trim() : null
 		};
 	});
-const filters = (page) => page.locator('[data-test=filters]').textContent();
 const listboxes = (page) => page.locator('[role=listbox]').count();
-const dialogOpen = (page) => page.evaluate(() => document.querySelector('[data-test=main-sheet] dialog')?.open ?? false);
-const pageState = (page) => page.locator('[data-test=page-state]').textContent();
 const settle = (page) => page.waitForTimeout(400);
 const box = (page, sel) => page.locator(sel).boundingBox();
-
-// ---- desktop, keyboard ----
-{
-	const { context, page } = await open({ width: 1440, height: 900 });
-	const dirButton = page.locator('[data-test=menu-dir] button');
-
-	await check('filter menu: Tab reaches the menu button', async () => {
-		await page.locator('[data-test=menu-agent] button').focus();
-		await page.keyboard.press('Tab');
-		const f = await focus(page);
-		expect(f.test === 'menu-dir' && f.tag === 'button', `focus on ${JSON.stringify(f)}`);
-	});
-	await check('filter menu: Enter opens at the selected option, focus in the list', async () => {
-		await page.keyboard.press('Enter');
-		const f = await focus(page);
-		expect((await listboxes(page)) === 1, 'no listbox');
-		expect((await dirButton.getAttribute('aria-expanded')) === 'true', 'aria-expanded not true');
-		expect(f.role === 'listbox' && f.active === 'all', `focus ${JSON.stringify(f)}`);
-	});
-	await check('filter menu: arrows, Home and End move; ArrowUp stops at the top', async () => {
-		const seen = [];
-		for (const key of ['ArrowDown', 'ArrowDown', 'ArrowUp', 'End', 'Home', 'ArrowUp']) {
-			await page.keyboard.press(key);
-			seen.push((await focus(page)).active);
-		}
-		expect(seen.join(',') === 'received,sent,received,between yours,all,all', seen.join(','));
-	});
-	await check('filter menu: Enter selects, closes and returns focus to the button', async () => {
-		await page.keyboard.press('ArrowDown');
-		await page.keyboard.press('Enter');
-		const f = await focus(page);
-		expect((await listboxes(page)) === 0, 'list still open');
-		expect(f.test === 'menu-dir' && f.tag === 'button', `focus ${JSON.stringify(f)}`);
-		expect((await filters(page)) === 'agent=all;dir=in', await filters(page));
-		expect((await dirButton.textContent()).includes('received'), 'button does not show the value');
-	});
-	await check('filter menu: Space opens; Escape closes without a change, focus on the button', async () => {
-		await page.keyboard.press(' ');
-		expect((await focus(page)).active === 'received', 'opened away from the selected option');
-		await page.keyboard.press('ArrowDown');
-		await page.keyboard.press('Escape');
-		const f = await focus(page);
-		expect((await listboxes(page)) === 0, 'list still open');
-		expect(f.test === 'menu-dir' && f.tag === 'button', `focus ${JSON.stringify(f)}`);
-		expect((await filters(page)) === 'agent=all;dir=in', await filters(page));
-	});
-	await check('filter menu: ArrowDown opens; Tab closes it and moves on to the next control', async () => {
-		await page.keyboard.press('ArrowDown');
-		expect((await listboxes(page)) === 1, 'ArrowDown did not open');
-		await page.keyboard.press('Tab');
-		expect((await listboxes(page)) === 0, 'Tab left it open');
-		const f = await focus(page);
-		expect(f.test === 'open-sheet', `focus ${JSON.stringify(f)}`);
-	});
-	await check('filter menu: a press outside closes it', async () => {
-		await dirButton.focus();
-		await page.keyboard.press('Enter');
-		await page.mouse.click(5, 880);
-		expect((await listboxes(page)) === 0, 'still open');
-	});
-
-	const hash = await page.evaluate(() => location.hash);
-	await check('sheet: Enter opens it as a modal dialog with focus inside', async () => {
-		await page.locator('[data-test=open-sheet]').focus();
-		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
-		const f = await focus(page);
-		expect(f.inDialog, `focus ${JSON.stringify(f)}`);
-	});
-	await check('sheet: from 720 px it is a 500 px panel on the right, full height', async () => {
-		const b = await box(page, 'dialog');
-		expect(Math.round(b.x + b.width) === 1440 && Math.round(b.width) === 500 && Math.round(b.height) === 900, JSON.stringify(b));
-	});
-	await check('sheet: Tab and Shift+Tab stay inside', async () => {
-		for (const key of [...Array(8).fill('Tab'), ...Array(8).fill('Shift+Tab')]) {
-			await page.keyboard.press(key);
-			const f = await focus(page);
-			expect(f.inDialog, `after ${key}: ${JSON.stringify(f)}`);
-		}
-	});
-	await check('sheet: the page behind is inert', async () => {
-		const b = await box(page, '[data-test=behind]');
-		await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
-		expect((await page.locator('[data-test=behind]').textContent()).includes('(0)'), 'the button behind took the click');
-		expect(await dialogOpen(page), 'a click behind closed it');
-	});
-	await check('sheet: nothing animates (reduced motion)', async () => {
-		const n = await page.evaluate(() => document.getAnimations().length);
-		expect(n === 0, `${n} animations`);
-	});
-	await check('sheet: Escape closes it; focus returns to the opener; the URL is unchanged', async () => {
-		await page.keyboard.press('Escape');
-		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
-		const f = await focus(page);
-		expect(f.test === 'open-sheet', `focus ${JSON.stringify(f)}`);
-		expect((await page.evaluate(() => location.hash)) === hash, await page.evaluate(() => location.hash));
-	});
-	await check('sheet: browser back closes it; focus returns to the opener', async () => {
-		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
-		await page.goBack();
-		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
-		const f = await focus(page);
-		expect(f.test === 'open-sheet', `focus ${JSON.stringify(f)}`);
-		expect((await page.evaluate(() => location.hash)) === hash, 'left the page');
-	});
-	await check('sheet: Close closes it; reopening still works', async () => {
-		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
-		await page.locator('[data-test=main-sheet] dialog header button').click();
-		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
-		expect((await focus(page)).test === 'open-sheet', 'focus not on the opener');
-		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
-		await page.keyboard.press('Escape');
-		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
-	});
-	await check('sheet: the parent closing it at once leaves no history entry behind', async () => {
-		await page.locator('[data-test=race-parent]').click();
-		await settle(page);
-		expect(!(await dialogOpen(page)), 'still open');
-		expect((await pageState(page)) === '{}', `history state ${await pageState(page)}`);
-	});
-	await check('sheet: Close before the history entry exists keeps the page and closes once it does', async () => {
-		await page.locator('[data-test=race-dismiss]').click();
-		await settle(page);
-		expect((await page.evaluate(() => location.hash)) === hash, `left the page: ${page.url()}`);
-		if (await dialogOpen(page)) {
-			await page.keyboard.press('Escape');
-			await settle(page);
-		}
-		expect(!(await dialogOpen(page)), 'still open');
-		expect((await pageState(page)) === '{}', `history state ${await pageState(page)}`);
-	});
-	await check('sheet: closed by the parent, reopened, then back closes it', async () => {
-		await page.locator('[data-test=parent-later]').click();
-		await settle(page);
-		expect(!(await dialogOpen(page)), 'the parent did not close it');
-		expect((await pageState(page)) === '{}', `history state after the parent closed it: ${await pageState(page)}`);
-		await page.locator('[data-test=open-sheet]').focus();
-		await page.keyboard.press('Enter');
-		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
-		await settle(page);
-		await page.goBack();
-		await settle(page);
-		expect(!(await dialogOpen(page)), 'back left it open');
-		expect((await page.evaluate(() => location.hash)) === hash, 'left the page');
-	});
-	await check('sheet: mounted with open set, it stays open and back closes it', async () => {
-		await page.locator('[data-test=mount-open]').click();
-		await settle(page);
-		const mounted = () => page.evaluate(() => document.querySelector('[data-test=mounted-sheet] dialog')?.open ?? false);
-		expect(await mounted(), 'closed itself');
-		await page.goBack();
-		await settle(page);
-		expect(!(await mounted()), 'back left it open');
-		expect((await page.evaluate(() => location.hash)) === hash, 'left the page');
-		expect((await pageState(page)) === '{}', `history state ${await pageState(page)}`);
-	});
-
-	await check('disclosure: Enter and Space toggle aria-expanded and the region', async () => {
-		const toggle = page.locator('[data-test=disc-konstantin] button');
-		const region = page.locator('[data-test=disc-konstantin] [id$=-region]');
-		await toggle.focus();
-		expect((await toggle.getAttribute('aria-expanded')) === 'false' && !(await region.isVisible()), 'not closed at first');
-		await page.keyboard.press('Enter');
-		expect((await toggle.getAttribute('aria-expanded')) === 'true' && (await region.isVisible()), 'Enter did not open it');
-		await page.keyboard.press(' ');
-		expect((await toggle.getAttribute('aria-expanded')) === 'false' && !(await region.isVisible()), 'Space did not close it');
-	});
-	await check('error line: Retry by keyboard calls retry', async () => {
-		await page.getByRole('button', { name: 'Retry' }).focus();
-		await page.keyboard.press('Enter');
-		expect((await page.locator('[data-test=retries]').textContent()) === '1', 'retry not called');
-		expect(/as of \d\d:\d\d/.test(await page.getByRole('alert').textContent()), 'no "as of hh:mm"');
-	});
-	await check('announcer: arrivals are said in a polite live region', async () => {
-		await page.locator('[data-test=arrive]').click();
-		expect((await page.locator('[aria-live=polite]').textContent()) === '2 new messages', 'not announced');
-	});
-	await context.close();
-}
-
-// ---- 1180: the overlay ----
-{
-	const { context, page } = await open({ width: 1180, height: 820 });
-	await check('sheet at 1180: a 500 px overlay on the right, modal', async () => {
-		await page.locator('[data-test=open-sheet]').click();
-		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
-		const b = await box(page, 'dialog');
-		expect(Math.round(b.x + b.width) === 1180 && Math.round(b.width) === 500 && Math.round(b.height) === 820, JSON.stringify(b));
-		expect(!(await page.locator('dialog .handle').isVisible()), 'the handle shows on the overlay');
-		await page.keyboard.press('Escape');
-		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
-	});
-	await context.close();
-}
-
-// ---- phone, touch ----
-{
-	const { context, page } = await open({ width: 390, height: 844 });
-	await check('filter menu by touch: tap opens, tapping an option selects and closes', async () => {
-		await page.locator('[data-test=menu-dir] button').tap();
-		expect((await listboxes(page)) === 1, 'tap did not open');
-		await page.getByRole('option', { name: 'between yours' }).tap();
-		expect((await listboxes(page)) === 0, 'still open');
-		expect((await filters(page)) === 'agent=all;dir=own', await filters(page));
-	});
-	await check('sheet by touch: a bottom sheet over the page', async () => {
-		await page.locator('[data-test=open-sheet]').tap();
-		await page.waitForFunction(() => document.querySelector('[data-test=main-sheet] dialog')?.open);
-		const b = await box(page, 'dialog');
-		expect(Math.round(b.width) === 390 && Math.round(b.y + b.height) === 844 && b.height < 844 * 0.8, JSON.stringify(b));
-	});
-	await check('sheet by touch: the page behind takes no tap', async () => {
-		const sheet = await box(page, '[data-test=main-sheet] dialog');
-		const b = await box(page, '[data-test=behind]');
-		const [x, y] = [b.x + b.width / 2, b.y + b.height / 2];
-		expect(y < sheet.y, `the button behind is under the sheet (${y} >= ${sheet.y})`);
-		await page.touchscreen.tap(x, y);
-		expect((await page.locator('[data-test=behind]').textContent()).includes('(0)'), 'behind took it');
-		expect(await dialogOpen(page), 'a tap behind closed it');
-	});
-	await check('sheet by touch: the handle toggles full height', async () => {
-		const handle = page.locator('dialog .handle');
-		await handle.tap();
-		let b = await box(page, 'dialog');
-		expect(Math.round(b.height) === 844 && (await handle.getAttribute('aria-expanded')) === 'true', JSON.stringify(b));
-		await handle.tap();
-		b = await box(page, 'dialog');
-		expect(b.height < 844 * 0.8 && (await handle.getAttribute('aria-expanded')) === 'false', JSON.stringify(b));
-	});
-	await check('sheet by touch: back closes it', async () => {
-		await page.goBack();
-		await page.waitForFunction(() => !document.querySelector('[data-test=main-sheet] dialog')?.open);
-		expect((await focus(page)).test === 'open-sheet', 'focus not on the opener');
-	});
-	await check('disclosure by touch: tap toggles', async () => {
-		const toggle = page.locator('[data-test=disc-balazs] button');
-		await toggle.tap();
-		expect((await toggle.getAttribute('aria-expanded')) === 'true', 'tap did not open');
-		await toggle.tap();
-		expect((await toggle.getAttribute('aria-expanded')) === 'false', 'tap did not close');
-	});
-	await context.close();
-}
 
 // ---- the Feed (U9): rows, the thread beside it, the sheet below 1280 px ----
 const FEED = `http://127.0.0.1:${port}/`;
 // the fixture's clock, as in shoot.mjs, so day groups and times are stable
 const NOW = new Date('2026-10-14T12:20:00Z');
 
-/** A page on the Feed at `hash`, with every owner.feed call it makes counted. */
-async function openFeed(size, hash = '#/') {
-	where = `feed ${size.width}`;
+/** A page on the Feed at `hash`, with every owner.feed call it makes counted. `fixed` holds the
+ * clock at the fixture's NOW; a check that needs a refresh pass runs on the real clock, since
+ * the pass cadence is measured on it. */
+async function openFeed(size, hash = '#/', { fixed = true, label = 'feed', wait = '.col [data-id]' } = {}) {
+	where = `${label} ${size.width}`;
 	const context = await browser.newContext({
 		viewport: size,
 		...(size.width < 720 ? { isMobile: true, hasTouch: true } : {}),
@@ -339,7 +75,7 @@ async function openFeed(size, hash = '#/') {
 		reducedMotion: 'reduce'
 	});
 	const page = await context.newPage();
-	await page.clock.setFixedTime(NOW);
+	if (fixed) await page.clock.setFixedTime(NOW);
 	page.on('pageerror', (e) => {
 		failed++;
 		console.log(`not ok  page error: ${e.message}`);
@@ -349,7 +85,7 @@ async function openFeed(size, hash = '#/') {
 		if (r.url().endsWith('/v1/rpc') && JSON.parse(r.postData() ?? '{}').op === 'owner.feed') calls.feed++;
 	});
 	await page.goto(FEED + hash, { waitUntil: 'networkidle' });
-	await page.waitForSelector('.col [data-id]');
+	await page.waitForSelector(wait);
 	// the socket's first frame starts one refresh pass; let it land before counting
 	await page.waitForTimeout(800);
 	return { context, page, calls };
@@ -535,6 +271,227 @@ const focusedRow = (page) => page.evaluate(() => document.activeElement?.closest
 		expect((await hashOf(page)) === '#/', await hashOf(page));
 		await page.locator(`.col [data-id="${id}"]`).tap();
 		await page.waitForFunction(() => document.querySelector('.feedpage dialog')?.open);
+	});
+	await context.close();
+}
+
+// ---- the filter menu, on the Feed's filter bar (keyboard, 1440) ----
+const menu = (page, i) => page.locator('.filters .menu').nth(i);
+const menuOf = (page) => page.evaluate(() => [...document.querySelectorAll('.filters .menu')].indexOf(document.activeElement?.closest('.filters .menu')));
+{
+	const { context, page } = await openFeed({ width: 1440, height: 900 }, '#/', { label: 'menu' });
+	const place = menu(page, 1).locator('button.trigger');
+	await check('filter menu: Tab reaches the next menu button', async () => {
+		await menu(page, 0).locator('button.trigger').focus();
+		await page.keyboard.press('Tab');
+		const f = await focus(page);
+		expect((await menuOf(page)) === 1 && f.tag === 'button', `focus on ${JSON.stringify(f)}`);
+	});
+	await check('filter menu: Enter opens at the selected option, focus in the list', async () => {
+		await page.keyboard.press('Enter');
+		const f = await focus(page);
+		expect((await listboxes(page)) === 1, 'no listbox');
+		expect((await place.getAttribute('aria-expanded')) === 'true', 'aria-expanded not true');
+		expect(f.role === 'listbox' && f.active === 'Every place', `focus ${JSON.stringify(f)}`);
+	});
+	await check('filter menu: arrows, Home and End move; ArrowUp stops at the top', async () => {
+		const seen = [];
+		for (const key of ['ArrowDown', 'ArrowDown', 'ArrowUp', 'End', 'Home', 'ArrowUp']) {
+			await page.keyboard.press(key);
+			seen.push((await focus(page)).active);
+		}
+		expect(seen.join(',') === 'Direct messages,#conde-dev,Direct messages,#lobby,Every place,Every place', seen.join(','));
+	});
+	await check('filter menu: Enter selects into the URL, closes and returns focus to the button', async () => {
+		await page.keyboard.press('ArrowDown');
+		await page.keyboard.press('Enter');
+		await page.waitForFunction(() => location.hash === '#/f/place=dm');
+		await settle(page);
+		const f = await focus(page);
+		expect((await listboxes(page)) === 0, 'list still open');
+		expect((await menuOf(page)) === 1 && f.tag === 'button', `focus ${JSON.stringify(f)}`);
+		expect((await place.textContent()).includes('Direct messages'), 'button does not show the value');
+	});
+	await check('filter menu: Space opens; Escape closes without a change, focus on the button', async () => {
+		await page.keyboard.press(' ');
+		expect((await focus(page)).active === 'Direct messages', 'opened away from the selected option');
+		await page.keyboard.press('ArrowDown');
+		await page.keyboard.press('Escape');
+		const f = await focus(page);
+		expect((await listboxes(page)) === 0, 'list still open');
+		expect((await menuOf(page)) === 1 && f.tag === 'button', `focus ${JSON.stringify(f)}`);
+		expect((await hashOf(page)) === '#/f/place=dm', await hashOf(page));
+	});
+	await check('filter menu: ArrowDown opens; Tab closes it and moves on to the next control', async () => {
+		await page.keyboard.press('ArrowDown');
+		expect((await listboxes(page)) === 1, 'ArrowDown did not open');
+		await page.keyboard.press('Tab');
+		expect((await listboxes(page)) === 0, 'Tab left it open');
+		const f = await focus(page);
+		expect(f.tag === 'button' && f.text === 'All' && (await menuOf(page)) === -1, `focus ${JSON.stringify(f)}`);
+	});
+	await check('filter menu: a press outside closes it', async () => {
+		await place.focus();
+		await page.keyboard.press('Enter');
+		await page.mouse.click(700, 880);
+		expect((await listboxes(page)) === 0, 'still open');
+	});
+	await context.close();
+}
+
+// ---- the sheet, as the Feed's thread overlay (keyboard, 1180) ----
+const sheetOpen = (page) => page.evaluate(() => document.querySelector('.feedpage dialog')?.open ?? false);
+{
+	const { context, page } = await openFeed({ width: 1180, height: 820 }, '#/', { label: 'sheet' });
+	const id = await scrollRowToTop(page, 3);
+	const openRow = async () => {
+		await page.locator(`.col [data-id="${id}"]`).focus();
+		await page.keyboard.press('Enter');
+		await page.waitForFunction(() => document.querySelector('.feedpage dialog')?.open);
+		await page.waitForSelector('.feedpage dialog .thread ol li');
+		await settle(page);
+	};
+	await check('sheet: Enter opens it as a modal dialog with focus inside', async () => {
+		await openRow();
+		const f = await focus(page);
+		expect(f.inDialog, `focus ${JSON.stringify(f)}`);
+	});
+	await check('sheet: Tab and Shift+Tab stay inside', async () => {
+		for (const key of [...Array(8).fill('Tab'), ...Array(8).fill('Shift+Tab')]) {
+			await page.keyboard.press(key);
+			const f = await focus(page);
+			expect(f.inDialog, `after ${key}: ${JSON.stringify(f)}`);
+		}
+	});
+	await check('sheet: the page behind is inert', async () => {
+		const other = await page.evaluate((id) => [...document.querySelectorAll('.col a.row')].find((r) => r.dataset.id !== id && r.getBoundingClientRect().top > 200)?.dataset.id, id);
+		const b = await box(page, `.col [data-id="${other}"]`);
+		await page.mouse.click(Math.min(b.x + 40, 600), b.y + b.height / 2);
+		await settle(page);
+		expect((await hashOf(page)) === `#/t/${id}`, `the row behind took the click: ${await hashOf(page)}`);
+		expect(await sheetOpen(page), 'a click behind closed it');
+	});
+	await check('sheet: nothing animates (reduced motion)', async () => {
+		const n = await page.evaluate(() => document.getAnimations().length);
+		expect(n === 0, `${n} animations`);
+	});
+	await check('sheet: browser back closes it; focus returns to the opener', async () => {
+		await page.goBack();
+		await page.waitForFunction(() => !document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+		expect((await focusedRow(page)) === id, `focus on ${await focusedRow(page)}`);
+		expect((await hashOf(page)) === '#/', await hashOf(page));
+	});
+	await check('sheet: Close closes it; reopening still works', async () => {
+		await openRow();
+		await page.locator('.feedpage dialog header button').click();
+		await page.waitForFunction(() => !document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+		expect((await focusedRow(page)) === id, 'focus not on the opener');
+		expect((await hashOf(page)) === '#/', await hashOf(page));
+		await openRow();
+		await page.keyboard.press('Escape');
+		await page.waitForFunction(() => !document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+	});
+	await check('sheet: closed by the page when the window widens past 1280 px, it leaves no history entry behind', async () => {
+		await openRow();
+		await page.setViewportSize({ width: 1440, height: 900 });
+		await page.waitForSelector('aside.side .thread ol li');
+		await settle(page);
+		expect(!(await sheetOpen(page)), 'the sheet stayed open beside the panel');
+		expect((await hashOf(page)) === `#/t/${id}`, await hashOf(page));
+		// the sheet's entry is gone: one back leaves the thread's own entry (it replaced the
+		// Feed's when it opened in the sheet), it does not land on a copy of it
+		await page.goBack();
+		await settle(page);
+		expect((await page.evaluate(() => location.href)) !== `${FEED}#/t/${id}`, 'back stayed on the thread: a stale sheet entry');
+	});
+	await context.close();
+}
+{
+	const thread = await import('../../src/lib/design/fixture.ts').then((fx) => fx.ids.feedThread);
+	const { context, page } = await openFeed({ width: 390, height: 844 }, `#/t/${thread}`, { label: 'sheet' });
+	await check('sheet: mounted open by a deep link, it stays open; Close returns to the Feed in the app', async () => {
+		await page.waitForFunction(() => document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+		expect(await sheetOpen(page), 'closed itself');
+		await page.locator('.feedpage dialog header button').tap();
+		await page.waitForFunction(() => !document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+		expect((await hashOf(page)) === '#/', `left the Feed: ${page.url()}`);
+	});
+	await context.close();
+}
+
+// ---- the disclosure, on the Fleet's teammates ----
+for (const size of [
+	{ width: 1440, height: 900 },
+	{ width: 390, height: 844 }
+]) {
+	const { context, page } = await openFeed(size, '#/fleet', { label: 'fleet', wait: 'button[aria-expanded]:has-text("konstantin")' });
+	const toggle = page.locator('button[aria-expanded]', { hasText: 'konstantin' });
+	const region = async () => page.locator(`#${await toggle.getAttribute('aria-controls')}`);
+	if (size.width > 720) {
+		await check('disclosure: Enter and Space toggle aria-expanded and the region', async () => {
+			await toggle.focus();
+			expect((await toggle.getAttribute('aria-expanded')) === 'false' && !(await (await region()).isVisible()), 'not closed at first');
+			await page.keyboard.press('Enter');
+			expect((await toggle.getAttribute('aria-expanded')) === 'true' && (await (await region()).isVisible()), 'Enter did not open it');
+			await page.keyboard.press(' ');
+			expect((await toggle.getAttribute('aria-expanded')) === 'false' && !(await (await region()).isVisible()), 'Space did not close it');
+		});
+	} else {
+		await check('disclosure by touch: tap toggles', async () => {
+			await toggle.tap();
+			expect((await toggle.getAttribute('aria-expanded')) === 'true', 'tap did not open');
+			await toggle.tap();
+			expect((await toggle.getAttribute('aria-expanded')) === 'false', 'tap did not close');
+		});
+	}
+	await context.close();
+}
+
+// ---- the error line and the announcer, on a Feed refresh pass (real clock) ----
+/** Starts a refresh pass the way a return to the tab does. */
+const pass = (page) => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+{
+	const { context, page } = await openFeed({ width: 1440, height: 900 }, '#/', { fixed: false, label: 'pass' });
+	let failing = false;
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (failing && op === 'owner.feed') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: false, error: { code: 'unavailable', message: 'store unavailable' } }) });
+		return route.fallback();
+	});
+	await check('error line: a failed pass keeps the rows and says "as of hh:mm"; Retry by keyboard reloads', async () => {
+		const rows = await page.locator('.col a.row').count();
+		failing = true;
+		await pass(page);
+		const alert = page.getByRole('alert');
+		await alert.waitFor({ timeout: 6000 });
+		expect(/as of \d\d:\d\d/.test(await alert.textContent()), `no "as of hh:mm": ${await alert.textContent()}`);
+		expect((await page.locator('.col a.row').count()) === rows, 'the rows did not stay');
+		failing = false;
+		await alert.getByRole('button', { name: 'Retry' }).focus();
+		await page.keyboard.press('Enter');
+		await alert.waitFor({ state: 'detached', timeout: 6000 });
+	});
+	await page.unroute('**/v1/rpc');
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (op !== 'owner.feed') return route.fallback();
+		const res = await route.fetch();
+		const body = await res.json();
+		const top = body.result?.messages?.[0];
+		if (top && !JSON.parse(route.request().postData()).body?.before) {
+			body.result.messages.unshift({ ...top, message_id: 'ARRIVED-1', seq: top.seq + 1000, text: 'Arrived during the check.' });
+		}
+		return route.fulfill({ response: res, body: JSON.stringify(body) });
+	});
+	await check('announcer: arrivals are said in a polite live region', async () => {
+		await settle(page);
+		await pass(page);
+		await page.waitForFunction(() => /new message/.test([...document.querySelectorAll('[aria-live=polite]')].map((e) => e.textContent).join(' ') ?? ''), null, { timeout: 6000 });
 	});
 	await context.close();
 }

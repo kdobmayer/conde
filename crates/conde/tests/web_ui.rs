@@ -124,6 +124,7 @@ on_both!(
     a_credential_on_the_browser_host_never_reaches_the_owner_view,
     a_connected_bridge_keeps_its_host_online,
     the_slack_instance_is_never_a_host,
+    the_built_app_reads_through_the_real_ops,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -311,6 +312,210 @@ async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>)
     } else {
         assert_eq!(icon.status(), StatusCode::NOT_FOUND);
     }
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The built app's own calls against the real ops, with the fields the client reads: the shell
+/// and its files, the shell's reads, the Feed's first page, a thread opened on one of its rows,
+/// the problems filter and search.
+async fn the_built_app_reads_through_the_real_ops(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+
+    let (status, _, html) = b.get(&ui.env.url("/")).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    if conde_remote::web::app_embedded() {
+        let files: HashSet<&str> = html
+            .match_indices("\"/app/")
+            .map(|(at, _)| {
+                let rest = &html[at + 1..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect();
+        assert!(files.iter().any(|f| f.ends_with(".js")), "{html}");
+        for f in files {
+            let r = b.step.get(ui.env.url(f)).send().await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "{f}");
+        }
+    } else {
+        eprintln!("no web build embedded: the shell's files are not checked");
+    }
+
+    let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    assert_eq!(rail["owner"], USER);
+    let worker = rail["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == format!("{USER}/worker"))
+        .expect("worker in the rail");
+    assert!(
+        worker["dms"].is_array() && worker["channels"].is_array(),
+        "{worker}"
+    );
+    assert!(worker["channels"][0]["channel"].is_string(), "{worker}");
+    let fleet = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
+    assert!(
+        fleet["now"].is_string() && fleet["online_ttl_s"].is_number(),
+        "{fleet}"
+    );
+    for h in fleet["hosts"].as_array().unwrap() {
+        assert!(
+            h["host"].is_string() && h["owner"].is_string() && h["online"].is_boolean(),
+            "{h}"
+        );
+    }
+    for a in fleet["agents"].as_array().unwrap() {
+        assert!(
+            a["name"].is_string() && a["owner"].is_string() && a["host"].is_string(),
+            "{a}"
+        );
+    }
+
+    // a held DM, for the problems filter
+    let mut agent_id = HashMap::new();
+    for p in [&c.k, &c.dv] {
+        let (d, user) = (ui.d.clone(), p.user_id);
+        for a in blocking(move || d.with_conn(|t| t.owner_agents(user)).unwrap()).await {
+            agent_id.insert(a.canonical(), a.id);
+        }
+    }
+    let held = ui
+        .op(
+            &c.k,
+            &c.worker,
+            "message.send",
+            json!({"to": {"agent": "david/scout"}, "text": "held for the smoke"}),
+        )
+        .await["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let notification = format!("{held}.{}", agent_id["david/scout"]);
+    let dd = ui.d.clone();
+    blocking(move || {
+        dd.with_tx(|t| Ok(t.set_notification_status(&notification, "held")?))
+            .unwrap()
+    })
+    .await;
+
+    // the Feed's first page, as the client asks for it with no filter
+    let feed = ui.ok(&b, &csrf, "owner.feed", json!({})).await;
+    assert!(feed["more"].is_boolean(), "{feed}");
+    let rows = feed["messages"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{feed}");
+    for m in rows {
+        for k in ["message_id", "place", "from", "to", "date", "text"] {
+            assert!(m[k].is_string(), "{k}: {m}");
+        }
+        assert!(m["seq"].is_i64(), "{m}");
+        assert!(m["reply_to"].is_null() || m["reply_to"].is_string(), "{m}");
+        assert!(
+            m["attachments"].is_array() && m["reactions"].is_array(),
+            "{m}"
+        );
+        assert!(
+            ["in", "out", "own"].contains(&m["direction"].as_str().unwrap()),
+            "{m}"
+        );
+        assert!(
+            m["via"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty() && v.iter().all(Value::is_string)),
+            "{m}"
+        );
+        if let Some(r) = m["delivery"]["recipients"].as_array() {
+            assert!(
+                r.iter()
+                    .all(|r| r["recipient"].is_string() && r["state"].is_string()),
+                "{m}"
+            );
+        }
+    }
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|m| m["message_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&c.worker_dm["message_id"].as_str().unwrap()),
+        "{ids:?}"
+    );
+    assert!(
+        !ids.contains(&c.private_dm["message_id"].as_str().unwrap()),
+        "{ids:?}"
+    );
+
+    // a thread opened on one of its rows
+    let id = c.worker_dm["message_id"].as_str().unwrap();
+    let t = ui.ok(&b, &csrf, "owner.thread", json!({"id": id})).await;
+    assert!(
+        t["top"].is_string() && t["hidden_parent"].is_boolean(),
+        "{t}"
+    );
+    assert!(t["start"].is_null() || t["start"].is_string(), "{t}");
+    assert!(t["next"].is_null() || t["next"].is_i64(), "{t}");
+    assert!(
+        t["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["message_id"] == id),
+        "{t}"
+    );
+
+    // needs attention
+    let p = ui
+        .ok(&b, &csrf, "owner.feed", json!({"problems": true}))
+        .await;
+    assert_eq!(p["more"], false, "{p}");
+    let problems = p["messages"].as_array().unwrap();
+    assert!(
+        problems.iter().any(|m| m["message_id"] == held.as_str()),
+        "{p}"
+    );
+    for m in problems {
+        let states: Vec<&str> = m["delivery"]["recipients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["state"].as_str().unwrap())
+            .collect();
+        assert!(
+            states
+                .iter()
+                .any(|s| ["retrying", "held", "denied", "refused", "gone"].contains(s)),
+            "{m}"
+        );
+    }
+
+    // search
+    let s = ui
+        .ok(
+            &b,
+            &csrf,
+            "owner.search",
+            json!({"pattern": "report|private"}),
+        )
+        .await;
+    assert!(s.get("next_cursor").is_some(), "{s}");
+    let hits = s["hits"].as_array().unwrap();
+    for h in hits {
+        for k in ["place", "message_id", "from", "date", "line"] {
+            assert!(h[k].is_string(), "{k}: {h}");
+        }
+        assert!(h["seq"].is_i64(), "{h}");
+    }
+    assert!(
+        hits.iter()
+            .any(|h| h["message_id"] == c.worker_dm["message_id"]),
+        "{s}"
+    );
+    assert!(
+        hits.iter()
+            .all(|h| h["message_id"] != c.private_dm["message_id"]),
+        "{s}"
+    );
     ui.server.shutdown().await.unwrap();
 }
 

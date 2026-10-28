@@ -1,5 +1,10 @@
 # Three visual directions
 
+Outcome (owner, 2026-10-28): B (Editorial) was chosen as the one design and the app is built in
+it (`../plan.md`, "Owner's choice: B only"); A and the skin switch were not built. The option
+pages under `web/src/routes/_design` were removed with the design branch of the app (U16); the
+renders below stay as the record of what was compared.
+
 Decision (owner, 2026-10-14): A and B are both built, as two skins over one skeleton with a
 per-browser switch; after a day or two of real traffic the owner picks one or a mix and the other
 is deleted. C is not built. Its pages and renders stay here as the record of what was compared.

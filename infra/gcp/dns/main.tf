@@ -155,11 +155,12 @@ resource "cloudflare_dns_record" "google_verification" {
   ttl     = 3600
 }
 
+# Cloudflare stores a TXT value over 255 characters as two quoted strings; written that way so the plan stays clean.
 resource "cloudflare_dns_record" "google_dkim" {
   zone_id = local.zone_id
   name    = "google._domainkey.conde.cloud"
   type    = "TXT"
-  content = "\"v=DKIM1;k=rsa;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyoxyD1SCWzHCfGYznl7jLXU59a7l+tKRmZ4QAs+YFtIhqkBcic5g0vIGJzoooyE1gGiA5lxVfDbNy6Uv3N5+E9Vyr7hY53d4XyInfJFC8Rm/dm3yI89qFjmbYNnwNj3sss68ivX2HjtGWvJc4ZnoqbZzB8dIIA8czRLmzXAYkeMRuo9Dh7ZvztdC5SlfepZqyOew5lq9XB+3C5jtcrhG1dcdfOOFlAGx9uKpa841VmgUVDTltkWY/o4Cl8DyP8uPJd1VGK3MPvpcXNdJibGSHvlF7conveLmgAsQ8OWSgXUjePRka5wlJgFngh8FRlr0JcPc6eZcHbRu3atyvYjFSQIDAQAB\""
+  content = "\"v=DKIM1;k=rsa;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyoxyD1SCWzHCfGYznl7jLXU59a7l+tKRmZ4QAs+YFtIhqkBcic5g0vIGJzoooyE1gGiA5lxVfDbNy6Uv3N5+E9Vyr7hY53d4XyInfJFC8Rm/dm3yI89qFjmbYNnwNj3sss68ivX2HjtGWvJc4ZnoqbZzB8dIIA8czRLmzXAYkeMRuo9Dh7ZvztdC5SlfepZqyOe\" \"w5lq9XB+3C5jtcrhG1dcdfOOFlAGx9uKpa841VmgUVDTltkWY/o4Cl8DyP8uPJd1VGK3MPvpcXNdJibGSHvlF7conveLmgAsQ8OWSgXUjePRka5wlJgFngh8FRlr0JcPc6eZcHbRu3atyvYjFSQIDAQAB\""
   ttl     = 3600
 }
 

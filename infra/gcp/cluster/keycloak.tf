@@ -207,8 +207,8 @@ resource "kubernetes_deployment_v1" "keycloak" {
 
           resources {
             requests = {
-              cpu                 = "250m"
-              memory              = "256Mi"
+              cpu                 = "50m"
+              memory              = "64Mi"
               "ephemeral-storage" = "100Mi"
             }
             # Autopilot sets the ephemeral-storage limit to the request; stated here so plans stay empty.

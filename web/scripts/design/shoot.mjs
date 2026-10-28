@@ -1,6 +1,6 @@
 // Design-only: headless screenshots of pages on a local server, one at a time.
 // Usage: node scripts/design/shoot.mjs <shots.json>
-// shots.json: [{ "url": "...", "out": "path.png", "size": "desktop" | "phone", "scheme": "light" | "dark",
+// shots.json: [{ "url": "...", "out": "path.png", "size": "desktop" | "tablet" | "phone", "scheme": "light" | "dark",
 //                "wait"?: "css selector", "click"?: "css selector" }]
 // Needs playwright-core 1.64.0 (npm i --no-save) and a Chromium headless shell under
 // ~/.cache/ms-playwright (CHROME overrides the path). The clock is fixed to the fixture's NOW
@@ -17,6 +17,7 @@ const executablePath =
 const NOW = new Date('2026-10-14T12:20:00Z');
 const sizes = {
 	desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 },
+	tablet: { viewport: { width: 1180, height: 820 }, deviceScaleFactor: 2 },
 	phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }
 };
 

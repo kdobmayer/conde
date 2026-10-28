@@ -52,7 +52,7 @@ async fn board(on_pg: bool) -> Option<Arc<Dispatcher>> {
         match blocking(pg::fresh_database).await {
             Some(url) => Some(url),
             None => {
-                eprintln!("skipped: set CONDE_TEST_PG to run the web app suite on Postgres");
+                pg::skip("the web app suite on Postgres");
                 return None;
             }
         }

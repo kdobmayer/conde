@@ -605,7 +605,7 @@ fn a_v1_host_and_a_v2_host_exchange_messages() {
 #[test]
 fn replicas_wake_and_fence_each_other() {
     let Some(db) = pg::fresh_database() else {
-        eprintln!("skipped: set CONDE_TEST_PG to run the two-replica test");
+        pg::skip("the two-replica test");
         return;
     };
     let slow = ServerConfig {
@@ -670,7 +670,7 @@ fn replicas_wake_and_fence_each_other() {
 #[test]
 fn server_on_postgres_stops_cleanly_on_sigterm() {
     let Some(db) = pg::fresh_database() else {
-        eprintln!("skipped: set CONDE_TEST_PG to run conde server on Postgres");
+        pg::skip("conde server on Postgres");
         return;
     };
     let port = std::net::TcpListener::bind("127.0.0.1:0")

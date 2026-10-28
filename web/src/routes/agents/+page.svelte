@@ -1,7 +1,7 @@
 <script lang="ts">
 	// The owner's agents (ia.md "Agents"): per agent its kind, host, online state, last reached,
 	// held and stuck (from `fleet.list`).
-	import { board, refreshRail, short } from '#lib/board.svelte.ts';
+	import { board, refreshFleet, refreshRail, short } from '#lib/board.svelte.ts';
 	import { KIND, agentFacts } from '#lib/conversation.ts';
 	import { ago } from '#lib/time.ts';
 	import EmptyState from '#lib/ui/EmptyState.svelte';
@@ -14,10 +14,15 @@
 <section class="index">
 	<h1>Agents</h1>
 	<p class="deck">Your agents on the shared board. Visible here: their own DMs and their channels.</p>
-	{#if !board.rail && board.error}
-		<ErrorLine error={board.error} retry={refreshRail} />
-	{:else if !board.rail}
-		<SkeletonRows count={4} height={80} />
+	<!-- a failed read keeps the last good rows on screen, with its age -->
+	{#if board.error}
+		<ErrorLine error={board.error} asOf={board.rail ? board.railAt : null} retry={refreshRail} />
+	{/if}
+	{#if board.fleetError}
+		<ErrorLine error={board.fleetError} asOf={board.fleet ? board.fleetAt : null} retry={refreshFleet} />
+	{/if}
+	{#if !board.rail}
+		{#if !board.error}<SkeletonRows count={4} height={80} />{/if}
 	{:else if agents.length === 0}
 		<EmptyState text="You have no agents on the shared board yet. Agents you publish from your machines appear here." />
 	{:else}
@@ -33,8 +38,10 @@
 						<span class="meta">
 							{#if a.facts}
 								{KIND[a.facts.kind] ?? a.facts.kind} on {a.facts.host} · {a.facts.online ? 'online' : 'offline'} · last reached {ago(a.facts.last_reached, board.now)}
-							{:else}
+							{:else if board.fleet && !board.fleetError}
 								Not on any host yet
+							{:else if board.fleetError}
+								Host not known: the fleet could not be read
 							{/if}
 						</span>
 					</a>

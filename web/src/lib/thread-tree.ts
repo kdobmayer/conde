@@ -66,3 +66,58 @@ export function treeOrder(messages: Message[], top: string): TreeLine[] {
 	if (root) walk(root, 0);
 	return out;
 }
+
+export type ThreadOp = (body: { id: string; after?: number }) => Promise<ThreadAnswer>;
+
+/**
+ * One open thread's reads, one at a time, over an injected op. `load` is the first answer and
+ * every refresh: it re-reads the span loaded so far from the start (up to where the retained
+ * continuation ended, or all of it when it was complete) and replaces the state with that, so a
+ * change on a later page is seen and the continuation frontier is kept. `more` continues from
+ * `next`. Reads are queued: an earlier read never lands after a later one.
+ */
+export class ThreadReader {
+	readonly id: string;
+	state: ThreadState = emptyThread();
+	private readonly op: ThreadOp;
+	private readonly changed: (state: ThreadState) => void;
+	private queue: Promise<unknown> = Promise.resolve();
+
+	constructor(id: string, op: ThreadOp, changed: (state: ThreadState) => void = () => {}) {
+		this.id = id;
+		this.op = op;
+		this.changed = changed;
+	}
+
+	load(): Promise<void> {
+		return this.enqueue(async () => {
+			// undefined: nothing loaded yet; null: the whole subtree was here
+			const frontier = this.state.top === null ? undefined : this.state.next;
+			let s = mergeThread(emptyThread(), await this.op({ id: this.id }));
+			if (frontier !== undefined) {
+				while (s.next !== null && (frontier === null || s.next < frontier)) {
+					s = mergeThread(s, await this.op({ id: this.id, after: s.next }));
+				}
+			}
+			this.set(s);
+		});
+	}
+
+	more(): Promise<void> {
+		return this.enqueue(async () => {
+			if (this.state.next === null) return;
+			this.set(mergeThread(this.state, await this.op({ id: this.id, after: this.state.next })));
+		});
+	}
+
+	private set(state: ThreadState): void {
+		this.state = state;
+		this.changed(state);
+	}
+
+	private enqueue(step: () => Promise<void>): Promise<void> {
+		const run = this.queue.then(step);
+		this.queue = run.catch(() => {});
+		return run;
+	}
+}

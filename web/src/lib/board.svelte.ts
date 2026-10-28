@@ -20,8 +20,12 @@ export const board = $state({
 	live: false,
 	/** The last `owner.list` failure, cleared by the next success. */
 	error: '' as string,
+	/** When the rail on screen was read (this browser's clock). */
+	railAt: null as number | null,
 	/** The last `fleet.list` failure, cleared by the next success. */
 	fleetError: '' as string,
+	/** When the fleet on screen was read (this browser's clock). */
+	fleetAt: null as number | null,
 	/** Ticks once a second: relative times and retry clocks read it. */
 	now: Date.now()
 });
@@ -75,6 +79,7 @@ export async function refreshRail(): Promise<void> {
 		const rail = await rpc<Rail>('owner.list');
 		if (!sameOwner()) return;
 		board.rail = rail;
+		board.railAt = Date.now();
 		board.error = '';
 	} catch (e) {
 		board.error = (e as Error).message;
@@ -88,6 +93,7 @@ export async function refreshFleet(): Promise<void> {
 		if (!sameOwner()) return;
 		board.skewMs = Date.parse(fleet.now) - (asked + Date.now()) / 2;
 		board.fleet = fleet;
+		board.fleetAt = Date.now();
 		board.fleetError = '';
 	} catch (e) {
 		board.fleetError = (e as Error).message;

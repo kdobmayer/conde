@@ -496,6 +496,100 @@ const pass = (page) => page.evaluate(() => document.dispatchEvent(new Event('vis
 	await context.close();
 }
 
+// ---- the sheet's history when the reader leaves for the conversation and comes back ----
+for (const size of [
+	{ width: 390, height: 844 },
+	{ width: 1180, height: 820 }
+]) {
+	const { context, page } = await openFeed(size, '#/', { label: 'sheet' });
+	await check('sheet: to the conversation, Back restores the sheet, Forward returns to the conversation, Back twice closes it', async () => {
+		const id = await scrollRowToTop(page, 3);
+		await page.locator(`.col [data-id="${id}"]`).click();
+		await page.waitForSelector('.feedpage dialog .thread .acts a');
+		await settle(page);
+		await page.locator('.feedpage dialog .thread .acts a').first().click();
+		await page.waitForSelector('.msg');
+		const convo = await hashOf(page);
+		expect(convo.includes(`/m/${id}`), `not the conversation at the message: ${convo}`);
+		await page.goBack();
+		await page.waitForFunction(() => document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+		expect((await hashOf(page)) === `#/t/${id}`, await hashOf(page));
+		await page.goForward();
+		await settle(page);
+		expect((await hashOf(page)) === convo, `Forward stayed at ${await hashOf(page)}`);
+		await page.goBack();
+		await page.waitForFunction(() => document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+		await page.goBack();
+		await page.waitForFunction(() => !document.querySelector('.feedpage dialog')?.open);
+		await settle(page);
+		expect((await hashOf(page)) === '#/', `the second Back left ${await hashOf(page)}`);
+	});
+	if (size.width < 720) {
+		await check('sheet by touch: the handle toggles full height', async () => {
+			await page.locator('.col a.row').nth(2).tap();
+			await page.waitForFunction(() => document.querySelector('.feedpage dialog')?.open);
+			const handle = page.locator('.feedpage dialog .handle');
+			await handle.tap();
+			let b = await box(page, '.feedpage dialog');
+			expect(Math.round(b.height) === 844 && (await handle.getAttribute('aria-expanded')) === 'true', JSON.stringify(b));
+			await handle.tap();
+			b = await box(page, '.feedpage dialog');
+			expect(b.height < 844 * 0.8 && (await handle.getAttribute('aria-expanded')) === 'false', JSON.stringify(b));
+		});
+	}
+	await context.close();
+}
+
+// ---- Agents and Channels keep their rows when a refresh fails, and say so ----
+for (const hash of ['#/agents', '#/channels']) {
+	const { context, page } = await openFeed({ width: 1440, height: 900 }, hash, { fixed: false, label: hash.slice(2), wait: '.index li' });
+	const failing = new Set();
+	await page.route('**/v1/rpc', (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (failing.has(op)) return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: false, error: { code: 'unavailable', message: `${op} unavailable` } }) });
+		return route.fallback();
+	});
+	const rows = await page.locator('.index li').count();
+	await check('a failed owner.list keeps the rows and shows the error line with its age and Retry; Retry recovers', async () => {
+		failing.add('owner.list');
+		await pass(page);
+		const alert = page.getByRole('alert').filter({ hasText: 'owner.list' });
+		await alert.waitFor({ timeout: 6000 });
+		expect(/as of \d\d:\d\d/.test(await alert.textContent()), `no age: ${await alert.textContent()}`);
+		expect((await page.locator('.index li').count()) === rows, 'the rows did not stay');
+		failing.delete('owner.list');
+		await alert.getByRole('button', { name: 'Retry' }).click();
+		await alert.waitFor({ state: 'detached', timeout: 6000 });
+	});
+	if (hash === '#/agents') {
+		await check('a failed fleet.list shows its own error line; no agent reads "Not on any host yet"', async () => {
+			failing.add('fleet.list');
+			await pass(page);
+			const alert = page.getByRole('alert').filter({ hasText: 'fleet.list' });
+			await alert.waitFor({ timeout: 6000 });
+			expect((await page.locator('.index li').count()) === rows, 'the rows did not stay');
+			expect(!(await page.locator('.index').textContent()).includes('Not on any host yet'), 'reads "Not on any host yet"');
+			failing.delete('fleet.list');
+		});
+	}
+	await context.close();
+}
+
+// ---- the keys page (a server page; the mock serves its template) fits the phone ----
+{
+	where = 'keys 390';
+	const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+	const page = await context.newPage();
+	await check('keys at 390: no horizontal overflow', async () => {
+		await page.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
+		const w = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+		expect(w[0] <= w[1], `scrollWidth ${w[0]} > clientWidth ${w[1]}`);
+	});
+	await context.close();
+}
+
 await browser.close();
 mock.kill();
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');

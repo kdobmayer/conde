@@ -1,36 +1,41 @@
-/** One open thread: the first `owner.thread` answer, then continuations merged by id. */
+/** One open thread for the page: ThreadReader's state, with loading and the last error. */
 
 import { rpc } from './api';
-import { emptyThread, mergeThread, type ThreadState } from './thread-tree';
+import { ThreadReader, emptyThread, type ThreadState } from './thread-tree';
 import type { ThreadAnswer } from './types';
 
 export class ThreadView {
 	state = $state<ThreadState>(emptyThread());
 	loading = $state(false);
 	error = $state('');
+	readonly id: string;
+	private readonly reader: ThreadReader;
+	private pending = 0;
 
-	constructor(readonly id: string) {}
+	constructor(id: string) {
+		this.id = id;
+		this.reader = new ThreadReader(id, (body) => rpc<ThreadAnswer>('owner.thread', body), (s) => (this.state = s));
+	}
 
-	/** The first answer: the path to `id` and the subtree's first messages. */
-	async load(): Promise<void> {
-		await this.fetch({ id: this.id });
+	/** The first answer, and every refresh of what is loaded. */
+	load(): Promise<void> {
+		return this.run(() => this.reader.load());
 	}
 
 	/** The next part of the subtree, while there is one. */
-	async more(): Promise<void> {
-		if (this.state.next === null) return;
-		await this.fetch({ id: this.id, after: this.state.next });
+	more(): Promise<void> {
+		return this.run(() => this.reader.more());
 	}
 
-	private async fetch(body: { id: string; after?: number }): Promise<void> {
-		this.loading = true;
+	private async run(read: () => Promise<void>): Promise<void> {
+		this.loading = ++this.pending > 0;
 		try {
-			this.state = mergeThread(this.state, await rpc<ThreadAnswer>('owner.thread', body));
+			await read();
 			this.error = '';
 		} catch (e) {
 			this.error = (e as Error).message;
 		} finally {
-			this.loading = false;
+			this.loading = --this.pending > 0;
 		}
 	}
 }

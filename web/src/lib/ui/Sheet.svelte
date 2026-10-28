@@ -17,6 +17,8 @@
 	let opener: HTMLElement | null = null;
 	/** Our history entry: none; being pushed (the push is async); the current one; being left. */
 	let entry: 'none' | 'pushing' | 'ours' | 'leaving' = 'none';
+	/** The key our entry carries: this instance's id, or the key of an entry history restored. */
+	let key = id;
 
 	$effect(() => {
 		if (!dialog) return;
@@ -25,7 +27,7 @@
 	});
 
 	$effect(() => {
-		const ours = (page.state as { sheet?: string }).sheet === id;
+		const ours = (page.state as { sheet?: string }).sheet === key;
 		if (ours) return;
 		if (entry === 'ours') {
 			// back (or forward) left our entry: close, with nothing more to leave
@@ -43,11 +45,19 @@
 		full = false;
 		d.showModal();
 		close?.focus();
-		if (entry === 'none') await push();
+		if (entry !== 'none') return;
+		// back or forward onto an entry a sheet pushed (this page remounted): it is ours already;
+		// pushing another would cut off the forward entries
+		const restored = (page.state as { sheet?: string }).sheet;
+		if (restored) {
+			key = restored;
+			entry = 'ours';
+		} else await push();
 	}
 
 	async function push() {
 		entry = 'pushing';
+		key = id;
 		// the current URL, hash route included ('' would resolve without the hash)
 		await goto(new URL(location.href), { state: { ...page.state, sheet: id }, shallow: true });
 		entry = 'ours';

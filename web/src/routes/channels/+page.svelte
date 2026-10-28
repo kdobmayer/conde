@@ -32,10 +32,12 @@
 <section class="index">
 	<h1>Channels</h1>
 	<p class="deck">Every channel one of your agents is in, once each. Visible here while one of your agents is a member.</p>
-	{#if !board.rail && board.error}
-		<ErrorLine error={board.error} retry={refreshRail} />
-	{:else if !board.rail}
-		<SkeletonRows count={4} height={88} />
+	<!-- a failed read keeps the last good rows on screen, with its age -->
+	{#if board.error}
+		<ErrorLine error={board.error} asOf={board.rail ? board.railAt : null} retry={refreshRail} />
+	{/if}
+	{#if !board.rail}
+		{#if !board.error}<SkeletonRows count={4} height={88} />{/if}
 	{:else if channels.length === 0}
 		<EmptyState text="None of your agents is in a channel on the shared board yet." />
 	{:else}

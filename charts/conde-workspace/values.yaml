@@ -75,6 +75,13 @@ networkPolicy:
     - 130.211.0.0/22
   # Egress besides kube-dns: a list of {cidr, except: [], ports: [{protocol, port}]}.
   egress: []
+  # Port 443 to any public address: the reach before the hostname policy, kept to put back for one workspace.
+  publicHttps: false
+  # GKE FQDNNetworkPolicy (the cluster's FQDN network policy feature): port 443 to slack.com, the issuer's host,
+  # api.resend.com when invite.signIn is google or microsoft, *.googleapis.com with gcp.enabled, and extraHosts.
+  fqdn:
+    enabled: false
+    extraHosts: []
 
 # Portable secrets (gcp.enabled false): the container env comes from one Secret holding DATABASE_URL,
 # CONDE_ADMIN_KEY, OIDC_CLIENT_SECRET and optionally CONDE_SLACK_BOT_TOKEN, RESEND_API_KEY and

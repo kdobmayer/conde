@@ -99,7 +99,7 @@ locals {
         sectionName = "https"
       }
     }
-    networkPolicy = { egress = local.network_policy_egress }
+    networkPolicy = { egress = local.network_policy_egress, fqdn = { enabled = true } }
     gcp = {
       enabled            = true
       project            = local.project
@@ -343,6 +343,25 @@ resource "kubernetes_network_policy_v1" "argocd" {
         protocol = "TCP"
         port     = "443"
       }
+    }
+  }
+}
+
+# Hostname egress: the repository over SSH, and the infra realm for sign-in.
+resource "kubernetes_manifest" "argocd_fqdn_network_policy" {
+  manifest = {
+    apiVersion = "networking.gke.io/v1alpha1"
+    kind       = "FQDNNetworkPolicy"
+    metadata = {
+      name      = "argocd"
+      namespace = kubernetes_namespace_v1.argocd.metadata[0].name
+    }
+    spec = {
+      podSelector = {}
+      egress = [
+        { matches = [{ name = "github.com" }], ports = [{ protocol = "TCP", port = 22 }] },
+        { matches = [{ name = local.keycloak_hostname }], ports = [{ protocol = "TCP", port = 443 }] },
+      ]
     }
   }
 }

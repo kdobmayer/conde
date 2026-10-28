@@ -1,0 +1,31 @@
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.fqdn.enabled }}
+{{- /* The hosts the server calls: Slack's API, its sign-in issuer, Resend's API when it sends the invite email itself. */}}
+{{- $hosts := list "slack.com" }}
+{{- with .Values.oidc.issuer }}
+{{- $hosts = append $hosts (first (splitList ":" (urlParse .).host)) }}
+{{- end }}
+{{- if has .Values.invite.signIn (list "google" "microsoft") }}
+{{- $hosts = append $hosts "api.resend.com" }}
+{{- end }}
+{{- $hosts = concat $hosts .Values.networkPolicy.fqdn.extraHosts | uniq }}
+# GKE hostname egress on 443, besides the NetworkPolicy (a connection passes if either allows it).
+apiVersion: networking.gke.io/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: conde
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector: {}
+  egress:
+    - matches:
+        {{- range $hosts }}
+        - name: {{ . | quote }}
+        {{- end }}
+        {{- if .Values.gcp.enabled }}
+        # The Cloud SQL Auth Proxy's Admin API calls; a wildcard matches one label.
+        - pattern: "*.googleapis.com"
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+{{- end }}

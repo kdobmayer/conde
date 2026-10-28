@@ -23,7 +23,8 @@ resource "azuread_application" "sso" {
 
   web {
     # The CLI's `conde login` reuses the web flow and finishes on a loopback redirect (any port).
-    redirect_uris = [local.sso_redirect, "http://localhost/auth/cli", "http://127.0.0.1/auth/cli"]
+    # dakai.conde.cloud is the board's next home (GCP); the old redirect stays until that cutover is done.
+    redirect_uris = [local.sso_redirect, "https://dakai.conde.cloud/auth/callback", "http://localhost/auth/cli", "http://127.0.0.1/auth/cli"]
     logout_url    = "https://${local.fqdn}/"
 
     implicit_grant {

@@ -57,6 +57,8 @@ your store). The Secret holds:
 | `networkPolicy.enabled` | `true` | deny-by-default NetworkPolicy |
 | `networkPolicy.ingressCidrs` | Google load balancer ranges | sources allowed to port 8080 |
 | `networkPolicy.egress` | `[]` | egress besides kube-dns: `{cidr, except, ports: [{protocol, port}]}` |
+| `networkPolicy.publicHttps` | `false` | egress to any public address on 443 (the reach before the hostname policy) |
+| `networkPolicy.fqdn.enabled`, `.extraHosts` | `false`, `[]` | GKE FQDNNetworkPolicy on 443: slack.com, the issuer's host, api.resend.com when the server sends the invite email, `*.googleapis.com` with `gcp.enabled`, and the extra hosts |
 | `existingSecret` | `""` | without `gcp.enabled`: the Secret the env comes from |
 | `externalSecret.enabled`, `.secretStoreRef`, `.data`, `.refreshInterval` | off | without `gcp.enabled`: an ExternalSecret mapping env names to remote keys |
 | `gcp.enabled` | `false` | the GKE mode above |

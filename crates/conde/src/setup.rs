@@ -660,6 +660,17 @@ pub fn run(
         let r = adopt_v1_credential(env, host, out);
         part("boards", r, out)?;
     }
+    if let Some(want) = opts.default_board.as_ref().filter(|_| opts.boards) {
+        // before the skills, which name the default board
+        let r =
+            boards::write_default(&env.default_board(), &env.boards_dir(), want).and_then(|()| {
+                Ok(writeln!(
+                    out,
+                    "boards: default board for names and channels: {want}"
+                )?)
+            });
+        part("boards", r, out)?;
+    }
     if opts.service {
         let r = match env.os {
             Os::Linux => systemd(env, host, out),
@@ -811,7 +822,7 @@ pub fn verify(
                 )?;
             }
             let skill = env.claude_skill_for(&name);
-            match file(&skill, skill_text(CLAUDE_SKILL, &name).as_bytes())? {
+            match file(&skill, skill_for(env, CLAUDE_SKILL, &name).as_bytes())? {
                 None => line(
                     "ok",
                     format!("claude: skill {} up to date", env.show(&skill)),
@@ -878,7 +889,7 @@ pub fn verify(
                 )?;
             }
             let skill = env.codex_skill_for(&name);
-            match file(&skill, skill_text(CODEX_SKILL, &name).as_bytes())? {
+            match file(&skill, skill_for(env, CODEX_SKILL, &name).as_bytes())? {
                 None => line(
                     "ok",
                     format!("codex: skill {} up to date", env.show(&skill)),
@@ -1693,9 +1704,8 @@ fn default_board(
 ) -> anyhow::Result<()> {
     let path = env.default_board();
     let current = boards::read_default(&path)?;
-    if let Some(want) = &opts.default_board {
-        boards::write_default(&path, &env.boards_dir(), want)?;
-        writeln!(out, "boards: default board for names and channels: {want}")?;
+    if opts.default_board.is_some() {
+        // applied by run before the skills
         return Ok(());
     }
     if enrolled.is_empty() {
@@ -2179,8 +2189,8 @@ fn holder(env: &Env, present: bool, command: Option<&str>, sock: Option<&str>) -
     }
 }
 
-/// The alias a second registration is named after: the default shared board, else the first
-/// enrolled one.
+/// The alias a second registration is named after, and the board the skills name: the default
+/// shared board, else the first enrolled one.
 fn board_alias(env: &Env) -> Option<String> {
     let enrolled = boards::enrolled_in(&env.boards_dir()).ok()?;
     match boards::read_default(&env.default_board()) {
@@ -2226,10 +2236,29 @@ fn mcp_name(
     Ok((pick, displaced))
 }
 
+/// The skill as `conde setup` writes it on this host for MCP server `mcp`.
+fn skill_for(env: &Env, skill: &str, mcp: &str) -> String {
+    let enrolled = boards::enrolled_in(&env.boards_dir()).unwrap_or_default();
+    skill_text(skill, mcp, board_alias(env).as_deref(), &enrolled)
+}
+
 /// The skill as written for an MCP server registered as `mcp`: under a second name it is
-/// a skill of that name (`skills/<mcp>/`), beside the other instance's `conde` skill.
-pub fn skill_text(skill: &str, mcp: &str) -> String {
+/// a skill of that name (`skills/<mcp>/`), beside the other instance's `conde` skill; its
+/// shared-board examples name `board` (`<alias>` with none), and its introduction every
+/// `enrolled` alias.
+pub fn skill_text(skill: &str, mcp: &str, board: Option<&str>, enrolled: &[String]) -> String {
+    let board = board.unwrap_or("<alias>");
+    let aliases = match enrolled {
+        [] => format!("alias `{board}`"),
+        [one] => format!("alias `{one}`"),
+        many => {
+            let quoted: Vec<String> = many.iter().map(|a| format!("`{a}`")).collect();
+            format!("aliases {}", quoted.join(", "))
+        }
+    };
     skill
+        .replace("{aliases}", &aliases)
+        .replace("{board}", board)
         .replacen(
             &format!("---\nname: {MCP_NAME}\n"),
             &format!("---\nname: {mcp}\n"),
@@ -2279,7 +2308,7 @@ fn claude(
         )?;
     }
     let skill = env.claude_skill_for(&name);
-    let text = skill_text(CLAUDE_SKILL, &name);
+    let text = skill_for(env, CLAUDE_SKILL, &name);
     writeln!(
         out,
         "claude: skill {} {}",
@@ -2466,7 +2495,7 @@ fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {
         )?;
     }
     let skill = env.codex_skill_for(&name);
-    let skill_body = skill_text(CODEX_SKILL, &name);
+    let skill_body = skill_for(env, CODEX_SKILL, &name);
     writeln!(
         out,
         "codex: skill {} {}",

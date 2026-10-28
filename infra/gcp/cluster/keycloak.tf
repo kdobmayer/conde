@@ -722,6 +722,34 @@ resource "kubernetes_network_policy_v1" "keycloak" {
   }
 }
 
+# Hostname egress: the clearscale realm's Google provider (token, userinfo, keys), the Cloud SQL Auth Proxy's Admin API
+# calls, and Resend's SMTP host for the realms' emails.
+resource "kubernetes_manifest" "keycloak_fqdn_network_policy" {
+  manifest = {
+    apiVersion = "networking.gke.io/v1alpha1"
+    kind       = "FQDNNetworkPolicy"
+    metadata = {
+      name      = "keycloak"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      podSelector = {}
+      egress = [
+        {
+          matches = [
+            { name = "oauth2.googleapis.com" },
+            { name = "openidconnect.googleapis.com" },
+            { name = "www.googleapis.com" },
+            { pattern = "*.googleapis.com" },
+          ]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+        { matches = [{ name = "smtp.resend.com" }], ports = [{ protocol = "TCP", port = 465 }] },
+      ]
+    }
+  }
+}
+
 # ── Database grants: Keycloak owns its schema, no other role reaches its database, `postgres` is closed to PUBLIC ──
 locals {
   keycloak_dbinit = "keycloak-dbinit"

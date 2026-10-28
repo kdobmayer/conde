@@ -1,6 +1,6 @@
 {{- if .Values.networkPolicy.enabled }}
 # Deny by default; in from the configured sources to 8080 only, out to kube-dns, Keycloak's admin API on a password
-# workspace, and the configured egress list.
+# workspace, optionally any public address on 443, and the configured egress list.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -44,6 +44,18 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    {{- end }}
+    {{- if .Values.networkPolicy.publicHttps }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
     {{- end }}
     {{- range .Values.networkPolicy.egress }}
     - to:

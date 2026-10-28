@@ -62,7 +62,8 @@ deployment/conde`. Two secrets this root reads are in its state, because their p
 - Email: every realm, master included, sends through Resend (`local.smtp` in main.tf: smtp.resend.com, SMTPS on 465,
   user `resend`, the API key from `resend-api-key`), from `no-reply@conde.cloud` with replies to the owner. Keycloak
   needs egress to TCP 465, an egress rule of its NetworkPolicy in the cluster root. "Forgot password" is on in the realms
-  that sign in with passwords (`passwords` in `local.realms`): demo.
+  that sign in with passwords (`passwords` in `local.realms`): demo. Demo's email theme `conde` (in the Keycloak image,
+  `infra/keycloak/themes`) turns the execute-actions email into the invitation with the onboarding steps.
 
 ## Adding a company
 

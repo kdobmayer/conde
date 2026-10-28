@@ -5,6 +5,8 @@ resource "keycloak_realm" "this" {
   realm        = each.key
   display_name = each.value.display_name
   enabled      = true
+  # infra/keycloak/themes: demo's invitation email carries the onboarding steps.
+  email_theme = each.key == "demo" ? "conde" : null
 
   registration_allowed     = false
   login_with_email_allowed = true

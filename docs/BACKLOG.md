@@ -40,19 +40,12 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   the demo realm drops and re-adds the `conde-admin` manage-users role for a few seconds (invites fail in that
   window; a dependency fix in infra/gcp/realms). Done: inviting a pre-existing realm account (the realm-clear
   admin call, bc6bfd1).
-- S2c (desk, small): Keycloak account console theme (React-based, not covered by the login theme); master realm
-  display name "conde admin" (today the label under the wordmark reads KEYCLOAK); the unused image 26.8.1-conde3 in
-  Artifact Registry can go with the next registry cleanup.
-- S8 (desk, housekeeping found by the diagram read, 2026-10-28): remove `/realms/dakai` from the public Keycloak
-  route (no such realm); drop the unused project-wide `roles/container.developer` of the `deploy` service account
-  (no workflow deploys through the DNS endpoint; releases go through deploy/image.yaml and Argo CD); fix
-  workspaces/README.md (four mounted secrets, five on demo; dakai's OIDC secret is the Entra app's); refresh
-  docs/COST-conde-cloud.md after the cost cuts and S4 (5 rules on conde-web plus the two admin policies, 20
-  secrets); add an "as built" note to docs/infra-plan-gcp.md where the code diverged (roots cluster/realms/dns,
-  no dakai realm, Argo CD instead of a deploy workflow, CSI instead of ESO, Resend instead of Gmail, apex and www
-  proxied to Pages); drop KC_BOOTSTRAP_ADMIN_USERNAME, the bootstrap-admin-password mount and the
-  keycloak-bootstrap-admin secret from the cluster root (unused since D2); put "Krisztián" and "Dobmayer" on
-  keycloak_user.krisztian in the infra realm (every full realms plan wants to blank them today).
+- S2c: done 2026-10-28 (account console theme, master display name "conde admin", image 26.8.1-conde7). Open:
+  the unused Keycloak images 26.8.1-conde1 to conde6 in Artifact Registry go with the next registry cleanup
+  (owner's deletion list).
+- S8: done 2026-10-28 (master 21c25b5). Open: the Secret Manager secret `keycloak-bootstrap-admin` is out of
+  Terraform state and still in GCP (owner's deletion list); the `deploy` service account's display name still
+  says "GKE rollout" (rides the next foundation change).
 - S9 (desk, after v0.5.0): what remains of the old board's names: the launchd label `space.nativeai.conde`
   (a rename needs a migration of existing installs), and `dakai` in the shipped skills (skills/claude,
   skills/codex), the README and test fixtures (the product text, the CLI help, the MCP descriptions and the

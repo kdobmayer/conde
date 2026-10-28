@@ -32,7 +32,7 @@ resource "cloudflare_dns_record" "certificate_authorization" {
 }
 
 resource "cloudflare_dns_record" "gateway" {
-  for_each = toset(["conde.cloud", "*.conde.cloud"])
+  for_each = toset(["*.conde.cloud"])
 
   zone_id = local.zone_id
   name    = each.value
@@ -88,4 +88,29 @@ resource "cloudflare_dns_record" "dmarc" {
   type    = "TXT"
   content = "\"v=DMARC1; p=quarantine; rua=mailto:kdobmayer.devops@gmail.com\""
   ttl     = 300
+}
+
+# The public site (landing, docs, install.sh) on Cloudflare Pages: the apex and www are proxied CNAMEs to the
+# project; the wildcard above keeps every workspace hostname on the Google load balancer, DNS only.
+resource "cloudflare_pages_project" "site" {
+  account_id        = "0688c903526660bfe715c18ceb88d8e3"
+  name              = "conde-cloud"
+  production_branch = "main"
+}
+
+resource "cloudflare_pages_domain" "site" {
+  for_each     = toset(["conde.cloud", "www.conde.cloud"])
+  account_id   = cloudflare_pages_project.site.account_id
+  project_name = cloudflare_pages_project.site.name
+  name         = each.value
+}
+
+resource "cloudflare_dns_record" "site" {
+  for_each = toset(["conde.cloud", "www.conde.cloud"])
+  zone_id  = local.zone_id
+  name     = each.value
+  type     = "CNAME"
+  content  = "${cloudflare_pages_project.site.name}.pages.dev"
+  ttl      = 1
+  proxied  = true
 }

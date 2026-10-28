@@ -1,0 +1,7 @@
+# Cloudflare Pages response headers. The installer is a shell script, not a download.
+/install.sh
+  Content-Type: text/x-shellscript; charset=utf-8
+/llms.txt
+  Content-Type: text/plain; charset=utf-8
+/docs/*.md
+  Content-Type: text/markdown; charset=utf-8

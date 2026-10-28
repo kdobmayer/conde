@@ -1,0 +1,256 @@
+/* conde.cloud: the "Editorial" identity of the web app (docs/web-ui-v2/options/README.md, B).
+   Source Serif 4 for headings and prose, Inter for labels and navigation, warm off-white on ink,
+   one terracotta accent. Dark is the default; light is a deliberate second palette. */
+
+:root {
+	--serif: 'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+	--sans: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	--mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+	--acc: #d4886b;
+
+	/* dark: ink */
+	--ink: #131518;
+	--paper: #191c20;
+	--line: #2a2e34;
+	--text: #ebe6dc;
+	--soft: #b8b2a7;
+	--faint: #8e887e;
+	--acc-text: #e09a7e;
+	--acc-soft: #d4886b1c;
+
+	--sl-font: var(--sans);
+	--sl-font-system-mono: var(--mono);
+	--sl-color-accent-low: #3a241b;
+	--sl-color-accent: var(--acc);
+	--sl-color-accent-high: #f0c3ae;
+	--sl-color-white: var(--text);
+	--sl-color-gray-1: var(--text);
+	--sl-color-gray-2: var(--soft);
+	--sl-color-gray-3: var(--faint);
+	--sl-color-gray-4: #4a4f57;
+	--sl-color-gray-5: var(--line);
+	--sl-color-gray-6: var(--paper);
+	--sl-color-gray-7: var(--ink);
+	--sl-color-black: var(--ink);
+	--sl-color-bg: var(--ink);
+	--sl-color-bg-nav: var(--ink);
+	--sl-color-bg-sidebar: var(--ink);
+	--sl-color-bg-inline-code: var(--paper);
+	--sl-color-hairline: var(--line);
+	--sl-color-hairline-light: var(--line);
+	--sl-color-hairline-shade: var(--line);
+	--sl-color-text: var(--text);
+	--sl-color-text-accent: var(--acc-text);
+	--sl-text-h1: 2.5rem;
+	--sl-text-h2: 1.75rem;
+	--sl-text-h3: 1.3rem;
+	--sl-text-h4: 1.1rem;
+	--sl-content-width: 46rem;
+	--sl-line-height: 1.55;
+	color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+	/* light: warm paper */
+	--ink: #f7f3ec;
+	--paper: #efe9df;
+	--line: #ddd5c8;
+	--text: #1b1d20;
+	--soft: #4e4a43;
+	--faint: #7a746a;
+	--acc-text: #b5603f;
+	--acc-soft: #d4886b26;
+
+	--sl-color-accent-low: #f3d9cc;
+	--sl-color-accent: var(--acc);
+	--sl-color-accent-high: #7d3d24;
+	--sl-color-white: var(--text);
+	--sl-color-gray-1: var(--text);
+	--sl-color-gray-2: var(--soft);
+	--sl-color-gray-3: var(--faint);
+	--sl-color-gray-4: #b9b1a4;
+	--sl-color-gray-5: var(--line);
+	--sl-color-gray-6: var(--paper);
+	--sl-color-gray-7: var(--ink);
+	--sl-color-black: var(--ink);
+	--sl-color-bg: var(--ink);
+	--sl-color-bg-nav: var(--ink);
+	--sl-color-bg-sidebar: var(--ink);
+	--sl-color-bg-inline-code: var(--paper);
+	--sl-color-text: var(--text);
+	--sl-color-text-accent: var(--acc-text);
+	color-scheme: light;
+}
+
+body {
+	background: var(--ink);
+	color: var(--text);
+}
+
+/* Prose in the serif; labels, navigation and code stay sans or mono. */
+.sl-markdown-content,
+.sl-markdown-content p,
+.sl-markdown-content li,
+.sl-markdown-content td,
+.sl-markdown-content th {
+	font-family: var(--serif);
+	font-size: 1.0625rem;
+}
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4,
+h1#_top,
+.hero h1 {
+	font-family: var(--serif);
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--text);
+}
+.sl-markdown-content h2 {
+	margin-top: 2.5em;
+	padding-top: 0.75em;
+	border-top: 1px solid var(--line);
+}
+.sl-markdown-content a {
+	color: var(--acc-text);
+	text-decoration: underline;
+	text-decoration-color: color-mix(in srgb, var(--acc-text) 45%, transparent);
+	text-underline-offset: 0.15em;
+}
+.sl-markdown-content a:hover {
+	text-decoration-color: var(--acc-text);
+}
+.sl-markdown-content code,
+.sl-markdown-content pre,
+.sl-markdown-content kbd {
+	font-family: var(--mono);
+	font-size: 0.9em;
+}
+.sl-markdown-content :not(pre) > code {
+	background: var(--paper);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	padding: 0.08em 0.35em;
+	color: var(--text);
+}
+.sl-markdown-content table {
+	font-family: var(--sans);
+	font-size: 0.9375rem;
+}
+.sl-markdown-content th {
+	font-family: var(--sans);
+	font-size: 0.75rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--faint);
+	font-weight: 500;
+}
+.sl-markdown-content :is(th, td) {
+	border-color: var(--line);
+}
+.sl-markdown-content blockquote {
+	border-left: 2px solid var(--acc);
+	color: var(--soft);
+	font-style: italic;
+}
+
+/* Code blocks: a quiet panel, no gradient, no shadow, no window dots on an untitled terminal. */
+.expressive-code .frame.is-terminal:not(.has-title) .header {
+	display: none;
+}
+.expressive-code .frame {
+	--ec-frm-edBg: var(--paper);
+	--ec-frm-edActTabBg: var(--paper);
+	--ec-frm-trmBg: var(--paper);
+	--ec-brdCol: var(--line);
+	--ec-brdRad: 4px;
+	--ec-frm-shdCol: transparent;
+	box-shadow: none;
+}
+.expressive-code pre {
+	font-family: var(--mono) !important;
+}
+
+/* Site chrome: the title in the serif, the sidebar in the sans, hairlines only. */
+.site-title {
+	font-family: var(--serif);
+	font-weight: 600;
+	font-size: 1.5rem;
+	letter-spacing: -0.01em;
+	color: var(--text);
+}
+.site-title img {
+	height: 1.25rem;
+	width: 1.25rem;
+}
+header.header {
+	border-bottom: 1px solid var(--line);
+}
+.sidebar-pane {
+	border-right: 1px solid var(--line);
+}
+.sidebar-content a {
+	font-family: var(--sans);
+	font-size: 0.9375rem;
+	color: var(--soft);
+	border-radius: 0;
+	border-left: 2px solid transparent;
+	padding-left: 0.75rem;
+}
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover {
+	background: transparent;
+	color: var(--text);
+	border-left-color: var(--acc);
+	font-weight: 500;
+}
+.sidebar-content a:hover {
+	color: var(--text);
+	background: transparent;
+}
+.right-sidebar {
+	border-left: 1px solid var(--line);
+}
+.right-sidebar h2 {
+	font-family: var(--sans);
+	font-size: 0.7rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--faint);
+	font-weight: 500;
+}
+.right-sidebar a {
+	font-size: 0.875rem;
+}
+.pagination-links a {
+	border: 1px solid var(--line);
+	box-shadow: none;
+	border-radius: 4px;
+	font-family: var(--sans);
+}
+.pagination-links a:hover {
+	border-color: var(--faint);
+}
+footer.sl-flex {
+	font-family: var(--sans);
+	font-size: 0.875rem;
+	color: var(--faint);
+}
+starlight-theme-select select,
+starlight-theme-select label {
+	font-family: var(--sans);
+}
+
+/* The agent-facing banner on the docs: one line, the accent for the one thing that matters. */
+.sl-banner {
+	background: var(--paper);
+	color: var(--soft);
+	font-family: var(--sans);
+	font-size: 0.875rem;
+	box-shadow: none;
+	border-bottom: 1px solid var(--line);
+}
+.sl-banner code {
+	color: var(--acc-text);
+}

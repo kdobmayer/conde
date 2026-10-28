@@ -74,7 +74,9 @@ Raise `terraform_client_secret_version` (`variables.tf`) by one, then, with the 
     ./run.sh plan    # signs in with the new secret
 
 The targeted apply changes only the client and its secret, so the provider does not sign in again with the old secret
-after Keycloak has stopped accepting it. The secret version holding the old value is destroyed with the apply.
+after Keycloak has stopped accepting it. The secret version holding the old value is disabled, not destroyed
+(`deletion_policy = "DISABLE"`); destroying it is a separate decision:
+`gcloud secrets versions destroy <n> --secret keycloak-terraform-client-secret --project conde-prod`.
 
 ## Later switches
 

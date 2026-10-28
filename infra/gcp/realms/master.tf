@@ -75,10 +75,12 @@ resource "keycloak_openid_client_service_account_realm_role" "terraform" {
   role                    = data.keycloak_role.master_admin.name
 }
 
+# A rotation disables the version holding the old value instead of destroying it.
 resource "google_secret_manager_secret_version" "terraform_client_secret" {
   secret                 = google_secret_manager_secret.generated["keycloak-terraform-client-secret"].id
   secret_data_wo         = ephemeral.random_password.terraform_client_secret.result
   secret_data_wo_version = var.terraform_client_secret_version
+  deletion_policy        = "DISABLE"
 
   lifecycle {
     replace_triggered_by = [keycloak_openid_client.terraform.id]

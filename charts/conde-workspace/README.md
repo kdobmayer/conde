@@ -1,7 +1,7 @@
 # conde-workspace
 
 One conde server for one workspace (board): the Deployment, its Service, a Gateway API route, a PodDisruptionBudget
-and a deny-by-default NetworkPolicy. Install one release per workspace, each in its own namespace; the object names
+above one replica and a deny-by-default NetworkPolicy. Install one release per workspace, each in its own namespace; the object names
 are fixed (`conde`, `dbinit`), so two workspaces never share a namespace.
 
 On conde.cloud, Argo CD renders it once per `deploy/tenants/<name>.yaml` (see `deploy/argocd/workspaces.yaml.tftpl`

@@ -1,3 +1,5 @@
+{{- /* With one replica a PDB of minAvailable 1 only delays the eviction. */}}
+{{- if gt (int .Values.replicas) 1 }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -8,3 +10,4 @@ spec:
   selector:
     matchLabels:
       {{- include "conde.labels" . | nindent 6 }}
+{{- end }}

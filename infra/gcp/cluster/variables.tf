@@ -38,3 +38,26 @@ variable "argocd_repo_key_version" {
   type    = number
   default = 1
 }
+
+# The client id of the OAuth client `iap-admin` (docs/infra-gcp-s4-iap.md); not a secret.
+variable "iap_client_id" {
+  type    = string
+  default = "327673226052-0uppqjn1ujh4df0alpv2oagplaa099g2.apps.googleusercontent.com"
+
+  validation {
+    condition     = endswith(var.iap_client_id, ".apps.googleusercontent.com")
+    error_message = "iap_client_id is an OAuth client id (<number>-<id>.apps.googleusercontent.com)."
+  }
+}
+
+# The Secret Manager version of iap-admin-client-secret written into keycloak/iap-admin and argocd/iap-admin. After adding
+# a version, set its number here and apply; a new "latest" alone changes nothing.
+variable "iap_client_secret_version" {
+  type    = number
+  default = 1
+
+  validation {
+    condition     = var.iap_client_secret_version >= 1 && floor(var.iap_client_secret_version) == var.iap_client_secret_version
+    error_message = "iap_client_secret_version is a Secret Manager version number (1, 2, ...)."
+  }
+}

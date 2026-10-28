@@ -8,3 +8,5 @@ oidc:
 # How an invite reaches the person: Keycloak's account-setup email (docs/DEPLOY.md, invites).
 invite:
   signIn: password
+# One server: a restart or node drain is a short outage, accepted for the cost.
+replicas: 1

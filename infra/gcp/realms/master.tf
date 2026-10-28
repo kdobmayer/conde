@@ -66,7 +66,7 @@ resource "keycloak_openid_client" "terraform" {
   service_accounts_enabled     = true
 
   client_secret_wo         = ephemeral.random_password.terraform_client_secret.result
-  client_secret_wo_version = "1"
+  client_secret_wo_version = tostring(var.terraform_client_secret_version)
 }
 
 resource "keycloak_openid_client_service_account_realm_role" "terraform" {
@@ -75,17 +75,21 @@ resource "keycloak_openid_client_service_account_realm_role" "terraform" {
   role                    = data.keycloak_role.master_admin.name
 }
 
+# A rotation disables the version holding the old value instead of destroying it.
 resource "google_secret_manager_secret_version" "terraform_client_secret" {
   secret                 = google_secret_manager_secret.generated["keycloak-terraform-client-secret"].id
   secret_data_wo         = ephemeral.random_password.terraform_client_secret.result
-  secret_data_wo_version = 1
+  secret_data_wo_version = var.terraform_client_secret_version
+  deletion_policy        = "DISABLE"
 
   lifecycle {
     replace_triggered_by = [keycloak_openid_client.terraform.id]
   }
 }
 
-# Managed for its outbound mail (admin password resets and the console's test email) and its login theme; other settings stay Keycloak's.
+# Managed for its frontend URL, its login theme and its outbound mail (admin password resets and the console's test
+# email); other settings stay Keycloak's. The frontend URL moves the master realm's sign-in, and with it the console, to
+# the host behind IAP.
 import {
   to = keycloak_realm.master
   id = "master"
@@ -96,6 +100,10 @@ resource "keycloak_realm" "master" {
   default_signature_algorithm = "RS256"
   # The admin console's sign-in page in the conde theme (infra/keycloak/themes).
   login_theme = "conde"
+
+  attributes = {
+    frontendUrl = local.master_url
+  }
 
   smtp_server {
     host              = local.smtp.host

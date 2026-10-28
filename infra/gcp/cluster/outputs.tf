@@ -9,7 +9,7 @@ output "gateway" {
 output "keycloak" {
   value = {
     url                    = "https://${local.keycloak_hostname}"
-    admin_console          = "https://${local.keycloak_hostname}/admin/master/console/"
+    admin_console          = "https://${local.keycloak_admin_hostname}/admin/master/console/"
     image                  = local.keycloak_image
     bootstrap_admin_user   = "bootstrap-admin"
     bootstrap_admin_secret = google_secret_manager_secret.keycloak_bootstrap_admin.secret_id

@@ -6,14 +6,23 @@ directly against its Entra tenant; the realm `infra` for platform tools (Argo CD
 required); and in the master realm the permanent admin `admin` and the client `terraform`. The realms `infra` and
 `master` sign in with password and OTP for every user (the `mfa-browser` flow; a user without OTP enrols at the first
 sign-in); `clearscale` and `infra` refuse the password grant at the token endpoint (flows.tf).
-Apply after the cluster and workspaces roots, from a machine on the admin allowlist: the provider calls `/admin`
-and `/realms/master`, which Cloud Armor refuses from anywhere else.
+Apply after the cluster and workspaces roots. The provider calls `/admin` and `/realms/master`, which the public
+host does not serve, so `run.sh` reaches Keycloak through a port-forward to its Service: it starts `kubectl
+port-forward -n keycloak svc/keycloak 18080:8080 --address=127.0.0.1` over the cluster's DNS endpoint as
+terraform@conde-prod, waits until Keycloak answers, runs the given terraform command with the provider on
+http://127.0.0.1:18080, fails if the forward died during the run, and stops it. It refuses to start when the port is
+already taken (another listener would receive the credentials); `KEYCLOAK_FORWARD_PORT` picks another one. The
+master realm requires TLS only for public addresses, and a port-forward arrives from 127.0.0.1.
 
     export GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=terraform@conde-prod.iam.gserviceaccount.com
     export CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=$GOOGLE_IMPERSONATE_SERVICE_ACCOUNT
     export KEYCLOAK_CLIENT_ID=terraform
     export KEYCLOAK_CLIENT_SECRET="$(gcloud secrets versions access latest --secret keycloak-terraform-client-secret --project conde-prod)"
-    cd infra/gcp/realms && terraform init && terraform apply
+    cd infra/gcp/realms && terraform init && ./run.sh apply
+
+The master realm's frontend URL is https://admin-auth.conde.cloud (`master.tf`), the admin console's host behind
+Identity-Aware Proxy (docs/infra-gcp-s4-iap.md): its sign-in pages and the issuer of its tokens are there, while every
+other realm keeps https://auth.conde.cloud.
 
 The first apply, before the `terraform` client exists, signs in as the bootstrap admin instead:
 
@@ -44,10 +53,10 @@ default requires them from the user), so an invited user gets no "complete your 
 ## Replacing the bootstrap admin
 
 1. Read the temporary password: `gcloud secrets versions access latest --secret keycloak-admin-temp-password
-   --project conde-prod`. Sign in at https://auth.conde.cloud/admin/master/console/ as `admin`; Keycloak asks for a
+   --project conde-prod`. Sign in at https://admin-auth.conde.cloud/admin/master/console/ as `admin`; Keycloak asks for a
    new password and an authenticator app (OTP). Sign out, then sign in again with the new password and an OTP code.
 2. Switch Terraform to the `terraform` client (the first block above, without `KEYCLOAK_USER` and
-   `KEYCLOAK_PASSWORD`: `unset KEYCLOAK_USER KEYCLOAK_PASSWORD`) and run `terraform plan`: it must sign in and show
+   `KEYCLOAK_PASSWORD`: `unset KEYCLOAK_USER KEYCLOAK_PASSWORD`) and run `./run.sh plan`: it must sign in and show
    no changes.
 3. In the admin console as `admin`: realm master, Users, `bootstrap-admin`, Delete. Keycloak creates the bootstrap
    user only while the master realm has no user at all, so it does not come back on a restart.
@@ -55,6 +64,19 @@ default requires them from the user), so an invited user gets no "complete your 
    `keycloak-bootstrap-admin` secret; they are unused from step 3 on.
 5. Add `"master"` to `no_password_grant` in flows.tf and apply: the first-apply path above was the last user of the
    master realm's password grant.
+
+## Rotating the terraform client secret
+
+Raise `terraform_client_secret_version` (`variables.tf`) by one, then, with the current secret still exported:
+
+    ./run.sh apply -target=keycloak_openid_client.terraform -target=google_secret_manager_secret_version.terraform_client_secret
+    export KEYCLOAK_CLIENT_SECRET="$(gcloud secrets versions access latest --secret keycloak-terraform-client-secret --project conde-prod)"
+    ./run.sh plan    # signs in with the new secret
+
+The targeted apply changes only the client and its secret, so the provider does not sign in again with the old secret
+after Keycloak has stopped accepting it. The secret version holding the old value is disabled, not destroyed
+(`deletion_policy = "DISABLE"`); destroying it is a separate decision:
+`gcloud secrets versions destroy <n> --secret keycloak-terraform-client-secret --project conde-prod`.
 
 ## Later switches
 

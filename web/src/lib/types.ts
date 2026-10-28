@@ -120,6 +120,8 @@ export interface Fleet {
 	online_ttl_s: number;
 	hosts: FleetHost[];
 	agents: FleetAgent[];
+	/** The workspace admins' user names; absent from a server older than the field. */
+	admins?: string[];
 }
 
 export interface ChannelSummary {

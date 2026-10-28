@@ -355,11 +355,14 @@ async fn the_built_app_reads_through_the_real_ops(d: Arc<Dispatcher>) {
         "{worker}"
     );
     assert!(worker["channels"][0]["channel"].is_string(), "{worker}");
+    let (dd, user) = (ui.d.clone(), c.k.user_id);
+    blocking(move || dd.with_tx(|t| Ok(t.set_user_admin(user, true)?)).unwrap()).await;
     let fleet = ui.ok(&b, &csrf, "fleet.list", json!({})).await;
     assert!(
         fleet["now"].is_string() && fleet["online_ttl_s"].is_number(),
         "{fleet}"
     );
+    assert_eq!(fleet["admins"], json!([USER]), "the admin mark's source");
     for h in fleet["hosts"].as_array().unwrap() {
         assert!(
             h["host"].is_string() && h["owner"].is_string() && h["online"].is_boolean(),

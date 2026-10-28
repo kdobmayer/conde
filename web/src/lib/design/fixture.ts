@@ -249,7 +249,8 @@ export const fleet: Fleet = {
 		agent(NUC, 'claude', 'nuc', false, { seen: at(2) }),
 		agent(REVIEW, 'codex', 'bk-laptop', false, { seen: at(3) }),
 		agent(INFRA, 'claude', 'dk-mac', false, { seen: at(80) })
-	]
+	],
+	admins: [OWNER, 'konstantin']
 };
 
 function agent(

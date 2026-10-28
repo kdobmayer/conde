@@ -113,6 +113,7 @@
 					{@const agents = t.hosts.reduce((n, h) => n + h.agents.length, 0)}
 					{#snippet label()}
 						<span class="owner">{t.owner}</span>
+						{#if t.admin}<span class="role">admin</span>{/if}
 						<span class="count">{plural(t.hosts.length, 'host')} · {plural(agents, 'agent')}</span>
 					{/snippet}
 					<Disclosure {label}>
@@ -310,6 +311,14 @@
 	}
 	.owner {
 		font: 600 17px/1.3 var(--serif);
+	}
+	.role {
+		margin-left: 8px;
+		font-size: 10.5px;
+		font-weight: 500;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--muted);
 	}
 	.count {
 		margin-left: 10px;

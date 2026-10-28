@@ -504,6 +504,13 @@ impl WebStore for WebBoard {
         Ok(RealmAccount { id, invite })
     }
 
+    fn clear_realm_account(&self, name: &str) -> WebResult<Option<bool>> {
+        self.write(|t| match t.user_by_name(name)? {
+            Some(u) => Ok(Some(t.clear_user_keycloak(u.user_id)?)),
+            None => Ok(None),
+        })
+    }
+
     fn set_slack_member(&self, name: &str, member_id: &str) -> WebResult<Option<WebUser>> {
         self.write(|t| match t.user_by_name(name)? {
             Some(u) => {

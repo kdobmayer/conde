@@ -534,6 +534,12 @@ pub trait WebStore: Send + Sync {
     fn record_realm_id(&self, _user_id: i64, _invite: &str, _id: &str) -> WebResult<RealmAccount> {
         Err(WebStoreError("this board has no invites".into()))
     }
+    /// Forgets the realm account recorded for user `name` (its id and correlation value; the
+    /// user's identities and email stay), so the next invite creates a new one; whether one was
+    /// recorded, None for an unknown user.
+    fn clear_realm_account(&self, _name: &str) -> WebResult<Option<bool>> {
+        Err(WebStoreError("this board has no invites".into()))
+    }
     /// Sets the user's Slack member id as the admin's (a lookup by email never replaces it);
     /// None for an unknown user. Default: refused (a store without human paging).
     fn set_slack_member(&self, _name: &str, _member_id: &str) -> WebResult<Option<WebUser>> {

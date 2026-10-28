@@ -37,8 +37,7 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S1b (desk, after S1): small follow-ups from the S1 review: the Keycloak `conde` email theme hard-codes the demo
   workspace name and URL (a second password realm needs a realm-aware template); every realms apply that changes
   the demo realm drops and re-adds the `conde-admin` manage-users role for a few seconds (invites fail in that
-  window; a dependency fix in infra/gcp/realms); an admin call to clear a user's recorded realm account (today a
-  documented SQL statement); inviting a pre-existing realm account is unsupported.
+  window; a dependency fix in infra/gcp/realms); inviting a pre-existing realm account is unsupported.
 - S2c (desk, small): Keycloak account console theme (React-based, not covered by the login theme); master realm
   display name "conde admin" (today the label under the wordmark reads KEYCLOAK); the unused image 26.8.1-conde3 in
   Artifact Registry can go with the next registry cleanup.

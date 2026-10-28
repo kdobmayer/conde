@@ -1692,6 +1692,62 @@ fn admin_user_invites_and_lists_with_the_admin_key() {
     );
 }
 
+/// `conde admin user realm-clear` posts to the user's realm-account clear with the admin key and
+/// prints one line either way; an agent's shell and a name that is no user name are refused
+/// before anything is sent.
+#[test]
+fn admin_user_realm_clear_posts_with_the_admin_key() {
+    let r = Root::new();
+    let key = "q7Zx2Lm9Vt4Rk8Wp3Ny6Hb1Jc5Fd0GsUe";
+    let out = r
+        .cmd(Path::new(BIN))
+        .env("CODEX_THREAD_ID", "t-1")
+        .env("CONDE_ADMIN_KEY", key)
+        .args([
+            "admin",
+            "user",
+            "realm-clear",
+            "ann",
+            "--server",
+            "https://x.example",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("admin commands are for the human only"));
+
+    for (cleared, want) in [
+        (
+            true,
+            "cleared the recorded sign-in account of ann on {url}: the next invite creates a new one",
+        ),
+        (
+            false,
+            "ann on {url} has no recorded sign-in account: nothing to clear",
+        ),
+    ] {
+        let (url, seen) = one_admin_answer(json!({"user": "ann", "cleared": cleared}));
+        let line = conde::admin::realm_clear(&url, key, " Ann ").unwrap();
+        assert_eq!(line, want.replace("{url}", &url));
+        let request = seen.join().unwrap();
+        assert!(
+            request.starts_with("POST /v1/admin/users/ann/realm-account/clear HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.to_ascii_lowercase().contains(&format!(
+                "authorization: bearer {}",
+                key.to_ascii_lowercase()
+            )),
+            "{request}"
+        );
+    }
+    let e = conde::admin::realm_clear("https://x.example", key, "a/../../keys")
+        .unwrap_err()
+        .to_string();
+    assert_eq!(e, "a user name is [a-z0-9_-]");
+}
+
 /// The admin key never travels over plain http, except to this machine.
 #[test]
 fn admin_slack_refuses_plain_http_off_this_machine() {

@@ -1,7 +1,8 @@
 //! The admin API under `/v1/admin`, authenticated by the `CONDE_ADMIN_KEY` bearer: mint, list
 //! and revoke host keys, invite users by email (and send the invite email, [`super::invite`]),
-//! bind users to an identity, list, disable and enable users. The key is compared through its
-//! digest in constant time and never logged; every answer is `no-store`.
+//! bind users to an identity, list, disable and enable users, clear a user's recorded realm
+//! account. The key is compared through its digest in constant time and never logged; every
+//! answer is `no-store`.
 
 use std::sync::Arc;
 
@@ -172,6 +173,10 @@ pub fn router(state: AdminState) -> Router {
         .route("/v1/admin/users/{name}/disable", post(disable_user))
         .route("/v1/admin/users/{name}/enable", post(enable_user))
         .route("/v1/admin/users/{name}/slack", post(set_slack))
+        .route(
+            "/v1/admin/users/{name}/realm-account/clear",
+            post(clear_realm_account),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin))
         .with_state(state)
 }
@@ -739,6 +744,31 @@ async fn disable_user(State(state): State<AdminState>, Path(name): Path<String>)
 /// `POST /v1/admin/users/{name}/enable`.
 async fn enable_user(State(state): State<AdminState>, Path(name): Path<String>) -> Response {
     set_disabled(state, name, false).await
+}
+
+/// `POST /v1/admin/users/{name}/realm-account/clear`: forgets the realm account a password
+/// workspace's invite recorded (its id and correlation value), so the next invite creates a new
+/// one; `cleared` is false when none was recorded. The user's identities and email stay.
+async fn clear_realm_account(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(name) = owner_name(&name) else {
+        return fail(StatusCode::BAD_REQUEST, "bad_request", "bad user name");
+    };
+    let target = name.clone();
+    match state
+        .core()
+        .store(move |s| s.clear_realm_account(&target))
+        .await
+    {
+        Ok(Some(cleared)) => {
+            tracing::info!(user = %name, cleared, "admin cleared the user's realm account record");
+            reply(StatusCode::OK, json!({"user": name, "cleared": cleared}))
+        }
+        Ok(None) => fail(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => store_failed(e),
+    }
 }
 
 #[derive(Deserialize)]

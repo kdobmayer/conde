@@ -424,8 +424,8 @@ resource "kubernetes_manifest" "keycloak_backend" {
   }
 }
 
-# Deny by default; in from the load balancer only, out to DNS, the metadata server, the Cloud SQL PSC endpoint and
-# public HTTPS (the Cloud SQL Admin API, the federated identity providers).
+# Deny by default; in from the load balancer only, out to DNS, the metadata server, the Cloud SQL PSC endpoint, public
+# HTTPS (the Cloud SQL Admin API, the federated identity providers) and public SMTPS.
 resource "kubernetes_network_policy_v1" "keycloak" {
   metadata {
     name      = "keycloak"
@@ -523,6 +523,20 @@ resource "kubernetes_network_policy_v1" "keycloak" {
             port     = ports.value.port
           }
         }
+      }
+    }
+
+    # SMTP submission with implicit TLS (smtp.resend.com) for the realms' emails; Keycloak's policy only.
+    egress {
+      to {
+        ip_block {
+          cidr   = "0.0.0.0/0"
+          except = local.private_ranges
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "465"
       }
     }
   }

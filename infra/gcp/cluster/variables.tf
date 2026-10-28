@@ -31,3 +31,10 @@ variable "workspaces_auto_sync" {
   type    = bool
   default = true
 }
+
+# Bump after adding a new version of the argocd-repo-ssh-key secret: the Argo CD release upgrades and its hook re-imports
+# the key (README: Repository access).
+variable "argocd_repo_key_version" {
+  type    = number
+  default = 1
+}

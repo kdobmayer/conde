@@ -14,8 +14,9 @@ and `infra/gcp/cluster/README.md`). Elsewhere it installs with Helm 3:
 `gcp.enabled: true` (GKE): the server reaches Cloud SQL through the Cloud SQL Auth Proxy as a native sidecar with
 automatic IAM authentication, so the database URL holds no password; its secrets are Secret Manager files mounted by
 the GKE Secret Manager CSI add-on under `/secrets` (no Kubernetes Secret); the GKE load balancer gets a
-HealthCheckPolicy and a GCPBackendPolicy with the Cloud Armor policy; and the `dbinit` Job, once, as the `postgres`
-user, hands the database and its public schema to the workspace's IAM user. The Google side (service account, IAM
+HealthCheckPolicy and a GCPBackendPolicy with the Cloud Armor policy; and the `dbinit` Job, as the `postgres` user,
+hands the database and its public schema to the workspace's IAM user and revokes CONNECT and TEMPORARY from PUBLIC,
+so no other workspace's user can open it. The Google side (service account, IAM
 user, grants, secrets) comes from `infra/gcp/modules/workspace`.
 
 `gcp.enabled: false` (any cluster): the container's environment comes from one Secret you provide, either
@@ -68,7 +69,9 @@ your store). The Secret holds:
 | `gcp.dbinit.enabled`, `.image`, `.adminSecret` | `true`, pinned postgres, `pg-admin-password` | the database hand-over Job and the secret with the `postgres` password |
 
 The Namespace and the dbinit objects carry `argocd.argoproj.io/sync-wave: "-1"`, so Argo CD finishes the database
-hand-over before it starts the server; Helm ignores the annotation.
+hand-over before it starts the server, and the Job carries `Replace=true,Force=true`, so Argo CD recreates it (its pod
+template is immutable) when the script changes; Helm ignores both annotations. With Helm alone, delete the completed
+Job before an upgrade that changes it.
 
 The selector labels are `app.kubernetes.io/name: conde` and `conde.cloud/workspace: <name>` and never change for a
 release; the chart adds no other labels to the pod template, so a values change that does not touch the pod leaves

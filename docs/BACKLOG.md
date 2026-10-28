@@ -11,6 +11,41 @@ commit messages, no attribution, `cargo test --workspace` green on both stores
 timing bounds), no new clippy warning, docs updated where behavior changes.
 Review and integration by desk, one batch at a time; one release per batch.
 
+## conde.cloud on GCP: the remaining sequence (owner, 2026-10-28)
+
+Owner's ruling: nothing below is deferred except D1 (needs his hand) and the network-layer revisit, which is
+the last step. Desk runs the rest in this order after the Dakai cutover basics (release, rehearsal, cutover).
+
+- S1 (desk): the invite email flow: `conde admin invite <name> <email> --board <ws>`, the join page
+  `/join/<token>` (set password, then the one line for the agent), Keycloak account creation through its
+  admin API, mail through Resend; `conde update`; the site documents both.
+- S2 (desk): Keycloak login theme in the conde branding, design option B (docs/infra-plan-gcp.md 8c).
+- S3 (desk): the landing page second pass with the owner's illustration (text-free variant by Astra,
+  lowercase "conde", under the headline at about 60% width; a square crop for the social preview); two
+  rendered options for the owner: a three-step strip, a short real agent-human exchange in the serif, the
+  three sign-in modes as a footer fact. Source: site/src/assets/source/landing-illustration-v1.png.
+- S4 (desk): Identity-Aware Proxy in front of the admin surfaces (Keycloak console on its own hostname and
+  backend, Argo CD), replacing the IP allowlist (docs/infra-plan-gcp.md 8b); a Cloud Armor policy of its own
+  for the Argo CD backend.
+- S5 (desk): Keycloak file vault for the Google and SMTP secrets so they leave Terraform state.
+- S6 (desk): archive, later delete, the DakaiGroup/conde repository and the Azure conde resources once the
+  Dakai cutover is a week old (the resource list shown to the owner before the destroy, per his rule).
+- S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
+  Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
+
+Owner's own steps, at his pace, none blocking the above:
+- D1: replace the GitHub Actions secret CLOUDFLARE_API_TOKEN (today the conde-terraform token: DNS edit +
+  Zone settings + Pages edit) with a token holding only "Cloudflare Pages: Edit": create it at
+  dash.cloudflare.com/profile/api-tokens, `pass insert -f conde/cloudflare-pages-token`, then desk runs
+  `pass show conde/cloudflare-pages-token | gh secret set CLOUDFLARE_API_TOKEN -R kdobmayer/conde`.
+- D2: sign in to Keycloak's admin console as the permanent `admin` (temporary password in Secret Manager
+  keycloak-admin-temp-password), set the password and the authenticator; then desk deletes bootstrap-admin
+  and adds master to `no_password_grant` (infra/gcp/realms/README.md).
+- D3: sign in to Argo CD at argocd.conde.cloud through the infra realm as `krisztian` (temporary password
+  in Secret Manager infra-krisztian-temp-password); then desk flips `argocd_local_admin` to false and
+  deletes argocd-initial-admin-secret.
+- D4: Cloudflare account 2FA (profile, Authentication); it holds the domain.
+
 ## Standing items (no claim needed)
 
 - S1. Release smoke on the NUC after every release, unattended with the

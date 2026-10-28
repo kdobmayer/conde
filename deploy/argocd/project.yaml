@@ -11,9 +11,11 @@ spec:
   destinations:
     - server: https://kubernetes.default.svc
       namespace: ws-*
+  # Argo CD checks the namespace it creates against this list too, so Namespace stays, limited to the ws-* names.
   clusterResourceWhitelist:
     - group: ""
       kind: Namespace
+      name: ws-*
   namespaceResourceWhitelist:
     - group: ""
       kind: ServiceAccount

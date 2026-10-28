@@ -1,13 +1,6 @@
-# Values of the conde-workspace chart for https://demo.conde.cloud; signs in against its Keycloak realm.
-name: demo
-hostname: demo.conde.cloud
+# https://demo.conde.cloud, signing in against its Keycloak realm. The file name is the workspace name; everything else
+# the chart needs is derived from it in deploy/argocd/workspaces.yaml.tftpl, and only these keys are read from here.
 boardName: demo
 oidc:
   issuer: https://auth.conde.cloud/realms/demo
   clientId: conde
-gcp:
-  serviceAccount: conde-demo@conde-prod.iam.gserviceaccount.com
-  secrets:
-    adminKey: demo-admin-key
-    oidcClientSecret: demo-oidc-client-secret
-    slackBotToken: demo-slack-bot-token

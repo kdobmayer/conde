@@ -18,7 +18,77 @@ locals {
   # Pods reach the API server at its in-VPC address; the cluster object reports none with IP endpoints disabled.
   api_server_ips = [for e in data.kubernetes_resource.api_server.object.endpoints : one(e.addresses)]
 
-  # Platform values of every workspace Application; the tenant file and deploy/image.yaml add the rest.
+  workspace_domain = "conde.cloud"
+  postgres_image   = "docker.io/library/postgres:18.6-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5"
+
+  # Writes only the repository Secret, by server-side apply (no last-applied annotation copying the key); kubectl prints
+  # the object name only. A Helm hook of the Argo CD release, so it runs on every install and upgrade, and the TTL
+  # controller deletes it and its pod, with the pod's token, ten minutes after it finishes; Terraform tracks no Job.
+  argocd_repo_import_job = {
+    apiVersion = "batch/v1"
+    kind       = "Job"
+    metadata = {
+      name      = "${local.argocd_repo_import}-hook"
+      namespace = local.argocd_namespace
+      annotations = {
+        "helm.sh/hook"                 = "post-install,post-upgrade"
+        "helm.sh/hook-delete-policy"   = "before-hook-creation"
+        "conde.cloud/repo-key-version" = tostring(var.argocd_repo_key_version)
+      }
+    }
+    spec = {
+      backoffLimit            = 4
+      ttlSecondsAfterFinished = 600
+      template = {
+        metadata = { labels = { "app.kubernetes.io/name" = local.argocd_repo_import } }
+        spec = {
+          serviceAccountName = local.argocd_repo_import
+          restartPolicy      = "Never"
+          securityContext = {
+            runAsNonRoot   = true
+            runAsUser      = 65532
+            seccompProfile = { type = "RuntimeDefault" }
+          }
+          containers = [{
+            name  = "kubectl"
+            image = local.kubectl_image
+            args  = ["apply", "--server-side", "--field-manager=${local.argocd_repo_import}", "-k", "/work"]
+            env   = [{ name = "HOME", value = "/tmp" }]
+            resources = {
+              requests = { cpu = "50m", memory = "64Mi", "ephemeral-storage" = "100Mi" }
+              limits   = { "ephemeral-storage" = "100Mi" }
+            }
+            securityContext = {
+              allowPrivilegeEscalation = false
+              readOnlyRootFilesystem   = true
+              capabilities             = { drop = ["ALL"] }
+            }
+            volumeMounts = [
+              { name = "work", mountPath = "/work" },
+              { name = "kustomization", mountPath = "/work/kustomization.yaml", subPath = "kustomization.yaml", readOnly = true },
+              { name = "key", mountPath = "/work/key", readOnly = true },
+              { name = "tmp", mountPath = "/tmp" },
+            ]
+          }]
+          volumes = [
+            { name = "work", emptyDir = {} },
+            { name = "tmp", emptyDir = {} },
+            { name = "kustomization", configMap = { name = local.argocd_repo_import } },
+            {
+              name = "key"
+              csi = {
+                driver           = "secrets-store-gke.csi.k8s.io"
+                readOnly         = true
+                volumeAttributes = { secretProviderClass = local.argocd_repo_import }
+              }
+            },
+          ]
+        }
+      }
+    }
+  }
+
+  # Platform values of every workspace Application; the ApplicationSet derives the per-workspace values.
   workspace_platform_values = {
     namespace   = { create = true }
     distBaseUrl = local.foundation.dist_bucket_url
@@ -123,6 +193,7 @@ locals {
           targetRef = { group = "", kind = "Service", name = "argocd-server" }
         }
       },
+      local.argocd_repo_import_job,
     ]
   }
 }
@@ -152,7 +223,14 @@ resource "helm_release" "argocd" {
   values     = [yamlencode(local.argocd_values)]
   timeout    = 900
 
-  depends_on = [kubernetes_network_policy_v1.argocd]
+  # The repository import hook needs its identity, permissions, secret mount and kustomization in place.
+  depends_on = [
+    kubernetes_network_policy_v1.argocd,
+    google_secret_manager_secret_iam_member.argocd_repo_import,
+    kubernetes_role_binding_v1.argocd_repo_import,
+    kubernetes_manifest.argocd_repo_ssh_key,
+    kubernetes_config_map_v1.argocd_repo_import,
+  ]
 }
 
 # Deny by default. In: the namespace's own pods, and the load balancer to the server. Out: the namespace's own pods,
@@ -379,138 +457,6 @@ resource "kubernetes_config_map_v1" "argocd_repo_import" {
   }
 }
 
-# Writes only the repository Secret, by server-side apply (no last-applied annotation copying the key); kubectl prints
-# the object name only. Re-run after a key rotation with -replace (README).
-resource "kubernetes_job_v1" "argocd_repo_import" {
-  metadata {
-    name      = local.argocd_repo_import
-    namespace = kubernetes_namespace_v1.argocd.metadata[0].name
-  }
-
-  spec {
-    backoff_limit = 4
-
-    template {
-      metadata {
-        labels = { "app.kubernetes.io/name" = local.argocd_repo_import }
-      }
-
-      spec {
-        service_account_name = kubernetes_service_account_v1.argocd_repo_import.metadata[0].name
-        restart_policy       = "Never"
-
-        # Autopilot adds it at admission; stated here so plans stay empty.
-        toleration {
-          key      = "kubernetes.io/arch"
-          operator = "Equal"
-          value    = "amd64"
-          effect   = "NoSchedule"
-        }
-
-        security_context {
-          run_as_non_root = true
-          run_as_user     = 65532
-          seccomp_profile {
-            type = "RuntimeDefault"
-          }
-        }
-
-        container {
-          name  = "kubectl"
-          image = local.kubectl_image
-          args  = ["apply", "--server-side", "--field-manager=${local.argocd_repo_import}", "-k", "/work"]
-
-          env {
-            name  = "HOME"
-            value = "/tmp"
-          }
-
-          resources {
-            requests = {
-              cpu                 = "50m"
-              memory              = "64Mi"
-              "ephemeral-storage" = "100Mi"
-            }
-            limits = {
-              "ephemeral-storage" = "100Mi"
-            }
-          }
-
-          security_context {
-            allow_privilege_escalation = false
-            read_only_root_filesystem  = true
-            capabilities {
-              drop = ["ALL"]
-            }
-          }
-
-          volume_mount {
-            name       = "work"
-            mount_path = "/work"
-          }
-          volume_mount {
-            name       = "kustomization"
-            mount_path = "/work/kustomization.yaml"
-            sub_path   = "kustomization.yaml"
-            read_only  = true
-          }
-          volume_mount {
-            name       = "key"
-            mount_path = "/work/key"
-            read_only  = true
-          }
-          volume_mount {
-            name       = "tmp"
-            mount_path = "/tmp"
-          }
-        }
-
-        volume {
-          name = "work"
-          empty_dir {}
-        }
-        volume {
-          name = "tmp"
-          empty_dir {}
-        }
-        volume {
-          name = "kustomization"
-          config_map {
-            name = kubernetes_config_map_v1.argocd_repo_import.metadata[0].name
-          }
-        }
-        volume {
-          name = "key"
-          csi {
-            driver    = "secrets-store-gke.csi.k8s.io"
-            read_only = true
-            volume_attributes = {
-              secretProviderClass = kubernetes_manifest.argocd_repo_ssh_key.manifest.metadata.name
-            }
-          }
-        }
-      }
-    }
-  }
-
-  wait_for_completion = true
-
-  lifecycle {
-    ignore_changes = [metadata[0].annotations]
-  }
-
-  timeouts {
-    create = "10m"
-    update = "10m"
-  }
-
-  depends_on = [
-    google_secret_manager_secret_iam_member.argocd_repo_import,
-    kubernetes_role_binding_v1.argocd_repo_import,
-    kubernetes_network_policy_v1.argocd,
-  ]
-}
-
 # ── The workspaces: one Application per deploy/tenants/<name>.yaml (the CRDs come with helm_release.argocd) ─────────
 resource "kubernetes_manifest" "argocd_project" {
   manifest   = yamldecode(file("${path.module}/../../../deploy/argocd/project.yaml"))
@@ -522,6 +468,10 @@ resource "kubernetes_manifest" "argocd_workspaces" {
     repo_url        = local.argocd_repo_url
     revision        = var.gitops_revision
     platform_values = jsonencode(local.workspace_platform_values)
+    domain          = local.workspace_domain
+    project         = local.project
+    postgres_image  = local.postgres_image
+    pg_admin_secret = "pg-admin-password"
     sync_policy = jsonencode(var.workspaces_auto_sync ? {
       automated = { selfHeal = true, prune = false }
     } : {})

@@ -1,13 +1,6 @@
-# Values of the conde-workspace chart for https://clearscale.conde.cloud; signs in against its Keycloak realm.
-name: clearscale
-hostname: clearscale.conde.cloud
+# https://clearscale.conde.cloud, signing in against its Keycloak realm. The file name is the workspace name; everything else
+# the chart needs is derived from it in deploy/argocd/workspaces.yaml.tftpl, and only these keys are read from here.
 boardName: clearscale
 oidc:
   issuer: https://auth.conde.cloud/realms/clearscale
   clientId: conde
-gcp:
-  serviceAccount: conde-clearscale@conde-prod.iam.gserviceaccount.com
-  secrets:
-    adminKey: clearscale-admin-key
-    oidcClientSecret: clearscale-oidc-client-secret
-    slackBotToken: clearscale-slack-bot-token

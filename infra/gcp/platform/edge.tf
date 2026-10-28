@@ -73,26 +73,16 @@ resource "google_compute_security_policy" "web" {
     }
   }
 
-  # Percent-encoded admin paths are refused outright; no Keycloak endpoint we route has an encoded path.
+  # Keycloak normalises percent-encoded dot segments (`/realms/demo/%2e%2e/master/...` serves the master
+  # realm). Cloud Armor evaluates the normalised path, so rule 1000 already catches that (verified from a
+  # non-allowlisted address); this rule is defence in depth should that evaluation ever change.
   rule {
     priority    = 1002
     action      = "deny(403)"
-    description = "No percent-encoded paths toward the admin console"
+    description = "No percent-encoded or dot-segment paths toward Keycloak"
     match {
       expr {
-        expression = "request.path.lower().contains('%2f') || request.path.lower().contains('%61dmin')"
-      }
-    }
-  }
-
-  # The whole Argo CD host (UI, API, gRPC); lower() and startsWith also catch an upper-case or host:port header.
-  rule {
-    priority    = 1003
-    action      = "deny(403)"
-    description = "Argo CD host only from admin_cidrs"
-    match {
-      expr {
-        expression = "request.headers['host'].lower().startsWith('argocd.conde.cloud') && !(${local.admin_from_allowlist})"
+        expression = "request.headers['host'].lower().startsWith('auth.conde.cloud') && (request.path.contains('%') || request.path.contains('..'))"
       }
     }
   }
@@ -103,7 +93,7 @@ resource "google_compute_security_policy" "web" {
     description = "Sign-in paths: over 100 requests a minute from one IP bans it for 10 minutes"
     match {
       expr {
-        expression = "request.path.matches('^/auth/')"
+        expression = "request.path.matches('^/auth/|^/realms/[^/]+/login-actions/|^/realms/[^/]+/protocol/openid-connect/token')"
       }
     }
     rate_limit_options {

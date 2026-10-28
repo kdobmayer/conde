@@ -95,5 +95,7 @@ A git files generator rather than a list in Terraform: adding or removing a work
 still needs its GCP side first (`infra/gcp/workspaces`, `infra/gcp/realms`).
 
 `preserveResourcesOnDeletion` is on: deleting a tenant file or the ApplicationSet leaves the workspace running.
-Pruning is off. Automated sync is `workspaces_auto_sync`, off until the workspaces adopted from Terraform have been
-synced once by hand, then on with self-heal.
+Sync is automated with self-heal, so a change made by hand to a workspace object is reverted to git; a new image goes
+in through `deploy/image.yaml`, not `kubectl set image`. Pruning is off: an object dropped from the chart stays until
+it is deleted by hand. `workspaces_auto_sync` turns automation off, as it was for the first adoption of the
+Terraform-created objects.

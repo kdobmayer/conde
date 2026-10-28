@@ -3,7 +3,7 @@ variable "admin_cidrs" {
   description = "Source ranges allowed to reach the Keycloak admin console (/admin/, /realms/master/) and the Argo CD host."
 
   validation {
-    condition     = length(var.admin_cidrs) >= 1 && length(var.admin_cidrs) <= 4 && alltrue([for c in var.admin_cidrs : can(cidrhost(c, 0))])
+    condition     = length(var.admin_cidrs) >= 1 && length(var.admin_cidrs) <= 3 && alltrue([for c in var.admin_cidrs : can(cidrhost(c, 0))])
     error_message = "admin_cidrs holds one to four CIDR ranges."
   }
 }

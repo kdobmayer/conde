@@ -12,6 +12,7 @@ resource "keycloak_realm" "this" {
   edit_username_allowed    = false
   remember_me              = false
   verify_email             = true
+  reset_password_allowed   = each.value.passwords
   ssl_required             = "external"
   password_policy          = "length(12) and notUsername"
 
@@ -39,19 +40,17 @@ resource "keycloak_realm" "this" {
     }
   }
 
-  dynamic "smtp_server" {
-    for_each = var.smtp == null ? [] : [var.smtp]
-    content {
-      host              = smtp_server.value.host
-      port              = smtp_server.value.port
-      from              = smtp_server.value.from
-      from_display_name = each.value.display_name
-      starttls          = true
+  smtp_server {
+    host              = local.smtp.host
+    port              = local.smtp.port
+    ssl               = true
+    from              = local.smtp.from
+    from_display_name = local.smtp.from_display_name
+    reply_to          = local.smtp.reply_to
 
-      auth {
-        username = smtp_server.value.username
-        password = var.smtp_password
-      }
+    auth {
+      username = local.smtp.username
+      password = data.google_secret_manager_secret_version.resend.secret_data
     }
   }
 

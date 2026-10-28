@@ -30,7 +30,8 @@ Every generated value is write-only: it is in Keycloak and in Secret Manager, no
 | `keycloak-terraform-client-secret` | the secret of the master realm's `terraform` client |
 
 A conde server reads its client secret at start: after a new version, `kubectl -n ws-<name> rollout restart
-deployment/conde`. The SMTP password, once set, is the one secret in this state (the realm resource keeps it).
+deployment/conde`. Two secrets this root reads are in its state, because their provider fields are not write-only:
+`resend-api-key` (the SMTP password of every realm) and `<name>-google-oauth-client-secret`.
 
 ## Replacing the bootstrap admin
 
@@ -53,9 +54,10 @@ deployment/conde`. The SMTP password, once set, is the one secret in this state 
 - Local passwords back on in a Google realm: in its `google browser` flow, set the `google browser forms` subflow to
   ALTERNATIVE and the password form in it to REQUIRED (`keycloak_authentication_subflow.google_forms` and
   `keycloak_authentication_execution.google_password`). The login page then shows both the form and the Google button.
-- Email: set `smtp` (for Gmail `{ host = "smtp.gmail.com", from = "kdobmayer.devops@gmail.com", username =
-  "kdobmayer.devops@gmail.com" }`) and pass the app password as `TF_VAR_smtp_password`. Until then the realms send
-  no email, so email verification and invitation emails cannot complete.
+- Email: every realm, master included, sends through Resend (`local.smtp` in main.tf: smtp.resend.com, SMTPS on 465,
+  user `resend`, the API key from `resend-api-key`), from `no-reply@conde.cloud` with replies to the owner. Keycloak
+  needs egress to TCP 465, an egress rule of its NetworkPolicy in the cluster root. "Forgot password" is on in the realms
+  that sign in with passwords (`passwords` in `local.realms`): demo.
 
 ## Adding a company
 

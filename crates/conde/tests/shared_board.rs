@@ -1597,9 +1597,27 @@ async fn a_mailbox_row_is_reached_only_when_delivered(d: Arc<Dispatcher>) {
 async fn board_info_names_the_board_account_and_host(d: Arc<Dispatcher>) {
     let fx = fixture(&d, config()).await;
     let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
+    let default = json!({"admin_agent": null, "lobby": null, "guide": "https://conde.cloud/docs/setup",
+                         "text": conde_remote::web::DEFAULT_WELCOME_TEXT});
     assert_eq!(
         info,
-        json!({"name": "shared", "owner": "kd", "host": "homepc", "mailbox_only": false})
+        json!({"name": "shared", "owner": "kd", "host": "homepc", "mailbox_only": false,
+               "welcome": default})
+    );
+    // the workspace's welcome as the admin stored it, the defaults filled
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            Ok(t.set_setting("welcome", r##"{"admin_agent":"kd/desk","lobby":"#lobby"}"##)?)
+        })
+        .unwrap()
+    })
+    .await;
+    let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;
+    assert_eq!(
+        info["welcome"],
+        json!({"admin_agent": "kd/desk", "lobby": "#lobby", "guide": "https://conde.cloud/docs/setup",
+               "text": conde_remote::web::DEFAULT_WELCOME_TEXT})
     );
     let (_home, _) = migrated(&fx, &[], 4).await;
     let info = fx.s.ok(&fx.kd, None, "board.info", json!({})).await;

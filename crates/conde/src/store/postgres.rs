@@ -137,6 +137,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "keycloak_account",
         include_str!("migrations/0018_keycloak_account.sql"),
     ),
+    (19, "welcome", include_str!("migrations/0019_welcome.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -889,7 +890,7 @@ fn user_slack_row(r: &Row) -> UserSlack {
 }
 
 const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled,
-    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email FROM users u";
+    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email, u.admin FROM users u";
 
 fn user_row(r: &Row) -> UserRow {
     UserRow {
@@ -898,6 +899,7 @@ fn user_row(r: &Row) -> UserRow {
         disabled: r.get(2),
         bound: r.get(3),
         email: r.get(4),
+        admin: r.get(5),
     }
 }
 
@@ -1318,6 +1320,36 @@ impl Tx for PgTx {
         self.execute(
             "UPDATE users SET done_pages = $2 WHERE user_id = $1",
             &[&user_id, &on],
+        )?;
+        Ok(())
+    }
+
+    fn set_user_admin(&self, user_id: i64, admin: bool) -> StoreResult<()> {
+        self.execute(
+            "UPDATE users SET admin = $2 WHERE user_id = $1",
+            &[&user_id, &admin],
+        )?;
+        Ok(())
+    }
+
+    fn mark_user_arrived(&self, user_id: i64, at: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE users SET arrived_at = $2 WHERE user_id = $1 AND arrived_at IS NULL",
+            &[&user_id, &at],
+        )? > 0)
+    }
+
+    fn setting(&self, key: &str) -> StoreResult<Option<String>> {
+        Ok(self
+            .query_opt("SELECT value FROM settings WHERE key = $1", &[&key])?
+            .map(|r| r.get(0)))
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> StoreResult<()> {
+        self.execute(
+            "INSERT INTO settings(key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            &[&key, &value],
         )?;
         Ok(())
     }

@@ -24,6 +24,7 @@ type Case = (&'static str, fn(&dyn Store));
 
 const CASES: &[Case] = &[
     ("principals", principals),
+    ("settings_and_arrival", settings_and_arrival),
     ("credentials", credentials),
     ("idempotency", idempotency),
     ("agents_and_byte_order", agents_and_byte_order),
@@ -134,6 +135,12 @@ fn main() {
         report.run(
             "sqlite::old_board_file_gains_topics",
             old_board_file_gains_topics,
+        );
+    }
+    if wanted("sqlite::old_board_file_counts_enrolled_users_as_arrived") {
+        report.run(
+            "sqlite::old_board_file_counts_enrolled_users_as_arrived",
+            old_board_file_counts_enrolled_users_as_arrived,
         );
     }
     if wanted("sqlite::old_board_file_gains_grant_codes") {
@@ -2165,6 +2172,64 @@ fn an_identities_rebuild_another_process_finished_first_is_skipped() {
     entra_identities_keep_their_users(&s);
 }
 
+/// Settings replace their value; the admin role is set and cleared; a user's arrival is
+/// recorded once.
+fn settings_and_arrival(s: &dyn Store) {
+    write(s, |tx| {
+        assert_eq!(tx.setting("welcome").unwrap(), None);
+        tx.set_setting("welcome", "a").unwrap();
+        tx.set_setting("welcome", "b").unwrap();
+        assert_eq!(tx.setting("welcome").unwrap().as_deref(), Some("b"));
+        let ann = tx.ensure_user("ann").unwrap();
+        assert!(!tx.user_by_id(ann).unwrap().unwrap().admin);
+        tx.set_user_admin(ann, true).unwrap();
+        assert!(tx.user_by_name("ann").unwrap().unwrap().admin);
+        tx.set_user_admin(ann, false).unwrap();
+        assert!(!tx.user_by_name("ann").unwrap().unwrap().admin);
+        assert!(
+            tx.mark_user_arrived(ann, "2026-10-28T10:00:00.000Z")
+                .unwrap()
+        );
+        assert!(
+            !tx.mark_user_arrived(ann, "2026-10-28T11:00:00.000Z")
+                .unwrap()
+        );
+    });
+}
+
+/// A board file from before the welcome: opening it adds the admin role and the arrival time,
+/// and a user who had a host counts as arrived (no welcome for them later).
+fn old_board_file_counts_enrolled_users_as_arrived() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    let (ann, bob) = {
+        let s = SqliteStore::open(&path).unwrap();
+        write(&s, |tx| {
+            let ann = tx.ensure_user("ann").unwrap();
+            tx.ensure_host("laptop", ann).unwrap();
+            (ann, tx.ensure_user("bob").unwrap())
+        })
+    };
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE users DROP COLUMN admin; ALTER TABLE users DROP COLUMN arrived_at",
+        )
+        .unwrap();
+    let s = SqliteStore::open(&path).unwrap();
+    write(&s, |tx| {
+        assert!(!tx.user_by_id(ann).unwrap().unwrap().admin);
+        assert!(
+            !tx.mark_user_arrived(ann, "2026-10-28T10:00:00.000Z")
+                .unwrap()
+        );
+        assert!(
+            tx.mark_user_arrived(bob, "2026-10-28T10:00:00.000Z")
+                .unwrap()
+        );
+    });
+}
+
 /// A board file from before topics: opening it adds the column, data intact.
 fn old_board_file_gains_topics() {
     let dir = tempfile::tempdir().unwrap();
@@ -2307,6 +2372,7 @@ fn web_sign_in_and_disabled_users(store: &dyn Store) {
         disabled,
         bound,
         email: None,
+        admin: false,
     };
     assert_eq!(w.user_by_name("ann").unwrap(), Some(row(false, false)));
     assert_eq!(w.user_by_identity(ENTRA, "o-1").unwrap(), None);

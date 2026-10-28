@@ -54,6 +54,7 @@ pub fn board_info(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         owner: ctx.p.user.clone(),
         host: ctx.p.host.clone(),
         mailbox_only: ctx.mailbox_only,
+        welcome: Some(crate::welcome::stored(ctx.db)?.filled()),
     })
 }
 

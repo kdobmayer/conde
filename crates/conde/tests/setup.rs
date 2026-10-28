@@ -266,17 +266,15 @@ fn linux_full_setup_then_idempotent_rerun() {
         out.contains("codex: added MCP server conde to ~/.codex/config.toml"),
         "{out}"
     );
+    // no workspace enrolled: the default guide, and no one named to write to
     assert!(
-        out.ends_with(&format!(
-            "\n\n{}\n  {}\n{}\n\n{}\n",
-            setup::FEEDBACK,
-            setup::FEEDBACK_COMMAND,
-            setup::FEEDBACK_KEEP,
-            setup::GUIDE
-        )),
+        out.ends_with("\n\nSetup guide: https://conde.cloud/docs/setup\n"),
         "{out}"
     );
-    assert!(setup::FEEDBACK_COMMAND.starts_with("conde send kdobmayer/desk "));
+    assert!(
+        !out.contains("Questions:") && !out.contains("kdobmayer/desk"),
+        "{out}"
+    );
 
     let unit = read(&env.systemd_unit());
     assert!(
@@ -2308,5 +2306,63 @@ fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
     assert_eq!(
         setup::launchd_loaded_program("gui/501/x = {\n\tstate = running\n}\n"),
         None
+    );
+}
+
+// --- the workspace's welcome -----------------------------------------------------------------
+
+fn welcome_setup(welcome: Value) -> String {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    enrolled(&env);
+    let mut host = Fake::new(&env, &["systemctl"]);
+    let mut info = board_info(true);
+    info["welcome"] = welcome;
+    host.daemon.insert("board.info", Ok(info));
+    let (ok, out) = run(
+        &env,
+        &Options::select(false, false, false, false),
+        &mut host,
+    );
+    assert!(ok, "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+    out
+}
+
+#[test]
+fn setup_ends_with_the_workspace_welcome_and_its_admin_agent() {
+    let out = welcome_setup(
+        json!({"admin_agent": "krisztian/networkoptix", "lobby": null,
+        "guide": "https://clearscale.conde.cloud/readme", "text": "Hello."}),
+    );
+    assert!(
+        out.ends_with(
+            "\nSetup guide: https://clearscale.conde.cloud/readme\n\
+             Questions: conde send krisztian/networkoptix \"<how the setup went, or your question>\" --board dakai\n  \
+             (from a name published there: conde publish <name> --board dakai; keep it registered, \
+             krisztian/networkoptix replies to it)\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("Team channel"), "{out}");
+}
+
+#[test]
+fn setup_names_no_one_when_the_welcome_has_no_admin_agent() {
+    let out = welcome_setup(json!({"lobby": "#lobby", "guide": "https://conde.cloud/docs/setup"}));
+    assert!(
+        out.ends_with(
+            "\nSetup guide: https://conde.cloud/docs/setup\nTeam channel: #lobby (conde read '#lobby' --board dakai)\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("Questions:"), "{out}");
+}
+
+#[test]
+fn a_server_without_the_welcome_gets_the_default_guide() {
+    assert_eq!(
+        conde::welcome::lines("dakai", None),
+        "Setup guide: https://conde.cloud/docs/setup\n"
     );
 }

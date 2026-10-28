@@ -36,5 +36,6 @@ pub mod surface;
 pub mod update;
 pub mod util;
 pub mod web_store;
+pub mod welcome;
 #[cfg(windows)]
 pub mod win;

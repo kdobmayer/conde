@@ -50,6 +50,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("messages", "page", "TEXT"),
     ("users", "keycloak_id", "TEXT"),
     ("users", "keycloak_invite", "TEXT"),
+    ("users", "admin", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "arrived_at", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -117,6 +119,14 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         ))?;
         if !stmt.exists([column])? {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+            if *column == "arrived_at" {
+                // as Postgres migration 0019: users with a host before the welcome count as arrived
+                conn.execute_batch(
+                    "UPDATE users SET arrived_at = COALESCE((SELECT MIN(c.created_at) FROM device_credentials c
+                         WHERE c.user_id = users.user_id), '1970-01-01T00:00:00Z')
+                     WHERE EXISTS (SELECT 1 FROM hosts h WHERE h.user_id = users.user_id)",
+                )?;
+            }
         }
     }
     conn.execute_batch(
@@ -352,7 +362,7 @@ fn user_slack_row(r: &Row) -> rusqlite::Result<UserSlack> {
 }
 
 const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled,
-    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email FROM users u";
+    EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email, u.admin FROM users u";
 
 fn user_row(r: &Row) -> rusqlite::Result<UserRow> {
     Ok(UserRow {
@@ -361,6 +371,7 @@ fn user_row(r: &Row) -> rusqlite::Result<UserRow> {
         disabled: r.get(2)?,
         bound: r.get(3)?,
         email: r.get(4)?,
+        admin: r.get(5)?,
     })
 }
 
@@ -775,6 +786,36 @@ impl Tx for SqliteTx<'_> {
         self.exec(
             "UPDATE users SET done_pages = ?2 WHERE user_id = ?1",
             params![user_id, on],
+        )?;
+        Ok(())
+    }
+
+    fn set_user_admin(&self, user_id: i64, admin: bool) -> StoreResult<()> {
+        self.exec(
+            "UPDATE users SET admin = ?2 WHERE user_id = ?1",
+            params![user_id, admin],
+        )?;
+        Ok(())
+    }
+
+    fn mark_user_arrived(&self, user_id: i64, at: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE users SET arrived_at = ?2 WHERE user_id = ?1 AND arrived_at IS NULL",
+            params![user_id, at],
+        )? > 0)
+    }
+
+    fn setting(&self, key: &str) -> StoreResult<Option<String>> {
+        self.opt("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
         )?;
         Ok(())
     }

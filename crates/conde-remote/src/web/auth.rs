@@ -1147,7 +1147,17 @@ async fn mint_for(state: &WebState, code: CliCode, host: &str) -> Response {
         return redeem_error(StatusCode::BAD_REQUEST, "invalid_request", "bad host name");
     };
     let label = host.trim().chars().take(64).collect::<String>();
-    match keys::mint(state.core(), code.user_id, base, label, keys::HOST_SUFFIXES).await {
+    let how = super::Enrollment::Login;
+    match keys::mint(
+        state.core(),
+        code.user_id,
+        base,
+        label,
+        keys::HOST_SUFFIXES,
+        how,
+    )
+    .await
+    {
         Ok(minted) => {
             let mut r = Json(RedeemResponse {
                 host_id: minted.host_id,

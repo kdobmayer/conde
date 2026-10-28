@@ -22,7 +22,7 @@ use super::session::digest;
 use super::{
     BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, WebConfig, WebStore,
 };
-use super::{BridgeRegistry, WebUser, entra_issuer};
+use super::{BridgeRegistry, SetWelcome, WebUser, Welcome, entra_issuer};
 
 /// The shortest admin key accepted.
 pub(crate) const MIN_KEY_LEN: usize = 32;
@@ -173,6 +173,9 @@ pub fn router(state: AdminState) -> Router {
         .route("/v1/admin/users/{name}/disable", post(disable_user))
         .route("/v1/admin/users/{name}/enable", post(enable_user))
         .route("/v1/admin/users/{name}/slack", post(set_slack))
+        .route("/v1/admin/users/{name}/promote", post(promote_user))
+        .route("/v1/admin/users/{name}/demote", post(demote_user))
+        .route("/v1/admin/welcome", get(get_welcome).post(set_welcome))
         .route(
             "/v1/admin/users/{name}/realm-account/clear",
             post(clear_realm_account),
@@ -219,7 +222,17 @@ async fn create_key(State(state): State<AdminState>, Json(req): Json<CreateKey>)
         Ok(u) => u,
         Err(e) => return store_failed(e),
     };
-    match mint(state.core(), owner.user_id, base.clone(), label.clone(), 1).await {
+    let how = super::Enrollment::Admin;
+    match mint(
+        state.core(),
+        owner.user_id,
+        base.clone(),
+        label.clone(),
+        1,
+        how,
+    )
+    .await
+    {
         Ok(k) => {
             tracing::info!(%user, host = %k.host_id, "admin minted a host key");
             reply(
@@ -822,9 +835,176 @@ async fn set_slack(
     }
 }
 
+async fn set_admin(state: AdminState, name: String, admin: bool) -> Response {
+    let Some(name) = owner_name(&name) else {
+        return fail(StatusCode::BAD_REQUEST, "bad_request", "bad user name");
+    };
+    let target = name.clone();
+    match state
+        .core()
+        .store(move |s| s.set_admin(&target, admin))
+        .await
+    {
+        Ok(Some(user)) => {
+            tracing::info!(user = %user.name, admin, "admin set the user's admin role");
+            reply(StatusCode::OK, json!({"user": user.name, "admin": admin}))
+        }
+        Ok(None) => fail(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// `POST /v1/admin/users/{name}/promote`: the user becomes a workspace admin, whose published
+/// agent the welcome can name.
+async fn promote_user(State(state): State<AdminState>, Path(name): Path<String>) -> Response {
+    set_admin(state, name, true).await
+}
+
+/// `POST /v1/admin/users/{name}/demote`: the user is no longer a workspace admin.
+async fn demote_user(State(state): State<AdminState>, Path(name): Path<String>) -> Response {
+    set_admin(state, name, false).await
+}
+
+/// `GET /v1/admin/welcome`: the welcome as stored and as newcomers get it (defaults filled).
+async fn get_welcome(State(state): State<AdminState>) -> Response {
+    match state.core().store(|s| s.welcome()).await {
+        Ok(w) => reply(
+            StatusCode::OK,
+            json!({"stored": w, "welcome": w.clone().filled()}),
+        ),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// A welcome field: trimmed, None when empty or absent.
+fn field(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// The welcome's fields checked for form (the board checks that they exist): the admin agent
+/// `owner/name`, the lobby `#channel`, the guide an https URL, the text one short paragraph.
+fn welcome_form(req: Welcome) -> Result<Welcome, &'static str> {
+    let admin_agent = match field(req.admin_agent) {
+        None => None,
+        Some(a) => {
+            let a = a.to_lowercase();
+            let ok = a.split_once('/').is_some_and(|(owner, name)| {
+                owner_name(owner).as_deref() == Some(owner)
+                    && !name.is_empty()
+                    && name.len() <= 100
+                    && !name.contains('/')
+            }) && !a.chars().any(|c| c.is_whitespace() || c.is_control());
+            if !ok {
+                return Err("admin_agent is an agent's full name, owner/name");
+            }
+            Some(a)
+        }
+    };
+    let lobby = match field(req.lobby) {
+        None => None,
+        Some(l) => {
+            let name = l.trim_start_matches('#').to_lowercase();
+            let ok = (1..=80).contains(&name.len())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            if !ok {
+                return Err("lobby is a channel, #name");
+            }
+            Some(format!("#{name}"))
+        }
+    };
+    let guide = field(req.guide);
+    if let Some(g) = &guide
+        && (!g.starts_with("https://")
+            || g.len() <= "https://".len()
+            || g.len() > 512
+            || g.chars().any(|c| c.is_whitespace() || c.is_control()))
+    {
+        return Err("guide is an https URL of at most 512 characters");
+    }
+    let text = field(req.text);
+    if let Some(t) = &text
+        && (t.chars().count() > 600 || t.chars().any(|c| c.is_control() || is_format(c)))
+    {
+        return Err(
+            "text is one paragraph of at most 600 characters, without control or format characters",
+        );
+    }
+    Ok(Welcome {
+        admin_agent,
+        lobby,
+        guide,
+        text,
+    })
+}
+
+/// `POST /v1/admin/welcome {admin_agent, lobby?, guide?, text?}`: replaces the workspace's
+/// welcome (an absent field is unset: no admin agent or lobby, the default guide or text). The
+/// admin agent must be a published agent of an admin user, the lobby a channel on the board.
+async fn set_welcome(State(state): State<AdminState>, Json(req): Json<Welcome>) -> Response {
+    let welcome = match welcome_form(req) {
+        Ok(w) => w,
+        Err(message) => return bad_request(message),
+    };
+    match state.core().store(move |s| s.set_welcome(&welcome)).await {
+        Ok(SetWelcome::Stored(w)) => {
+            tracing::info!(admin_agent = ?w.admin_agent, lobby = ?w.lobby, "admin set the welcome");
+            reply(
+                StatusCode::OK,
+                json!({"stored": w, "welcome": w.clone().filled()}),
+            )
+        }
+        Ok(SetWelcome::Refused(why)) => fail(StatusCode::CONFLICT, "conflict", &why),
+        Err(e) => store_failed(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn welcome_forms() {
+        let w = welcome_form(Welcome {
+            admin_agent: Some(" Krisztian/NetworkOptix ".into()),
+            lobby: Some("lobby".into()),
+            guide: Some(" ".into()),
+            text: None,
+        })
+        .unwrap();
+        assert_eq!(w.admin_agent.as_deref(), Some("krisztian/networkoptix"));
+        assert_eq!(w.lobby.as_deref(), Some("#lobby"));
+        assert_eq!(w.guide, None);
+        for bad in [
+            Welcome {
+                admin_agent: Some("desk".into()),
+                ..Welcome::default()
+            },
+            Welcome {
+                admin_agent: Some("a/b/c".into()),
+                ..Welcome::default()
+            },
+            Welcome {
+                lobby: Some("#a b".into()),
+                ..Welcome::default()
+            },
+            Welcome {
+                guide: Some("http://x.io".into()),
+                ..Welcome::default()
+            },
+            Welcome {
+                text: Some("a\u{202E}b".into()),
+                ..Welcome::default()
+            },
+            Welcome {
+                text: Some("x".repeat(601)),
+                ..Welcome::default()
+            },
+        ] {
+            assert!(welcome_form(bad.clone()).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn slack_member_ids() {

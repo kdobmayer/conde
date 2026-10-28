@@ -262,7 +262,8 @@ pub fn user_list(server: &str) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-/// `GET /v1/admin/users` with the admin key: one line per user, `name  email  issuers  state`.
+/// `GET /v1/admin/users` with the admin key: one line per user, `name  email  issuers  state`,
+/// then `admin` for an admin.
 pub fn list_users(server: &str, key: &str) -> anyhow::Result<Vec<String>> {
     let answer = admin_request(server, key, "/v1/admin/users", None)?;
     let users = answer["users"].as_array().cloned().unwrap_or_default();
@@ -276,7 +277,7 @@ pub fn list_users(server: &str, key: &str) -> anyhow::Result<Vec<String>> {
                 .filter_map(|i| i.as_str())
                 .collect();
             format!(
-                "{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}{}",
                 u["name"].as_str().unwrap_or(""),
                 u["email"].as_str().unwrap_or("-"),
                 if issuers.is_empty() {
@@ -289,9 +290,97 @@ pub fn list_users(server: &str, key: &str) -> anyhow::Result<Vec<String>> {
                 } else {
                     "enabled"
                 },
+                if u["admin"].as_bool() == Some(true) {
+                    "\tadmin"
+                } else {
+                    ""
+                },
             )
         })
         .collect())
+}
+
+/// `conde admin user promote|demote <name> --server <url>`.
+pub fn user_role(server: &str, name: &str, admin: bool) -> anyhow::Result<i32> {
+    let key = admin_key(
+        server,
+        "admin user promote and demote need the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+    )?;
+    println!("{}", set_role(server, &key, name, admin)?);
+    Ok(0)
+}
+
+/// `POST /v1/admin/users/<name>/promote` (or `/demote`) with the admin key; the line to print.
+pub fn set_role(server: &str, key: &str, name: &str, admin: bool) -> anyhow::Result<String> {
+    let name = user_name(name)?;
+    let verb = if admin { "promote" } else { "demote" };
+    let path = format!("/v1/admin/users/{name}/{verb}");
+    let answer = admin_request(server, key, &path, Some(serde_json::json!({})))?;
+    let user = answer["user"].as_str().unwrap_or(&name);
+    Ok(if admin {
+        format!("{user} is an admin of {server}")
+    } else {
+        format!("{user} is no longer an admin of {server}")
+    })
+}
+
+/// `conde admin welcome set --agent <owner/name> [--lobby] [--guide] [--text] --server <url>`.
+pub fn welcome_set(server: &str, welcome: &conde_remote::web::Welcome) -> anyhow::Result<i32> {
+    let key = admin_key(
+        server,
+        "admin welcome set needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+    )?;
+    print!("{}", set_welcome(server, &key, welcome)?);
+    Ok(0)
+}
+
+/// `POST /v1/admin/welcome` with the admin key; the text to print.
+pub fn set_welcome(
+    server: &str,
+    key: &str,
+    welcome: &conde_remote::web::Welcome,
+) -> anyhow::Result<String> {
+    let body = serde_json::to_value(welcome)?;
+    let answer = admin_request(server, key, "/v1/admin/welcome", Some(body))?;
+    welcome_text(server, &answer)
+}
+
+/// `conde admin welcome show --server <url>`.
+pub fn welcome_show(server: &str) -> anyhow::Result<i32> {
+    let key = admin_key(
+        server,
+        "admin welcome show needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+    )?;
+    let answer = admin_request(server, &key, "/v1/admin/welcome", None)?;
+    print!("{}", welcome_text(server, &answer)?);
+    Ok(0)
+}
+
+/// The welcome an admin API answer carries, as `welcome set` and `welcome show` print it.
+pub fn welcome_text(server: &str, answer: &serde_json::Value) -> anyhow::Result<String> {
+    let w: conde_remote::web::Welcome =
+        serde_json::from_value(answer["welcome"].clone()).context("the server's welcome answer")?;
+    let none = "(none)";
+    Ok(format!(
+        "welcome of {server}:\n  admin agent: {}\n  lobby: {}\n  guide: {}\n  text: {}\n",
+        w.admin_agent.as_deref().unwrap_or(none),
+        w.lobby.as_deref().unwrap_or(none),
+        w.guide.as_deref().unwrap_or(none),
+        w.text.as_deref().unwrap_or(none),
+    ))
+}
+
+/// A user name as the admin API takes it: `[a-z0-9_-]`.
+fn user_name(name: &str) -> anyhow::Result<String> {
+    let name = name.trim().to_lowercase();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("a user name is [a-z0-9_-]");
+    }
+    Ok(name)
 }
 
 /// `conde admin user realm-clear <name> --server <url>`.
@@ -306,14 +395,7 @@ pub fn user_realm_clear(server: &str, name: &str) -> anyhow::Result<i32> {
 
 /// `POST /v1/admin/users/<name>/realm-account/clear` with the admin key; the line to print.
 pub fn realm_clear(server: &str, key: &str, name: &str) -> anyhow::Result<String> {
-    let name = name.trim().to_lowercase();
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        bail!("a user name is [a-z0-9_-]");
-    }
+    let name = user_name(name)?;
     let path = format!("/v1/admin/users/{name}/realm-account/clear");
     let answer = admin_request(server, key, &path, Some(serde_json::json!({})))?;
     let user = answer["user"].as_str().unwrap_or(&name);
@@ -437,6 +519,7 @@ pub fn enroll(
         "{}",
         enrolled_text(&alias, &cfg, &path, false, None, &bridge)
     );
+    print!("{}", crate::welcome::lines(&alias, info.welcome.as_ref()));
     Ok(0)
 }
 

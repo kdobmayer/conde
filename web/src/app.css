@@ -1,6 +1,7 @@
 /* Design B, Editorial (docs/web-ui-v2/options/README.md): warm off-white on ink, one terracotta
    accent for own agents and anything that needs attention, grey status. Dark only. Source Serif 4
-   and Inter are bundled in U15; until then the fallback stacks apply. */
+   and Inter are bundled (lib/fonts.css); the fallback stacks cover the time before they load. */
+@import './lib/fonts.css';
 :root {
 	--bg: #131518;
 	--panel: #191c20;

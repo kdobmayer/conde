@@ -32,3 +32,19 @@ The app talks only to its own origin, as the signed-in owner, and writes nothing
   `fleet`), never what; the app refetches what it shows and polls every 15 s while it is down.
 
 Versions are pinned exactly in package.json (checked on npm 2026-10-09).
+
+Fonts: Source Serif 4 (400, 600, 400 italic) and Inter (400, 600), the woff2 files of
+`@fontsource/source-serif-4` 5.3.1 and `@fontsource/inter` 5.3.0 copied unmodified into
+`static/app/fonts` (not an npm dependency; the version is in each file name), with the OFL 1.1
+text beside them. `src/lib/fonts.css` declares each face twice, latin and latin-ext, with the
+packages' `unicode-range`, so a latin-ext file (ő, ű, other Central European letters) downloads
+only on a page whose text uses it. The server caches them for good, like the hashed files.
+
+| subset    | Serif 400 | Serif 600 | Serif 400 italic | Inter 400 | Inter 600 | total         |
+| --------- | --------: | --------: | ---------------: | --------: | --------: | ------------: |
+| latin     |    20,088 |    21,532 |           20,092 |    23,664 |    24,452 | 109,828 bytes |
+| latin-ext |    17,844 |    18,332 |           18,452 |    35,000 |    36,260 | 125,888 bytes |
+
+At most 235,716 bytes once per browser. Measured on the mock (2026-10-28): the Fleet page loads
+the five latin files (109,828 bytes); the Feed with a Hungarian message adds the latin-ext file of
+the serif it is set in (127,672 bytes).

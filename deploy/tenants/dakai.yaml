@@ -8,5 +8,3 @@ oidc:
 # How an invite reaches the person: one email from the server (docs/DEPLOY.md, invites).
 invite:
   signIn: microsoft
-# Stopped for the cutover (docs/CUTOVER-dakai.md step 4); removed at step 13.
-replicas: 0

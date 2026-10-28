@@ -32,6 +32,13 @@ variable "workspaces_auto_sync" {
   default = true
 }
 
+# Workspaces whose network policy still allows any public address on 443 besides their FQDN policy: the way to put
+# the broad reach back for one workspace without a commit to the gitops branch.
+variable "workspaces_public_https" {
+  type    = set(string)
+  default = []
+}
+
 # Bump after adding a new version of the argocd-repo-ssh-key secret: the Argo CD release upgrades and its hook re-imports
 # the key (README: Repository access).
 variable "argocd_repo_key_version" {

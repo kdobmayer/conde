@@ -7,7 +7,7 @@ locals {
   iap_secret_manager_secret = "iap-admin-client-secret"
   # GCPBackendPolicy reads the client secret from the data key `key`.
   iap_kubernetes_secret = "iap-admin"
-  iap_member            = "user:kdobmayer.devops@gmail.com"
+  iap_member            = "user:krisztian@conde.cloud"
   iap_namespaces = {
     keycloak = kubernetes_namespace_v1.keycloak.metadata[0].name
     argocd   = kubernetes_namespace_v1.argocd.metadata[0].name

@@ -86,7 +86,7 @@ resource "cloudflare_dns_record" "dmarc" {
   zone_id = local.zone_id
   name    = "_dmarc.conde.cloud"
   type    = "TXT"
-  content = "\"v=DMARC1; p=quarantine; rua=mailto:kdobmayer.devops@gmail.com\""
+  content = "\"v=DMARC1; p=quarantine; rua=mailto:krisztian@conde.cloud\""
   ttl     = 300
 }
 
@@ -113,4 +113,82 @@ resource "cloudflare_dns_record" "site" {
   content  = "${cloudflare_pages_project.site.name}.pages.dev"
   ttl      = 1
   proxied  = true
+}
+
+# Google Workspace mail for conde.cloud (the owner's mailbox krisztian@conde.cloud): the domain verification, the
+# MX records and the apex SPF were written by Google through Cloudflare on 2026-10-28 and imported; DKIM is published
+# here. Resend keeps its own SPF and DKIM on the send subdomain, so the two senders do not meet.
+locals {
+  google_mx = {
+    "aspmx.l.google.com"      = 1
+    "alt1.aspmx.l.google.com" = 5
+    "alt2.aspmx.l.google.com" = 5
+    "alt3.aspmx.l.google.com" = 10
+    "alt4.aspmx.l.google.com" = 10
+  }
+}
+
+resource "cloudflare_dns_record" "google_mx" {
+  for_each = local.google_mx
+
+  zone_id  = local.zone_id
+  name     = "conde.cloud"
+  type     = "MX"
+  content  = each.key
+  priority = each.value
+  ttl      = 3600
+}
+
+resource "cloudflare_dns_record" "google_spf" {
+  zone_id = local.zone_id
+  name    = "conde.cloud"
+  type    = "TXT"
+  content = "\"v=spf1 include:_spf.google.com ~all\""
+  ttl     = 3600
+}
+
+resource "cloudflare_dns_record" "google_verification" {
+  zone_id = local.zone_id
+  name    = "conde.cloud"
+  type    = "TXT"
+  content = "\"google-site-verification=KS1hE9-mOY8T2vmG-m0_hK3bIWety8eKzR8nDorz1Bo\""
+  ttl     = 3600
+}
+
+# Cloudflare stores a TXT value over 255 characters as two quoted strings; written that way so the plan stays clean.
+resource "cloudflare_dns_record" "google_dkim" {
+  zone_id = local.zone_id
+  name    = "google._domainkey.conde.cloud"
+  type    = "TXT"
+  content = "\"v=DKIM1;k=rsa;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyoxyD1SCWzHCfGYznl7jLXU59a7l+tKRmZ4QAs+YFtIhqkBcic5g0vIGJzoooyE1gGiA5lxVfDbNy6Uv3N5+E9Vyr7hY53d4XyInfJFC8Rm/dm3yI89qFjmbYNnwNj3sss68ivX2HjtGWvJc4ZnoqbZzB8dIIA8czRLmzXAYkeMRuo9Dh7ZvztdC5SlfepZqyOe\" \"w5lq9XB+3C5jtcrhG1dcdfOOFlAGx9uKpa841VmgUVDTltkWY/o4Cl8DyP8uPJd1VGK3MPvpcXNdJibGSHvlF7conveLmgAsQ8OWSgXUjePRka5wlJgFngh8FRlr0JcPc6eZcHbRu3atyvYjFSQIDAQAB\""
+  ttl     = 3600
+}
+
+import {
+  to = cloudflare_dns_record.google_mx["aspmx.l.google.com"]
+  id = "${local.zone_id}/f0b6c6436e60c1c943dc383e596ffe6f"
+}
+import {
+  to = cloudflare_dns_record.google_mx["alt1.aspmx.l.google.com"]
+  id = "${local.zone_id}/9ee31754029db090603b9b82eb80c04b"
+}
+import {
+  to = cloudflare_dns_record.google_mx["alt2.aspmx.l.google.com"]
+  id = "${local.zone_id}/770ae4657d912deb645ca15b08e92b99"
+}
+import {
+  to = cloudflare_dns_record.google_mx["alt3.aspmx.l.google.com"]
+  id = "${local.zone_id}/4d17f0d0deb541882bcf5ead85a4a76c"
+}
+import {
+  to = cloudflare_dns_record.google_mx["alt4.aspmx.l.google.com"]
+  id = "${local.zone_id}/57bf1e4ace2485e86341f00a71210b98"
+}
+import {
+  to = cloudflare_dns_record.google_spf
+  id = "${local.zone_id}/27867b5d0bc1a11e831628494147fe29"
+}
+import {
+  to = cloudflare_dns_record.google_verification
+  id = "${local.zone_id}/5c45b868ba5076baa2127c5871828cbf"
 }

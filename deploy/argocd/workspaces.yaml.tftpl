@@ -73,6 +73,9 @@ spec:
               value: ${pg_admin_secret}
             - name: networkPolicy.enabled
               value: "true"
+            # Any public address on 443 for the workspaces named in the cluster root's workspaces_public_https.
+            - name: networkPolicy.publicHttps
+              value: '{{ has (trimSuffix ".yaml" .path.filename) (list ${public_https}) }}'
       destination:
         server: https://kubernetes.default.svc
         namespace: 'ws-{{ trimSuffix ".yaml" .path.filename }}'

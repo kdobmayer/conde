@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use conde_transport::{
-    ClaudeSender, ClaudeSession, CodexOutcome, ReceiptStatus as Wire, codex_control_present, codex_control_socket,
-    codex_home, codex_notify_with_id, discover_claude, msg_id_for,
+    ClaudeSender, ClaudeSession, CodexOutcome, ReceiptStatus as Wire, codex_control_present,
+    codex_control_socket, codex_home, codex_notify_with_id, discover_claude, msg_id_for,
 };
 
 use crate::address::{Address, Kind};
@@ -46,7 +46,10 @@ impl HarnessNotifier {
 
     /// Session ids of the live Claude sessions (the bridge's endpoint list).
     pub fn live_claude(&self) -> Vec<String> {
-        self.claude_sessions().into_iter().map(|s| s.session_id).collect()
+        self.claude_sessions()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect()
     }
 
     fn remember(&mut self, msg_id: String, attempt_id: &str) {
@@ -60,7 +63,11 @@ impl HarnessNotifier {
 
     fn claude(&mut self, session_id: &str, text: &str, attempt_id: &str) -> NotifyOutcome {
         // Registry targets are session ids; a session *named* like one must not match.
-        let Some(session) = self.claude_sessions().into_iter().find(|s| s.session_id == session_id) else {
+        let Some(session) = self
+            .claude_sessions()
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+        else {
             return NotifyOutcome::Failed(format!("no live Claude session {session_id}"));
         };
         let dir = ClaudeSender::scope(&session).to_path_buf();
@@ -70,7 +77,12 @@ impl HarnessNotifier {
                     tracing::info!(reply = sender.address(), "claude reply socket bound");
                     self.senders.insert(dir.clone(), sender);
                 }
-                Err(e) => return NotifyOutcome::Failed(format!("cannot bind a reply socket in {}: {e}", dir.display())),
+                Err(e) => {
+                    return NotifyOutcome::Failed(format!(
+                        "cannot bind a reply socket in {}: {e}",
+                        dir.display()
+                    ));
+                }
             }
         }
         let msg_id = msg_id_for(attempt_id);
@@ -80,7 +92,9 @@ impl HarnessNotifier {
                 self.sent_since_poll = true;
                 NotifyOutcome::Accepted
             }
-            Err(e) => NotifyOutcome::Failed(format!("cannot deliver to {}: {e}", session.sock.display())),
+            Err(e) => {
+                NotifyOutcome::Failed(format!("cannot deliver to {}: {e}", session.sock.display()))
+            }
         }
     }
 }
@@ -92,7 +106,9 @@ fn status(r: &conde_transport::Receipt) -> Option<ReceiptStatus> {
         Wire::Expired => ReceiptStatus::Expired,
         Wire::Denied => ReceiptStatus::Denied,
         Wire::Refused => ReceiptStatus::Refused,
-        Wire::Dropped => ReceiptStatus::Dropped { reason: r.drop_reason.clone().unwrap_or_default() },
+        Wire::Dropped => ReceiptStatus::Dropped {
+            reason: r.drop_reason.clone().unwrap_or_default(),
+        },
         Wire::Other(_) => return None,
     })
 }
@@ -122,14 +138,25 @@ impl Notifier for HarnessNotifier {
     }
 
     fn poll_receipts(&mut self) -> Vec<Receipt> {
-        let mut wait = if std::mem::take(&mut self.sent_since_poll) { self.receipt_wait } else { Duration::ZERO };
+        let mut wait = if std::mem::take(&mut self.sent_since_poll) {
+            self.receipt_wait
+        } else {
+            Duration::ZERO
+        };
         let mut out = Vec::new();
         for sender in self.senders.values() {
             for r in sender.receipts(wait) {
                 match (self.attempts.get(&r.msg_id), status(&r)) {
-                    (Some(attempt), Some(status)) => out.push(Receipt { attempt_id: attempt.clone(), status }),
+                    (Some(attempt), Some(status)) => out.push(Receipt {
+                        attempt_id: attempt.clone(),
+                        status,
+                    }),
                     (None, _) => tracing::debug!(msg_id = r.msg_id, "receipt for an unknown frame"),
-                    (_, None) => tracing::warn!(msg_id = r.msg_id, status = r.status.as_str(), "unknown receipt status"),
+                    (_, None) => tracing::warn!(
+                        msg_id = r.msg_id,
+                        status = r.status.as_str(),
+                        "unknown receipt status"
+                    ),
                 }
             }
             wait = Duration::ZERO;
@@ -142,7 +169,10 @@ impl Notifier for HarnessNotifier {
     /// for the thread's next turn; abandoning it would only queue it again).
     fn is_live(&mut self, address: &Address) -> bool {
         match address.kind {
-            Kind::Claude => self.claude_sessions().iter().any(|s| s.session_id == address.target),
+            Kind::Claude => self
+                .claude_sessions()
+                .iter()
+                .any(|s| s.session_id == address.target),
             Kind::Codex | Kind::Human => true,
             Kind::Mailbox => false,
         }
@@ -168,11 +198,21 @@ pub fn doctor_checks(notifier: &HarnessNotifier, actor: Option<&str>) -> Vec<(bo
     let caller = actor.and_then(|a| a.split_once(':'));
     let is = |kind: &str| caller.is_some_and(|(k, _)| k == kind);
     match claude_sessions_dir(notifier.claude_config.as_deref()) {
-        None => out.push((!is("claude"), "claude: cannot locate the sessions dir (no HOME)".to_string())),
+        None => out.push((
+            !is("claude"),
+            "claude: cannot locate the sessions dir (no HOME)".to_string(),
+        )),
         Some(dir) => match std::fs::read_dir(&dir) {
             Ok(_) => {
                 let live = notifier.claude_sessions();
-                out.push((true, format!("claude: sessions dir {} readable, {} live session(s)", dir.display(), live.len())));
+                out.push((
+                    true,
+                    format!(
+                        "claude: sessions dir {} readable, {} live session(s)",
+                        dir.display(),
+                        live.len()
+                    ),
+                ));
                 if let Some((_, sid)) = caller.filter(|(k, _)| *k == "claude") {
                     let found = live.iter().any(|s| s.session_id == sid);
                     out.push((
@@ -188,7 +228,10 @@ pub fn doctor_checks(notifier: &HarnessNotifier, actor: Option<&str>) -> Vec<(bo
                     ));
                 }
             }
-            Err(e) => out.push((!is("claude"), format!("claude: sessions dir {} not readable: {e}", dir.display()))),
+            Err(e) => out.push((
+                !is("claude"),
+                format!("claude: sessions dir {} not readable: {e}", dir.display()),
+            )),
         },
     }
     match codex_home().map(|h| codex_control_socket(&h)) {
@@ -219,7 +262,10 @@ mod tests {
             n.remember(msg_id_for(&format!("t{i}")), &format!("t{i}"));
         }
         assert_eq!(n.mappings(), 70_000);
-        assert_eq!(n.attempts.get(&msg_id_for("t0")).map(String::as_str), Some("t0"));
+        assert_eq!(
+            n.attempts.get(&msg_id_for("t0")).map(String::as_str),
+            Some("t0")
+        );
         n.forget("t0");
         assert_eq!(n.mappings(), 69_999);
         assert!(!n.attempts.contains_key(&msg_id_for("t0")));

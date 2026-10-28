@@ -17,7 +17,9 @@ use serde_json::{Value, json};
 use super::auth::base_name;
 use super::keys::{MintError, host_slug, mint};
 use super::session::digest;
-use super::{BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, WebConfig, WebStore};
+use super::{
+    BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, WebConfig, WebStore,
+};
 use super::{BridgeRegistry, WebUser, entra_issuer};
 
 /// The shortest admin key accepted.
@@ -296,9 +298,9 @@ pub(crate) fn email_address(input: &str) -> Option<String> {
     let email = input.trim();
     let ok = email.len() <= 254
         && !email.chars().any(|c| c.is_whitespace() || c.is_control())
-        && email
-            .split_once('@')
-            .is_some_and(|(local, domain)| !local.is_empty() && !domain.is_empty() && !domain.contains('@'));
+        && email.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+        });
     ok.then(|| email.to_string())
 }
 
@@ -354,7 +356,9 @@ async fn create_user(
     State(state): State<AdminState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Response {
-    let binding = [&req.issuer, &req.subject, &req.tid, &req.oid].iter().any(|v| v.is_some());
+    let binding = [&req.issuer, &req.subject, &req.tid, &req.oid]
+        .iter()
+        .any(|v| v.is_some());
     if !binding {
         return invite_user(state, req).await;
     }
@@ -434,16 +438,27 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
         return bad_request("email must be an address like name@example.com");
     };
     let (target, address) = (name.clone(), email.clone());
-    let result = state.core().store(move |s| s.invite_user(&target, &address)).await;
+    let result = state
+        .core()
+        .store(move |s| s.invite_user(&target, &address))
+        .await;
     let (user, outcome) = match result {
         Ok(Invited::Created(u)) => (u, "invited"),
         Ok(Invited::EmailSet(u)) => (u, "email set"),
         Ok(Invited::Exists(u)) => (u, "exists"),
         Ok(Invited::OtherEmail(other)) => {
-            return fail(StatusCode::CONFLICT, "conflict", &format!("'{name}' exists with another email ({other})"));
+            return fail(
+                StatusCode::CONFLICT,
+                "conflict",
+                &format!("'{name}' exists with another email ({other})"),
+            );
         }
         Ok(Invited::EmailTaken(other)) => {
-            return fail(StatusCode::CONFLICT, "conflict", &format!("user '{other}' has this email already"));
+            return fail(
+                StatusCode::CONFLICT,
+                "conflict",
+                &format!("user '{other}' has this email already"),
+            );
         }
         Err(e) => return store_failed(e),
     };
@@ -512,24 +527,41 @@ fn member_id(input: &str) -> Option<String> {
     let id = input.trim();
     let ok = (3..=32).contains(&id.len())
         && id.starts_with(['U', 'W'])
-        && id.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        && id
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
     ok.then(|| id.to_string())
 }
 
 /// `POST /v1/admin/users/{name}/slack {member_id}`: the Slack member id pages to the user's human
 /// reach; set by the admin, it is never replaced by a lookup by email.
-async fn set_slack(State(state): State<AdminState>, Path(name): Path<String>, Json(req): Json<SlackMember>) -> Response {
+async fn set_slack(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+    Json(req): Json<SlackMember>,
+) -> Response {
     let Some(name) = owner_name(&name) else {
         return fail(StatusCode::BAD_REQUEST, "bad_request", "bad user name");
     };
     let Some(id) = member_id(&req.member_id) else {
-        return fail(StatusCode::BAD_REQUEST, "bad_request", "member_id is a Slack member id (U... or W...)");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "member_id is a Slack member id (U... or W...)",
+        );
     };
     let (target, member) = (name.clone(), id.clone());
-    match state.core().store(move |s| s.set_slack_member(&target, &member)).await {
+    match state
+        .core()
+        .store(move |s| s.set_slack_member(&target, &member))
+        .await
+    {
         Ok(Some(user)) => {
             tracing::info!(user = %user.name, "admin set the user's Slack member id");
-            reply(StatusCode::OK, json!({"user": user.name, "slack_member_id": id, "slack_source": "admin"}))
+            reply(
+                StatusCode::OK,
+                json!({"user": user.name, "slack_member_id": id, "slack_source": "admin"}),
+            )
         }
         Ok(None) => fail(StatusCode::NOT_FOUND, "not_found", "no such user"),
         Err(e) => store_failed(e),
@@ -551,8 +583,19 @@ mod tests {
 
     #[test]
     fn invite_emails() {
-        assert_eq!(email_address(" Ann.B@Example.com ").as_deref(), Some("Ann.B@Example.com"));
-        for bad in ["", "ann", "@example.com", "ann@", "a@b@c", "ann b@example.com", "ann\u{7}@x.io"] {
+        assert_eq!(
+            email_address(" Ann.B@Example.com ").as_deref(),
+            Some("Ann.B@Example.com")
+        );
+        for bad in [
+            "",
+            "ann",
+            "@example.com",
+            "ann@",
+            "a@b@c",
+            "ann b@example.com",
+            "ann\u{7}@x.io",
+        ] {
             assert_eq!(email_address(bad), None, "{bad}");
         }
     }

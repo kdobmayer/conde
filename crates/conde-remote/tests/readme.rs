@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use conde_remote::{
-    Authenticator, Dispatcher, FenceResult, NotificationSource, Notify, Outcome, Principal, Recorded,
-    ServerConfig,
+    Authenticator, Dispatcher, FenceResult, NotificationSource, Notify, Outcome, Principal,
+    Recorded, ServerConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -54,28 +54,58 @@ async fn get(addr: std::net::SocketAddr, path: &str) -> (String, String) {
 #[tokio::test(flavor = "multi_thread")]
 async fn readme_is_served_raw_and_rendered() {
     let n = Arc::new(Nobody);
-    let h = conde_remote::start("127.0.0.1:0".parse().unwrap(), ServerConfig::default(), n.clone(), n.clone(), n)
-        .await
-        .unwrap();
+    let h = conde_remote::start(
+        "127.0.0.1:0".parse().unwrap(),
+        ServerConfig::default(),
+        n.clone(),
+        n.clone(),
+        n,
+    )
+    .await
+    .unwrap();
     let addr = h.local_addr();
 
     let (head, body) = get(addr, "/readme.md").await;
     assert!(head.starts_with("http/1.1 200"), "{head}");
-    assert!(head.contains("\r\ncontent-type: text/markdown; charset=utf-8"), "{head}");
+    assert!(
+        head.contains("\r\ncontent-type: text/markdown; charset=utf-8"),
+        "{head}"
+    );
     assert!(head.contains("\r\ncache-control: no-store"), "{head}");
     assert_eq!(body, README, "the raw file, byte for byte");
-    assert!(body.contains("https://conde.nativeai.space/readme.md"), "the README points agents at this copy");
+    assert!(
+        body.contains("https://conde.nativeai.space/readme.md"),
+        "the README points agents at this copy"
+    );
 
     let (head, body) = get(addr, "/readme").await;
     assert!(head.starts_with("http/1.1 200"), "{head}");
-    assert!(head.contains("\r\ncontent-type: text/html; charset=utf-8"), "{head}");
+    assert!(
+        head.contains("\r\ncontent-type: text/html; charset=utf-8"),
+        "{head}"
+    );
     assert!(head.contains("\r\ncache-control: no-store"), "{head}");
-    assert!(head.contains("script-src 'none'"), "no script on a public page: {head}");
-    assert!(body.contains("<title>conde setup · conde</title>"), "{body}");
-    assert!(body.contains("<h1>conde</h1>") && body.contains("<h2>Setup</h2>"), "headings render");
-    assert!(body.contains("<table>") && body.contains("<th>Message</th>"), "the doctor table renders");
+    assert!(
+        head.contains("script-src 'none'"),
+        "no script on a public page: {head}"
+    );
+    assert!(
+        body.contains("<title>conde setup · conde</title>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<h1>conde</h1>") && body.contains("<h2>Setup</h2>"),
+        "headings render"
+    );
+    assert!(
+        body.contains("<table>") && body.contains("<th>Message</th>"),
+        "the doctor table renders"
+    );
     assert!(body.contains("<pre><code class=\"language-sh\">curl -fsSL https://conde.nativeai.space/install.sh | sh"), "code blocks render");
-    assert!(body.contains("<!-- You found the comment."), "the hidden comment stays a comment");
+    assert!(
+        body.contains("<!-- You found the comment."),
+        "the hidden comment stays a comment"
+    );
     assert!(!body.contains("```"), "no raw fences left");
 
     h.shutdown().await.unwrap();

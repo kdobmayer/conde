@@ -35,8 +35,11 @@ pub enum PublicationState {
 }
 
 impl PublicationState {
-    pub const ALL: [PublicationState; 3] =
-        [PublicationState::Publishing, PublicationState::Published, PublicationState::Unpublishing];
+    pub const ALL: [PublicationState; 3] = [
+        PublicationState::Publishing,
+        PublicationState::Published,
+        PublicationState::Unpublishing,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -86,7 +89,11 @@ pub enum BoardOpKind {
 }
 
 impl BoardOpKind {
-    pub const ALL: [BoardOpKind; 3] = [BoardOpKind::Publish, BoardOpKind::Unpublish, BoardOpKind::Migrate];
+    pub const ALL: [BoardOpKind; 3] = [
+        BoardOpKind::Publish,
+        BoardOpKind::Unpublish,
+        BoardOpKind::Migrate,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -118,7 +125,11 @@ pub enum BoardOpState {
 }
 
 impl BoardOpState {
-    pub const ALL: [BoardOpState; 3] = [BoardOpState::Pending, BoardOpState::Done, BoardOpState::Failed];
+    pub const ALL: [BoardOpState; 3] = [
+        BoardOpState::Pending,
+        BoardOpState::Done,
+        BoardOpState::Failed,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -139,8 +150,16 @@ pub trait LocalTx {
     /// Every publication, or those of one board, by board and shared name.
     fn publications(&self, board: Option<&str>) -> StoreResult<Vec<Publication>>;
     fn publication(&self, board: &str, agent_id: &str) -> StoreResult<Option<Publication>>;
-    fn publication_by_mailbox(&self, board: &str, mailbox_id: &str) -> StoreResult<Option<Publication>>;
-    fn publication_by_name(&self, board: &str, shared_name: &str) -> StoreResult<Option<Publication>>;
+    fn publication_by_mailbox(
+        &self,
+        board: &str,
+        mailbox_id: &str,
+    ) -> StoreResult<Option<Publication>>;
+    fn publication_by_name(
+        &self,
+        board: &str,
+        shared_name: &str,
+    ) -> StoreResult<Option<Publication>>;
     fn insert_publication(&self, p: &Publication) -> StoreResult<()>;
     /// Sets the mailbox, generation and state of one publication.
     fn update_publication(
@@ -154,7 +173,13 @@ pub trait LocalTx {
     fn delete_publication(&self, board: &str, agent_id: &str) -> StoreResult<bool>;
     fn insert_op(&self, op: &BoardOp) -> StoreResult<()>;
     fn op(&self, op_id: &str) -> StoreResult<Option<BoardOp>>;
-    fn finish_op(&self, op_id: &str, state: BoardOpState, result: Option<&Value>, at: &str) -> StoreResult<()>;
+    fn finish_op(
+        &self,
+        op_id: &str,
+        state: BoardOpState,
+        result: Option<&Value>,
+        at: &str,
+    ) -> StoreResult<()>;
     /// Pending ops, of one board or all, oldest first.
     fn pending_ops(&self, board: Option<&str>) -> StoreResult<Vec<BoardOp>>;
     fn pending_op_for(&self, board: &str, agent_id: &str) -> StoreResult<Option<BoardOp>>;
@@ -164,10 +189,8 @@ pub trait LocalTx {
     fn forget_board(&self, board: &str) -> StoreResult<(usize, usize)>;
 }
 
-const PUB_SELECT: &str =
-    "SELECT board, agent_id, shared_name, mailbox_id, route_generation, state, updated_at FROM publications";
-const OP_SELECT: &str =
-    "SELECT op_id, board, kind, agent_id, request_json, state, result_json, created_at, updated_at FROM board_ops";
+const PUB_SELECT: &str = "SELECT board, agent_id, shared_name, mailbox_id, route_generation, state, updated_at FROM publications";
+const OP_SELECT: &str = "SELECT op_id, board, kind, agent_id, request_json, state, result_json, created_at, updated_at FROM board_ops";
 
 fn pub_row(r: &rusqlite::Row) -> rusqlite::Result<Publication> {
     let state: String = r.get(5)?;
@@ -204,9 +227,9 @@ fn op_row(r: &rusqlite::Row) -> rusqlite::Result<BoardOp> {
 impl LocalTx for SqliteTx<'_> {
     fn publications(&self, board: Option<&str>) -> StoreResult<Vec<Publication>> {
         let run = || -> rusqlite::Result<Vec<Publication>> {
-            let mut stmt = self
-                .raw()
-                .prepare(&format!("{PUB_SELECT} WHERE ?1 IS NULL OR board = ?1 ORDER BY board, shared_name"))?;
+            let mut stmt = self.raw().prepare(&format!(
+                "{PUB_SELECT} WHERE ?1 IS NULL OR board = ?1 ORDER BY board, shared_name"
+            ))?;
             let rows = stmt.query_map(params![board], pub_row)?;
             rows.collect()
         };
@@ -215,17 +238,37 @@ impl LocalTx for SqliteTx<'_> {
 
     fn publication(&self, board: &str, agent_id: &str) -> StoreResult<Option<Publication>> {
         let sql = format!("{PUB_SELECT} WHERE board = ?1 AND agent_id = ?2");
-        self.guard(self.raw().query_row(&sql, params![board, agent_id], pub_row).optional())
+        self.guard(
+            self.raw()
+                .query_row(&sql, params![board, agent_id], pub_row)
+                .optional(),
+        )
     }
 
-    fn publication_by_mailbox(&self, board: &str, mailbox_id: &str) -> StoreResult<Option<Publication>> {
+    fn publication_by_mailbox(
+        &self,
+        board: &str,
+        mailbox_id: &str,
+    ) -> StoreResult<Option<Publication>> {
         let sql = format!("{PUB_SELECT} WHERE board = ?1 AND mailbox_id = ?2");
-        self.guard(self.raw().query_row(&sql, params![board, mailbox_id], pub_row).optional())
+        self.guard(
+            self.raw()
+                .query_row(&sql, params![board, mailbox_id], pub_row)
+                .optional(),
+        )
     }
 
-    fn publication_by_name(&self, board: &str, shared_name: &str) -> StoreResult<Option<Publication>> {
+    fn publication_by_name(
+        &self,
+        board: &str,
+        shared_name: &str,
+    ) -> StoreResult<Option<Publication>> {
         let sql = format!("{PUB_SELECT} WHERE board = ?1 AND shared_name = ?2");
-        self.guard(self.raw().query_row(&sql, params![board, shared_name], pub_row).optional())
+        self.guard(
+            self.raw()
+                .query_row(&sql, params![board, shared_name], pub_row)
+                .optional(),
+        )
     }
 
     fn insert_publication(&self, p: &Publication) -> StoreResult<()> {
@@ -262,9 +305,10 @@ impl LocalTx for SqliteTx<'_> {
     }
 
     fn delete_publication(&self, board: &str, agent_id: &str) -> StoreResult<bool> {
-        let n = self.guard(
-            self.raw().execute("DELETE FROM publications WHERE board = ?1 AND agent_id = ?2", params![board, agent_id]),
-        )?;
+        let n = self.guard(self.raw().execute(
+            "DELETE FROM publications WHERE board = ?1 AND agent_id = ?2",
+            params![board, agent_id],
+        ))?;
         Ok(n > 0)
     }
 
@@ -289,17 +333,29 @@ impl LocalTx for SqliteTx<'_> {
 
     fn op(&self, op_id: &str) -> StoreResult<Option<BoardOp>> {
         let sql = format!("{OP_SELECT} WHERE op_id = ?1");
-        self.guard(self.raw().query_row(&sql, params![op_id], op_row).optional())
+        self.guard(
+            self.raw()
+                .query_row(&sql, params![op_id], op_row)
+                .optional(),
+        )
     }
 
-    fn finish_op(&self, op_id: &str, state: BoardOpState, result: Option<&Value>, at: &str) -> StoreResult<()> {
+    fn finish_op(
+        &self,
+        op_id: &str,
+        state: BoardOpState,
+        result: Option<&Value>,
+        at: &str,
+    ) -> StoreResult<()> {
         let n = self.guard(self.raw().execute(
             "UPDATE board_ops SET state = ?2, result_json = ?3, updated_at = ?4 WHERE op_id = ?1",
             params![op_id, state.as_str(), result.map(Value::to_string), at],
         ))?;
         // An op that is gone (its board forgotten) refuses the whole transaction.
         if n != 1 {
-            return Err(super::StoreError(format!("board op {op_id} no longer exists")));
+            return Err(super::StoreError(format!(
+                "board op {op_id} no longer exists"
+            )));
         }
         Ok(())
     }
@@ -317,17 +373,32 @@ impl LocalTx for SqliteTx<'_> {
 
     fn pending_op_for(&self, board: &str, agent_id: &str) -> StoreResult<Option<BoardOp>> {
         let sql = format!("{OP_SELECT} WHERE state = 'pending' AND board = ?1 AND agent_id = ?2");
-        self.guard(self.raw().query_row(&sql, params![board, agent_id], op_row).optional())
+        self.guard(
+            self.raw()
+                .query_row(&sql, params![board, agent_id], op_row)
+                .optional(),
+        )
     }
 
     fn migrate_op(&self, board: &str) -> StoreResult<Option<BoardOp>> {
-        let sql = format!("{OP_SELECT} WHERE kind = 'migrate' AND state <> 'failed' AND board = ?1");
-        self.guard(self.raw().query_row(&sql, params![board], op_row).optional())
+        let sql =
+            format!("{OP_SELECT} WHERE kind = 'migrate' AND state <> 'failed' AND board = ?1");
+        self.guard(
+            self.raw()
+                .query_row(&sql, params![board], op_row)
+                .optional(),
+        )
     }
 
     fn forget_board(&self, board: &str) -> StoreResult<(usize, usize)> {
-        let pubs = self.guard(self.raw().execute("DELETE FROM publications WHERE board = ?1", params![board]))?;
-        let ops = self.guard(self.raw().execute("DELETE FROM board_ops WHERE board = ?1", params![board]))?;
+        let pubs = self.guard(
+            self.raw()
+                .execute("DELETE FROM publications WHERE board = ?1", params![board]),
+        )?;
+        let ops = self.guard(
+            self.raw()
+                .execute("DELETE FROM board_ops WHERE board = ?1", params![board]),
+        )?;
         Ok((pubs, ops))
     }
 }

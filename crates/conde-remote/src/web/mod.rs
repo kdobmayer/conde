@@ -140,7 +140,12 @@ impl WebConfig {
         client_secret: &str,
         redirect_uri: &str,
     ) -> Result<WebConfig, ConfigError> {
-        WebConfig::oidc(&entra_issuer(tenant_id), client_id, client_secret, redirect_uri)
+        WebConfig::oidc(
+            &entra_issuer(tenant_id),
+            client_id,
+            client_secret,
+            redirect_uri,
+        )
     }
 
     /// From the process environment; see [`WebConfig::from_vars`].
@@ -152,10 +157,13 @@ impl WebConfig {
     /// and `OIDC_REDIRECT_URI`, each falling back to its Entra variable (`ENTRA_TENANT_ID` gives
     /// the tenant's issuer, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI`).
     /// `Ok(None)` when none is set (web sign-in disabled); an error when only some are.
-    pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<WebConfig>, ConfigError> {
+    pub fn from_vars(
+        var: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<WebConfig>, ConfigError> {
         let var = |name: &str| var(name).filter(|v| !v.is_empty());
         let secret = |name: &str| crate::secret_from(name, var);
-        let issuer = var("OIDC_ISSUER").or_else(|| var("ENTRA_TENANT_ID").map(|t| entra_issuer(&t)));
+        let issuer =
+            var("OIDC_ISSUER").or_else(|| var("ENTRA_TENANT_ID").map(|t| entra_issuer(&t)));
         let client_id = var("OIDC_CLIENT_ID").or_else(|| var("ENTRA_CLIENT_ID"));
         // a set OIDC_CLIENT_SECRET_FILE decides alone: an empty one is unset, never the Entra secret
         let client_secret = match secret("OIDC_CLIENT_SECRET")? {
@@ -170,8 +178,12 @@ impl WebConfig {
                 (None, None, None, None) => Ok(None),
                 (None, ..) => Err(ConfigError::Missing("OIDC_ISSUER (or ENTRA_TENANT_ID)")),
                 (_, None, ..) => Err(ConfigError::Missing("OIDC_CLIENT_ID (or ENTRA_CLIENT_ID)")),
-                (_, _, None, _) => Err(ConfigError::Missing("OIDC_CLIENT_SECRET (or ENTRA_CLIENT_SECRET)")),
-                _ => Err(ConfigError::Missing("OIDC_REDIRECT_URI (or ENTRA_REDIRECT_URI)")),
+                (_, _, None, _) => Err(ConfigError::Missing(
+                    "OIDC_CLIENT_SECRET (or ENTRA_CLIENT_SECRET)",
+                )),
+                _ => Err(ConfigError::Missing(
+                    "OIDC_REDIRECT_URI (or ENTRA_REDIRECT_URI)",
+                )),
             };
         };
         if !issuer.starts_with("https://") {
@@ -673,7 +685,11 @@ impl WebSetup {
                 registry,
                 clock: system_clock(),
             };
-            app = app.merge(admin::router(AdminState::new(core, &key, self.entra.as_ref())));
+            app = app.merge(admin::router(AdminState::new(
+                core,
+                &key,
+                self.entra.as_ref(),
+            )));
         }
         (app, state)
     }

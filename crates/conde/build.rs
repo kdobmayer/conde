@@ -20,11 +20,19 @@ fn main() {
 }
 
 fn var(name: &str) -> Option<String> {
-    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
     let text = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (out.status.success() && !text.is_empty()).then_some(text)
 }
@@ -40,19 +48,44 @@ fn git_commit(dir: &Path) -> Option<String> {
         // listed from the top: from the crate, ls-files names only its files, relative to it
         if let Some(files) = git(Path::new(&top), &["ls-files", "-z"]) {
             for f in files.split('\0').filter(|f| !f.is_empty()) {
-                println!("cargo:rerun-if-changed={}", Path::new(&top).join(f).display());
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    Path::new(&top).join(f).display()
+                );
             }
         }
     }
-    let dirty = git(dir, &["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"]).is_some();
-    let commit = if dirty { format!("{commit}-dirty") } else { commit };
-    let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string(), "index".to_string()];
+    let dirty = git(
+        dir,
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+    )
+    .is_some();
+    let commit = if dirty {
+        format!("{commit}-dirty")
+    } else {
+        commit
+    };
+    let mut watched = vec![
+        "HEAD".to_string(),
+        "packed-refs".to_string(),
+        "index".to_string(),
+    ];
     if let Some(r) = git(dir, &["symbolic-ref", "-q", "HEAD"]) {
         watched.push(r);
     }
     for w in watched {
         // a missing path would rerun the script on every build
-        if let Some(p) = git(dir, &["rev-parse", "--path-format=absolute", "--git-path", &w]).filter(|p| Path::new(p).exists()) {
+        if let Some(p) = git(
+            dir,
+            &["rev-parse", "--path-format=absolute", "--git-path", &w],
+        )
+        .filter(|p| Path::new(p).exists())
+        {
             println!("cargo:rerun-if-changed={p}");
         }
     }
@@ -61,7 +94,10 @@ fn git_commit(dir: &Path) -> Option<String> {
 
 /// Today's UTC date, YYYY-MM-DD (days to civil date, proleptic Gregorian).
 fn today() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let z = (secs / 86_400) as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

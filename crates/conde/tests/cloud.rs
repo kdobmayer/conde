@@ -5,9 +5,9 @@
 //! v2 hosts keep exchanging messages.
 #![cfg(unix)] // drives the daemon over a unix socket
 
-mod support;
 #[path = "pg/mod.rs"]
 mod pg;
+mod support;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,9 +49,16 @@ impl Cloud {
             Some(url) => Dispatcher::connect(url, conde::store::postgres::PgOpen::SERVER).unwrap(),
             None => Dispatcher::open(&dir.join("conde.db")).unwrap(),
         });
-        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let handle = rt
-            .block_on(conde::cloud::start(d.clone(), "127.0.0.1:0".parse().unwrap(), config))
+            .block_on(conde::cloud::start(
+                d.clone(),
+                "127.0.0.1:0".parse().unwrap(),
+                config,
+            ))
             .unwrap();
         let addr = handle.local_addr();
         std::mem::forget(handle); // runs until the runtime drops
@@ -67,7 +74,16 @@ impl Cloud {
         let key = format!("conde_test_{}", conde::util::new_ulid());
         let digest = conde_remote::token_digest(&key);
         self.d
-            .with_tx(|c| conde::ops::hosts::insert_key(c, user, host, &digest, "test", "2026-10-09T00:00:00.000Z"))
+            .with_tx(|c| {
+                conde::ops::hosts::insert_key(
+                    c,
+                    user,
+                    host,
+                    &digest,
+                    "test",
+                    "2026-10-09T00:00:00.000Z",
+                )
+            })
             .unwrap();
         key
     }
@@ -75,10 +91,32 @@ impl Cloud {
     /// `conde enroll` with a fresh key: `boards/shared.json`, pinned to the account.
     fn enroll(&self, h: &Host) {
         let key = self.key(&h.user, &h.host);
-        let out = h.conde(None, &[], &["enroll", "--server", &self.url(), "--host", &h.host, "--key-stdin"], Some(&key));
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert!(!String::from_utf8_lossy(&out.stdout).contains(&key), "the key is never echoed");
-        assert_eq!(conde::credentials::mode(&h.root.join("config/conde/boards/shared.json")), Some(0o600));
+        let out = h.conde(
+            None,
+            &[],
+            &[
+                "enroll",
+                "--server",
+                &self.url(),
+                "--host",
+                &h.host,
+                "--key-stdin",
+            ],
+            Some(&key),
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains(&key),
+            "the key is never echoed"
+        );
+        assert_eq!(
+            conde::credentials::mode(&h.root.join("config/conde/boards/shared.json")),
+            Some(0o600)
+        );
     }
 
     /// Start `h`'s daemon on `sock` and switch the host to v2 (nothing bound yet, so nothing
@@ -91,16 +129,32 @@ impl Cloud {
         let m = human_call(h, sock, "host.migrate_v2", json!({"publish": []}));
         assert!(m["bindings"].is_array(), "{m}\n{}", h.log(log));
         wait_for("the shared board connected", || {
-            let d = h.conde(None, &[("CONDE_SOCK", sock.to_str().unwrap())], &["doctor"], None);
-            String::from_utf8_lossy(&d.stdout).contains("ok      shared: connected").then_some(())
+            let d = h.conde(
+                None,
+                &[("CONDE_SOCK", sock.to_str().unwrap())],
+                &["doctor"],
+                None,
+            );
+            String::from_utf8_lossy(&d.stdout)
+                .contains("ok      shared: connected")
+                .then_some(())
         });
         pid
     }
 
     /// Publish `name` on the shared board (the human).
     fn publish(&self, h: &Host, sock: &std::path::Path, name: &str) {
-        let r = human_call(h, sock, "mailbox.publish", json!({"agent": name, "name": name}));
-        assert_eq!((r["state"].as_str(), r["name"].as_str()), (Some("published"), Some(name)), "{r}");
+        let r = human_call(
+            h,
+            sock,
+            "mailbox.publish",
+            json!({"agent": name, "name": name}),
+        );
+        assert_eq!(
+            (r["state"].as_str(), r["name"].as_str()),
+            (Some("published"), Some(name)),
+            "{r}"
+        );
     }
 
     /// The v1 bridge of a host that is not migrated (`conde daemon --v1-bridge`).
@@ -113,7 +167,11 @@ impl Cloud {
     fn enroll_v1(&self, h: &Host) {
         let key = self.key(&h.user, &h.host);
         let path = h.root.join("config/conde/credentials");
-        let creds = conde::credentials::Credentials { server: self.url(), host_id: h.host.clone(), key };
+        let creds = conde::credentials::Credentials {
+            server: self.url(),
+            host_id: h.host.clone(),
+            key,
+        };
         conde::credentials::store(&path, &creds).unwrap();
         assert_eq!(conde::credentials::mode(&path), Some(0o600));
     }
@@ -132,30 +190,45 @@ impl Cloud {
 }
 
 /// One request to `h`'s daemon as its human, on the shared board.
-fn human_call(h: &Host, sock: &std::path::Path, op: &str, body: serde_json::Value) -> serde_json::Value {
+fn human_call(
+    h: &Host,
+    sock: &std::path::Path,
+    op: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
     let mut req = conde::protocol::Request::new(conde::util::new_ulid(), op, body);
     req.actor = Some(format!("human:{}", h.user));
     req.idempotency_key = Some(conde::util::new_ulid());
     req.board = Some("shared".into());
-    let resp = conde::client::Client::connect(sock).unwrap().call(&req).unwrap();
+    let resp = conde::client::Client::connect(sock)
+        .unwrap()
+        .call(&req)
+        .unwrap();
     assert!(resp.ok, "{op}: {:?}", resp.error);
     resp.result.unwrap()
 }
 
 fn test_config() -> ServerConfig {
-    ServerConfig { poll_interval: Duration::from_millis(100), ..ServerConfig::default() }
+    ServerConfig {
+        poll_interval: Duration::from_millis(100),
+        ..ServerConfig::default()
+    }
 }
 
 fn queued_id(out: &str) -> String {
-    out.strip_prefix("queued ").and_then(|s| s.split(' ').next()).expect(out).to_string()
+    out.strip_prefix("queued ")
+        .and_then(|s| s.split(' ').next())
+        .expect(out)
+        .to_string()
 }
-
 
 /// The delivery state the sender's `conde sent` shows for `id`, once it is `state`.
 fn wait_sent(h: &Host, harness: &str, env: &[(&str, &str)], id: &str, state: &str) -> String {
     wait_for(&format!("delivery {state} of {id}"), || {
         let out = h.ok(Some(harness), env, &["sent", "--board", "shared"]);
-        out.lines().find(|l| l.contains(id) && l.contains(&format!("delivery: {state}"))).map(str::to_string)
+        out.lines()
+            .find(|l| l.contains(id) && l.contains(&format!("delivery: {state}")))
+            .map(str::to_string)
     })
 }
 
@@ -173,12 +246,26 @@ fn two_hosts_exchange_a_dm_through_the_server() {
 
     // names are registered on the local board; publication puts them on the shared one
     let out = a.ok(Some("codex"), ALICE, &["register", "alice"]);
-    assert!(out.starts_with("registered ann/alice on the local board (codex:t-alice@host-a)"), "{out}");
+    assert!(
+        out.starts_with("registered ann/alice on the local board (codex:t-alice@host-a)"),
+        "{out}"
+    );
     b.ok(Some("claude"), CAROL, &["register", "carol"]);
     let out = b.conde(Some("claude"), CAROL, &["register", "ann/alice"], None);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not in your namespace"), "{out:?}");
-    let out = a.conde(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "too early"], None);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("alice is not published on shared"), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not in your namespace"),
+        "{out:?}"
+    );
+    let out = a.conde(
+        Some("codex"),
+        ALICE,
+        &["send", "--board", "shared", "ben/carol", "too early"],
+        None,
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("alice is not published on shared"),
+        "{out:?}"
+    );
     cloud.publish(&a, &sa, "alice");
     cloud.publish(&b, &sb, "carol");
     // after enrollment and publication, the server binds mailboxes only, never a session
@@ -186,35 +273,66 @@ fn two_hosts_exchange_a_dm_through_the_server() {
     assert!(!format!("{bound:?}").contains("s-carol"), "{bound:?}");
 
     carol.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "hello across hosts"]));
+    let id = queued_id(&a.ok(
+        Some("codex"),
+        ALICE,
+        &[
+            "send",
+            "--board",
+            "shared",
+            "ben/carol",
+            "hello across hosts",
+        ],
+    ));
     assert!(id.starts_with("shared:"), "{id}");
     let f = carol.wait_frames(&id, 1);
     assert!(
-        f[0].text.contains(&format!("\nconde [shared]: new message {id} from ann/alice. Read it with: conde read {id}\n")),
+        f[0].text.contains(&format!(
+            "\nconde [shared]: new message {id} from ann/alice. Read it with: conde read {id}\n"
+        )),
         "{}",
         f[0].text
     );
     wait_sent(&a, "codex", ALICE, &id, "delivered");
     let read = b.ok(Some("claude"), CAROL, &["read", &id]);
-    assert!(read.contains("From: ann/alice\nTo: ben/carol\n") && read.ends_with("\nhello across hosts\n"), "{read}");
+    assert!(
+        read.contains("From: ann/alice\nTo: ben/carol\n")
+            && read.ends_with("\nhello across hosts\n"),
+        "{read}"
+    );
 
     // the reply inherits the shared board from the id
-    let reply = queued_id(&b.ok(Some("claude"), CAROL, &["send", "ann/alice", "back", "--reply-to", &id]));
+    let reply = queued_id(&b.ok(
+        Some("claude"),
+        CAROL,
+        &["send", "ann/alice", "back", "--reply-to", &id],
+    ));
     assert!(reply.starts_with("shared:"), "{reply}");
 
     // doctor on a v2 host: the local board, the shared connection, the delivery slots
-    let doctor = String::from_utf8_lossy(&a.conde(Some("codex"), ALICE, &["doctor"], None).stdout).to_string();
-    assert!(doctor.contains("ok      shared: connected to ws://"), "{doctor}");
-    assert!(doctor.contains("credentials: ") && doctor.contains("boards/shared.json mode 600"), "{doctor}");
+    let doctor = String::from_utf8_lossy(&a.conde(Some("codex"), ALICE, &["doctor"], None).stdout)
+        .to_string();
+    assert!(
+        doctor.contains("ok      shared: connected to ws://"),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains("credentials: ") && doctor.contains("boards/shared.json mode 600"),
+        "{doctor}"
+    );
     assert!(doctor.contains("ok      database: ok"), "{doctor}");
     assert!(doctor.contains("ok      slots: shared "), "{doctor}");
 
     // a revoked key stops the board connection only; the local board keeps working
-    let revoked = cloud.d.with_tx(|c| conde::ops::hosts::revoke(c, Some("host-a"), None, "now")).unwrap();
+    let revoked = cloud
+        .d
+        .with_tx(|c| conde::ops::hosts::revoke(c, Some("host-a"), None, "now"))
+        .unwrap();
     assert_eq!(revoked.len(), 1);
     wait_for("the connection stopped", || {
         let d = String::from_utf8_lossy(&a.conde(None, &[], &["doctor"], None).stdout).to_string();
-        d.contains("shared: stopped: the board rejected this host's credential").then_some(())
+        d.contains("shared: stopped: the board rejected this host's credential")
+            .then_some(())
     });
     a.ok(Some("codex"), ALICE, &["send", "alice", "still local"]);
 }
@@ -236,15 +354,31 @@ fn a_restarted_daemon_is_a_new_instance_and_resends_once() {
     cloud.publish(&b, &sb, "carol");
 
     // first frame: held at the recipient (mid-flight); the re-sent frame: delivered
-    carol.plan(vec![vec![(ms(0), "held", json!({}))], vec![(ms(0), "delivered", json!({}))]]);
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "survive a restart"]));
+    carol.plan(vec![
+        vec![(ms(0), "held", json!({}))],
+        vec![(ms(0), "delivered", json!({}))],
+    ]);
+    let id = queued_id(&a.ok(
+        Some("codex"),
+        ALICE,
+        &[
+            "send",
+            "--board",
+            "shared",
+            "ben/carol",
+            "survive a restart",
+        ],
+    ));
     wait_sent(&a, "codex", ALICE, &id, "held");
 
     // the process ends; the next one is a new bridge instance and the hold is re-attempted
     b.terminate(old);
     b.daemon("new.log", &sb, &[]);
     let f = carol.wait_frames(&id, 2);
-    assert_ne!(f[0].msg_id, f[1].msg_id, "a new token, never the board's attempt id");
+    assert_ne!(
+        f[0].msg_id, f[1].msg_id,
+        "a new token, never the board's attempt id"
+    );
     wait_sent(&a, "codex", ALICE, &id, "delivered");
     std::thread::sleep(ms(1500));
     assert_eq!(carol.frames_for(&id).len(), 2, "re-sent exactly once");
@@ -268,17 +402,29 @@ fn a_second_daemon_with_the_hosts_key_fences_only_the_board_connection() {
     a.daemon("other.log", &other_sock, &[]);
     wait_for("the first connection fenced", || {
         let d = String::from_utf8_lossy(&a.conde(None, &[], &["doctor"], None).stdout).to_string();
-        d.contains("shared: stopped: fenced by a newer bridge").then_some(())
+        d.contains("shared: stopped: fenced by a newer bridge")
+            .then_some(())
     });
     // the first daemon still serves its local board
-    a.ok(Some("codex"), ALICE, &["send", "alice", "local after the fence"]);
-    assert!(a.ok(Some("codex"), ALICE, &["inbox", "--board", "local"]).contains("local after the fence"));
+    a.ok(
+        Some("codex"),
+        ALICE,
+        &["send", "alice", "local after the fence"],
+    );
+    assert!(
+        a.ok(Some("codex"), ALICE, &["inbox", "--board", "local"])
+            .contains("local after the fence")
+    );
 }
 
 #[test]
 fn an_idle_connection_stays_up_through_pings() {
     let ping = Duration::from_millis(300);
-    let cloud = Cloud::start(ServerConfig { ping_interval: ping, max_missed_pongs: 2, ..test_config() });
+    let cloud = Cloud::start(ServerConfig {
+        ping_interval: ping,
+        max_missed_pongs: 2,
+        ..test_config()
+    });
     let mut a = Host::new("ann", "host-a");
     cloud.enroll(&a);
     let sa = a.sock();
@@ -286,13 +432,30 @@ fn an_idle_connection_stays_up_through_pings() {
     cloud.join(&mut a, "daemon.log", &sa, &["--idle-timeout", "1"]);
     // A second daemon on the same socket refuses before it ever says hello.
     let file = std::fs::File::create(a.root.join("second.log")).unwrap();
-    let second = a.env(&mut std::process::Command::new(BIN)).args(["daemon"]).stderr(file).status();
+    let second = a
+        .env(&mut std::process::Command::new(BIN))
+        .args(["daemon"])
+        .stderr(file)
+        .status();
     assert!(!second.unwrap().success());
-    assert!(a.log("second.log").contains("another conde daemon is listening"), "{}", a.log("second.log"));
+    assert!(
+        a.log("second.log")
+            .contains("another conde daemon is listening"),
+        "{}",
+        a.log("second.log")
+    );
     std::thread::sleep(ping * 7);
     let doctor = a.ok(None, &[], &["doctor"]);
-    assert!(doctor.contains("1 connection(s) since start"), "{doctor}\n{}", a.log("daemon.log"));
-    assert!(!a.log("daemon.log").contains("connection lost"), "{}", a.log("daemon.log"));
+    assert!(
+        doctor.contains("1 connection(s) since start"),
+        "{doctor}\n{}",
+        a.log("daemon.log")
+    );
+    assert!(
+        !a.log("daemon.log").contains("connection lost"),
+        "{}",
+        a.log("daemon.log")
+    );
 }
 
 #[test]
@@ -300,14 +463,21 @@ fn admin_is_human_only_and_healthz_answers() {
     let cloud = Cloud::start(test_config());
     let a = Host::new("ann", "host-a");
     // an agent's shell cannot mint keys
-    let out = a.conde(Some("codex"), ALICE, &["admin", "key", "list", "--data", "/nonexistent"], None);
+    let out = a.conde(
+        Some("codex"),
+        ALICE,
+        &["admin", "key", "list", "--data", "/nonexistent"],
+        None,
+    );
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("human only"));
     // healthz answers from the store
     let body = cloud.rt.block_on(async {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut s = tokio::net::TcpStream::connect(cloud.addr).await.unwrap();
-        s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").await.unwrap();
+        s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let mut raw = String::new();
         s.read_to_string(&mut raw).await.unwrap();
         raw
@@ -332,17 +502,38 @@ fn a_session_that_stops_gives_its_hold_back_to_the_board() {
     cloud.publish(&a, &sa, "alice");
     cloud.publish(&b, &sb, "carol");
     carol.plan(vec![vec![(ms(0), "held", json!({}))]]);
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "held, then the session ends"]));
+    let id = queued_id(&a.ok(
+        Some("codex"),
+        ALICE,
+        &[
+            "send",
+            "--board",
+            "shared",
+            "ben/carol",
+            "held, then the session ends",
+        ],
+    ));
     wait_sent(&a, "codex", ALICE, &id, "held");
 
     // The session ends: the hold is abandoned (recipient offline, no session detail on the
     // wire) and the re-attempt finds no session.
-    let session_file = b.root.join(format!("claude/sessions/{}.json", std::process::id()));
+    let session_file = b
+        .root
+        .join(format!("claude/sessions/{}.json", std::process::id()));
     let saved = std::fs::read(&session_file).unwrap();
     std::fs::remove_file(&session_file).unwrap();
-    wait_sent(&a, "codex", ALICE, &id, "retrying after failed (recipient offline)");
+    wait_sent(
+        &a,
+        "codex",
+        ALICE,
+        &id,
+        "retrying after failed (recipient offline)",
+    );
     let attempts = cloud.attempts(id.trim_start_matches("shared:"));
-    assert_eq!((attempts[0].1.as_str(), attempts[0].2.as_deref()), ("abandoned", Some("recipient offline")));
+    assert_eq!(
+        (attempts[0].1.as_str(), attempts[0].2.as_deref()),
+        ("abandoned", Some("recipient offline"))
+    );
     // It comes back: the retry reaches it.
     std::fs::write(&session_file, saved).unwrap();
     carol.wait_frames(&id, 2);
@@ -363,25 +554,48 @@ fn a_v1_host_and_a_v2_host_exchange_messages() {
     let (sa, sb) = (a.sock(), b.sock());
     cloud.bridge_v1(&mut a, "bridge.log", &sa);
     cloud.join(&mut b, "daemon.log", &sb, &[]);
-    let out = a.ok(Some("claude"), &[("CLAUDE_CODE_SESSION_ID", "s-dave")], &["register", "dave"]);
+    let out = a.ok(
+        Some("claude"),
+        &[("CLAUDE_CODE_SESSION_ID", "s-dave")],
+        &["register", "dave"],
+    );
     assert!(out.contains("ann/dave"), "{out}");
     b.ok(Some("claude"), CAROL, &["register", "carol"]);
     cloud.publish(&b, &sb, "carol");
 
     carol.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
-    let to_v2 = queued_id(&a.ok(Some("claude"), &[("CLAUDE_CODE_SESSION_ID", "s-dave")], &["send", "ben/carol", "from v1"]));
+    let to_v2 = queued_id(&a.ok(
+        Some("claude"),
+        &[("CLAUDE_CODE_SESSION_ID", "s-dave")],
+        &["send", "ben/carol", "from v1"],
+    ));
     let f = carol.wait_frames(&format!("shared:{to_v2}"), 1);
     assert!(f[0].text.contains("from ann/dave"), "{}", f[0].text);
 
     dave.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
-    let to_v1 = queued_id(&b.ok(Some("claude"), CAROL, &["send", "--board", "shared", "ann/dave", "from v2"]));
+    let to_v1 = queued_id(&b.ok(
+        Some("claude"),
+        CAROL,
+        &["send", "--board", "shared", "ann/dave", "from v2"],
+    ));
     let f = dave.wait_frames(to_v1.trim_start_matches("shared:"), 1);
-    assert!(f[0].text.contains("\nconde: new message "), "the v1 bridge injects the board's text: {}", f[0].text);
+    assert!(
+        f[0].text.contains("\nconde: new message "),
+        "the v1 bridge injects the board's text: {}",
+        f[0].text
+    );
 
     // the v1 bridge's doctor answer carries the build it runs, as the v2 daemon's does
     let req = conde::protocol::Request::new(conde::util::new_ulid(), "doctor", json!({}));
-    let doctor = conde::client::Client::connect(&sa).unwrap().call(&req).unwrap();
-    assert_eq!(doctor.result.as_ref().map(|r| &r["build"]), Some(&json!(conde::VERSION)), "{doctor:?}");
+    let doctor = conde::client::Client::connect(&sa)
+        .unwrap()
+        .call(&req)
+        .unwrap();
+    assert_eq!(
+        doctor.result.as_ref().map(|r| &r["build"]),
+        Some(&json!(conde::VERSION)),
+        "{doctor:?}"
+    );
 }
 
 /// Two server replicas on one Postgres board (CONDE_TEST_PG): a message sent
@@ -394,8 +608,14 @@ fn replicas_wake_and_fence_each_other() {
         eprintln!("skipped: set CONDE_TEST_PG to run the two-replica test");
         return;
     };
-    let slow = ServerConfig { poll_interval: Duration::from_secs(30), ..ServerConfig::default() };
-    let (one, two) = (Cloud::replica(Some(&db), slow.clone()), Cloud::replica(Some(&db), slow));
+    let slow = ServerConfig {
+        poll_interval: Duration::from_secs(30),
+        ..ServerConfig::default()
+    };
+    let (one, two) = (
+        Cloud::replica(Some(&db), slow.clone()),
+        Cloud::replica(Some(&db), slow),
+    );
     let mut a = Host::new("ann", "host-a");
     let mut b = Host::new("ben", "host-b");
     let carol = FakeClaude::start(&b, "s-carol");
@@ -412,20 +632,36 @@ fn replicas_wake_and_fence_each_other() {
 
     carol.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
     let sent = std::time::Instant::now();
-    let id = queued_id(&a.ok(Some("codex"), ALICE, &["send", "--board", "shared", "ben/carol", "across replicas"]));
+    let id = queued_id(&a.ok(
+        Some("codex"),
+        ALICE,
+        &["send", "--board", "shared", "ben/carol", "across replicas"],
+    ));
     carol.wait_frames(&id, 1);
-    assert!(sent.elapsed() < Duration::from_secs(10), "woken, not polled: {:?}", sent.elapsed());
+    assert!(
+        sent.elapsed() < Duration::from_secs(10),
+        "woken, not polled: {:?}",
+        sent.elapsed()
+    );
     wait_sent(&a, "codex", ALICE, &id, "delivered");
 
     // a second daemon of host-b on replica two; replica one closes the first instance
     let other_sock = b.root.join("run/other.sock");
-    let mut cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(b.root.join("config/conde/boards/shared.json")).unwrap()).unwrap();
+    let mut cfg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(b.root.join("config/conde/boards/shared.json")).unwrap(),
+    )
+    .unwrap();
     cfg["server"] = json!(two.url());
-    std::fs::write(b.root.join("config/conde/boards/shared.json"), cfg.to_string()).unwrap();
+    std::fs::write(
+        b.root.join("config/conde/boards/shared.json"),
+        cfg.to_string(),
+    )
+    .unwrap();
     b.daemon("other.log", &other_sock, &[]);
     wait_for("the first instance fenced", || {
         let d = String::from_utf8_lossy(&b.conde(None, &[], &["doctor"], None).stdout).to_string();
-        d.contains("shared: stopped: fenced by a newer bridge").then_some(())
+        d.contains("shared: stopped: fenced by a newer bridge")
+            .then_some(())
     });
 }
 
@@ -437,7 +673,11 @@ fn server_on_postgres_stops_cleanly_on_sigterm() {
         eprintln!("skipped: set CONDE_TEST_PG to run conde server on Postgres");
         return;
     };
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let child = std::process::Command::new(BIN)
         .args(["server", "--listen", &format!("127.0.0.1:{port}")])
         .env("DATABASE_URL", &db)
@@ -449,7 +689,8 @@ fn server_on_postgres_stops_cleanly_on_sigterm() {
     wait_for("healthz 200", || {
         use std::io::{Read, Write};
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
-        s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").ok()?;
+        s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+            .ok()?;
         let mut raw = String::new();
         s.read_to_string(&mut raw).ok()?;
         raw.starts_with("HTTP/1.1 200").then_some(())
@@ -457,7 +698,11 @@ fn server_on_postgres_stops_cleanly_on_sigterm() {
     // SAFETY: kill(2) on the child this test spawned.
     assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) }, 0);
     let out = child.wait_with_output().unwrap();
-    let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(out.status.success(), "exit {:?}\n{log}", out.status);
     assert!(!log.contains("panicked"), "{log}");
 }
@@ -469,17 +714,39 @@ fn enroll_takes_the_alias_and_account_from_board_info() {
     let cloud = Cloud::start(test_config());
     let h = Host::new("ann", "host-a");
     let key = cloud.key("ann", "host-a");
-    let out = h.conde(None, &[], &["enroll", "--server", &cloud.url(), "--key-stdin"], Some(&key));
+    let out = h.conde(
+        None,
+        &[],
+        &["enroll", "--server", &cloud.url(), "--key-stdin"],
+        Some(&key),
+    );
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.starts_with(&format!("enrolled host host-a with {} as board shared (account ann)", cloud.url())), "{stdout}");
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.starts_with(&format!(
+            "enrolled host host-a with {} as board shared (account ann)",
+            cloud.url()
+        )),
+        "{stdout}"
+    );
     assert!(!stdout.contains(&key), "the key is never echoed");
     let path = h.root.join("config/conde/boards/shared.json");
     assert_eq!(conde::credentials::mode(&path), Some(0o600));
-    let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!((stored["owner"].as_str(), stored["host_id"].as_str()), (Some("ann"), Some("host-a")));
+    let stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        (stored["owner"].as_str(), stored["host_id"].as_str()),
+        (Some("ann"), Some("host-a"))
+    );
     let bound = cloud.d.with_conn(|tx| tx.agents_on_host("host-a")).unwrap();
-    assert!(bound.is_empty(), "enrollment binds nothing on the server: {bound:?}");
+    assert!(
+        bound.is_empty(),
+        "enrollment binds nothing on the server: {bound:?}"
+    );
 }
 
 /// B24: the daemon forwards a human's watch of a shared board with no published name of the
@@ -494,19 +761,47 @@ fn a_human_watches_a_shared_board_without_a_published_name() {
     cloud.join(&mut a, "daemon.log", &sa, &[]);
     a.ok(Some("codex"), ALICE, &["register", "alice"]);
     cloud.publish(&a, &sa, "alice");
-    a.ok(Some("codex"), ALICE, &["create", "#ops", "--board", "shared"]);
-    a.ok(Some("codex"), ALICE, &["send", "#ops", "alice posts on the shared board", "--board", "shared"]);
+    a.ok(
+        Some("codex"),
+        ALICE,
+        &["create", "#ops", "--board", "shared"],
+    );
+    a.ok(
+        Some("codex"),
+        ALICE,
+        &[
+            "send",
+            "#ops",
+            "alice posts on the shared board",
+            "--board",
+            "shared",
+        ],
+    );
     let human = a.conde(None, &[], &["register", "ann"], None);
     if String::from_utf8_lossy(&human.stderr).contains("refusing to act as the human") {
         eprintln!("skipped: runs as the human; launch the suite outside an agent shell");
         return;
     }
-    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
 
     // the human: never published, reads alice's post (watch runs until the timeout ends it)
-    let out = a.env(&mut std::process::Command::new("/usr/bin/timeout")).args(["4", BIN, "watch", "--board", "shared"]).output().unwrap();
-    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("ann/alice") && stdout.contains("alice posts on the"), "{stdout}{stderr}");
+    let out = a
+        .env(&mut std::process::Command::new("/usr/bin/timeout"))
+        .args(["4", BIN, "watch", "--board", "shared"])
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        stdout.contains("ann/alice") && stdout.contains("alice posts on the"),
+        "{stdout}{stderr}"
+    );
 
     // an agent session that is not published: refused at once, as before
     let bob: &[(&str, &str)] = &[("CODEX_THREAD_ID", "t-bob")];
@@ -514,12 +809,28 @@ fn a_human_watches_a_shared_board_without_a_published_name() {
     let out = a
         .env(&mut std::process::Command::new(a.root.join("bin/codex")))
         .envs(bob.iter().copied())
-        .args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", "/usr/bin/timeout", "4", BIN, "watch", "--board", "shared"])
+        .args([
+            "-c",
+            "\"$0\" \"$@\"; rc=$?; :; exit $rc",
+            "/usr/bin/timeout",
+            "4",
+            BIN,
+            "watch",
+            "--board",
+            "shared",
+        ])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "refused, not watching until the timeout: {stderr}");
-    assert!(stderr.contains("bob is not published on shared"), "{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "refused, not watching until the timeout: {stderr}"
+    );
+    assert!(
+        stderr.contains("bob is not published on shared"),
+        "{stderr}"
+    );
 }
 
 /// B26: a human with no published name retires an unpublished name on a shared board through
@@ -538,7 +849,11 @@ fn a_human_retires_a_name_on_a_shared_board() {
         eprintln!("skipped: runs as the human; launch the suite outside an agent shell");
         return;
     }
-    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
     a.ok(None, &[], &["unpublish", "alice", "--board", "shared"]);
     let out = a.ok(None, &[], &["retire", "alice", "--board", "shared"]);
     assert!(out.contains("retired ann/alice"), "{out}");

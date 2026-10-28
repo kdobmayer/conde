@@ -4,18 +4,18 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::address::{Address, Kind, split_qualified};
 use crate::ops::{self, agents::Agent};
+use crate::protocol::{ErrorCode, Request, Response, VERSION};
 use crate::store::postgres::{PgOpen, PgStore};
 use crate::store::sqlite::SqliteStore;
 use crate::store::{Mode, Store, StoreError, Tx};
-use crate::protocol::{ErrorCode, Request, Response, VERSION};
 use crate::util::{iso_from_ms, now_ms, sha256_hex};
 
 /// Seconds-scale backoff before a failed / expired / dropped notification
@@ -69,7 +69,10 @@ op_error_ctor! {
 
 impl From<StoreError> for OpError {
     fn from(e: StoreError) -> OpError {
-        OpError { code: ErrorCode::Internal, message: format!("storage error: {e}") }
+        OpError {
+            code: ErrorCode::Internal,
+            message: format!("storage error: {e}"),
+        }
     }
 }
 
@@ -102,8 +105,11 @@ impl Ctx<'_> {
             .actor
             .ok_or_else(|| unauthenticated("this request needs the caller's identity (actor)"))?;
         // A host migrated to v2 acts as its mailboxes; every other host as its sessions.
-        let parsed =
-            if self.mailbox_only { Address::parse(raw, &self.p.host) } else { Address::parse_v1(raw, &self.p.host) };
+        let parsed = if self.mailbox_only {
+            Address::parse(raw, &self.p.host)
+        } else {
+            Address::parse_v1(raw, &self.p.host)
+        };
         let address = parsed.map_err(|e| bad_request(e.to_string()))?;
         if address.host != self.p.host {
             return Err(forbidden(format!(
@@ -116,7 +122,9 @@ impl Ctx<'_> {
 
     /// The shared board's name, or the refusal of a shared-board op on a local board.
     pub fn shared_board(&self) -> OpResult<&str> {
-        self.board.ok_or_else(|| forbidden("this is a local board; publication and migration are ops of a shared board"))
+        self.board.ok_or_else(|| {
+            forbidden("this is a local board; publication and migration are ops of a shared board")
+        })
     }
 
     /// The refusal of a mailbox op from a host that has not migrated to v2.
@@ -166,7 +174,11 @@ impl Ctx<'_> {
             0 => Err(unauthenticated(unregistered(&address))),
             _ => Err(conflict(format!(
                 "multiple registry names point at this session: {}",
-                found.iter().map(Agent::canonical).collect::<Vec<_>>().join(", ")
+                found
+                    .iter()
+                    .map(Agent::canonical)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))),
         }
     }
@@ -180,7 +192,9 @@ pub fn unregistered(address: &Address) -> String {
             "this session ({address}) is not in the registry; run: conde register {} (a human registers under their own name)",
             address.target
         ),
-        _ => format!("this session ({address}) is not in the registry; run: conde register <your-name>"),
+        _ => format!(
+            "this session ({address}) is not in the registry; run: conde register <your-name>"
+        ),
     }
 }
 
@@ -240,7 +254,10 @@ impl Dispatcher {
 
     /// Asks the Slack worker to look up the user's member id by email on its next pass.
     pub fn request_slack_lookup(&self, user_id: i64) {
-        self.slack_lookups.lock().unwrap_or_else(|e| e.into_inner()).insert(user_id);
+        self.slack_lookups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(user_id);
     }
 
     /// The lookups asked for since the last call.
@@ -289,7 +306,10 @@ impl Dispatcher {
     }
 
     /// Run `f` in one read transaction (tests, diagnostics, lookups).
-    pub fn with_conn<T>(&self, f: impl FnOnce(&dyn Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    pub fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&dyn Tx) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let tx = self.store.begin(Mode::Read)?;
         let out = f(&*tx)?;
         tx.commit()?;
@@ -312,7 +332,12 @@ impl Dispatcher {
     /// The principal of an authenticated remote connection: `user_id` on `host`,
     /// optionally as bridge instance `bridge_instance`. None when the user is gone
     /// or the host is not theirs.
-    pub fn remote_principal(&self, user_id: i64, host: &str, bridge_instance: Option<&str>) -> Option<Principal> {
+    pub fn remote_principal(
+        &self,
+        user_id: i64,
+        host: &str,
+        bridge_instance: Option<&str>,
+    ) -> Option<Principal> {
         let user = self.with_conn(|tx| tx.host_owner(host)).ok().flatten()?;
         (user.0 == user_id).then(|| Principal {
             user_id,
@@ -335,12 +360,23 @@ impl Dispatcher {
             Ok((user_id, tx.ensure_host(&host, user_id)?))
         })?;
         anyhow::ensure!(owner == user_id, "host '{host}' belongs to another user");
-        Ok(Principal { user_id, user, host, local, bridge_instance: None, bridge_connection: None, browser: false })
+        Ok(Principal {
+            user_id,
+            user,
+            host,
+            local,
+            bridge_instance: None,
+            bridge_connection: None,
+            browser: false,
+        })
     }
 
     /// A bridge principal for the same user and host, with a fresh instance id.
     pub fn bridge_principal(&self, of: &Principal) -> Principal {
-        Principal { bridge_instance: Some(crate::util::new_ulid()), ..of.clone() }
+        Principal {
+            bridge_instance: Some(crate::util::new_ulid()),
+            ..of.clone()
+        }
     }
 
     pub fn dispatch(&self, p: &Principal, req: &Request) -> Response {
@@ -367,16 +403,31 @@ impl Dispatcher {
         let key = match (&req.idempotency_key, spec.mutation && !spec.bridge_only) {
             (Some(k), true) if !k.is_empty() && k.len() <= 200 => Some(k.as_str()),
             (_, true) => {
-                return Err(bad_request(format!("'{}' needs an idempotency_key (1-200 chars)", spec.name)));
+                return Err(bad_request(format!(
+                    "'{}' needs an idempotency_key (1-200 chars)",
+                    spec.name
+                )));
             }
             (_, false) => None,
         };
         let actor_id = self.actor_id(p, req);
         let request_hash = key.map(|_| {
-            sha256_hex(format!("{}\n{}\n{}", req.op, req.from.as_deref().unwrap_or(""), req.body).as_bytes())
+            sha256_hex(
+                format!(
+                    "{}\n{}\n{}",
+                    req.op,
+                    req.from.as_deref().unwrap_or(""),
+                    req.body
+                )
+                .as_bytes(),
+            )
         });
 
-        let tx = self.store.begin(if spec.mutation { Mode::Write } else { Mode::Read })?;
+        let tx = self.store.begin(if spec.mutation {
+            Mode::Write
+        } else {
+            Mode::Read
+        })?;
         if let Some(instance) = &p.bridge_connection
             && let Some(newer) = fenced_by(&*tx, &p.host, instance)?
         {
@@ -386,14 +437,18 @@ impl Dispatcher {
             )));
         }
         let board = self.shared_name();
-        let mailbox_only = board.is_some() && !p.local && !p.browser && tx.host_mailbox_only(&p.host)?;
+        let mailbox_only =
+            board.is_some() && !p.local && !p.browser && tx.host_mailbox_only(&p.host)?;
         if mailbox_only {
             refuse_on_migrated_host(p, req)?;
         }
         // Before any identity substitution (`--from`): a human never sends on a shared board.
         if let Some(board) = board
             && crate::humans::SEND_OPS.contains(&spec.name)
-            && req.actor.as_deref().is_some_and(|a| Address::parse(a, &p.host).is_ok_and(|x| x.kind == Kind::Human))
+            && req
+                .actor
+                .as_deref()
+                .is_some_and(|a| Address::parse(a, &p.host).is_ok_and(|x| x.kind == Kind::Human))
         {
             return Err(forbidden(crate::humans::no_sending(board)));
         }
@@ -424,7 +479,14 @@ impl Dispatcher {
             tx.announce(board_topics(spec.name));
         }
         if let (Some(key), Some(hash)) = (key, request_hash) {
-            tx.idempotency_put(&actor_id, spec.name, key, &hash, &result.to_string(), &ctx.now_iso())?;
+            tx.idempotency_put(
+                &actor_id,
+                spec.name,
+                key,
+                &hash,
+                &result.to_string(),
+                &ctx.now_iso(),
+            )?;
         }
         tx.commit()?;
         Ok(result)
@@ -435,16 +497,28 @@ impl Dispatcher {
         let actor = req
             .actor
             .as_deref()
-            .map(|a| Address::parse(a, &p.host).map(|x| x.to_string()).unwrap_or_else(|_| a.to_string()))
+            .map(|a| {
+                Address::parse(a, &p.host)
+                    .map(|x| x.to_string())
+                    .unwrap_or_else(|_| a.to_string())
+            })
             .unwrap_or_default();
-        format!("{}|{}|{}", p.user_id, actor, req.from.as_deref().unwrap_or("").to_lowercase())
+        format!(
+            "{}|{}|{}",
+            p.user_id,
+            actor,
+            req.from.as_deref().unwrap_or("").to_lowercase()
+        )
     }
 }
 
 /// A host migrated to v2 (DESIGN-v2.md §6) never registers, pins or renames a name on the shared
 /// board (its names are published), and never acts as a session.
 fn refuse_on_migrated_host(p: &Principal, req: &Request) -> OpResult<()> {
-    if matches!(req.op.as_str(), "agent.register" | "agent.pin" | "agent.rename") {
+    if matches!(
+        req.op.as_str(),
+        "agent.register" | "agent.pin" | "agent.rename"
+    ) {
         return Err(forbidden(format!(
             "'{}' is refused for host '{}': it migrated to v2, and its names on this board are published by \
              its human (conde publish <agent> --board <alias>)",
@@ -452,7 +526,8 @@ fn refuse_on_migrated_host(p: &Principal, req: &Request) -> OpResult<()> {
         )));
     }
     if let Some(actor) = &req.actor
-        && Address::parse(actor, &p.host).is_ok_and(|a| matches!(a.kind, Kind::Claude | Kind::Codex))
+        && Address::parse(actor, &p.host)
+            .is_ok_and(|a| matches!(a.kind, Kind::Claude | Kind::Codex))
     {
         return Err(forbidden(format!(
             "host '{}' migrated to v2: it acts on this board as a published mailbox, never as a session",
@@ -466,7 +541,11 @@ fn refuse_on_migrated_host(p: &Principal, req: &Request) -> OpResult<()> {
 fn board_topics(op: &str) -> u8 {
     use crate::store::topics::{DELIVERY, FLEET, MESSAGES};
     let fleet = ["agent.", "profile.", "mailbox.", "host."];
-    if fleet.iter().any(|f| op.starts_with(f)) { FLEET | MESSAGES } else { MESSAGES | DELIVERY }
+    if fleet.iter().any(|f| op.starts_with(f)) {
+        FLEET | MESSAGES
+    } else {
+        MESSAGES | DELIVERY
+    }
 }
 
 /// The instance that superseded `instance` on `host`, when it was fenced (the
@@ -500,14 +579,19 @@ pub fn opt_str<'v>(body: &'v Value, key: &str) -> OpResult<Option<&'v str>> {
 pub fn opt_i64(body: &Value, key: &str) -> OpResult<Option<i64>> {
     match body.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => v.as_i64().map(Some).ok_or_else(|| bad_request(format!("field '{key}' must be an integer"))),
+        Some(v) => v
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| bad_request(format!("field '{key}' must be an integer"))),
     }
 }
 
 /// A single-line header-safe value.
 pub fn one_line(value: &str, what: &str) -> OpResult<()> {
     if value.chars().any(char::is_control) {
-        return Err(bad_request(format!("{what} must be a single line without control characters")));
+        return Err(bad_request(format!(
+            "{what} must be a single line without control characters"
+        )));
     }
     Ok(())
 }

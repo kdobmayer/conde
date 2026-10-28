@@ -172,7 +172,12 @@ pub(crate) async fn page(
     };
     let user_id = session.record.user_id;
     let keys = state.store(move |s| s.host_keys(user_id)).await?;
-    Ok(pages::keys(header(&session), &state.config().public_url, &one_per_host(keys), &idp_origin(&state)))
+    Ok(pages::keys(
+        header(&session),
+        &state.config().public_url,
+        &one_per_host(keys),
+        &idp_origin(&state),
+    ))
 }
 
 #[derive(Deserialize)]

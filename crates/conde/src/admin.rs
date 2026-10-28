@@ -31,7 +31,8 @@ pub fn require_human() -> anyhow::Result<()> {
 /// against the system CA bundle), else the SQLite file in the data directory.
 fn open_board(data: Option<PathBuf>, how: PgOpen) -> anyhow::Result<Dispatcher> {
     if let Some(url) = std::env::var("DATABASE_URL").ok().filter(|u| !u.is_empty()) {
-        return Dispatcher::connect(&url, how).context("connecting to the Postgres board (DATABASE_URL)");
+        return Dispatcher::connect(&url, how)
+            .context("connecting to the Postgres board (DATABASE_URL)");
     }
     let dir = data.unwrap_or_else(paths::data_dir);
     crate::private::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -43,9 +44,17 @@ fn open_board(data: Option<PathBuf>, how: PgOpen) -> anyhow::Result<Dispatcher> 
 pub fn server(listen: Option<&str>, data: Option<PathBuf>) -> anyhow::Result<()> {
     let listen = match listen {
         Some(l) => l.to_string(),
-        None => format!("0.0.0.0:{}", std::env::var("PORT").ok().filter(|p| !p.is_empty()).unwrap_or("8080".into())),
+        None => format!(
+            "0.0.0.0:{}",
+            std::env::var("PORT")
+                .ok()
+                .filter(|p| !p.is_empty())
+                .unwrap_or("8080".into())
+        ),
     };
-    let addr: SocketAddr = listen.parse().with_context(|| format!("bad listen address '{listen}'"))?;
+    let addr: SocketAddr = listen
+        .parse()
+        .with_context(|| format!("bad listen address '{listen}'"))?;
     let board = Arc::new(open_board(data, PgOpen::SERVER)?);
     cloud::run(board, addr)
 }
@@ -54,10 +63,18 @@ pub fn server(listen: Option<&str>, data: Option<PathBuf>) -> anyhow::Result<()>
 fn new_key() -> anyhow::Result<String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(format!("conde_{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+    Ok(format!(
+        "conde_{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
 }
 
-pub fn key_create(data: Option<PathBuf>, user: &str, host: &str, label: &str) -> anyhow::Result<i32> {
+pub fn key_create(
+    data: Option<PathBuf>,
+    user: &str,
+    host: &str,
+    label: &str,
+) -> anyhow::Result<i32> {
     let board = open_board(data, PgOpen::COMMAND)?;
     let key = new_key()?;
     let digest = conde_remote::token_digest(&key);
@@ -84,17 +101,30 @@ fn admin_key(server: &str, no_tty: &'static str) -> anyhow::Result<String> {
 
 /// One admin API request (`path` under the server's origin) with the admin key: the answer's
 /// JSON, or its message as the error. The key never travels over plain http off this machine.
-fn admin_request(server: &str, key: &str, path: &str, body: Option<serde_json::Value>) -> anyhow::Result<serde_json::Value> {
+fn admin_request(
+    server: &str,
+    key: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
     let base = credentials::rpc_url(server)?;
     let parsed = reqwest::Url::parse(&base)?;
-    let host = parsed.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
     let loopback = host.eq_ignore_ascii_case("localhost")
-        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
     if parsed.scheme() == "http" && !loopback {
         bail!("refusing to send the admin key over plain http to {server}; use https://");
     }
     let url = format!("{}{path}", base.trim_end_matches("/v1/rpc"));
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let (status, answer) = runtime.block_on(async {
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(crate::login::tls()?)
@@ -107,10 +137,16 @@ fn admin_request(server: &str, key: &str, path: &str, body: Option<serde_json::V
         };
         let r = request.bearer_auth(key).send().await?;
         let status = r.status();
-        anyhow::Ok((status, r.json::<serde_json::Value>().await.unwrap_or_default()))
+        anyhow::Ok((
+            status,
+            r.json::<serde_json::Value>().await.unwrap_or_default(),
+        ))
     })?;
     if !status.is_success() {
-        bail!("{} ({status})", answer["message"].as_str().unwrap_or("the server refused"));
+        bail!(
+            "{} ({status})",
+            answer["message"].as_str().unwrap_or("the server refused")
+        );
     }
     Ok(answer)
 }
@@ -118,7 +154,10 @@ fn admin_request(server: &str, key: &str, path: &str, body: Option<serde_json::V
 /// `conde admin slack <owner> <member-id> --server <url>`: the admin API sets the owner's Slack
 /// member id (`slack_source = admin`) with the admin key from `CONDE_ADMIN_KEY` or a prompt.
 pub fn slack(server: &str, owner: &str, member_id: &str) -> anyhow::Result<i32> {
-    let key = admin_key(server, "admin slack needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal")?;
+    let key = admin_key(
+        server,
+        "admin slack needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+    )?;
     println!("{}", set_slack(server, &key, owner, member_id)?);
     Ok(0)
 }
@@ -126,15 +165,25 @@ pub fn slack(server: &str, owner: &str, member_id: &str) -> anyhow::Result<i32> 
 /// `POST /v1/admin/users/<owner>/slack {member_id}` with the admin key; the line to print.
 pub fn set_slack(server: &str, key: &str, owner: &str, member_id: &str) -> anyhow::Result<String> {
     let path = format!("/v1/admin/users/{}/slack", owner.trim().to_lowercase());
-    let answer = admin_request(server, key, &path, Some(serde_json::json!({"member_id": member_id})))?;
+    let answer = admin_request(
+        server,
+        key,
+        &path,
+        Some(serde_json::json!({"member_id": member_id})),
+    )?;
     let user = answer["user"].as_str().unwrap_or(owner);
-    Ok(format!("slack member id of {user} on {server}: {member_id} (set by the admin)"))
+    Ok(format!(
+        "slack member id of {user} on {server}: {member_id} (set by the admin)"
+    ))
 }
 
 /// `conde admin user invite <name> <email> --server <url>`: creates the user the first sign-in
 /// with this verified email lands on.
 pub fn user_invite(server: &str, name: &str, email: &str) -> anyhow::Result<i32> {
-    let key = admin_key(server, "admin user invite needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal")?;
+    let key = admin_key(
+        server,
+        "admin user invite needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+    )?;
     println!("{}", invite(server, &key, name, email)?);
     Ok(0)
 }
@@ -151,7 +200,10 @@ pub fn invite(server: &str, key: &str, name: &str, email: &str) -> anyhow::Resul
 
 /// `conde admin user list --server <url>`.
 pub fn user_list(server: &str) -> anyhow::Result<i32> {
-    let key = admin_key(server, "admin user list needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal")?;
+    let key = admin_key(
+        server,
+        "admin user list needs the admin key: set CONDE_ADMIN_KEY or run it at a terminal",
+    )?;
     let lines = list_users(server, &key)?;
     if lines.is_empty() {
         eprintln!("(no users)");
@@ -169,19 +221,36 @@ pub fn list_users(server: &str, key: &str) -> anyhow::Result<Vec<String>> {
     Ok(users
         .iter()
         .map(|u| {
-            let issuers: Vec<&str> = u["issuers"].as_array().into_iter().flatten().filter_map(|i| i.as_str()).collect();
+            let issuers: Vec<&str> = u["issuers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| i.as_str())
+                .collect();
             format!(
                 "{}\t{}\t{}\t{}",
                 u["name"].as_str().unwrap_or(""),
                 u["email"].as_str().unwrap_or("-"),
-                if issuers.is_empty() { "not signed in yet".to_string() } else { issuers.join(",") },
-                if u["disabled"].as_bool() == Some(true) { "disabled" } else { "enabled" },
+                if issuers.is_empty() {
+                    "not signed in yet".to_string()
+                } else {
+                    issuers.join(",")
+                },
+                if u["disabled"].as_bool() == Some(true) {
+                    "disabled"
+                } else {
+                    "enabled"
+                },
             )
         })
         .collect())
 }
 
-pub fn key_revoke(data: Option<PathBuf>, host: Option<&str>, id: Option<&str>) -> anyhow::Result<i32> {
+pub fn key_revoke(
+    data: Option<PathBuf>,
+    host: Option<&str>,
+    id: Option<&str>,
+) -> anyhow::Result<i32> {
     let board = open_board(data, PgOpen::COMMAND)?;
     let now = iso_from_ms(now_ms());
     let revoked = board.with_tx(|c| hosts::revoke(c, host, id, &now))?;
@@ -189,7 +258,13 @@ pub fn key_revoke(data: Option<PathBuf>, host: Option<&str>, id: Option<&str>) -
         bail!("no live key matches");
     }
     for k in revoked {
-        println!("revoked {} ({}@{}, {})", k.key_id, k.user, k.host, k.label.unwrap_or_default());
+        println!(
+            "revoked {} ({}@{}, {})",
+            k.key_id,
+            k.user,
+            k.host,
+            k.label.unwrap_or_default()
+        );
     }
     eprintln!("a bridge connected with a revoked key keeps its connection until it reconnects");
     Ok(0)
@@ -199,7 +274,11 @@ pub fn key_list(data: Option<PathBuf>) -> anyhow::Result<i32> {
     let board = open_board(data, PgOpen::COMMAND)?;
     let keys = board.with_conn(hosts::list)?;
     for k in &keys {
-        let state = k.revoked_at.as_deref().map(|r| format!("revoked {r}")).unwrap_or_else(|| "live".into());
+        let state = k
+            .revoked_at
+            .as_deref()
+            .map(|r| format!("revoked {r}"))
+            .unwrap_or_else(|| "live".into());
         println!(
             "{}\t{}@{}\t{}\t{}\t{state}",
             k.key_id,
@@ -219,9 +298,14 @@ pub fn key_list(data: Option<PathBuf>) -> anyhow::Result<i32> {
 /// [`boards::move_board`]) and has the running bridge reconnect there.
 pub fn board_move(alias: &str, url: &str, trust_new: bool) -> anyhow::Result<i32> {
     let config = boards::config_dir()?;
-    let (old, new) = boards::move_board(&config, alias, url, trust_new, &mut boards::moved_probe, &mut |server, key| {
-        boards::board_info(server, key)
-    })?;
+    let (old, new) = boards::move_board(
+        &config,
+        alias,
+        url,
+        trust_new,
+        &mut boards::moved_probe,
+        &mut |server, key| boards::board_info(server, key),
+    )?;
     println!(
         "board {alias} moved: {} -> {} (credential, account {} and host {} kept)",
         old.server, new.server, new.owner, new.host_id
@@ -232,7 +316,12 @@ pub fn board_move(alias: &str, url: &str, trust_new: bool) -> anyhow::Result<i32
 
 /// `conde enroll`: store the server URL, host id, account and key (0600) as the board
 /// `alias` (default: the name the board advertises), refusing to retarget a pinned alias.
-pub fn enroll(server: &str, host: Option<&str>, board: Option<&str>, key_stdin: bool) -> anyhow::Result<i32> {
+pub fn enroll(
+    server: &str,
+    host: Option<&str>,
+    board: Option<&str>,
+    key_stdin: bool,
+) -> anyhow::Result<i32> {
     credentials::bridge_url(server)?;
     if let Some(alias) = board {
         boards::check_shared_alias(alias)?;
@@ -251,13 +340,23 @@ pub fn enroll(server: &str, host: Option<&str>, board: Option<&str>, key_stdin: 
         bail!("that is not a host key (empty or contains whitespace)");
     }
     let info = boards::board_info(server, &key)?;
-    let alias = board.map(str::to_string).unwrap_or_else(|| info.name.clone());
+    let alias = board
+        .map(str::to_string)
+        .unwrap_or_else(|| info.name.clone());
     boards::check_shared_alias(&alias)?;
     let path = boards::path(&alias)?;
-    let cfg = BoardConfig { server: server.to_string(), host_id: info.host.clone(), owner: info.owner.clone(), key };
+    let cfg = BoardConfig {
+        server: server.to_string(),
+        host_id: info.host.clone(),
+        owner: info.owner.clone(),
+        key,
+    };
     boards::store(&path, &alias, &cfg)?;
     let bridge = reload_bridge(&paths::socket_path(), &alias);
-    print!("{}", enrolled_text(&alias, &cfg, &path, false, None, &bridge));
+    print!(
+        "{}",
+        enrolled_text(&alias, &cfg, &path, false, None, &bridge)
+    );
     Ok(0)
 }
 
@@ -267,7 +366,11 @@ pub fn reload_bridge(socket: &std::path::Path, alias: &str) -> String {
     let Ok(mut client) = crate::client::Client::connect(socket) else {
         return "bridge: not running; it reads the new key at start".into();
     };
-    let mut req = crate::protocol::Request::new(crate::util::new_ulid(), crate::surface::BOARD_RELOAD, serde_json::json!({}));
+    let mut req = crate::protocol::Request::new(
+        crate::util::new_ulid(),
+        crate::surface::BOARD_RELOAD,
+        serde_json::json!({}),
+    );
     req.board = Some(alias.to_string());
     let why = match client.call(&req) {
         Ok(r) if r.ok => {
@@ -277,7 +380,10 @@ pub fn reload_bridge(socket: &std::path::Path, alias: &str) -> String {
                 _ => format!("bridge: {alias} reloaded"),
             };
         }
-        Ok(r) => r.error.map(|e| e.message).unwrap_or_else(|| "no answer".into()),
+        Ok(r) => r
+            .error
+            .map(|e| e.message)
+            .unwrap_or_else(|| "no answer".into()),
         Err(e) => format!("{e:#}"),
     };
     format!("bridge: {alias} not reloaded ({why}); restart the bridge to use the new key")
@@ -306,7 +412,9 @@ pub fn enrolled_text(
              board {alias} at {server} (account {owner}); credential stored at {path} (mode 0600)\n"
         )
     } else {
-        format!("enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} (mode 0600)\n")
+        format!(
+            "enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} (mode 0600)\n"
+        )
     };
     format!(
         "{head}{}: conde publish <name> --board {alias}\n\

@@ -40,7 +40,10 @@ impl std::fmt::Debug for BoardConfig {
 
 /// `$XDG_CONFIG_HOME/conde`, else `~/.config/conde`.
 pub fn config_dir() -> anyhow::Result<PathBuf> {
-    Ok(credentials::path()?.parent().context("credential path has no directory")?.to_path_buf())
+    Ok(credentials::path()?
+        .parent()
+        .context("credential path has no directory")?
+        .to_path_buf())
 }
 
 /// The directory of the board files.
@@ -59,16 +62,21 @@ pub fn is_alias(alias: &str) -> bool {
     !b.is_empty()
         && b.len() <= MAX_ALIAS
         && b[0].is_ascii_lowercase()
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' || *c == b'_')
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' || *c == b'_')
 }
 
 /// An alias a shared board may be enrolled under (`local` is the local board's).
 pub fn check_shared_alias(alias: &str) -> anyhow::Result<()> {
     if alias == LOCAL_BOARD {
-        bail!("'local' names this machine's own board; enroll a shared board under another alias (e.g. --board dakai)");
+        bail!(
+            "'local' names this machine's own board; enroll a shared board under another alias (e.g. --board dakai)"
+        );
     }
     if !is_alias(alias) {
-        bail!("'{alias}' is not a board alias (lowercase letters, digits, '-' or '_', starting with a letter, at most {MAX_ALIAS})");
+        bail!(
+            "'{alias}' is not a board alias (lowercase letters, digits, '-' or '_', starting with a letter, at most {MAX_ALIAS})"
+        );
     }
     Ok(())
 }
@@ -87,7 +95,10 @@ pub fn enrolled_in(dir: &Path) -> anyhow::Result<Vec<String>> {
     let mut out = Vec::new();
     for entry in entries {
         let name = entry?.file_name().to_string_lossy().into_owned();
-        if let Some(alias) = name.strip_suffix(".json").filter(|a| is_alias(a) && *a != LOCAL_BOARD) {
+        if let Some(alias) = name
+            .strip_suffix(".json")
+            .filter(|a| is_alias(a) && *a != LOCAL_BOARD)
+        {
             out.push(alias.to_string());
         }
     }
@@ -99,11 +110,17 @@ pub fn enrolled_in(dir: &Path) -> anyhow::Result<Vec<String>> {
 pub fn load(path: &Path) -> anyhow::Result<BoardConfig> {
     let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     crate::private::check(path)?;
-    serde_json::from_slice(&raw).with_context(|| format!("{} is not a conde board file", path.display()))
+    serde_json::from_slice(&raw)
+        .with_context(|| format!("{} is not a conde board file", path.display()))
 }
 
 /// The refusal to retarget a pinned alias, or None when `new` keeps its server and account.
-pub fn retarget_refusal(alias: &str, old: &BoardConfig, new_server: &str, new_owner: Option<&str>) -> Option<String> {
+pub fn retarget_refusal(
+    alias: &str,
+    old: &BoardConfig,
+    new_server: &str,
+    new_owner: Option<&str>,
+) -> Option<String> {
     let same_server = credentials::same_server(&old.server, new_server).unwrap_or(false);
     let same_owner = new_owner.is_none_or(|o| o.eq_ignore_ascii_case(&old.owner));
     (!same_server || !same_owner).then(|| {
@@ -116,7 +133,12 @@ pub fn retarget_refusal(alias: &str, old: &BoardConfig, new_server: &str, new_ow
 
 /// Before enrolling under `alias`: refuse when the alias is pinned to another server
 /// (`owner` None: the account is not known yet).
-pub fn check_pin(path: &Path, alias: &str, server: &str, owner: Option<&str>) -> anyhow::Result<()> {
+pub fn check_pin(
+    path: &Path,
+    alias: &str,
+    server: &str,
+    owner: Option<&str>,
+) -> anyhow::Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -162,7 +184,10 @@ pub fn read_default(path: &Path) -> anyhow::Result<String> {
                 return Ok(LOCAL_BOARD.into());
             }
             if !is_alias(alias) {
-                bail!("{} holds '{alias}', which is not a board alias", path.display());
+                bail!(
+                    "{} holds '{alias}', which is not a board alias",
+                    path.display()
+                );
             }
             Ok(alias.to_string())
         }
@@ -174,16 +199,26 @@ pub fn read_default(path: &Path) -> anyhow::Result<String> {
 /// Set the default board; `local` or an enrolled alias (`boards_dir` holds its file).
 pub fn write_default(path: &Path, boards_dir: &Path, alias: &str) -> anyhow::Result<()> {
     if alias != LOCAL_BOARD && !enrolled_in(boards_dir)?.iter().any(|a| a == alias) {
-        bail!("no board '{alias}' is enrolled on this host; the default is local or one of: {}", list_or_none(boards_dir)?);
+        bail!(
+            "no board '{alias}' is enrolled on this host; the default is local or one of: {}",
+            list_or_none(boards_dir)?
+        );
     }
-    let dir = path.parent().context("default-board path has no directory")?;
+    let dir = path
+        .parent()
+        .context("default-board path has no directory")?;
     crate::private::create_dir(dir)?;
-    std::fs::write(path, format!("{alias}\n")).with_context(|| format!("writing {}", path.display()))
+    std::fs::write(path, format!("{alias}\n"))
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn list_or_none(boards_dir: &Path) -> anyhow::Result<String> {
     let all = enrolled_in(boards_dir)?;
-    Ok(if all.is_empty() { "(none enrolled)".into() } else { all.join(", ") })
+    Ok(if all.is_empty() {
+        "(none enrolled)".into()
+    } else {
+        all.join(", ")
+    })
 }
 
 /// `board.info` on a server with a host key, over `POST /v1/rpc` (https; plain http only to
@@ -191,7 +226,9 @@ fn list_or_none(boards_dir: &Path) -> anyhow::Result<String> {
 pub fn board_info(server: &str, key: &str) -> anyhow::Result<BoardInfo> {
     let url = format!("{}/v1/rpc", crate::login::origin(server)?);
     let request = json!({"v": 1, "type": "request", "request_id": crate::util::new_ulid(), "op": op::BOARD_INFO, "body": {}});
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let answer: Value = runtime.block_on(async {
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(crate::login::tls()?)
@@ -206,7 +243,11 @@ pub fn board_info(server: &str, key: &str) -> anyhow::Result<BoardInfo> {
             .await
             .with_context(|| format!("asking {server} for board.info"))?;
         let status = response.status();
-        let location = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let bytes = response.bytes().await.unwrap_or_default();
         if let Some(url) = conde_remote::moved_to(status.as_u16(), location.as_deref(), &bytes) {
             bail!("{server} answered that the board moved to {url}");
@@ -218,10 +259,13 @@ pub fn board_info(server: &str, key: &str) -> anyhow::Result<BoardInfo> {
         anyhow::Ok(body)
     })?;
     if answer["ok"] != true {
-        let message = answer["error"]["message"].as_str().unwrap_or("no reason given");
+        let message = answer["error"]["message"]
+            .as_str()
+            .unwrap_or("no reason given");
         bail!("{server} refused board.info: {message}");
     }
-    serde_json::from_value(answer["result"].clone()).map_err(|e| anyhow!("{server} answered board.info without its fields: {e}"))
+    serde_json::from_value(answer["result"].clone())
+        .map_err(|e| anyhow!("{server} answered board.info without its fields: {e}"))
 }
 
 /// What a host is told when its board answered that it moved.
@@ -233,18 +277,33 @@ pub fn moved_message(alias: &str, url: &str) -> String {
 /// leaves this host; the 308's address, or None for any other answer.
 pub fn moved_probe(server: &str) -> anyhow::Result<Option<String>> {
     let url = format!("{}/v1/rpc", crate::login::origin(server)?);
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(crate::login::tls()?)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let response = client.post(&url).json(&json!({})).send().await.with_context(|| format!("asking {server} whether it moved"))?;
+        let response = client
+            .post(&url)
+            .json(&json!({}))
+            .send()
+            .await
+            .with_context(|| format!("asking {server} whether it moved"))?;
         let status = response.status();
-        let location = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let bytes = response.bytes().await.unwrap_or_default();
-        anyhow::Ok(conde_remote::moved_to(status.as_u16(), location.as_deref(), &bytes))
+        anyhow::Ok(conde_remote::moved_to(
+            status.as_u16(),
+            location.as_deref(),
+            &bytes,
+        ))
     })
 }
 
@@ -286,7 +345,9 @@ pub fn move_board(
     let expected = if moved_here {
         alias.to_string()
     } else if trust_new {
-        info(&old.server, &old.key).map(|i| i.name).unwrap_or_else(|_| alias.to_string())
+        info(&old.server, &old.key)
+            .map(|i| i.name)
+            .unwrap_or_else(|_| alias.to_string())
     } else {
         bail!(
             "{} {said}, not that it moved to {new_server}; nothing was sent to {new_server} and nothing changed (to point \
@@ -294,10 +355,16 @@ pub fn move_board(
             old.server
         );
     };
-    let found = info(new_server, &old.key)
-        .with_context(|| format!("{new_server} did not answer as board {expected} with this host's key; nothing changed"))?;
+    let found = info(new_server, &old.key).with_context(|| {
+        format!(
+            "{new_server} did not answer as board {expected} with this host's key; nothing changed"
+        )
+    })?;
     if found.name != expected {
-        bail!("{new_server} is board '{}', not '{expected}'; nothing changed", found.name);
+        bail!(
+            "{new_server} is board '{}', not '{expected}'; nothing changed",
+            found.name
+        );
     }
     if !found.owner.eq_ignore_ascii_case(&old.owner) || found.host != old.host_id {
         bail!(
@@ -308,7 +375,10 @@ pub fn move_board(
             old.host_id
         );
     }
-    let new = BoardConfig { server: new_server.to_string(), ..old.clone() };
+    let new = BoardConfig {
+        server: new_server.to_string(),
+        ..old.clone()
+    };
     write(&path, alias, &new)?;
     Ok((old, new))
 }
@@ -359,7 +429,12 @@ pub fn adopt_legacy(config: &Path, alias: &str, owner: &str) -> anyhow::Result<P
     let legacy = legacy_path(config);
     let creds = credentials::load(&legacy)?;
     let path = path_in(config, alias);
-    let cfg = BoardConfig { server: creds.server, host_id: creds.host_id, owner: owner.to_string(), key: creds.key };
+    let cfg = BoardConfig {
+        server: creds.server,
+        host_id: creds.host_id,
+        owner: owner.to_string(),
+        key: creds.key,
+    };
     store(&path, alias, &cfg)?;
     std::fs::remove_file(&legacy).with_context(|| format!("removing {}", legacy.display()))?;
     Ok(path)
@@ -373,7 +448,12 @@ mod tests {
 
     #[cfg(unix)]
     fn cfg(server: &str, owner: &str) -> BoardConfig {
-        BoardConfig { server: server.into(), host_id: "h".into(), owner: owner.into(), key: "k".into() }
+        BoardConfig {
+            server: server.into(),
+            host_id: "h".into(),
+            owner: owner.into(),
+            key: "k".into(),
+        }
     }
 
     #[test]
@@ -381,10 +461,22 @@ mod tests {
         for ok in ["dakai", "team-2", "a_b"] {
             assert!(is_alias(ok), "{ok}");
         }
-        for bad in ["", "Dakai", "2team", "da kai", "dakai:", "x".repeat(33).as_str()] {
+        for bad in [
+            "",
+            "Dakai",
+            "2team",
+            "da kai",
+            "dakai:",
+            "x".repeat(33).as_str(),
+        ] {
             assert!(!is_alias(bad), "{bad}");
         }
-        assert!(check_shared_alias("local").unwrap_err().to_string().contains("this machine's own board"));
+        assert!(
+            check_shared_alias("local")
+                .unwrap_err()
+                .to_string()
+                .contains("this machine's own board")
+        );
         assert!(check_shared_alias("dakai").is_ok());
     }
 
@@ -403,8 +495,13 @@ mod tests {
         again.key = "k2".into();
         store(&p, "dakai", &again).unwrap();
         assert_eq!(load(&p).unwrap().key, "k2");
-        let err = store(&p, "dakai", &cfg("https://evil.example", "krisz")).unwrap_err().to_string();
-        assert_eq!(err, "dakai is pinned to wss://Conde.example/v1/bridge as KRISZ; to point the alias elsewhere, first run: conde boards --forget dakai");
+        let err = store(&p, "dakai", &cfg("https://evil.example", "krisz"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "dakai is pinned to wss://Conde.example/v1/bridge as KRISZ; to point the alias elsewhere, first run: conde boards --forget dakai"
+        );
         assert!(store(&p, "dakai", &cfg("https://conde.example", "other")).is_err());
         assert!(check_pin(&p, "dakai", "https://conde.example", None).is_ok());
         assert!(!format!("{:?}", load(&p).unwrap()).contains("k2"));
@@ -416,7 +513,10 @@ mod tests {
         write_default(&def, &dir, "dakai").unwrap();
         assert_eq!(read_default(&def).unwrap(), "dakai");
         let err = write_default(&def, &dir, "other").unwrap_err().to_string();
-        assert!(err.contains("no board 'other' is enrolled") && err.contains("dakai"), "{err}");
+        assert!(
+            err.contains("no board 'other' is enrolled") && err.contains("dakai"),
+            "{err}"
+        );
         write_default(&def, &dir, "local").unwrap();
         assert_eq!(read_default(&def).unwrap(), "local");
         std::fs::remove_dir_all(&root).unwrap();

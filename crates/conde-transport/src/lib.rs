@@ -23,8 +23,8 @@ pub use claude::{
     resolve_claude, uds_address,
 };
 pub use codex::{
-    CodexOutcome, PROVENANCE, codex_control_present, codex_control_socket, codex_home, codex_notify,
-    codex_notify_with_id,
+    CodexOutcome, PROVENANCE, codex_control_present, codex_control_socket, codex_home,
+    codex_notify, codex_notify_with_id,
 };
 
 /// Errors a caller can act on; socket-level failures of a send stay `io::Error`.
@@ -43,7 +43,6 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
 
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -65,7 +64,9 @@ pub(crate) fn env_dir_or_home(var: &str, fallback: &str) -> Option<std::path::Pa
 /// Codex keep `.claude` and `.codex`.
 pub fn home_dir() -> Option<std::path::PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(var).filter(|h| !h.is_empty()).map(std::path::PathBuf::from)
+    std::env::var_os(var)
+        .filter(|h| !h.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// SDDL for an object only `sid` may access: a protected DACL with one
@@ -80,7 +81,13 @@ mod tests {
     #[test]
     fn owner_only_sddl_grants_one_sid() {
         let sid = "S-1-5-21-1-2-3-1001";
-        assert_eq!(super::owner_only_sddl(sid, false), "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)");
-        assert_eq!(super::owner_only_sddl(sid, true), "D:P(A;OICI;GA;;;S-1-5-21-1-2-3-1001)");
+        assert_eq!(
+            super::owner_only_sddl(sid, false),
+            "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)"
+        );
+        assert_eq!(
+            super::owner_only_sddl(sid, true),
+            "D:P(A;OICI;GA;;;S-1-5-21-1-2-3-1001)"
+        );
     }
 }

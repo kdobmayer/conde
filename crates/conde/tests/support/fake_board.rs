@@ -18,7 +18,9 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, post};
-use conde_remote::{Endpoint, Hello, Notify, NotifyFields, NotifyKind, OutcomeReason, OutcomeStatus, Route, Routes};
+use conde_remote::{
+    Endpoint, Hello, Notify, NotifyFields, NotifyKind, OutcomeReason, OutcomeStatus, Route, Routes,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -144,7 +146,9 @@ impl St {
     }
 
     fn canonical(&self, id: &str) -> String {
-        self.mailbox(id).map(|m| format!("{}/{}", m.owner, m.name)).unwrap_or_default()
+        self.mailbox(id)
+            .map(|m| format!("{}/{}", m.owner, m.name))
+            .unwrap_or_default()
     }
 
     fn send_to(&self, host: &str, frame: String) {
@@ -158,9 +162,19 @@ impl St {
             .mailboxes
             .iter()
             .filter(|m| m.host.as_deref() == Some(host))
-            .map(|m| Route { mailbox_id: m.id.clone(), route_generation: m.generation })
+            .map(|m| Route {
+                mailbox_id: m.id.clone(),
+                route_generation: m.generation,
+            })
             .collect();
-        frame("routes", &serde_json::to_value(Routes { mailboxes, revision: None }).unwrap())
+        frame(
+            "routes",
+            &serde_json::to_value(Routes {
+                mailboxes,
+                revision: None,
+            })
+            .unwrap(),
+        )
     }
 
     /// The stale-attempt rule: an open attempt whose instance is not the host's active one, or
@@ -176,12 +190,16 @@ impl St {
             if note.raw {
                 continue;
             }
-            if note.current.as_deref() != Some(&a.id) || matches!(note.status.as_str(), "delivered" | "refused" | "denied") {
+            if note.current.as_deref() != Some(&a.id)
+                || matches!(note.status.as_str(), "delivered" | "refused" | "denied")
+            {
                 continue;
             }
             let mb = self.mailbox(&note.mailbox).cloned();
             let host_active = self.hosts.get(&a.host).and_then(|h| h.active.clone());
-            let moved = mb.as_ref().is_none_or(|m| m.generation != a.generation || m.host.as_deref() != Some(&a.host));
+            let moved = mb
+                .as_ref()
+                .is_none_or(|m| m.generation != a.generation || m.host.as_deref() != Some(&a.host));
             if moved || host_active.as_deref() != Some(&a.instance) {
                 stale.push(a.id.clone());
             }
@@ -193,7 +211,9 @@ impl St {
 
     fn settle(&mut self, attempt: &str, status: &str, reason: Option<String>) {
         let retry = Duration::from_millis(self.retry_ms);
-        let Some(a) = self.attempts.get_mut(attempt) else { return };
+        let Some(a) = self.attempts.get_mut(attempt) else {
+            return;
+        };
         a.status = Some(status.to_string());
         a.reason = reason;
         a.history.push(status.to_string());
@@ -223,14 +243,21 @@ impl St {
     fn claim(&mut self, host: &str, instance: &str) -> Vec<Value> {
         self.abandon_stale();
         let window = *self.windows.get(instance).unwrap_or(&32) as usize;
-        let dispatching = self.attempts.values().filter(|a| a.instance == instance && a.status.is_none()).count();
+        let dispatching = self
+            .attempts
+            .values()
+            .filter(|a| a.instance == instance && a.status.is_none())
+            .count();
         let mut room = window.saturating_sub(dispatching);
         let now = Instant::now();
         let mut due: Vec<String> = self
             .notes
             .iter()
             .filter(|(_, n)| !n.raw && n.status == "pending" && n.next_at <= now)
-            .filter(|(_, n)| self.mailbox(&n.mailbox).is_some_and(|m| m.host.as_deref() == Some(host)))
+            .filter(|(_, n)| {
+                self.mailbox(&n.mailbox)
+                    .is_some_and(|m| m.host.as_deref() == Some(host))
+            })
             .map(|(k, _)| k.clone())
             .collect();
         due.sort();
@@ -282,7 +309,9 @@ impl St {
             attempt_id: a.id.clone(),
             recipient: self.canonical(&note.mailbox),
             binding_version: a.generation,
-            endpoint: Endpoint::Mailbox { mailbox_id: note.mailbox.clone() },
+            endpoint: Endpoint::Mailbox {
+                mailbox_id: note.mailbox.clone(),
+            },
             message_id: m.id.clone(),
             text: String::new(),
             fields: Some(NotifyFields {
@@ -303,7 +332,9 @@ impl St {
         let mut ids: Vec<String> = self
             .attempts
             .values()
-            .filter(|a| a.instance == instance && matches!(a.status.as_deref(), None | Some("held")))
+            .filter(|a| {
+                a.instance == instance && matches!(a.status.as_deref(), None | Some("held"))
+            })
             .filter(|a| self.notes[&a.msg].current.as_deref() == Some(&a.id))
             .map(|a| a.id.clone())
             .collect();
@@ -336,13 +367,23 @@ pub struct FakeBoard {
 
 impl FakeBoard {
     pub fn start() -> FakeBoard {
-        let rt = Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
-        let st = Arc::new(Mutex::new(St { retry_ms: 300, ..St::default() }));
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let st = Arc::new(Mutex::new(St {
+            retry_ms: 300,
+            ..St::default()
+        }));
         let app = Router::new()
             .route("/v1/rpc", post(rpc))
             .route("/v1/bridge", any(bridge))
             .with_state(st.clone());
-        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         rt.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let board = FakeBoard { st, addr, rt };
@@ -367,7 +408,11 @@ impl FakeBoard {
     /// Pushes due notifications to every connected host, up to its window.
     fn pump(&self) {
         let mut st = self.lock();
-        let conns: Vec<(String, String)> = st.conns.iter().map(|(h, (i, _, _))| (h.clone(), i.clone())).collect();
+        let conns: Vec<(String, String)> = st
+            .conns
+            .iter()
+            .map(|(h, (i, _, _))| (h.clone(), i.clone()))
+            .collect();
         for (host, instance) in conns {
             for n in st.claim(&host, &instance) {
                 st.pushed.push((host.clone(), n.clone()));
@@ -407,7 +452,14 @@ impl FakeBoard {
     pub fn mailbox(&self, owner: &str, name: &str, host: &str) -> String {
         let mut st = self.lock();
         let id = st.ulid();
-        st.mailboxes.push(Mailbox { id: id.clone(), owner: owner.into(), name: name.into(), host: Some(host.into()), generation: 1, human: false });
+        st.mailboxes.push(Mailbox {
+            id: id.clone(),
+            owner: owner.into(),
+            name: name.into(),
+            host: Some(host.into()),
+            generation: 1,
+            human: false,
+        });
         id
     }
 
@@ -416,17 +468,44 @@ impl FakeBoard {
     }
 
     pub fn mailbox_named(&self, owner: &str, name: &str) -> Option<Mailbox> {
-        self.lock().mailboxes.iter().find(|m| m.owner == owner && m.name == name).cloned()
+        self.lock()
+            .mailboxes
+            .iter()
+            .find(|m| m.owner == owner && m.name == name)
+            .cloned()
     }
 
     /// A DM from mailbox `from` to `owner/name` written on the board directly (a teammate's
     /// agent sending through its own daemon is the same row).
     pub fn dm(&self, from: &str, to_owner: &str, to_name: &str, text: &str) -> String {
         let mut st = self.lock();
-        let to = st.mailboxes.iter().find(|m| m.owner == to_owner && m.name == to_name).unwrap().id.clone();
+        let to = st
+            .mailboxes
+            .iter()
+            .find(|m| m.owner == to_owner && m.name == to_name)
+            .unwrap()
+            .id
+            .clone();
         let id = st.ulid();
-        st.messages.push(Msg { id: id.clone(), from: from.into(), to: to.clone(), text: text.into(), reply_to: None, read: false });
-        st.notes.insert(id.clone(), Note { msg: id.clone(), mailbox: to, status: "pending".into(), next_at: Instant::now(), current: None, raw: false });
+        st.messages.push(Msg {
+            id: id.clone(),
+            from: from.into(),
+            to: to.clone(),
+            text: text.into(),
+            reply_to: None,
+            read: false,
+        });
+        st.notes.insert(
+            id.clone(),
+            Note {
+                msg: id.clone(),
+                mailbox: to,
+                status: "pending".into(),
+                next_at: Instant::now(),
+                current: None,
+                raw: false,
+            },
+        );
         id
     }
 
@@ -438,16 +517,47 @@ impl FakeBoard {
         let msg = st.ulid();
         n.attempt_id = attempt.clone();
         n.message_id = msg.clone();
-        let instance = st.conns.get(host).map(|c| c.0.clone()).expect("connected host");
+        let instance = st
+            .conns
+            .get(host)
+            .map(|c| c.0.clone())
+            .expect("connected host");
         let mailbox = match &n.endpoint {
             Endpoint::Mailbox { mailbox_id } => mailbox_id.clone(),
             _ => String::new(),
         };
-        st.messages.push(Msg { id: msg.clone(), from: String::new(), to: mailbox.clone(), text: "raw".into(), reply_to: None, read: false });
-        st.notes.insert(msg.clone(), Note { msg: msg.clone(), mailbox, status: "dispatching".into(), next_at: Instant::now(), current: Some(attempt.clone()), raw: true });
+        st.messages.push(Msg {
+            id: msg.clone(),
+            from: String::new(),
+            to: mailbox.clone(),
+            text: "raw".into(),
+            reply_to: None,
+            read: false,
+        });
+        st.notes.insert(
+            msg.clone(),
+            Note {
+                msg: msg.clone(),
+                mailbox,
+                status: "dispatching".into(),
+                next_at: Instant::now(),
+                current: Some(attempt.clone()),
+                raw: true,
+            },
+        );
         st.attempts.insert(
             attempt.clone(),
-            Attempt { id: attempt.clone(), msg, instance, host: host.into(), generation: n.binding_version, status: None, reason: None, last_seq: 0, history: Vec::new() },
+            Attempt {
+                id: attempt.clone(),
+                msg,
+                instance,
+                host: host.into(),
+                generation: n.binding_version,
+                status: None,
+                reason: None,
+                last_seq: 0,
+                history: Vec::new(),
+            },
         );
         let mut v = serde_json::to_value(&n).unwrap();
         v["v"] = json!(1);
@@ -461,7 +571,11 @@ impl FakeBoard {
     /// does on the board): a new generation, the old host's attempts re-attempted, its routes sent.
     pub fn take(&self, owner: &str, name: &str, host: &str) -> u64 {
         let mut st = self.lock();
-        let m = st.mailboxes.iter_mut().find(|m| m.owner == owner && m.name == name).unwrap();
+        let m = st
+            .mailboxes
+            .iter_mut()
+            .find(|m| m.owner == owner && m.name == name)
+            .unwrap();
         let old = m.host.replace(host.into());
         m.generation += 1;
         let generation = m.generation;
@@ -493,7 +607,10 @@ impl FakeBoard {
 
     /// Right after the next answer to `op`, a DM from `from` to `owner/name` arrives.
     pub fn dm_after(&self, op: &str, from: &str, owner: &str, name: &str, text: &str) {
-        self.lock().dm_after.insert(op.into(), (from.into(), owner.into(), name.into(), text.into()));
+        self.lock().dm_after.insert(
+            op.into(),
+            (from.into(), owner.into(), name.into(), text.into()),
+        );
     }
 
     pub fn answer(&self, op: &str) {
@@ -509,7 +626,11 @@ impl FakeBoard {
 
     /// Outcomes the host reported for one attempt: (event_seq, status, reason).
     pub fn outcomes_of(&self, host: &str, attempt: &str) -> Vec<(u64, String, Option<String>)> {
-        self.outcome_frames(host).into_iter().filter(|o| o.0 == attempt).map(|o| (o.1, o.2, o.3)).collect()
+        self.outcome_frames(host)
+            .into_iter()
+            .filter(|o| o.0 == attempt)
+            .map(|o| (o.1, o.2, o.3))
+            .collect()
     }
 
     pub fn set_acks(&self, host: &str, acks: Acks) {
@@ -553,7 +674,10 @@ impl FakeBoard {
             row.fenced.insert(old);
         }
         if let Some((_, tx, _)) = st.conns.remove(host) {
-            let _ = tx.send(Cmd::Frame(frame("error", &json!({"code": "fenced", "message": "a newer bridge took over"}))));
+            let _ = tx.send(Cmd::Frame(frame(
+                "error",
+                &json!({"code": "fenced", "message": "a newer bridge took over"}),
+            )));
             let _ = tx.send(Cmd::Close);
         }
     }
@@ -580,11 +704,20 @@ impl FakeBoard {
 
     /// Frames and RPC bodies the host sent, in order.
     pub fn capture(&self, host: &str) -> Vec<String> {
-        self.lock().capture.iter().filter(|(h, _)| h == host).map(|(_, f)| f.clone()).collect()
+        self.lock()
+            .capture
+            .iter()
+            .filter(|(h, _)| h == host)
+            .map(|(_, f)| f.clone())
+            .collect()
     }
 
     pub fn capture_all(&self) -> String {
-        self.lock().capture.iter().map(|(h, f)| format!("{h} {f}\n")).collect()
+        self.lock()
+            .capture
+            .iter()
+            .map(|(h, f)| format!("{h} {f}\n"))
+            .collect()
     }
 
     /// Outcome frames the host sent for messages' attempts: (attempt, event_seq, status, reason).
@@ -606,7 +739,13 @@ impl FakeBoard {
 
     /// Every attempt of a message, oldest first.
     pub fn attempts(&self, msg: &str) -> Vec<Attempt> {
-        let mut a: Vec<Attempt> = self.lock().attempts.values().filter(|a| a.msg == msg).cloned().collect();
+        let mut a: Vec<Attempt> = self
+            .lock()
+            .attempts
+            .values()
+            .filter(|a| a.msg == msg)
+            .cloned()
+            .collect();
         a.sort_by(|x, y| x.id.cmp(&y.id));
         a
     }
@@ -621,12 +760,21 @@ impl FakeBoard {
             .pushed
             .iter()
             .filter(|(_, f)| f["message_id"] == msg)
-            .map(|(h, f)| (h.clone(), f["attempt_id"].as_str().unwrap_or_default().to_string()))
+            .map(|(h, f)| {
+                (
+                    h.clone(),
+                    f["attempt_id"].as_str().unwrap_or_default().to_string(),
+                )
+            })
             .collect()
     }
 
     pub fn dispatching(&self, host: &str) -> usize {
-        self.lock().attempts.values().filter(|a| a.host == host && a.status.is_none()).count()
+        self.lock()
+            .attempts
+            .values()
+            .filter(|a| a.host == host && a.status.is_none())
+            .count()
     }
 
     pub fn connected(&self, host: &str) -> bool {
@@ -652,32 +800,47 @@ impl FakeBoard {
 
     /// Fleet "reached" for a mailbox row: a delivered attempt (mailbox rows count delivered only).
     pub fn reached(&self, msg: &str) -> bool {
-        self.attempts(msg).iter().any(|a| a.history.iter().any(|s| s == "delivered"))
+        self.attempts(msg)
+            .iter()
+            .any(|a| a.history.iter().any(|s| s == "delivered"))
     }
 }
 
 fn host_of(st: &St, headers: &HeaderMap) -> Option<String> {
-    let token = headers.get("authorization")?.to_str().ok()?.strip_prefix("Bearer ")?;
+    let token = headers
+        .get("authorization")?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?;
     let host = st.keys.get(token)?;
     (!st.hosts.get(host)?.revoked).then(|| host.clone())
 }
 
 async fn rpc(State(st): State<Arc<Mutex<St>>>, headers: HeaderMap, body: Bytes) -> Response {
     let mut s = st.lock().unwrap();
-    let Some(host) = host_of(&s, &headers) else { return StatusCode::UNAUTHORIZED.into_response() };
+    let Some(host) = host_of(&s, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let text = String::from_utf8_lossy(&body).to_string();
-    s.capture.push((host.clone(), format!("POST /v1/rpc {text}")));
+    s.capture
+        .push((host.clone(), format!("POST /v1/rpc {text}")));
     let req: Value = serde_json::from_str(&text).unwrap_or_default();
     let resp = dispatch(&mut s, &host, &req);
     axum::Json(resp).into_response()
 }
 
-async fn bridge(State(st): State<Arc<Mutex<St>>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn bridge(
+    State(st): State<Arc<Mutex<St>>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     let host = {
         let s = st.lock().unwrap();
         host_of(&s, &headers)
     };
-    let Some(host) = host else { return StatusCode::UNAUTHORIZED.into_response() };
+    let Some(host) = host else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     if st.lock().unwrap().blackout.contains(&host) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -686,7 +849,9 @@ async fn bridge(State(st): State<Arc<Mutex<St>>>, headers: HeaderMap, ws: WebSoc
 
 async fn session(st: Arc<Mutex<St>>, host: String, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
-    let Some(Ok(Message::Text(text))) = rx.next().await else { return };
+    let Some(Ok(Message::Text(text))) = rx.next().await else {
+        return;
+    };
     let hello_text = text.to_string();
     let (instance, refused) = {
         let mut s = st.lock().unwrap();
@@ -696,7 +861,10 @@ async fn session(st: Arc<Mutex<St>>, host: String, socket: WebSocket) {
             Ok(h) if h.check().is_ok() && h.proto == 2 && h.host_id == host => {
                 let row = s.hosts.get_mut(&host).unwrap();
                 if row.fenced.contains(&h.bridge_instance) {
-                    (h.bridge_instance, Some(("fenced", "a newer bridge took over")))
+                    (
+                        h.bridge_instance,
+                        Some(("fenced", "a newer bridge took over")),
+                    )
                 } else {
                     if let Some(old) = row.active.replace(h.bridge_instance.clone())
                         && old != h.bridge_instance
@@ -711,7 +879,8 @@ async fn session(st: Arc<Mutex<St>>, host: String, socket: WebSocket) {
                             _ => None,
                         })
                         .collect();
-                    s.windows.insert(h.bridge_instance.clone(), h.window.unwrap_or(32));
+                    s.windows
+                        .insert(h.bridge_instance.clone(), h.window.unwrap_or(32));
                     (h.bridge_instance, None)
                 }
             }
@@ -719,7 +888,12 @@ async fn session(st: Arc<Mutex<St>>, host: String, socket: WebSocket) {
         }
     };
     if let Some((code, message)) = refused {
-        let _ = tx.send(Message::text(frame("error", &json!({"code": code, "message": message})))).await;
+        let _ = tx
+            .send(Message::text(frame(
+                "error",
+                &json!({"code": code, "message": message}),
+            )))
+            .await;
         return;
     }
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -733,8 +907,14 @@ async fn session(st: Arc<Mutex<St>>, host: String, socket: WebSocket) {
             *n += 1;
             *n
         };
-        if let Some((_, old, _)) = s.conns.insert(host.clone(), (instance.clone(), cmd_tx.clone(), connects)) {
-            let _ = old.send(Cmd::Frame(frame("error", &json!({"code": "fenced", "message": "a newer bridge took over"}))));
+        if let Some((_, old, _)) = s
+            .conns
+            .insert(host.clone(), (instance.clone(), cmd_tx.clone(), connects))
+        {
+            let _ = old.send(Cmd::Frame(frame(
+                "error",
+                &json!({"code": "fenced", "message": "a newer bridge took over"}),
+            )));
             let _ = old.send(Cmd::Close);
         }
         if !s.no_routes_on_connect {
@@ -788,7 +968,10 @@ async fn session(st: Arc<Mutex<St>>, host: String, socket: WebSocket) {
         }
     }
     let mut s = st.lock().unwrap();
-    if s.conns.get(&host).is_some_and(|c| c.0 == instance && c.1.same_channel(&cmd_tx)) {
+    if s.conns
+        .get(&host)
+        .is_some_and(|c| c.0 == instance && c.1.same_channel(&cmd_tx))
+    {
         s.conns.remove(&host);
     }
 }
@@ -807,8 +990,15 @@ fn handle_frame(s: &mut St, host: &str, instance: &str, text: &str) -> Vec<Reply
             let status = v["status"].as_str().unwrap_or_default().to_string();
             let reason = v["reason"].as_str().map(str::to_string);
             // A v2 outcome carries a known status and a reason from the closed set.
-            if OutcomeStatus::parse(&status).is_none() || reason.as_deref().is_some_and(|r| OutcomeReason::parse(r).is_none()) {
-                return vec![Reply::Frame(frame("outcome_ack", &json!({"attempt_id": attempt, "event_seq": seq, "rejected": true, "reason": "outside the closed set"})))];
+            if OutcomeStatus::parse(&status).is_none()
+                || reason
+                    .as_deref()
+                    .is_some_and(|r| OutcomeReason::parse(r).is_none())
+            {
+                return vec![Reply::Frame(frame(
+                    "outcome_ack",
+                    &json!({"attempt_id": attempt, "event_seq": seq, "rejected": true, "reason": "outside the closed set"}),
+                ))];
             }
             let acks = s.hosts[host].acks;
             if acks == Acks::Stall {
@@ -821,8 +1011,13 @@ fn handle_frame(s: &mut St, host: &str, instance: &str, text: &str) -> Vec<Reply
                 Some(a) if seq <= a.last_seq => ack["duplicate"] = json!(true),
                 Some(a) => {
                     s.attempts.get_mut(&attempt).unwrap().last_seq = seq;
-                    let terminal = a.status.as_deref().is_some_and(|x| !matches!(x, "accepted" | "held"));
-                    let moved = s.mailbox(&s.notes[&a.msg].mailbox).is_none_or(|m| m.generation != a.generation);
+                    let terminal = a
+                        .status
+                        .as_deref()
+                        .is_some_and(|x| !matches!(x, "accepted" | "held"));
+                    let moved = s
+                        .mailbox(&s.notes[&a.msg].mailbox)
+                        .is_none_or(|m| m.generation != a.generation);
                     if terminal {
                         // already settled; ignored
                     } else if moved {
@@ -854,7 +1049,10 @@ fn handle_frame(s: &mut St, host: &str, instance: &str, text: &str) -> Vec<Reply
         }
         "request" => {
             let op = v["op"].as_str().unwrap_or_default().to_string();
-            let stale = s.stale_routes_before.contains(&op).then(|| s.routes_frame(host));
+            let stale = s
+                .stale_routes_before
+                .contains(&op)
+                .then(|| s.routes_frame(host));
             let resp = dispatch(s, host, &v);
             if s.lose_response.remove(&op) {
                 return vec![Reply::Drop];
@@ -863,10 +1061,33 @@ fn handle_frame(s: &mut St, host: &str, instance: &str, text: &str) -> Vec<Reply
                 return Vec::new();
             }
             if let Some((from, owner, name, text)) = s.dm_after.remove(&op) {
-                let to = s.mailboxes.iter().find(|m| m.owner == owner && m.name == name).unwrap().id.clone();
+                let to = s
+                    .mailboxes
+                    .iter()
+                    .find(|m| m.owner == owner && m.name == name)
+                    .unwrap()
+                    .id
+                    .clone();
                 let id = s.ulid();
-                s.messages.push(Msg { id: id.clone(), from, to: to.clone(), text, reply_to: None, read: false });
-                s.notes.insert(id.clone(), Note { msg: id, mailbox: to, status: "pending".into(), next_at: Instant::now() + Duration::from_secs(3600), current: None, raw: false });
+                s.messages.push(Msg {
+                    id: id.clone(),
+                    from,
+                    to: to.clone(),
+                    text,
+                    reply_to: None,
+                    read: false,
+                });
+                s.notes.insert(
+                    id.clone(),
+                    Note {
+                        msg: id,
+                        mailbox: to,
+                        status: "pending".into(),
+                        next_at: Instant::now() + Duration::from_secs(3600),
+                        current: None,
+                        raw: false,
+                    },
+                );
             }
             let mut out: Vec<Reply> = stale.into_iter().map(Reply::Frame).collect();
             out.push(Reply::Frame(resp.to_string()));
@@ -885,8 +1106,15 @@ fn actor(s: &St, host: &str, req: &Value) -> Option<String> {
         return None;
     }
     match kind {
-        "mailbox" => s.mailbox(target).filter(|m| m.host.as_deref() == Some(host)).map(|m| m.id.clone()),
-        "human" => s.mailboxes.iter().find(|m| m.human && m.owner == target && m.host.as_deref() == Some(host)).map(|m| m.id.clone()),
+        "mailbox" => s
+            .mailbox(target)
+            .filter(|m| m.host.as_deref() == Some(host))
+            .map(|m| m.id.clone()),
+        "human" => s
+            .mailboxes
+            .iter()
+            .find(|m| m.human && m.owner == target && m.host.as_deref() == Some(host))
+            .map(|m| m.id.clone()),
         _ => None,
     }
 }
@@ -905,7 +1133,10 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
     }
     let owner = s.hosts[host].owner.clone();
     let resp = match op.as_str() {
-        "board.info" => ok(&id, json!({"name": "dakai", "owner": owner, "host": host, "mailbox_only": s.hosts[host].mailbox_only})),
+        "board.info" => ok(
+            &id,
+            json!({"name": "dakai", "owner": owner, "host": host, "mailbox_only": s.hosts[host].mailbox_only}),
+        ),
         "host.migrate_preview" => ok(&id, json!({"rows": []})),
         "host.migrate_v2" => {
             s.hosts.get_mut(host).unwrap().mailbox_only = true;
@@ -915,10 +1146,17 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
             let name = body["name"].as_str().unwrap_or_default().to_string();
             let human = body["human"].as_bool().unwrap_or(false);
             let take = body["take"].as_bool().unwrap_or(false);
-            let existing = s.mailboxes.iter().position(|m| m.owner == owner && m.name == name);
+            let existing = s
+                .mailboxes
+                .iter()
+                .position(|m| m.owner == owner && m.name == name);
             match existing {
                 Some(i) if s.mailboxes[i].host.as_deref().is_some_and(|h| h != host) && !take => {
-                    err(&id, "conflict", &format!("{owner}/{name} is published from another host; use --take"))
+                    err(
+                        &id,
+                        "conflict",
+                        &format!("{owner}/{name} is published from another host; use --take"),
+                    )
                 }
                 Some(i) => {
                     let old = s.mailboxes[i].host.clone();
@@ -926,7 +1164,8 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
                     m.host = Some(host.into());
                     m.generation += 1;
                     m.human = human;
-                    let result = json!({"name": name, "mailbox_id": m.id, "route_generation": m.generation});
+                    let result =
+                        json!({"name": name, "mailbox_id": m.id, "route_generation": m.generation});
                     if let Some(old) = old.filter(|o| o != host) {
                         s.abandon_stale();
                         let f = s.routes_frame(&old);
@@ -938,10 +1177,20 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
                 }
                 None => {
                     let mid = s.ulid();
-                    s.mailboxes.push(Mailbox { id: mid.clone(), owner: owner.clone(), name: name.clone(), host: Some(host.into()), generation: 1, human });
+                    s.mailboxes.push(Mailbox {
+                        id: mid.clone(),
+                        owner: owner.clone(),
+                        name: name.clone(),
+                        host: Some(host.into()),
+                        generation: 1,
+                        human,
+                    });
                     let f = s.routes_frame(host);
                     s.send_to(host, f);
-                    ok(&id, json!({"name": name, "mailbox_id": mid, "route_generation": 1}))
+                    ok(
+                        &id,
+                        json!({"name": name, "mailbox_id": mid, "route_generation": 1}),
+                    )
                 }
             }
         }
@@ -971,31 +1220,75 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
             ok(&id, json!({"mailboxes": mine}))
         }
         "message.send" => match actor(s, host, req) {
-            None => err(&id, "unauthenticated", "the actor is not a mailbox of this host"),
+            None => err(
+                &id,
+                "unauthenticated",
+                "the actor is not a mailbox of this host",
+            ),
             Some(me) => {
                 let to = body["to"]["agent"].as_str().unwrap_or_default();
-                let (o, n) = to.split_once('/').map(|(o, n)| (o.to_string(), n.to_string())).unwrap_or((owner.clone(), to.to_string()));
-                let target = s.mailboxes.iter().find(|m| m.owner == o && m.name == n && m.host.is_some()).map(|m| m.id.clone());
+                let (o, n) = to
+                    .split_once('/')
+                    .map(|(o, n)| (o.to_string(), n.to_string()))
+                    .unwrap_or((owner.clone(), to.to_string()));
+                let target = s
+                    .mailboxes
+                    .iter()
+                    .find(|m| m.owner == o && m.name == n && m.host.is_some())
+                    .map(|m| m.id.clone());
                 match target {
                     None => err(&id, "not_found", &format!("recipient unavailable: {to}")),
                     Some(t) => {
                         let mid = s.ulid();
                         let reply_to = body["reply_to"].as_str().map(str::to_string);
-                        s.messages.push(Msg { id: mid.clone(), from: me, to: t.clone(), text: body["text"].as_str().unwrap_or_default().into(), reply_to, read: false });
-                        s.notes.insert(mid.clone(), Note { msg: mid.clone(), mailbox: t.clone(), status: "pending".into(), next_at: Instant::now(), current: None, raw: false });
-                        ok(&id, json!({"message_id": mid, "seq": 1, "to": s.canonical(&t)}))
+                        s.messages.push(Msg {
+                            id: mid.clone(),
+                            from: me,
+                            to: t.clone(),
+                            text: body["text"].as_str().unwrap_or_default().into(),
+                            reply_to,
+                            read: false,
+                        });
+                        s.notes.insert(
+                            mid.clone(),
+                            Note {
+                                msg: mid.clone(),
+                                mailbox: t.clone(),
+                                status: "pending".into(),
+                                next_at: Instant::now(),
+                                current: None,
+                                raw: false,
+                            },
+                        );
+                        ok(
+                            &id,
+                            json!({"message_id": mid, "seq": 1, "to": s.canonical(&t)}),
+                        )
                     }
                 }
             }
         },
         "human.status" => match actor(s, host, req) {
-            None => err(&id, "unauthenticated", "the actor is not a mailbox of this host"),
-            Some(_) => ok(&id, json!({"human": format!("{owner}/human"), "board": "dakai", "slack": true, "done_pages": false})),
+            None => err(
+                &id,
+                "unauthenticated",
+                "the actor is not a mailbox of this host",
+            ),
+            Some(_) => ok(
+                &id,
+                json!({"human": format!("{owner}/human"), "board": "dakai", "slack": true, "done_pages": false}),
+            ),
         },
-        "message.get" | "message.read" | "inbox.list" | "receipt.list" | "agent.whoami" => match actor(s, host, req) {
-            None => err(&id, "unauthenticated", "the actor is not a mailbox of this host"),
-            Some(me) => read_op(s, &id, &op, body, &me),
-        },
+        "message.get" | "message.read" | "inbox.list" | "receipt.list" | "agent.whoami" => {
+            match actor(s, host, req) {
+                None => err(
+                    &id,
+                    "unauthenticated",
+                    "the actor is not a mailbox of this host",
+                ),
+                Some(me) => read_op(s, &id, &op, body, &me),
+            }
+        }
         "agent.list" => {
             let rows: Vec<Value> = s
                 .mailboxes
@@ -1022,17 +1315,28 @@ fn view(s: &St, m: &Msg) -> Value {
 
 fn read_op(s: &mut St, id: &Value, op: &str, body: &Value, me: &str) -> Value {
     match op {
-        "agent.whoami" => ok(id, json!({"name": s.canonical(me), "address": format!("mailbox:{me}")})),
+        "agent.whoami" => ok(
+            id,
+            json!({"name": s.canonical(me), "address": format!("mailbox:{me}")}),
+        ),
         "message.get" | "message.read" if body["id"].is_string() => {
             let mid = body["id"].as_str().unwrap();
-            let Some(i) = s.messages.iter().position(|m| m.id == mid && (m.to == me || m.from == me)) else {
+            let Some(i) = s
+                .messages
+                .iter()
+                .position(|m| m.id == mid && (m.to == me || m.from == me))
+            else {
                 return err(id, "not_found", &format!("no message {mid}"));
             };
             if op == "message.read" && s.messages[i].to == me {
                 s.messages[i].read = true;
             }
             let v = view(s, &s.messages[i].clone());
-            if op == "message.get" { ok(id, json!({"message": v})) } else { ok(id, json!({"messages": [v], "more": false})) }
+            if op == "message.get" {
+                ok(id, json!({"message": v}))
+            } else {
+                ok(id, json!({"messages": [v], "more": false}))
+            }
         }
         "message.read" => {
             let mut out = Vec::new();

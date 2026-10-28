@@ -24,7 +24,10 @@ pub struct Client {
 impl Client {
     pub fn connect(path: &Path) -> anyhow::Result<Client> {
         let stream = crate::ipc::connect(path).with_context(|| {
-            format!("cannot reach the conde daemon at {} (start it with: conde daemon)", path.display())
+            format!(
+                "cannot reach the conde daemon at {} (start it with: conde daemon)",
+                path.display()
+            )
         })?;
         Ok(Client {
             reader: BufReader::new(stream.try_clone()?),
@@ -56,7 +59,9 @@ impl Client {
         line.push(b'\n');
         self.writer.set_write_timeout(Some(self.deadline))?;
         match self.writer.write_all(&line) {
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => return Err(late()),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(late());
+            }
             r => r?,
         }
         let mut buf = Vec::new();
@@ -71,7 +76,11 @@ impl Client {
                 // end of stream before a whole frame
                 Ok(_) => bail!("the conde daemon closed the connection"),
                 // the bytes read so far stay in buf; the loop checks the deadline
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) => {}
                 Err(e) => return Err(e.into()),
             }
         }
@@ -104,12 +113,24 @@ mod tests {
         for partial in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let path = silent(dir.path(), partial);
-            let mut client = Client::connect(&path).unwrap().with_deadline(Duration::from_millis(300));
+            let mut client = Client::connect(&path)
+                .unwrap()
+                .with_deadline(Duration::from_millis(300));
             let started = Instant::now();
-            let err = client.call(&Request::new("r1", "agent.whoami", serde_json::json!({}))).unwrap_err().to_string();
-            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+            let err = client
+                .call(&Request::new("r1", "agent.whoami", serde_json::json!({})))
+                .unwrap_err()
+                .to_string();
             assert!(
-                err.starts_with(&format!("the conde daemon at {} did not answer agent.whoami within 0.3 s", path.display())),
+                started.elapsed() < Duration::from_secs(5),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(
+                err.starts_with(&format!(
+                    "the conde daemon at {} did not answer agent.whoami within 0.3 s",
+                    path.display()
+                )),
                 "{err}"
             );
         }

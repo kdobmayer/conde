@@ -50,12 +50,17 @@ pub struct AddressError(pub String);
 fn valid_token(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 200
-        && s.chars().all(|c| !c.is_whitespace() && !c.is_control() && !matches!(c, '@' | '/' | ':'))
+        && s.chars()
+            .all(|c| !c.is_whitespace() && !c.is_control() && !matches!(c, '@' | '/' | ':'))
 }
 
 impl Address {
     pub fn new(kind: Kind, target: &str, host: &str) -> Address {
-        Address { kind, target: target.to_string(), host: host.to_lowercase() }
+        Address {
+            kind,
+            target: target.to_string(),
+            host: host.to_lowercase(),
+        }
     }
 
     /// Parse `kind:target[@host]`; a missing host means `default_host`.
@@ -73,8 +78,13 @@ impl Address {
     /// [`Address::parse`] limited to the v1 kinds (claude, codex, human): the address a
     /// session registers or pins, and a v1 actor. A mailbox is refused with the same error.
     pub fn parse_v1(s: &str, default_host: &str) -> Result<Address, AddressError> {
-        Address::parse(s, default_host)
-            .and_then(|a| if a.kind == Kind::Mailbox { Err(AddressError(s.to_string())) } else { Ok(a) })
+        Address::parse(s, default_host).and_then(|a| {
+            if a.kind == Kind::Mailbox {
+                Err(AddressError(s.to_string()))
+            } else {
+                Ok(a)
+            }
+        })
     }
 }
 
@@ -87,7 +97,9 @@ impl fmt::Display for Address {
 /// A dotted agent name part: letters, digits, `_` and `-` (so every name is
 /// also a valid @mention).
 fn valid_part(p: &str) -> bool {
-    !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !p.is_empty()
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Lowercased dotted name (`project.task.role`), or None when invalid.
@@ -129,20 +141,35 @@ mod tests {
         assert!(Address::parse("claude:", "box").is_err());
         assert!(Address::parse("claude:a b", "box").is_err());
         let m = Address::parse("mailbox:01AGENT@Box", "x").unwrap();
-        assert_eq!((m.kind, m.to_string().as_str()), (Kind::Mailbox, "mailbox:01AGENT@box"));
+        assert_eq!(
+            (m.kind, m.to_string().as_str()),
+            (Kind::Mailbox, "mailbox:01AGENT@box")
+        );
         assert_eq!(Kind::parse(Kind::Mailbox.as_str()), Some(Kind::Mailbox));
         assert!(Address::parse_v1("mailbox:01AGENT@box", "box").is_err());
-        assert_eq!(Address::parse_v1("codex:t-1", "box"), Address::parse("codex:t-1", "box"));
+        assert_eq!(
+            Address::parse_v1("codex:t-1", "box"),
+            Address::parse("codex:t-1", "box")
+        );
     }
 
     #[test]
     fn names() {
-        assert_eq!(normalize_name("Kond.Dev.Claude").as_deref(), Some("kond.dev.claude"));
+        assert_eq!(
+            normalize_name("Kond.Dev.Claude").as_deref(),
+            Some("kond.dev.claude")
+        );
         assert_eq!(normalize_name("a..b"), None);
         assert_eq!(normalize_name("../x"), None);
-        assert_eq!(split_qualified("Bob/x.y"), Some((Some("bob".into()), "x.y".into())));
+        assert_eq!(
+            split_qualified("Bob/x.y"),
+            Some((Some("bob".into()), "x.y".into()))
+        );
         assert_eq!(split_qualified("x"), Some((None, "x".into())));
-        assert_eq!(normalize_channel("#Team.Review").as_deref(), Some("team.review"));
+        assert_eq!(
+            normalize_channel("#Team.Review").as_deref(),
+            Some("team.review")
+        );
         assert_eq!(normalize_channel("team"), None);
     }
 }

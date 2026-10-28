@@ -32,7 +32,8 @@ pub const TASK_NAME: &str = "conde";
 /// The last step of every setup (owner's decision): report how it went.
 pub const FEEDBACK: &str = "Send a DM to kdobmayer/desk with how the setup went: what worked, what failed, what you \
 had to figure out yourself, roughly how long it took, and the OS.";
-pub const FEEDBACK_COMMAND: &str = "conde send kdobmayer/desk \"<how the setup went>\" --board dakai";
+pub const FEEDBACK_COMMAND: &str =
+    "conde send kdobmayer/desk \"<how the setup went>\" --board dakai";
 pub const FEEDBACK_KEEP: &str = "desk is on the team's board: the name you send it from must be published there \
 first (conde publish <name> --board dakai, when your human told you to publish it); otherwise, or on a host without \
 that board, tell your human instead. Keep the name registered: desk replies to it.";
@@ -90,7 +91,11 @@ pub struct Env {
 
 impl Env {
     pub fn from_process() -> anyhow::Result<Env> {
-        let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+        let var = |k: &str| {
+            std::env::var_os(k)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
         let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
         let home = var(home_var).ok_or_else(|| anyhow!("{home_var} is not set"))?;
         let exe = std::env::current_exe().context("locating the conde binary")?;
@@ -101,13 +106,18 @@ impl Env {
         #[cfg(windows)]
         let windows = Some(WindowsEnv {
             appdata: var("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")),
-            local_appdata: var("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData").join("Local")),
+            local_appdata: var("LOCALAPPDATA")
+                .unwrap_or_else(|| home.join("AppData").join("Local")),
             user_sid: conde_transport::win::own_user_sid().context("reading this user's SID")?,
         });
         #[cfg(not(windows))]
         let windows = None;
         // a Windows path from current_exe() is used as is: canonicalize() gives a \\?\ path
-        let exe = if cfg!(windows) { exe } else { exe.canonicalize().unwrap_or(exe) };
+        let exe = if cfg!(windows) {
+            exe
+        } else {
+            exe.canonicalize().unwrap_or(exe)
+        };
         Ok(Env {
             os: if cfg!(target_os = "macos") {
                 Os::MacOs
@@ -134,7 +144,10 @@ impl Env {
     /// The environment the service needs to resolve the same credential,
     /// board, socket and harness directories as the shell that ran setup.
     pub fn service_env(&self) -> Vec<(&'static str, String)> {
-        let mut vars = vec![("PATH", self.path.clone()), ("CONDE_SOCK", self.socket.to_string_lossy().into_owned())];
+        let mut vars = vec![
+            ("PATH", self.path.clone()),
+            ("CONDE_SOCK", self.socket.to_string_lossy().into_owned()),
+        ];
         for (name, dir) in [
             ("XDG_CONFIG_HOME", &self.xdg_config_home),
             ("XDG_DATA_HOME", &self.xdg_data_home),
@@ -150,7 +163,9 @@ impl Env {
     }
 
     fn claude_dir(&self) -> PathBuf {
-        self.claude_config_dir.clone().unwrap_or_else(|| self.home.join(".claude"))
+        self.claude_config_dir
+            .clone()
+            .unwrap_or_else(|| self.home.join(".claude"))
     }
 
     /// User-scope MCP servers live in `~/.claude.json`, or inside the
@@ -176,7 +191,9 @@ impl Env {
     }
 
     fn codex_dir(&self) -> PathBuf {
-        self.codex_home.clone().unwrap_or_else(|| self.home.join(".codex"))
+        self.codex_home
+            .clone()
+            .unwrap_or_else(|| self.home.join(".codex"))
     }
 
     pub fn codex_config(&self) -> PathBuf {
@@ -215,11 +232,15 @@ impl Env {
     }
 
     pub fn systemd_unit(&self) -> PathBuf {
-        self.xdg_config_home.clone().unwrap_or_else(|| self.home.join(".config")).join("systemd/user/conde.service")
+        self.xdg_config_home
+            .clone()
+            .unwrap_or_else(|| self.home.join(".config"))
+            .join("systemd/user/conde.service")
     }
 
     pub fn launchd_plist(&self) -> PathBuf {
-        self.home.join(format!("Library/LaunchAgents/{LAUNCHD_LABEL}.plist"))
+        self.home
+            .join(format!("Library/LaunchAgents/{LAUNCHD_LABEL}.plist"))
     }
 
     pub fn launchd_logs(&self) -> PathBuf {
@@ -230,7 +251,10 @@ impl Env {
     fn windows_data(&self) -> PathBuf {
         match &self.conde_data {
             Some(d) => d.clone(),
-            None => crate::paths::windows_data_dir(self.windows.as_ref().map(|w| w.local_appdata.clone()), Some(self.home.clone())),
+            None => crate::paths::windows_data_dir(
+                self.windows.as_ref().map(|w| w.local_appdata.clone()),
+                Some(self.home.clone()),
+            ),
         }
     }
 
@@ -304,12 +328,18 @@ impl Publish {
                 for typed in names {
                     let bare = typed.rsplit('/').next().unwrap_or(typed);
                     match rows.iter().find(|r| r.name.eq_ignore_ascii_case(bare)) {
-                        Some(r) if !chosen.iter().any(|c| c.agent_id == r.agent_id) => chosen.push(r),
+                        Some(r) if !chosen.iter().any(|c| c.agent_id == r.agent_id) => {
+                            chosen.push(r)
+                        }
                         Some(_) => {}
                         None => unknown.push(typed.clone()),
                     }
                 }
-                if unknown.is_empty() { Ok(chosen) } else { Err(unknown) }
+                if unknown.is_empty() {
+                    Ok(chosen)
+                } else {
+                    Err(unknown)
+                }
             }
         }
     }
@@ -341,7 +371,12 @@ pub trait Host {
     fn run(&mut self, prog: &str, args: &[&str]) -> anyhow::Result<CmdOut>;
     /// [`Host::run`] for a probe that must not hold setup up: Err once `limit` passes (the
     /// program is killed). This default delegates to `run` and enforces no deadline.
-    fn run_bounded(&mut self, prog: &str, args: &[&str], _limit: std::time::Duration) -> anyhow::Result<CmdOut> {
+    fn run_bounded(
+        &mut self,
+        prog: &str,
+        args: &[&str],
+        _limit: std::time::Duration,
+    ) -> anyhow::Result<CmdOut> {
         self.run(prog, args)
     }
     /// Whether a daemon answers on `socket`: connect and one request frame,
@@ -353,7 +388,13 @@ pub trait Host {
     fn ask(&mut self, prompt: &str) -> Option<String>;
     /// One request to the local daemon on `socket`, waiting briefly for a service that is
     /// starting. Err carries the daemon's refusal or why it was not reached.
-    fn daemon(&mut self, socket: &Path, op: &str, board: Option<&str>, body: Value) -> Result<Value, String>;
+    fn daemon(
+        &mut self,
+        socket: &Path,
+        op: &str,
+        board: Option<&str>,
+        body: Value,
+    ) -> Result<Value, String>;
     /// `board.info` on a shared board with a host key (over HTTPS, not through the daemon).
     fn board_info(&mut self, server: &str, key: &str) -> anyhow::Result<BoardInfo>;
 }
@@ -369,8 +410,12 @@ impl Host for System {
         use std::io::{BufRead, BufReader};
         #[cfg_attr(unix, allow(unused_mut))]
         let mut stream = crate::ipc::connect(socket).map_err(|e| e.to_string())?;
-        stream.set_read_timeout(Some(PROBE_TIMEOUT)).map_err(|e| e.to_string())?;
-        stream.set_write_timeout(Some(PROBE_TIMEOUT)).map_err(|e| e.to_string())?;
+        stream
+            .set_read_timeout(Some(PROBE_TIMEOUT))
+            .map_err(|e| e.to_string())?;
+        stream
+            .set_write_timeout(Some(PROBE_TIMEOUT))
+            .map_err(|e| e.to_string())?;
         let req = crate::protocol::Request::new(crate::util::new_ulid(), "agent.whoami", json!({}));
         let mut line = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
         line.push(b'\n');
@@ -388,9 +433,13 @@ impl Host for System {
     #[cfg(unix)]
     fn which(&self, prog: &str) -> Option<PathBuf> {
         let path = std::env::var_os("PATH")?;
-        std::env::split_paths(&path).map(|d| d.join(prog)).find(|p| {
-            std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-        })
+        std::env::split_paths(&path)
+            .map(|d| d.join(prog))
+            .find(|p| {
+                std::fs::metadata(p)
+                    .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+            })
     }
 
     /// Windows: `prog` with each `%PATHEXT%` extension (`claude.exe`, `claude.cmd`).
@@ -399,7 +448,11 @@ impl Host for System {
         let path = std::env::var_os("PATH")?;
         let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
         std::env::split_paths(&path)
-            .flat_map(|d| exts.split(';').filter(|e| !e.is_empty()).map(move |e| d.join(format!("{prog}{e}"))))
+            .flat_map(|d| {
+                exts.split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(move |e| d.join(format!("{prog}{e}")))
+            })
             .find(|p| p.is_file())
     }
 
@@ -416,15 +469,26 @@ impl Host for System {
         })
     }
 
-    fn run_bounded(&mut self, prog: &str, args: &[&str], limit: std::time::Duration) -> anyhow::Result<CmdOut> {
+    fn run_bounded(
+        &mut self,
+        prog: &str,
+        args: &[&str],
+        limit: std::time::Duration,
+    ) -> anyhow::Result<CmdOut> {
         // Output to a regular file, not a pipe: a descendant the program leaves running (a
         // wrapper that backgrounds something) would hold a pipe open past the deadline.
-        let out_path = std::env::temp_dir().join(format!("conde-probe-{}-{}", std::process::id(), crate::util::new_ulid()));
+        let out_path = std::env::temp_dir().join(format!(
+            "conde-probe-{}-{}",
+            std::process::id(),
+            crate::util::new_ulid()
+        ));
         let mut open = std::fs::OpenOptions::new();
         open.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
-        let out = open.open(&out_path).with_context(|| format!("creating {}", out_path.display()))?;
+        let out = open
+            .open(&out_path)
+            .with_context(|| format!("creating {}", out_path.display()))?;
         let spawned = std::process::Command::new(prog)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -460,7 +524,11 @@ impl Host for System {
         };
         let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
         let _ = std::fs::remove_file(&out_path);
-        Ok(CmdOut { ok: status.success(), stdout, stderr: String::new() })
+        Ok(CmdOut {
+            ok: status.success(),
+            stdout,
+            stderr: String::new(),
+        })
     }
 
     #[cfg(unix)]
@@ -488,7 +556,13 @@ impl Host for System {
         }
     }
 
-    fn daemon(&mut self, socket: &Path, op: &str, board: Option<&str>, body: Value) -> Result<Value, String> {
+    fn daemon(
+        &mut self,
+        socket: &Path,
+        op: &str,
+        board: Option<&str>,
+        body: Value,
+    ) -> Result<Value, String> {
         let deadline = std::time::Instant::now() + DAEMON_WAIT;
         let mut client = loop {
             match crate::client::Client::connect(socket) {
@@ -500,7 +574,11 @@ impl Host for System {
         let mut req = crate::protocol::Request::new(crate::util::new_ulid(), op, body);
         req.idempotency_key = Some(crate::util::new_ulid());
         req.board = board.map(Into::into);
-        req.actor = crate::identity::derive_address(&crate::identity::Markers::from_env(), crate::identity::harness_ancestor).ok();
+        req.actor = crate::identity::derive_address(
+            &crate::identity::Markers::from_env(),
+            crate::identity::harness_ancestor,
+        )
+        .ok();
         let resp = client.call(&req).map_err(|e| format!("{e:#}"))?;
         match (resp.ok, resp.result, resp.error) {
             (true, Some(r), _) => Ok(r),
@@ -550,20 +628,34 @@ pub fn write_bytes_if_changed(path: &Path, content: &[u8]) -> anyhow::Result<Cha
     if old.as_deref() == Some(content) {
         return Ok(Change::Unchanged);
     }
-    let dir = path.parent().ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let tmp = dir.join(format!(".{name}.conde-setup.{}", std::process::id()));
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
     if let Ok(meta) = std::fs::metadata(path) {
         std::fs::set_permissions(&tmp, meta.permissions())?;
     }
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(if old.is_some() { Change::Updated } else { Change::Created })
+    Ok(if old.is_some() {
+        Change::Updated
+    } else {
+        Change::Created
+    })
 }
 
 /// Run the selected parts; Ok(false) when a part failed (each is reported).
-pub fn run(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<bool> {
+pub fn run(
+    env: &Env,
+    opts: &Options,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+) -> anyhow::Result<bool> {
     let mut ok = true;
     let mut part = |name: &str, r: anyhow::Result<()>, out: &mut dyn Write| -> anyhow::Result<()> {
         if let Err(e) = r {
@@ -605,14 +697,22 @@ pub fn run(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) 
         let r = boards_part(env, opts, host, out);
         part("boards", r, out)?;
     }
-    writeln!(out, "\n{FEEDBACK}\n  {FEEDBACK_COMMAND}\n{FEEDBACK_KEEP}\n\n{GUIDE}")?;
+    writeln!(
+        out,
+        "\n{FEEDBACK}\n  {FEEDBACK_COMMAND}\n{FEEDBACK_KEEP}\n\n{GUIDE}"
+    )?;
     Ok(ok)
 }
 
 /// `conde setup --check`: compare this machine with what `conde setup` would
 /// make it, without changing anything. A harness that is not installed is
 /// skipped. Ok(false) when any line is an ISSUE.
-pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<bool> {
+pub fn verify(
+    env: &Env,
+    opts: &Options,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+) -> anyhow::Result<bool> {
     let mut issues = 0;
     let mut line = |kind: &str, text: String, out: &mut dyn Write| -> anyhow::Result<()> {
         if kind == "ISSUE" {
@@ -639,15 +739,31 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
             Os::Windows => (env.windows_task(), utf16_file(&task_xml(env))),
         };
         match file(&path, &want)? {
-            None => line("ok", format!("service: {} up to date", env.show(&path)), out)?,
-            Some(why) => line("ISSUE", format!("service: {} {why}{fix}", env.show(&path)), out)?,
+            None => line(
+                "ok",
+                format!("service: {} up to date", env.show(&path)),
+                out,
+            )?,
+            Some(why) => line(
+                "ISSUE",
+                format!("service: {} {why}{fix}", env.show(&path)),
+                out,
+            )?,
         }
         let socket = env.show(&env.socket);
         match host.reach(&env.socket) {
             Ok(()) => {
-                line("ok", format!("service: the bridge answers on {socket}"), out)?;
+                line(
+                    "ok",
+                    format!("service: the bridge answers on {socket}"),
+                    out,
+                )?;
                 match bridge_build(env, host) {
-                    Some(BridgeBuild::Same) => line("ok", format!("service: the bridge runs this build ({})", crate::VERSION), out)?,
+                    Some(BridgeBuild::Same) => line(
+                        "ok",
+                        format!("service: the bridge runs this build ({})", crate::VERSION),
+                        out,
+                    )?,
                     Some(BridgeBuild::Other(b)) => line(
                         "ISSUE",
                         format!(
@@ -671,7 +787,9 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
                 let state = service_state(env, host)?;
                 line(
                     "ISSUE",
-                    format!("service: the bridge does not answer on {socket} ({why}); {state}; see Troubleshooting in README.md"),
+                    format!(
+                        "service: the bridge does not answer on {socket} ({why}); {state}; see Troubleshooting in README.md"
+                    ),
                     out,
                 )?
             }
@@ -685,21 +803,50 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         } else {
             let (name, displaced) = claude_name(env)?;
             if let Some(what) = displaced {
-                line("note", format!("claude: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"), out)?;
+                line(
+                    "note",
+                    format!(
+                        "claude: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"
+                    ),
+                    out,
+                )?;
             }
             let skill = env.claude_skill_for(&name);
             match file(&skill, skill_text(CLAUDE_SKILL, &name).as_bytes())? {
-                None => line("ok", format!("claude: skill {} up to date", env.show(&skill)), out)?,
-                Some(why) => line("ISSUE", format!("claude: skill {} {why}{fix}", env.show(&skill)), out)?,
+                None => line(
+                    "ok",
+                    format!("claude: skill {} up to date", env.show(&skill)),
+                    out,
+                )?,
+                Some(why) => line(
+                    "ISSUE",
+                    format!("claude: skill {} {why}{fix}", env.show(&skill)),
+                    out,
+                )?,
             }
             let entry = read_json(&env.claude_json())?["mcpServers"][name.as_str()].clone();
-            if entry["command"] == exe.as_str() && entry["args"] == json!(["mcp"]) && entry["env"]["CONDE_SOCK"] == *env.socket.to_string_lossy() {
-                line("ok", format!("claude: MCP server {name} registered at user scope ({exe} mcp)"), out)?;
+            if entry["command"] == exe.as_str()
+                && entry["args"] == json!(["mcp"])
+                && entry["env"]["CONDE_SOCK"] == *env.socket.to_string_lossy()
+            {
+                line(
+                    "ok",
+                    format!("claude: MCP server {name} registered at user scope ({exe} mcp)"),
+                    out,
+                )?;
             } else {
-                line("ISSUE", format!("claude: MCP server {name} not registered for {exe}{fix}"), out)?;
+                line(
+                    "ISSUE",
+                    format!("claude: MCP server {name} not registered for {exe}{fix}"),
+                    out,
+                )?;
             }
             let inbound = read_json(&env.claude_settings())?["crossSessionInbound"].clone();
-            let now = if inbound.is_null() { "unset".to_string() } else { inbound.to_string() };
+            let now = if inbound.is_null() {
+                "unset".to_string()
+            } else {
+                inbound.to_string()
+            };
             let effect = if inbound == "accept" {
                 "bypass-mode sessions receive conde notifications without approval"
             } else if inbound.is_null() {
@@ -707,7 +854,11 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
             } else {
                 "an explicit setting, left as is by conde setup"
             };
-            line("note", format!("claude: crossSessionInbound is {now} ({effect})"), out)?;
+            line(
+                "note",
+                format!("claude: crossSessionInbound is {now} ({effect})"),
+                out,
+            )?;
         }
     }
     if opts.codex {
@@ -716,18 +867,47 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
         } else {
             let config = env.codex_config();
             let text = read_text(&config)?;
-            let (name, displaced) = codex_name(env, &text).unwrap_or_else(|_| (MCP_NAME.to_string(), None));
+            let (name, displaced) =
+                codex_name(env, &text).unwrap_or_else(|_| (MCP_NAME.to_string(), None));
             if let Some(what) = displaced {
-                line("note", format!("codex: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"), out)?;
+                line(
+                    "note",
+                    format!(
+                        "codex: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one is {name}"
+                    ),
+                    out,
+                )?;
             }
             let skill = env.codex_skill_for(&name);
             match file(&skill, skill_text(CODEX_SKILL, &name).as_bytes())? {
-                None => line("ok", format!("codex: skill {} up to date", env.show(&skill)), out)?,
-                Some(why) => line("ISSUE", format!("codex: skill {} {why}{fix}", env.show(&skill)), out)?,
+                None => line(
+                    "ok",
+                    format!("codex: skill {} up to date", env.show(&skill)),
+                    out,
+                )?,
+                Some(why) => line(
+                    "ISSUE",
+                    format!("codex: skill {} {why}{fix}", env.show(&skill)),
+                    out,
+                )?,
             }
             match codex_config_edit(&text, &name, &exe, &env.socket.to_string_lossy()) {
-                Ok(None) => line("ok", format!("codex: MCP server {name} registered in {} ({exe} mcp)", env.show(&config)), out)?,
-                Ok(Some(_)) => line("ISSUE", format!("codex: MCP server {name} not registered for {exe} in {}{fix}", env.show(&config)), out)?,
+                Ok(None) => line(
+                    "ok",
+                    format!(
+                        "codex: MCP server {name} registered in {} ({exe} mcp)",
+                        env.show(&config)
+                    ),
+                    out,
+                )?,
+                Ok(Some(_)) => line(
+                    "ISSUE",
+                    format!(
+                        "codex: MCP server {name} not registered for {exe} in {}{fix}",
+                        env.show(&config)
+                    ),
+                    out,
+                )?,
                 Err(e) => line("ISSUE", format!("codex: {}: {e:#}", env.show(&config)), out)?,
             }
         }
@@ -735,21 +915,43 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
     if opts.boards {
         let v1 = env.v1_credential();
         if v1.exists() {
-            line("ISSUE", format!("boards: the v1 credential {} is not moved to boards/ yet; run: conde setup", env.show(&v1)), out)?;
+            line(
+                "ISSUE",
+                format!(
+                    "boards: the v1 credential {} is not moved to boards/ yet; run: conde setup",
+                    env.show(&v1)
+                ),
+                out,
+            )?;
         }
         let enrolled = boards::enrolled_in(&env.boards_dir())?;
         if enrolled.is_empty() {
-            line("note", "boards: no shared board enrolled; this host works on its local board".into(), out)?;
+            line(
+                "note",
+                "boards: no shared board enrolled; this host works on its local board".into(),
+                out,
+            )?;
         }
         for alias in &enrolled {
             let path = env.boards_dir().join(format!("{alias}.json"));
             match boards::load(&path) {
-                Ok(cfg) => line("ok", format!("boards: {alias}: {} as host {} (account {})", cfg.server, cfg.host_id, cfg.owner), out)?,
+                Ok(cfg) => line(
+                    "ok",
+                    format!(
+                        "boards: {alias}: {} as host {} (account {})",
+                        cfg.server, cfg.host_id, cfg.owner
+                    ),
+                    out,
+                )?,
                 Err(e) => line("ISSUE", format!("boards: {alias}: {e:#}"), out)?,
             }
         }
         match boards::read_default(&env.default_board()) {
-            Ok(d) => line("ok", format!("boards: default board for names and channels: {d}"), out)?,
+            Ok(d) => line(
+                "ok",
+                format!("boards: default board for names and channels: {d}"),
+                out,
+            )?,
             Err(e) => line("ISSUE", format!("boards: {e:#}"), out)?,
         }
     }
@@ -762,11 +964,15 @@ pub fn verify(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Writ
 /// What the service manager says about the bridge, for an ISSUE line.
 fn service_state(env: &Env, host: &mut dyn Host) -> anyhow::Result<String> {
     let field = |text: &str, key: &str| {
-        text.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
     };
     Ok(match env.os {
         Os::Windows => {
-            let r = host.run("schtasks", &["/Query", "/TN", TASK_NAME, "/FO", "LIST", "/V"])?;
+            let r = host.run(
+                "schtasks",
+                &["/Query", "/TN", TASK_NAME, "/FO", "LIST", "/V"],
+            )?;
             if !r.ok {
                 format!("task scheduler: no task {TASK_NAME}")
             } else {
@@ -776,18 +982,31 @@ fn service_state(env: &Env, host: &mut dyn Host) -> anyhow::Result<String> {
             }
         }
         Os::MacOs => {
-            let r = host.run("launchctl", &["print", &format!("gui/{}/{LAUNCHD_LABEL}", env.uid)])?;
+            let r = host.run(
+                "launchctl",
+                &["print", &format!("gui/{}/{LAUNCHD_LABEL}", env.uid)],
+            )?;
             if !r.ok {
                 format!("launchd: {LAUNCHD_LABEL} is not loaded")
             } else {
                 let state = field(&r.stdout, "state = ").unwrap_or_else(|| "unknown".into());
-                let exit = field(&r.stdout, "last exit code = ").unwrap_or_else(|| "unknown".into());
+                let exit =
+                    field(&r.stdout, "last exit code = ").unwrap_or_else(|| "unknown".into());
                 format!("launchd: state = {state}, last exit code = {exit}")
             }
         }
         Os::Linux if host.which("systemctl").is_none() => "systemctl not found".to_string(),
         Os::Linux => {
-            let r = host.run("systemctl", &["--user", "show", "-p", "ActiveState,ExecMainStatus", "conde.service"])?;
+            let r = host.run(
+                "systemctl",
+                &[
+                    "--user",
+                    "show",
+                    "-p",
+                    "ActiveState,ExecMainStatus",
+                    "conde.service",
+                ],
+            )?;
             let state = field(&r.stdout, "ActiveState=").unwrap_or_else(|| "unknown".into());
             let exit = field(&r.stdout, "ExecMainStatus=").unwrap_or_else(|| "unknown".into());
             format!("systemd: ActiveState={state}, ExecMainStatus={exit}")
@@ -802,8 +1021,14 @@ fn daemon_args() -> Vec<String> {
 
 /// One systemd unit-file word: quoted when needed, `%` and `$` escaped.
 fn systemd_word(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$");
-    if escaped.is_empty() || escaped.contains(|c: char| c.is_whitespace() || c == '"' || c == '\\' || c == ';') {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
+        .replace('$', "$$");
+    if escaped.is_empty()
+        || escaped.contains(|c: char| c.is_whitespace() || c == '"' || c == '\\' || c == ';')
+    {
         format!("\"{escaped}\"")
     } else {
         escaped
@@ -813,13 +1038,19 @@ fn systemd_word(s: &str) -> String {
 /// One quoted `Environment=` assignment: `$` is literal there, `%` starts
 /// a specifier.
 fn systemd_env(name: &str, val: &str) -> String {
-    let escaped = val.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%");
+    let escaped = val
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
     format!("\"{name}={escaped}\"")
 }
 
 pub fn systemd_unit(env: &Env) -> String {
-    let environment: String =
-        env.service_env().iter().map(|(k, v)| format!("Environment={}\n", systemd_env(k, v))).collect();
+    let environment: String = env
+        .service_env()
+        .iter()
+        .map(|(k, v)| format!("Environment={}\n", systemd_env(k, v)))
+        .collect();
     let mut exec = systemd_word(&env.exe.to_string_lossy());
     for a in daemon_args() {
         exec.push(' ');
@@ -855,7 +1086,10 @@ fn systemd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
     let change = write_if_changed(&unit, &systemd_unit(env))?;
     writeln!(out, "service: {} {}", change.verb(), env.show(&unit))?;
     if host.which("systemctl").is_none() {
-        writeln!(out, "service: systemctl not found; start the bridge yourself: conde daemon")?;
+        writeln!(
+            out,
+            "service: systemctl not found; start the bridge yourself: conde daemon"
+        )?;
         return Ok(());
     }
     if change != Change::Unchanged {
@@ -870,7 +1104,10 @@ fn systemd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
         writeln!(out, "service: enabled and started conde.service")?;
     }
     if !linger_on(env, host) {
-        writeln!(out, "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"")?;
+        writeln!(
+            out,
+            "service: without a desktop login session, also run: loginctl enable-linger \"$USER\""
+        )?;
     }
     Ok(())
 }
@@ -884,13 +1121,19 @@ fn linger_on(env: &Env, host: &mut dyn Host) -> bool {
         return false;
     }
     let uid = env.uid.to_string();
-    host.run_bounded("loginctl", &["show-user", &uid, "--property=Linger", "--value"], std::time::Duration::from_secs(3))
-        .is_ok_and(|r| r.ok && matches!(r.stdout.trim(), "yes" | "Linger=yes"))
+    host.run_bounded(
+        "loginctl",
+        &["show-user", &uid, "--property=Linger", "--value"],
+        std::time::Duration::from_secs(3),
+    )
+    .is_ok_and(|r| r.ok && matches!(r.stdout.trim(), "yes" | "Linger=yes"))
 }
 
 /// What the running bridge says of its build; None when it gives no answer to tell by.
 fn bridge_build(env: &Env, host: &mut dyn Host) -> Option<BridgeBuild> {
-    host.daemon(&env.socket, "doctor", None, json!({})).ok().map(|r| BridgeBuild::of(&r["build"]))
+    host.daemon(&env.socket, "doctor", None, json!({}))
+        .ok()
+        .map(|r| BridgeBuild::of(&r["build"]))
 }
 
 /// Whether the running bridge must restart to serve this machine's boards: it is an older
@@ -901,19 +1144,35 @@ fn predates_boards(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyho
         return Ok(false);
     }
     let mut why = match host.daemon(&env.socket, crate::surface::BOARD_LIST, None, json!({})) {
-        Err(e) if crate::surface::predates_boards(&e) => Some("predates boards (an older conde)".to_string()),
+        Err(e) if crate::surface::predates_boards(&e) => {
+            Some("predates boards (an older conde)".to_string())
+        }
         Err(_) => None,
         Ok(r) => {
-            let known: Vec<&str> = r["boards"].as_array().into_iter().flatten().filter_map(|b| b["board"].as_str()).collect();
-            let missing: Vec<String> =
-                boards::enrolled_in(&env.boards_dir())?.into_iter().filter(|a| !known.contains(&a.as_str())).collect();
-            (!missing.is_empty()).then(|| format!("started before {} was enrolled", missing.join(", ")))
+            let known: Vec<&str> = r["boards"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b["board"].as_str())
+                .collect();
+            let missing: Vec<String> = boards::enrolled_in(&env.boards_dir())?
+                .into_iter()
+                .filter(|a| !known.contains(&a.as_str()))
+                .collect();
+            (!missing.is_empty())
+                .then(|| format!("started before {} was enrolled", missing.join(", ")))
         }
     };
     if why.is_none() {
         why = match bridge_build(env, host) {
-            Some(BridgeBuild::Other(b)) => Some(format!("runs another build ({b}) than this binary ({})", crate::VERSION)),
-            Some(BridgeBuild::Unreported) => Some(format!("does not report its build (older than {})", crate::VERSION)),
+            Some(BridgeBuild::Other(b)) => Some(format!(
+                "runs another build ({b}) than this binary ({})",
+                crate::VERSION
+            )),
+            Some(BridgeBuild::Unreported) => Some(format!(
+                "does not report its build (older than {})",
+                crate::VERSION
+            )),
             Some(BridgeBuild::Same) | None => None,
         };
     }
@@ -924,7 +1183,10 @@ fn predates_boards(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyho
 }
 
 fn xml(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 pub fn launchd_plist(env: &Env) -> String {
@@ -996,7 +1258,11 @@ fn launchd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
             writeln!(out, "service: loaded {LAUNCHD_LABEL} (starts at login)")?;
         }
     }
-    writeln!(out, "service: logs in {}", env.show(&logs.join("conde.log")))?;
+    writeln!(
+        out,
+        "service: logs in {}",
+        env.show(&logs.join("conde.log"))
+    )?;
     Ok(())
 }
 
@@ -1067,14 +1333,20 @@ fn restart_task(env: &Env, host: &mut dyn Host) -> anyhow::Result<()> {
     for verb in ["/End", "/Run"] {
         let r = host.run("schtasks", &[verb, "/TN", TASK_NAME])?;
         if !r.ok {
-            failed.push(format!("`schtasks {verb} /TN {TASK_NAME}` failed: {}", r.stderr.trim()));
+            failed.push(format!(
+                "`schtasks {verb} /TN {TASK_NAME}` failed: {}",
+                r.stderr.trim()
+            ));
         }
     }
     if failed.is_empty() {
         let deadline = std::time::Instant::now() + DAEMON_WAIT;
         while let Err(why) = host.reach(&env.socket) {
             if std::time::Instant::now() >= deadline {
-                failed.push(format!("the bridge does not answer on {} afterwards ({why})", env.show(&env.socket)));
+                failed.push(format!(
+                    "the bridge does not answer on {} afterwards ({why})",
+                    env.show(&env.socket)
+                ));
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1093,8 +1365,15 @@ fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resu
     let file_s = file.to_string_lossy().into_owned();
     let registered = host.run("schtasks", &["/Query", "/TN", TASK_NAME])?.ok;
     if change != Change::Unchanged || !registered {
-        check(host, "schtasks", &["/Create", "/TN", TASK_NAME, "/XML", &file_s, "/F"])?;
-        writeln!(out, "service: registered the scheduled task {TASK_NAME} (runs conde daemon at your logon)")?;
+        check(
+            host,
+            "schtasks",
+            &["/Create", "/TN", TASK_NAME, "/XML", &file_s, "/F"],
+        )?;
+        writeln!(
+            out,
+            "service: registered the scheduled task {TASK_NAME} (runs conde daemon at your logon)"
+        )?;
     }
     let running = host.reach(&env.socket).is_ok();
     if running && (change == Change::Updated || predates_boards(env, host, out)?) {
@@ -1148,7 +1427,12 @@ fn adopt_v1_credential(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> a
     };
     boards::check_shared_alias(&info.name)?;
     let path = env.boards_dir().join(format!("{}.json", info.name));
-    let cfg = BoardConfig { server: creds.server.clone(), host_id: creds.host_id.clone(), owner: info.owner.clone(), key: creds.key };
+    let cfg = BoardConfig {
+        server: creds.server.clone(),
+        host_id: creds.host_id.clone(),
+        owner: info.owner.clone(),
+        key: creds.key,
+    };
     boards::store(&path, &info.name, &cfg)?;
     std::fs::remove_file(&v1).with_context(|| format!("removing {}", v1.display()))?;
     writeln!(
@@ -1164,7 +1448,12 @@ fn adopt_v1_credential(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> a
 }
 
 /// The boards part of `conde setup`: each enrolled board's review, then the default board.
-fn boards_part(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+fn boards_part(
+    env: &Env,
+    opts: &Options,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let enrolled = boards::enrolled_in(&env.boards_dir())?;
     if enrolled.is_empty() {
         writeln!(
@@ -1186,7 +1475,13 @@ fn boards_part(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Wri
 
 /// The host's default board for names and channels (decision 9): from `--default-board`,
 /// else asked once at a terminal, else left as it is.
-fn default_board(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write, enrolled: &[String]) -> anyhow::Result<()> {
+fn default_board(
+    env: &Env,
+    opts: &Options,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    enrolled: &[String],
+) -> anyhow::Result<()> {
     let path = env.default_board();
     let current = boards::read_default(&path)?;
     if let Some(want) = &opts.default_board {
@@ -1196,11 +1491,17 @@ fn default_board(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn W
     }
     if enrolled.is_empty() {
         if current != LOCAL_BOARD {
-            writeln!(out, "boards: the default board {current} is not enrolled; run: conde setup --default-board local")?;
+            writeln!(
+                out,
+                "boards: the default board {current} is not enrolled; run: conde setup --default-board local"
+            )?;
         }
         return Ok(());
     }
-    let choices = std::iter::once(LOCAL_BOARD.to_string()).chain(enrolled.iter().cloned()).collect::<Vec<_>>().join(", ");
+    let choices = std::iter::once(LOCAL_BOARD.to_string())
+        .chain(enrolled.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
     for _ in 0..3 {
         let prompt = format!(
             "boards: names and channels without --board go to the default board; message ids always carry their own. \
@@ -1213,7 +1514,11 @@ fn default_board(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn W
             )?;
             return Ok(());
         };
-        let want = if answer.is_empty() { current.clone() } else { answer.to_lowercase() };
+        let want = if answer.is_empty() {
+            current.clone()
+        } else {
+            answer.to_lowercase()
+        };
         match boards::write_default(&path, &env.boards_dir(), &want) {
             Ok(()) => {
                 writeln!(out, "boards: default board for names and channels: {want}")?;
@@ -1244,11 +1549,19 @@ pub fn migrate_review(
     explicit: bool,
     publish: Option<&Publish>,
 ) -> anyhow::Result<bool> {
-    let later = format!("until then {alias} stays local-only on this host; the review: conde boards --migrate {alias}");
+    let later = format!(
+        "until then {alias} stays local-only on this host; the review: conde boards --migrate {alias}"
+    );
     let (info, finished) = match host.daemon(&env.socket, op::BOARD_INFO, Some(alias), json!({})) {
-        Ok(v) => (serde_json::from_value::<BoardInfo>(v.clone()).context("board.info answer")?, v.get("migration").cloned()),
+        Ok(v) => (
+            serde_json::from_value::<BoardInfo>(v.clone()).context("board.info answer")?,
+            v.get("migration").cloned(),
+        ),
         Err(why) => {
-            writeln!(out, "boards: {alias}: not reached through the daemon ({why}); {later}")?;
+            writeln!(
+                out,
+                "boards: {alias}: not reached through the daemon ({why}); {later}"
+            )?;
             return Ok(false);
         }
     };
@@ -1257,18 +1570,34 @@ pub fn migrate_review(
         if let Some(r) = finished {
             print_switch(out, alias, &r)?;
         }
-        writeln!(out, "boards: {alias}: host {} (account {}) is on v2; publish names with: conde publish <name> --board {alias}", info.host, info.owner)?;
+        writeln!(
+            out,
+            "boards: {alias}: host {} (account {}) is on v2; publish names with: conde publish <name> --board {alias}",
+            info.host, info.owner
+        )?;
         return Ok(true);
     }
-    let preview = match host.daemon(&env.socket, op::HOST_MIGRATE_PREVIEW, Some(alias), json!({})) {
-        Ok(v) => serde_json::from_value::<MigratePreview>(v).context("host.migrate_preview answer")?,
+    let preview = match host.daemon(
+        &env.socket,
+        op::HOST_MIGRATE_PREVIEW,
+        Some(alias),
+        json!({}),
+    ) {
+        Ok(v) => {
+            serde_json::from_value::<MigratePreview>(v).context("host.migrate_preview answer")?
+        }
         Err(why) => {
             writeln!(out, "boards: {alias}: the preview failed ({why}); {later}")?;
             return Ok(false);
         }
     };
     let unknown = |out: &mut dyn Write, names: &[String]| {
-        writeln!(out, "boards: {alias}: not migrated: not names of host {} on {alias}: {}; {later}", info.host, names.join(", "))
+        writeln!(
+            out,
+            "boards: {alias}: not migrated: not names of host {} on {alias}: {}; {later}",
+            info.host,
+            names.join(", ")
+        )
     };
     if preview.rows.is_empty() {
         if let Some(Publish::Names(names)) = publish
@@ -1277,7 +1606,11 @@ pub fn migrate_review(
             unknown(out, names)?;
             return Ok(false);
         }
-        writeln!(out, "boards: {alias}: no names of host {} are bound there; switching it to v2 publishes nothing", info.host)?;
+        writeln!(
+            out,
+            "boards: {alias}: no names of host {} are bound there; switching it to v2 publishes nothing",
+            info.host
+        )?;
         return apply_migration(env, host, out, alias, &[]);
     }
     let interactive = publish.is_none() && host.terminal();
@@ -1292,13 +1625,23 @@ pub fn migrate_review(
             }
         };
         let names: Vec<&str> = chosen.iter().map(|r| r.name.as_str()).collect();
-        let listed = if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
+        let listed = if names.is_empty() {
+            "nothing".to_string()
+        } else {
+            names.join(", ")
+        };
         let rest = preview.rows.len() - chosen.len();
-        writeln!(out, "boards: {alias}: {head} {listed}; the other {rest} names move to this host's local board only")?;
+        writeln!(
+            out,
+            "boards: {alias}: {head} {listed}; the other {rest} names move to this host's local board only"
+        )?;
         let ids: Vec<String> = chosen.iter().map(|r| r.agent_id.clone()).collect();
         let ok = apply_migration(env, host, out, alias, &ids)?;
         if ok {
-            writeln!(out, "boards: {alias}: to change it later: conde publish <name> --board {alias}, conde unpublish <name> --board {alias}")?;
+            writeln!(
+                out,
+                "boards: {alias}: to change it later: conde publish <name> --board {alias}, conde unpublish <name> --board {alias}"
+            )?;
         }
         return Ok(ok);
     }
@@ -1316,7 +1659,11 @@ pub fn migrate_review(
     };
     let names: Vec<&str> = chosen.iter().map(|r| r.name.as_str()).collect();
     let rest = preview.rows.len() - chosen.len();
-    let listed = if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
+    let listed = if names.is_empty() {
+        "nothing".to_string()
+    } else {
+        names.join(", ")
+    };
     let confirm = format!(
         "boards: {alias}: publish {listed}; the other {rest} names move to this host's local board only. Apply? [y/N] "
     );
@@ -1335,8 +1682,18 @@ pub fn migrate_review(
     apply_migration(env, host, out, alias, &ids)
 }
 
-fn show_preview(out: &mut dyn Write, alias: &str, info: &BoardInfo, preview: &MigratePreview, interactive: bool) -> anyhow::Result<()> {
-    let choose = if interactive { "; history alone is not consent, so you choose" } else { "" };
+fn show_preview(
+    out: &mut dyn Write,
+    alias: &str,
+    info: &BoardInfo,
+    preview: &MigratePreview,
+    interactive: bool,
+) -> anyhow::Result<()> {
+    let choose = if interactive {
+        "; history alone is not consent, so you choose"
+    } else {
+        ""
+    };
     writeln!(
         out,
         "boards: {alias}: host {} (account {}) still has {} names bound from v1. A candidate (*) has messages with \
@@ -1362,26 +1719,52 @@ fn show_preview(out: &mut dyn Write, alias: &str, info: &BoardInfo, preview: &Mi
                 crate::protocol::v2::EvidenceSource::Imported => "imported from kond",
                 crate::protocol::v2::EvidenceSource::Later => "since the import",
             };
-            writeln!(out, "      {via} {}: {} messages, last {} ({source})", e.with, e.messages, short_date(&e.last_at))?;
+            writeln!(
+                out,
+                "      {via} {}: {} messages, last {} ({source})",
+                e.with,
+                e.messages,
+                short_date(&e.last_at)
+            )?;
         }
     }
     if !others.is_empty() {
-        writeln!(out, "  no messages with another owner's agents ({}): {}", others.len(), others.join(", "))?;
+        writeln!(
+            out,
+            "  no messages with another owner's agents ({}): {}",
+            others.len(),
+            others.join(", ")
+        )?;
     }
     Ok(())
 }
 
 /// The rows the human keeps published; None without a terminal.
-fn choose<'a>(host: &mut dyn Host, out: &mut dyn Write, alias: &str, rows: &'a [PreviewRow]) -> anyhow::Result<Option<Vec<&'a PreviewRow>>> {
+fn choose<'a>(
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    alias: &str,
+    rows: &'a [PreviewRow],
+) -> anyhow::Result<Option<Vec<&'a PreviewRow>>> {
     let prompt = format!(
         "boards: {alias}: names that stay published (separated by spaces; 'candidates' for the * ones; 'none') [candidates]: "
     );
     for _ in 0..3 {
-        let Some(answer) = host.ask(&prompt) else { return Ok(None) };
+        let Some(answer) = host.ask(&prompt) else {
+            return Ok(None);
+        };
         let mut chosen: Vec<&PreviewRow> = Vec::new();
         let mut unknown = Vec::new();
-        let words: Vec<String> = answer.split([' ', ',']).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
-        let words = if words.is_empty() { vec!["candidates".to_string()] } else { words };
+        let words: Vec<String> = answer
+            .split([' ', ','])
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        let words = if words.is_empty() {
+            vec!["candidates".to_string()]
+        } else {
+            words
+        };
         for w in &words {
             let picked: Vec<&PreviewRow> = match w.as_str() {
                 "none" => Vec::new(),
@@ -1403,13 +1786,28 @@ fn choose<'a>(host: &mut dyn Host, out: &mut dyn Write, alias: &str, rows: &'a [
         if unknown.is_empty() {
             return Ok(Some(chosen));
         }
-        writeln!(out, "boards: {alias}: not names of this host: {}", unknown.join(", "))?;
+        writeln!(
+            out,
+            "boards: {alias}: not names of this host: {}",
+            unknown.join(", ")
+        )?;
     }
     Ok(None)
 }
 
-fn apply_migration(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &str, ids: &[String]) -> anyhow::Result<bool> {
-    let r = match host.daemon(&env.socket, op::HOST_MIGRATE_V2, Some(alias), json!({"publish": ids})) {
+fn apply_migration(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    alias: &str,
+    ids: &[String],
+) -> anyhow::Result<bool> {
+    let r = match host.daemon(
+        &env.socket,
+        op::HOST_MIGRATE_V2,
+        Some(alias),
+        json!({"publish": ids}),
+    ) {
         Ok(r) => r,
         Err(why) => {
             writeln!(
@@ -1427,10 +1825,22 @@ fn apply_migration(env: &Env, host: &mut dyn Host, out: &mut dyn Write, alias: &
 /// A switch's result: what is published, the kept conflicts, the moved sessions.
 fn print_switch(out: &mut dyn Write, alias: &str, r: &Value) -> anyhow::Result<()> {
     let manifest: Manifest = serde_json::from_value(r.clone()).context("host.migrate_v2 answer")?;
-    let published: Vec<&str> = manifest.bindings.iter().filter(|b| b.published.is_some()).map(|b| b.name.as_str()).collect();
+    let published: Vec<&str> = manifest
+        .bindings
+        .iter()
+        .filter(|b| b.published.is_some())
+        .map(|b| b.name.as_str())
+        .collect();
     let local = manifest.bindings.len() - published.len();
-    let listed = if published.is_empty() { "nothing".to_string() } else { published.join(", ") };
-    writeln!(out, "boards: {alias}: switched to v2; published: {listed}; on this host's local board only: {local} names")?;
+    let listed = if published.is_empty() {
+        "nothing".to_string()
+    } else {
+        published.join(", ")
+    };
+    writeln!(
+        out,
+        "boards: {alias}: switched to v2; published: {listed}; on this host's local board only: {local} names"
+    )?;
     for c in r["conflicts"].as_array().into_iter().flatten() {
         writeln!(
             out,
@@ -1496,10 +1906,12 @@ fn holder(env: &Env, present: bool, command: Option<&str>, sock: Option<&str>) -
     let Some(cmd) = command.filter(|c| !c.is_empty()) else {
         return Holder::Other("a server that runs no local command".into());
     };
-    let other = || Holder::Other(match sock {
-        Some(s) => format!("{cmd}, CONDE_SOCK={s}"),
-        None => cmd.to_string(),
-    });
+    let other = || {
+        Holder::Other(match sock {
+            Some(s) => format!("{cmd}, CONDE_SOCK={s}"),
+            None => cmd.to_string(),
+        })
+    };
     let (sep, path_like) = match env.os {
         Os::Windows => (';', cmd.contains(['/', '\\'])),
         _ => (':', cmd.contains('/')),
@@ -1507,12 +1919,20 @@ fn holder(env: &Env, present: bool, command: Option<&str>, sock: Option<&str>) -
     let resolved = if path_like {
         Some(PathBuf::from(cmd))
     } else {
-        env.path.split(sep).filter(|d| !d.is_empty()).map(|d| Path::new(d).join(cmd)).find(|p| p.is_file())
+        env.path
+            .split(sep)
+            .filter(|d| !d.is_empty())
+            .map(|d| Path::new(d).join(cmd))
+            .find(|p| p.is_file())
     };
     let socket = sock.map_or_else(|| env.default_socket.clone(), PathBuf::from);
     match resolved {
         Some(path) if same_file(&path, &env.exe) => {
-            if socket == env.socket { Holder::Ours } else { other() }
+            if socket == env.socket {
+                Holder::Ours
+            } else {
+                other()
+            }
         }
         Some(path) if path.exists() => other(),
         _ => Holder::Free,
@@ -1533,18 +1953,31 @@ fn board_alias(env: &Env) -> Option<String> {
 /// holds (`conde` first, then any `conde-*` among `existing`), else the first free of `conde`,
 /// `conde-<board alias>`, `conde-2`..; and, when `conde` belongs to another instance, what
 /// that one runs.
-fn mcp_name(env: &Env, existing: &[String], held: impl Fn(&str) -> Holder) -> anyhow::Result<(String, Option<String>)> {
+fn mcp_name(
+    env: &Env,
+    existing: &[String],
+    held: impl Fn(&str) -> Holder,
+) -> anyhow::Result<(String, Option<String>)> {
     let mut fresh = vec![MCP_NAME.to_string()];
     fresh.extend(board_alias(env).map(|a| format!("{MCP_NAME}-{a}")));
     fresh.extend((2..=9).map(|n| format!("{MCP_NAME}-{n}")));
-    let mut held_before: Vec<&String> = existing.iter().filter(|n| n.starts_with(&format!("{MCP_NAME}-"))).collect();
+    let mut held_before: Vec<&String> = existing
+        .iter()
+        .filter(|n| n.starts_with(&format!("{MCP_NAME}-")))
+        .collect();
     held_before.sort();
     let first = held(MCP_NAME);
     let pick = std::iter::once(&fresh[0])
         .chain(held_before)
         .find(|n| held(n) == Holder::Ours)
         .or_else(|| fresh.iter().find(|n| held(n) == Holder::Free))
-        .ok_or_else(|| anyhow!("every MCP server name from {} to {} belongs to another server", fresh[0], fresh[fresh.len() - 1]))?
+        .ok_or_else(|| {
+            anyhow!(
+                "every MCP server name from {} to {} belongs to another server",
+                fresh[0],
+                fresh[fresh.len() - 1]
+            )
+        })?
         .clone();
     let displaced = match first {
         Holder::Other(what) if pick != MCP_NAME => Some(what),
@@ -1557,29 +1990,62 @@ fn mcp_name(env: &Env, existing: &[String], held: impl Fn(&str) -> Holder) -> an
 /// a skill of that name (`skills/<mcp>/`), beside the other instance's `conde` skill.
 pub fn skill_text(skill: &str, mcp: &str) -> String {
     skill
-        .replacen(&format!("---\nname: {MCP_NAME}\n"), &format!("---\nname: {mcp}\n"), 1)
-        .replacen(&format!("tools of the `{MCP_NAME}` MCP server"), &format!("tools of the `{mcp}` MCP server"), 1)
+        .replacen(
+            &format!("---\nname: {MCP_NAME}\n"),
+            &format!("---\nname: {mcp}\n"),
+            1,
+        )
+        .replacen(
+            &format!("tools of the `{MCP_NAME}` MCP server"),
+            &format!("tools of the `{mcp}` MCP server"),
+            1,
+        )
 }
 
 fn claude_holder(env: &Env, entry: &Value) -> Holder {
-    let command = if entry["url"].is_null() { entry["command"].as_str() } else { None };
-    holder(env, !entry.is_null(), command, entry["env"]["CONDE_SOCK"].as_str())
+    let command = if entry["url"].is_null() {
+        entry["command"].as_str()
+    } else {
+        None
+    };
+    holder(
+        env,
+        !entry.is_null(),
+        command,
+        entry["env"]["CONDE_SOCK"].as_str(),
+    )
 }
 
 fn claude_name(env: &Env) -> anyhow::Result<(String, Option<String>)> {
     let servers = read_json(&env.claude_json())?["mcpServers"].clone();
-    let existing: Vec<String> = servers.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    let existing: Vec<String> = servers
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
     mcp_name(env, &existing, |n| claude_holder(env, &servers[n]))
 }
 
-fn claude(env: &Env, opts: &Options, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+fn claude(
+    env: &Env,
+    opts: &Options,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let (name, displaced) = claude_name(env)?;
     if let Some(what) = displaced {
-        writeln!(out, "claude: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one registers as {name}")?;
+        writeln!(
+            out,
+            "claude: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one registers as {name}"
+        )?;
     }
     let skill = env.claude_skill_for(&name);
     let text = skill_text(CLAUDE_SKILL, &name);
-    writeln!(out, "claude: skill {} {}", write_if_changed(&skill, &text)?.verb(), env.show(&skill))?;
+    writeln!(
+        out,
+        "claude: skill {} {}",
+        write_if_changed(&skill, &text)?.verb(),
+        env.show(&skill)
+    )?;
     claude_mcp(env, &name, host, out)?;
     claude_inbound(env, opts, out)
 }
@@ -1589,18 +2055,28 @@ fn mcp_entry(env: &Env) -> Value {
     json!({"type": "stdio", "command": env.exe.to_string_lossy(), "args": ["mcp"], "env": {"CONDE_SOCK": sock}})
 }
 
-fn claude_mcp(env: &Env, name: &str, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+fn claude_mcp(
+    env: &Env,
+    name: &str,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let path = env.claude_json();
     let mut want = mcp_entry(env);
     let current = read_json(&path)?["mcpServers"][name].clone();
     let sock = want["env"]["CONDE_SOCK"].clone();
-    if current["command"] == want["command"] && current["args"] == want["args"] && current["env"]["CONDE_SOCK"] == sock {
+    if current["command"] == want["command"]
+        && current["args"] == want["args"]
+        && current["env"]["CONDE_SOCK"] == sock
+    {
         writeln!(out, "claude: MCP server {name} unchanged (user scope)")?;
         return Ok(());
     }
     // the entry's other env vars stay; CONDE_SOCK is ours
     if let Some(kept) = current["env"].as_object() {
-        let env_obj = want["env"].as_object_mut().expect("mcp_entry has an env object");
+        let env_obj = want["env"]
+            .as_object_mut()
+            .expect("mcp_entry has an env object");
         for (k, v) in kept {
             if k != "CONDE_SOCK" && v.is_string() {
                 env_obj.insert(k.clone(), v.clone());
@@ -1626,10 +2102,18 @@ fn claude_mcp(env: &Env, name: &str, host: &mut dyn Host, out: &mut dyn Write) -
         }
         args.extend(["--", &exe, "mcp"]);
         check(host, &claude, &args)?;
-        writeln!(out, "claude: registered MCP server {name} at user scope (claude {})", args.join(" "))?;
+        writeln!(
+            out,
+            "claude: registered MCP server {name} at user scope (claude {})",
+            args.join(" ")
+        )?;
         let back = read_json(&path)?["mcpServers"][name].clone();
         if back["command"] != want["command"] || back["env"]["CONDE_SOCK"] != sock {
-            writeln!(out, "claude: note: the entry did not appear in {}; check with: claude mcp get {name}", env.show(&path))?;
+            writeln!(
+                out,
+                "claude: note: the entry did not appear in {}; check with: claude mcp get {name}",
+                env.show(&path)
+            )?;
         }
     } else {
         let text = read_text(&path)?;
@@ -1651,13 +2135,26 @@ fn claude_inbound(env: &Env, opts: &Options, out: &mut dyn Write) -> anyhow::Res
     let shown = env.show(&path);
     let current = read_json(&path)?["crossSessionInbound"].clone();
     if current == "accept" {
-        writeln!(out, "claude: crossSessionInbound already \"accept\" in {shown}")?;
+        writeln!(
+            out,
+            "claude: crossSessionInbound already \"accept\" in {shown}"
+        )?;
     } else if opts.keep_receiver_policy {
-        let now = if current.is_null() { "unset".to_string() } else { current.to_string() };
-        writeln!(out, "claude: crossSessionInbound left {now} in {shown} (--keep-receiver-policy)")?;
+        let now = if current.is_null() {
+            "unset".to_string()
+        } else {
+            current.to_string()
+        };
+        writeln!(
+            out,
+            "claude: crossSessionInbound left {now} in {shown} (--keep-receiver-policy)"
+        )?;
     } else if current.is_null() {
         let text = read_text(&path)?;
-        write_if_changed(&path, &json_set(&text, &["crossSessionInbound"], &json!("accept"))?)?;
+        write_if_changed(
+            &path,
+            &json_set(&text, &["crossSessionInbound"], &json!("accept"))?,
+        )?;
         writeln!(
             out,
             "claude: set crossSessionInbound to \"accept\" in {shown} (bypass-mode sessions receive conde \
@@ -1677,19 +2174,28 @@ bypass-mode sessions do not receive conde notifications without approval"
 pub fn codex_name(env: &Env, text: &str) -> anyhow::Result<(String, Option<String>)> {
     let doc: toml_edit::DocumentMut = text.parse().context("not valid TOML")?;
     let servers = doc.get("mcp_servers");
-    let existing: Vec<String> =
-        servers.and_then(|s| s.as_table_like()).map(|t| t.iter().map(|(k, _)| k.to_string()).collect()).unwrap_or_default();
+    let existing: Vec<String> = servers
+        .and_then(|s| s.as_table_like())
+        .map(|t| t.iter().map(|(k, _)| k.to_string()).collect())
+        .unwrap_or_default();
     mcp_name(env, &existing, |n| {
         let entry = servers.and_then(|s| s.get(n));
         let field = |k: &str| entry.and_then(|e| e.get(k));
-        let command = if field("url").is_none() { field("command").and_then(|c| c.as_str()) } else { None };
-        let sock = field("env").and_then(|e| e.get("CONDE_SOCK")).and_then(|v| v.as_str());
+        let command = if field("url").is_none() {
+            field("command").and_then(|c| c.as_str())
+        } else {
+            None
+        };
+        let sock = field("env")
+            .and_then(|e| e.get("CONDE_SOCK"))
+            .and_then(|v| v.as_str());
         holder(env, entry.is_some(), command, sock)
     })
 }
 
 /// What setup and `--check` both say on a machine without Claude Code.
-const CLAUDE_ABSENT: &str = "claude: Claude Code not found on this machine; rerun conde setup after installing it";
+const CLAUDE_ABSENT: &str =
+    "claude: Claude Code not found on this machine; rerun conde setup after installing it";
 
 /// Claude Code is installed when `claude` is on PATH or its config directory or
 /// `.claude.json` exists (installed somewhere PATH does not reach); setup and `--check` skip
@@ -1699,7 +2205,8 @@ fn claude_installed(env: &Env, host: &dyn Host) -> bool {
 }
 
 /// What setup and `--check` both say on a machine without Codex.
-const CODEX_ABSENT: &str = "codex: Codex not found on this machine; rerun conde setup after installing it";
+const CODEX_ABSENT: &str =
+    "codex: Codex not found on this machine; rerun conde setup after installing it";
 
 /// Codex is installed when `codex` is on PATH or its config directory exists (installed
 /// somewhere PATH does not reach); setup and `--check` skip it otherwise.
@@ -1713,13 +2220,26 @@ fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {
     // unreadable TOML: the skill still lands, the edit below reports the file
     let (name, displaced) = codex_name(env, &text).unwrap_or_else(|_| (MCP_NAME.to_string(), None));
     if let Some(what) = displaced {
-        writeln!(out, "codex: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one registers as {name}")?;
+        writeln!(
+            out,
+            "codex: MCP server {MCP_NAME} belongs to another conde instance ({what}); this one registers as {name}"
+        )?;
     }
     let skill = env.codex_skill_for(&name);
     let skill_body = skill_text(CODEX_SKILL, &name);
-    writeln!(out, "codex: skill {} {}", write_if_changed(&skill, &skill_body)?.verb(), env.show(&skill))?;
-    let edited = codex_config_edit(&text, &name, &env.exe.to_string_lossy(), &env.socket.to_string_lossy())
-        .with_context(|| format!("{} left as is", env.show(&path)))?;
+    writeln!(
+        out,
+        "codex: skill {} {}",
+        write_if_changed(&skill, &skill_body)?.verb(),
+        env.show(&skill)
+    )?;
+    let edited = codex_config_edit(
+        &text,
+        &name,
+        &env.exe.to_string_lossy(),
+        &env.socket.to_string_lossy(),
+    )
+    .with_context(|| format!("{} left as is", env.show(&path)))?;
     let line = match edited {
         Some(new) => match write_if_changed(&path, &new)? {
             Change::Created => format!("added MCP server {name} to"),
@@ -1734,7 +2254,12 @@ fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {
 /// Point `mcp_servers.<name>` at `exe mcp` on socket `sock` (its `env.CONDE_SOCK`) with a
 /// TOML-aware edit that keeps comments, formatting and every other entry (other keys of an
 /// existing entry and of its env too). None when it already does.
-pub fn codex_config_edit(text: &str, name: &str, exe: &str, sock: &str) -> anyhow::Result<Option<String>> {
+pub fn codex_config_edit(
+    text: &str,
+    name: &str,
+    exe: &str,
+    sock: &str,
+) -> anyhow::Result<Option<String>> {
     use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value as TomlValue, value};
     let mut doc: DocumentMut = text.parse().context("not valid TOML")?;
     let wanted_args = || Array::from_iter(["mcp"]);
@@ -1745,10 +2270,13 @@ pub fn codex_config_edit(text: &str, name: &str, exe: &str, sock: &str) -> anyho
     };
     let current = doc.get("mcp_servers").and_then(|s| s.get(name));
     let field = |k: &str| current.and_then(|c| c.get(k));
-    let args_ok = field("args").and_then(Item::as_array).is_some_and(|a| {
-        a.iter().map(|v| v.as_str()).collect::<Vec<_>>() == [Some("mcp")]
-    });
-    let sock_ok = field("env").and_then(|e| e.get("CONDE_SOCK")).and_then(Item::as_str) == Some(sock);
+    let args_ok = field("args")
+        .and_then(Item::as_array)
+        .is_some_and(|a| a.iter().map(|v| v.as_str()).collect::<Vec<_>>() == [Some("mcp")]);
+    let sock_ok = field("env")
+        .and_then(|e| e.get("CONDE_SOCK"))
+        .and_then(Item::as_str)
+        == Some(sock);
     if field("command").and_then(Item::as_str) == Some(exe) && args_ok && sock_ok {
         return Ok(None);
     }
@@ -1757,8 +2285,8 @@ pub fn codex_config_edit(text: &str, name: &str, exe: &str, sock: &str) -> anyho
         bail!("mcp_servers is not a table");
     }
     let has_entry = servers.and_then(|s| s.get(name)).is_some();
-    let inline_parent =
-        servers.is_some_and(|s| s.is_inline_table() || s.as_table_like().is_some_and(|t| t.is_dotted()));
+    let inline_parent = servers
+        .is_some_and(|s| s.is_inline_table() || s.as_table_like().is_some_and(|t| t.is_dotted()));
     if has_entry {
         let entry = doc["mcp_servers"][name]
             .as_table_like_mut()
@@ -1802,7 +2330,11 @@ pub fn codex_config_edit(text: &str, name: &str, exe: &str, sock: &str) -> anyho
     let back: DocumentMut = new.parse().context("edited config.toml does not parse")?;
     let entry = back.get("mcp_servers").and_then(|s| s.get(name));
     if entry.and_then(|c| c.get("command")).and_then(Item::as_str) != Some(exe)
-        || entry.and_then(|c| c.get("env")).and_then(|e| e.get("CONDE_SOCK")).and_then(Item::as_str) != Some(sock)
+        || entry
+            .and_then(|c| c.get("env"))
+            .and_then(|e| e.get("CONDE_SOCK"))
+            .and_then(Item::as_str)
+            != Some(sock)
     {
         bail!("edited config.toml does not hold the {name} entry");
     }
@@ -1813,14 +2345,22 @@ pub fn codex_config_edit(text: &str, name: &str, exe: &str, sock: &str) -> anyho
 /// the file (key order, formatting) stays as it was. The result is parsed
 /// back and compared with the intended value before it is returned.
 pub fn json_set(text: &str, path: &[&str], value: &Value) -> anyhow::Result<String> {
-    let mut expected = if text.trim().is_empty() { json!({}) } else { serde_json::from_str(text)? };
-    let mut slot = expected.as_object_mut().ok_or_else(|| anyhow!("the document is not a JSON object"))?;
+    let mut expected = if text.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(text)?
+    };
+    let mut slot = expected
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("the document is not a JSON object"))?;
     for (i, key) in path.iter().enumerate() {
         if i + 1 == path.len() {
             slot.insert((*key).to_string(), value.clone());
         } else {
             let next = slot.entry(*key).or_insert_with(|| json!({}));
-            slot = next.as_object_mut().ok_or_else(|| anyhow!("'{key}' is not a JSON object"))?;
+            slot = next
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("'{key}' is not a JSON object"))?;
         }
     }
     if text.trim().is_empty() {
@@ -1855,7 +2395,12 @@ fn splice(text: &str, at: usize, path: &[&str], value: &Value) -> anyhow::Result
         let v_end = scan_value(b, v_start)?;
         if key == path[0] {
             if path.len() == 1 {
-                return Ok(format!("{}{}{}", &text[..v_start], serde_json::to_string(value)?, &text[v_end..]));
+                return Ok(format!(
+                    "{}{}{}",
+                    &text[..v_start],
+                    serde_json::to_string(value)?,
+                    &text[v_end..]
+                ));
             }
             return splice(text, v_start, &path[1..], value);
         }
@@ -1869,24 +2414,38 @@ fn splice(text: &str, at: usize, path: &[&str], value: &Value) -> anyhow::Result
     for key in path[1..].iter().rev() {
         v = Value::Object(Map::from_iter([((*key).to_string(), v)]));
     }
-    let member = format!("{}: {}", serde_json::to_string(path[0])?, serde_json::to_string(&v)?);
+    let member = format!(
+        "{}: {}",
+        serde_json::to_string(path[0])?,
+        serde_json::to_string(&v)?
+    );
     let indent = match first_key {
         Some(k) => {
             let line_start = text[..k].rfind('\n').map_or(0, |n| n + 1);
-            text[line_start..k].chars().all(char::is_whitespace).then(|| text[line_start..k].to_string())
+            text[line_start..k]
+                .chars()
+                .all(char::is_whitespace)
+                .then(|| text[line_start..k].to_string())
         }
         None => None,
     };
     let indent_of_open = {
         let line_start = text[..open].rfind('\n').map_or(0, |n| n + 1);
-        text[line_start..open].chars().take_while(|c| c.is_whitespace()).collect::<String>()
+        text[line_start..open]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect::<String>()
     };
     Ok(match (first_key, indent) {
         (Some(_), Some(ind)) => format!("{}\n{ind}{member},{}", &text[..=open], &text[open + 1..]),
         (Some(_), None) => format!("{}{member}, {}", &text[..=open], &text[open + 1..]),
         (None, _) => {
             let close = skip_ws(b, open + 1);
-            format!("{}\n{indent_of_open}  {member}\n{indent_of_open}{}", &text[..=open], &text[close..])
+            format!(
+                "{}\n{indent_of_open}  {member}\n{indent_of_open}{}",
+                &text[..=open],
+                &text[close..]
+            )
         }
     })
 }
@@ -1945,66 +2504,127 @@ mod tests {
         let out = json_set(text, &["crossSessionInbound"], &json!("accept")).unwrap();
         assert_eq!(out, text.replace("\"hold\"", "\"accept\""));
         let out = json_set(text, &["mcpServers", "conde"], &json!({"command": "/c"})).unwrap();
-        assert!(out.starts_with("{\n  \"mcpServers\": {\"conde\":{\"command\":\"/c\"}},\n  \"zeta\": 1,"), "{out}");
+        assert!(
+            out.starts_with(
+                "{\n  \"mcpServers\": {\"conde\":{\"command\":\"/c\"}},\n  \"zeta\": 1,"
+            ),
+            "{out}"
+        );
         let nested = "{\"mcpServers\": {\"other\": {\"command\": \"x\"}}, \"z\": true}";
         let out = json_set(nested, &["mcpServers", "conde"], &json!({"command": "/c"})).unwrap();
-        assert_eq!(out, "{\"mcpServers\": {\"conde\": {\"command\":\"/c\"}, \"other\": {\"command\": \"x\"}}, \"z\": true}");
-        assert_eq!(json_set("{}", &["a"], &json!(1)).unwrap(), "{\n  \"a\": 1\n}");
-        assert_eq!(json_set("", &["a"], &json!(1)).unwrap(), "{\n  \"a\": 1\n}\n");
+        assert_eq!(
+            out,
+            "{\"mcpServers\": {\"conde\": {\"command\":\"/c\"}, \"other\": {\"command\": \"x\"}}, \"z\": true}"
+        );
+        assert_eq!(
+            json_set("{}", &["a"], &json!(1)).unwrap(),
+            "{\n  \"a\": 1\n}"
+        );
+        assert_eq!(
+            json_set("", &["a"], &json!(1)).unwrap(),
+            "{\n  \"a\": 1\n}\n"
+        );
         assert!(json_set("[1]", &["a"], &json!(1)).is_err());
         assert!(json_set("{\"mcpServers\": 3}", &["mcpServers", "conde"], &json!(1)).is_err());
         let escaped = "{\"k\\\"ey\": \"v\\\\\", \"crossSessionInbound\": null}";
         let out = json_set(escaped, &["crossSessionInbound"], &json!("accept")).unwrap();
-        assert_eq!(out, "{\"k\\\"ey\": \"v\\\\\", \"crossSessionInbound\": \"accept\"}");
+        assert_eq!(
+            out,
+            "{\"k\\\"ey\": \"v\\\\\", \"crossSessionInbound\": \"accept\"}"
+        );
     }
 
     fn conde_entry(toml: &str) -> (String, Vec<String>, usize) {
         let doc: toml_edit::DocumentMut = toml.parse().expect("edited TOML parses");
         let e = &doc["mcp_servers"]["conde"];
-        let args = e["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-        (e["command"].as_str().unwrap().to_string(), args, toml.matches("[mcp_servers.conde]").count())
+        let args = e["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        (
+            e["command"].as_str().unwrap().to_string(),
+            args,
+            toml.matches("[mcp_servers.conde]").count(),
+        )
     }
 
     #[test]
     fn codex_config_is_edited_in_place() {
         let user = "# my config\nmodel = \"x\" # trailing note\n\n[mcp_servers.docs]\nurl = \"https://example\"\n";
-        let first = codex_config_edit(user, "conde", "/bin/conde", "/s").unwrap().unwrap();
+        let first = codex_config_edit(user, "conde", "/bin/conde", "/s")
+            .unwrap()
+            .unwrap();
         assert!(first.starts_with(user), "{first}");
         assert!(
             first.ends_with("[mcp_servers.conde]\ncommand = \"/bin/conde\"\nargs = [\"mcp\"]\nenv = { CONDE_SOCK = \"/s\" }\n"),
             "{first}"
         );
-        assert_eq!(codex_config_edit(&first, "conde", "/bin/conde", "/s").unwrap(), None, "second run is a no-op");
-        let moved = codex_config_edit(&first, "conde", "/opt/my conde", "/s").unwrap().unwrap();
+        assert_eq!(
+            codex_config_edit(&first, "conde", "/bin/conde", "/s").unwrap(),
+            None,
+            "second run is a no-op"
+        );
+        let moved = codex_config_edit(&first, "conde", "/opt/my conde", "/s")
+            .unwrap()
+            .unwrap();
         assert_eq!(moved, first.replace("\"/bin/conde\"", "\"/opt/my conde\""));
-        let resocketed = codex_config_edit(&first, "conde", "/bin/conde", "/t").unwrap().unwrap();
+        let resocketed = codex_config_edit(&first, "conde", "/bin/conde", "/t")
+            .unwrap()
+            .unwrap();
         assert_eq!(resocketed, first.replace("\"/s\"", "\"/t\""));
         assert_eq!(
-            codex_config_edit("", "conde-dakai", "/c", "/s").unwrap().unwrap(),
+            codex_config_edit("", "conde-dakai", "/c", "/s")
+                .unwrap()
+                .unwrap(),
             "[mcp_servers.conde-dakai]\ncommand = \"/c\"\nargs = [\"mcp\"]\nenv = { CONDE_SOCK = \"/s\" }\n"
         );
 
         // an existing entry keeps its other keys, its env vars and its place
         let own = "[mcp_servers.conde]\ncommand = \"/old\"\nargs = [\"x\"]\nenv = { A = \"1\" }\n\n[other]\nk = 1\n";
-        let out = codex_config_edit(own, "conde", "/c", "/s").unwrap().unwrap();
-        assert_eq!(out, "[mcp_servers.conde]\ncommand = \"/c\"\nargs = [\"mcp\"]\nenv = { A = \"1\", CONDE_SOCK = \"/s\" }\n\n[other]\nk = 1\n");
+        let out = codex_config_edit(own, "conde", "/c", "/s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out,
+            "[mcp_servers.conde]\ncommand = \"/c\"\nargs = [\"mcp\"]\nenv = { A = \"1\", CONDE_SOCK = \"/s\" }\n\n[other]\nk = 1\n"
+        );
 
         // review repro: a comment with triple quotes must not hide the table (no duplicate)
         let tricky = "# example uses '''\n[mcp_servers.conde]\ncommand = \"/old\"\n";
-        let out = codex_config_edit(tricky, "conde", "/new", "/s").unwrap().unwrap();
-        assert_eq!(out, "# example uses '''\n[mcp_servers.conde]\ncommand = \"/new\"\nargs = [\"mcp\"]\nenv = { CONDE_SOCK = \"/s\" }\n");
+        let out = codex_config_edit(tricky, "conde", "/new", "/s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out,
+            "# example uses '''\n[mcp_servers.conde]\ncommand = \"/new\"\nargs = [\"mcp\"]\nenv = { CONDE_SOCK = \"/s\" }\n"
+        );
         assert_eq!(conde_entry(&out), ("/new".into(), vec!["mcp".into()], 1));
 
         // dotted keys and inline tables are extended, not shadowed
         let dotted = "[mcp_servers]\nconde.command = \"c\"\n";
-        assert_eq!(conde_entry(&codex_config_edit(dotted, "conde", "/c", "/s").unwrap().unwrap()).0, "/c");
+        assert_eq!(
+            conde_entry(
+                &codex_config_edit(dotted, "conde", "/c", "/s")
+                    .unwrap()
+                    .unwrap()
+            )
+            .0,
+            "/c"
+        );
         let inline = "mcp_servers = { x = { command = \"x\" } }\n";
-        let out = codex_config_edit(inline, "conde", "/c", "/s").unwrap().unwrap();
+        let out = codex_config_edit(inline, "conde", "/c", "/s")
+            .unwrap()
+            .unwrap();
         assert_eq!(conde_entry(&out).0, "/c");
         assert!(out.contains("x = { command = \"x\" }"), "{out}");
 
         assert!(codex_config_edit("mcp_servers = 3\n", "conde", "/c", "/s").is_err());
-        assert!(codex_config_edit("[broken\n", "conde", "/c", "/s").is_err(), "invalid TOML is never rewritten");
+        assert!(
+            codex_config_edit("[broken\n", "conde", "/c", "/s").is_err(),
+            "invalid TOML is never rewritten"
+        );
     }
 
     #[test]
@@ -2013,7 +2633,13 @@ mod tests {
         assert_eq!(systemd_word("/My Apps/conde"), "\"/My Apps/conde\"");
         assert_eq!(systemd_word("/opt/$x/%i"), "/opt/$$x/%%i");
         // Environment= takes $ literally; only % (specifiers) and quoting are escaped
-        assert_eq!(systemd_env("PATH", "/opt/$tools/bin:/usr/bin"), "\"PATH=/opt/$tools/bin:/usr/bin\"");
-        assert_eq!(systemd_env("CONDE_SOCK", "/run/a b/%i\"q\\"), "\"CONDE_SOCK=/run/a b/%%i\\\"q\\\\\"");
+        assert_eq!(
+            systemd_env("PATH", "/opt/$tools/bin:/usr/bin"),
+            "\"PATH=/opt/$tools/bin:/usr/bin\""
+        );
+        assert_eq!(
+            systemd_env("CONDE_SOCK", "/run/a b/%i\"q\\"),
+            "\"CONDE_SOCK=/run/a b/%%i\\\"q\\\\\""
+        );
     }
 }

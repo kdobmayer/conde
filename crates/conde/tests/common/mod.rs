@@ -31,7 +31,9 @@ impl Board {
 
     pub fn new() -> Board {
         let d = Arc::new(match pg::fresh_database() {
-            Some(url) => Dispatcher::connect(&url, conde::store::postgres::PgOpen::COMMAND).unwrap(),
+            Some(url) => {
+                Dispatcher::connect(&url, conde::store::postgres::PgOpen::COMMAND).unwrap()
+            }
             None => Dispatcher::open_in_memory().unwrap(),
         });
         let p = d.principal("krisz", "box", true).unwrap();
@@ -47,7 +49,15 @@ impl Board {
         self.request(p, actor, None, op, body, Some(&new_ulid()))
     }
 
-    pub fn request(&self, p: &Principal, actor: &str, from: Option<&str>, op: &str, body: Value, key: Option<&str>) -> Reply {
+    pub fn request(
+        &self,
+        p: &Principal,
+        actor: &str,
+        from: Option<&str>,
+        op: &str,
+        body: Value,
+        key: Option<&str>,
+    ) -> Reply {
         let mut req = Request::new(new_ulid(), op, body);
         req.actor = Some(actor.to_string());
         req.from = from.map(Into::into);
@@ -64,7 +74,8 @@ impl Board {
     }
 
     pub fn ok(&self, actor: &str, op: &str, body: Value) -> Value {
-        self.call(actor, op, body).unwrap_or_else(|e| panic!("{op} as {actor}: {e:?}"))
+        self.call(actor, op, body)
+            .unwrap_or_else(|e| panic!("{op} as {actor}: {e:?}"))
     }
 
     pub fn register(&self, actor: &str, name: &str) {
@@ -72,7 +83,11 @@ impl Board {
     }
 
     pub fn send(&self, actor: &str, to: &str, text: &str) -> String {
-        let target = if to.starts_with('#') { json!({"channel": to}) } else { json!({"agent": to}) };
+        let target = if to.starts_with('#') {
+            json!({"channel": to})
+        } else {
+            json!({"agent": to})
+        };
         let r = self.ok(actor, "message.send", json!({"to": target, "text": text}));
         r["message_id"].as_str().unwrap().to_string()
     }
@@ -89,7 +104,10 @@ impl Board {
             .unwrap()
             .into_iter()
             .map(|n| {
-                let name = n.recipient_name.split_once('/').map_or(n.recipient_name.clone(), |(_, n)| n.to_string());
+                let name = n
+                    .recipient_name
+                    .split_once('/')
+                    .map_or(n.recipient_name.clone(), |(_, n)| n.to_string());
                 (format!("{}.{name}", n.message_id), n.kind, n.status)
             })
             .collect();
@@ -99,7 +117,11 @@ impl Board {
 
     /// The id of the board owner's agent `name`.
     pub fn agent_id(&self, name: &str) -> String {
-        self.d.with_conn(|tx| tx.agent_by_name(self.p.user_id, name)).unwrap().expect(name).id
+        self.d
+            .with_conn(|tx| tx.agent_by_name(self.p.user_id, name))
+            .unwrap()
+            .expect(name)
+            .id
     }
 
     pub fn message_count(&self) -> i64 {
@@ -133,7 +155,10 @@ pub struct FakeNotifier {
 
 impl FakeNotifier {
     pub fn receipt(&mut self, attempt_id: &str, status: ReceiptStatus) {
-        self.receipts.push(Receipt { attempt_id: attempt_id.to_string(), status });
+        self.receipts.push(Receipt {
+            attempt_id: attempt_id.to_string(),
+            status,
+        });
     }
 
     pub fn last_attempt(&self) -> String {
@@ -141,13 +166,20 @@ impl FakeNotifier {
     }
 
     pub fn sent_to(&self, address_prefix: &str) -> Vec<&(String, String, String)> {
-        self.sent.iter().filter(|(a, _, _)| a.starts_with(address_prefix)).collect()
+        self.sent
+            .iter()
+            .filter(|(a, _, _)| a.starts_with(address_prefix))
+            .collect()
     }
 }
 
 impl Notifier for FakeNotifier {
     fn notify(&mut self, address: &Address, text: &str, attempt_id: &str) -> NotifyOutcome {
-        self.sent.push((address.to_string(), text.to_string(), attempt_id.to_string()));
+        self.sent.push((
+            address.to_string(),
+            text.to_string(),
+            attempt_id.to_string(),
+        ));
         self.outcomes.pop_front().unwrap_or(NotifyOutcome::Accepted)
     }
 

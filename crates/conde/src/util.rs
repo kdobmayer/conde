@@ -51,10 +51,16 @@ pub fn ms_from_iso(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     let num = |from: usize, len: usize| -> Option<i64> {
         let part = b.get(from..from + len)?;
-        part.iter().all(u8::is_ascii_digit).then(|| part.iter().fold(0, |n, d| n * 10 + i64::from(d - b'0')))
+        part.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| part.iter().fold(0, |n, d| n * 10 + i64::from(d - b'0')))
     };
     let at = |i: usize, c: u8| b.get(i) == Some(&c);
-    if !(at(4, b'-') && at(7, b'-') && matches!(b.get(10), Some(b'T' | b't' | b' ')) && at(13, b':')) {
+    if !(at(4, b'-')
+        && at(7, b'-')
+        && matches!(b.get(10), Some(b'T' | b't' | b' '))
+        && at(13, b':'))
+    {
         return None;
     }
     let (y, mo, d, h, mi) = (num(0, 4)?, num(5, 2)?, num(8, 2)?, num(11, 2)?, num(14, 2)?);
@@ -68,7 +74,15 @@ pub fn ms_from_iso(s: &str) -> Option<i64> {
             if digits == 0 {
                 return None;
             }
-            milli = (0..3).map(|k| if k < digits { i64::from(b[i + 1 + k] - b'0') } else { 0 }).fold(0, |n, d| n * 10 + d);
+            milli = (0..3)
+                .map(|k| {
+                    if k < digits {
+                        i64::from(b[i + 1 + k] - b'0')
+                    } else {
+                        0
+                    }
+                })
+                .fold(0, |n, d| n * 10 + d);
             i += 1 + digits;
         }
     }
@@ -84,8 +98,27 @@ pub fn ms_from_iso(s: &str) -> Option<i64> {
         _ => return None,
     };
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    if !(1..=12).contains(&mo) || d < 1 || d > month_days[(mo - 1) as usize] || h > 23 || mi > 59 || sec > 60 {
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1..=12).contains(&mo)
+        || d < 1
+        || d > month_days[(mo - 1) as usize]
+        || h > 23
+        || mi > 59
+        || sec > 60
+    {
         return None;
     }
     let days = days_from_civil(y, mo, d);
@@ -140,9 +173,19 @@ pub fn parse_after(s: &str) -> Result<After, String> {
     }
     if let Some((n, t)) = s.split_once('@') {
         let cursor = n.parse::<i64>().map_err(|_| bad())?;
-        return ms_from_iso(t).map(|t| After { cursor, time: Some(t) }).ok_or_else(bad);
+        return ms_from_iso(t)
+            .map(|t| After {
+                cursor,
+                time: Some(t),
+            })
+            .ok_or_else(bad);
     }
-    ms_from_iso(s).map(|t| After { cursor: 0, time: Some(t) }).ok_or_else(bad)
+    ms_from_iso(s)
+        .map(|t| After {
+            cursor: 0,
+            time: Some(t),
+        })
+        .ok_or_else(bad)
 }
 
 // Howard Hinnant's days -> civil date algorithm.
@@ -159,7 +202,10 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Host id used when no hostname can be read; doctor warns about it.
@@ -203,7 +249,13 @@ pub fn host_id(raw: &str) -> Option<String> {
         .trim()
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     (!id.is_empty()).then_some(id)
 }
@@ -248,8 +300,12 @@ pub fn own_euid() -> u32 {
 pub fn same_user(peer_uid: std::io::Result<u32>, own: u32) -> Result<(), String> {
     match peer_uid {
         Ok(uid) if uid == own => Ok(()),
-        Ok(uid) => Err(format!("refused connection from another user: peer uid {uid}, daemon uid {own}")),
-        Err(e) => Err(format!("refused connection: peer credentials unreadable ({e}); daemon uid {own}")),
+        Ok(uid) => Err(format!(
+            "refused connection from another user: peer uid {uid}, daemon uid {own}"
+        )),
+        Err(e) => Err(format!(
+            "refused connection: peer credentials unreadable ({e}); daemon uid {own}"
+        )),
     }
 }
 
@@ -258,8 +314,12 @@ pub fn same_user(peer_uid: std::io::Result<u32>, own: u32) -> Result<(), String>
 pub fn same_sid(peer_sid: std::io::Result<String>, own: &str) -> Result<(), String> {
     match peer_sid {
         Ok(sid) if sid == own => Ok(()),
-        Ok(sid) => Err(format!("refused connection from another user: peer SID {sid}, daemon SID {own}")),
-        Err(e) => Err(format!("refused connection: peer process unreadable ({e}); daemon SID {own}")),
+        Ok(sid) => Err(format!(
+            "refused connection from another user: peer SID {sid}, daemon SID {own}"
+        )),
+        Err(e) => Err(format!(
+            "refused connection: peer process unreadable ({e}); daemon SID {own}"
+        )),
     }
 }
 
@@ -269,15 +329,29 @@ mod tests {
 
     #[test]
     fn host_ids() {
-        assert_eq!(host_id("Krisz-MacBook-Pro.local").as_deref(), Some("krisz-macbook-pro.local"));
-        assert_eq!(host_id("worker.example.com").as_deref(), Some("worker.example.com"));
+        assert_eq!(
+            host_id("Krisz-MacBook-Pro.local").as_deref(),
+            Some("krisz-macbook-pro.local")
+        );
+        assert_eq!(
+            host_id("worker.example.com").as_deref(),
+            Some("worker.example.com")
+        );
         assert_ne!(host_id("worker.a.example"), host_id("worker.b.example"));
         assert_eq!(host_id("homepc\n").as_deref(), Some("homepc"));
-        assert_eq!(host_id("Büro_PC.example.com").as_deref(), Some("b-ro-pc.example.com"));
+        assert_eq!(
+            host_id("Büro_PC.example.com").as_deref(),
+            Some("b-ro-pc.example.com")
+        );
         assert_eq!(host_id("  "), None);
         // the live hostname is readable here and already a valid id
-        let live = system_hostname().and_then(|h| host_id(&h)).expect("gethostname");
-        assert!(live.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));
+        let live = system_hostname()
+            .and_then(|h| host_id(&h))
+            .expect("gethostname");
+        assert!(
+            live.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+        );
     }
 
     #[cfg(unix)]
@@ -297,7 +371,10 @@ mod tests {
         let own = "S-1-5-21-1-2-3-1001";
         assert_eq!(same_sid(Ok(own.into()), own), Ok(()));
         let err = same_sid(Ok("S-1-5-21-1-2-3-1002".into()), own).unwrap_err();
-        assert!(err.contains("peer SID S-1-5-21-1-2-3-1002, daemon SID S-1-5-21-1-2-3-1001"), "{err}");
+        assert!(
+            err.contains("peer SID S-1-5-21-1-2-3-1002, daemon SID S-1-5-21-1-2-3-1001"),
+            "{err}"
+        );
         let err = same_sid(Err(std::io::Error::other("gone")), own).unwrap_err();
         assert!(err.contains("unreadable (gone)"), "{err}");
     }
@@ -322,21 +399,44 @@ mod tests {
 
     #[test]
     fn iso_dates_parse_back() {
-        for ms in [0, 1_755_228_303_063, 951_782_400_000, -86_400_000, 4_102_444_799_999] {
+        for ms in [
+            0,
+            1_755_228_303_063,
+            951_782_400_000,
+            -86_400_000,
+            4_102_444_799_999,
+        ] {
             assert_eq!(ms_from_iso(&iso_from_ms(ms)), Some(ms), "{ms}");
         }
         let t = ms_from_iso("2026-10-09T14:30:00Z").unwrap();
         assert_eq!(ms_from_iso("2026-10-09T16:30:00+02:00"), Some(t));
-        assert_eq!(ms_from_iso("2026-10-09T12:30:00-02:30"), Some(t + 30 * 60_000));
+        assert_eq!(
+            ms_from_iso("2026-10-09T12:30:00-02:30"),
+            Some(t + 30 * 60_000)
+        );
         assert_eq!(ms_from_iso("2026-10-09t14:30:00z"), Some(t));
         assert_eq!(ms_from_iso("2026-10-09 14:30:00Z"), Some(t));
-        assert_eq!(ms_from_iso("2026-10-09T14:30"), Some(t), "the minute listings print");
+        assert_eq!(
+            ms_from_iso("2026-10-09T14:30"),
+            Some(t),
+            "the minute listings print"
+        );
         assert_eq!(ms_from_iso("2026-10-09T14:30:00"), Some(t));
         assert_eq!(ms_from_iso("2026-10-09T14:30:00.5Z"), Some(t + 500));
         assert_eq!(ms_from_iso("2026-10-09T14:30:00.123456789Z"), Some(t + 123));
-        for bad in ["", "yesterday", "2026-10-09", "2026-13-01T00:00Z", "2026-02-29T00:00Z", "2026-10-09T24:00Z",
-                    "2026-10-09T14:30:00.Z", "2026-10-09T14:30:00+0200", "2026-10-09T14:30:00 Z", "2026-1-09T14:30Z",
-                    "2026-10-09T14:30:00Z junk"] {
+        for bad in [
+            "",
+            "yesterday",
+            "2026-10-09",
+            "2026-13-01T00:00Z",
+            "2026-02-29T00:00Z",
+            "2026-10-09T24:00Z",
+            "2026-10-09T14:30:00.Z",
+            "2026-10-09T14:30:00+0200",
+            "2026-10-09T14:30:00 Z",
+            "2026-1-09T14:30Z",
+            "2026-10-09T14:30:00Z junk",
+        ] {
             assert_eq!(ms_from_iso(bad), None, "{bad}");
         }
         assert_eq!(ms_from_iso("2024-02-29T00:00Z"), Some(1_709_164_800_000));
@@ -346,10 +446,16 @@ mod tests {
     fn after_is_a_cursor_or_a_time() {
         assert_eq!(parse_after("42"), Ok(After::cursor(42)));
         assert_eq!(parse_after(" 0 "), Ok(After::cursor(0)));
-        let time = After { cursor: 0, time: Some(1000) };
+        let time = After {
+            cursor: 0,
+            time: Some(1000),
+        };
         assert_eq!(parse_after("1970-01-01T00:00:01Z"), Ok(time));
         assert_eq!(time.wire(), "1970-01-01T00:00:01.000Z");
-        let token = After { cursor: 205, time: Some(1000) };
+        let token = After {
+            cursor: 205,
+            time: Some(1000),
+        };
         assert_eq!(token.wire(), "205@1970-01-01T00:00:01.000Z");
         assert_eq!(parse_after("205@1970-01-01T00:00:01.000Z"), Ok(token));
         assert_eq!(After::cursor(7).wire(), 7);
@@ -357,7 +463,10 @@ mod tests {
             assert!(parse_after(bad).is_err(), "{bad}");
         }
         let e = parse_after("yesterday").unwrap_err();
-        assert!(e.starts_with("'yesterday' is not a cursor") && e.contains("RFC 3339"), "{e}");
+        assert!(
+            e.starts_with("'yesterday' is not a cursor") && e.contains("RFC 3339"),
+            "{e}"
+        );
     }
 
     #[test]

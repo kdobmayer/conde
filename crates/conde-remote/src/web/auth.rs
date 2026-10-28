@@ -33,7 +33,10 @@ use super::ratelimit::ClientIp;
 use super::session::{
     self, WebError, digest, login_cookie, login_retry_cookie, random_token, removal, same_secret,
 };
-use super::{CliCode, CliIssued, Identity, Invite, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser, pages};
+use super::{
+    CliCode, CliIssued, Identity, Invite, LoginTxn, PASTE_TRIES, WebConfig, WebState, WebUser,
+    pages,
+};
 
 /// Discovery and JWKS are re-read after this long (and at once when a token's key is unknown).
 const METADATA_MAX_AGE: Duration = Duration::from_secs(3600);
@@ -171,7 +174,9 @@ fn exchange_failure<RE: std::error::Error + 'static, T: openidconnect::ErrorResp
     e: &openidconnect::RequestTokenError<RE, T>,
 ) -> String {
     match e {
-        openidconnect::RequestTokenError::Parse(parse, _) => format!("the token response does not parse: {parse}"),
+        openidconnect::RequestTokenError::Parse(parse, _) => {
+            format!("the token response does not parse: {parse}")
+        }
         other => format!("{other:?}"),
     }
 }
@@ -343,7 +348,11 @@ impl Oidc {
                 .map(|n| n.as_str().to_string()),
             preferred_username: upn.map(str::to_string),
             // only Entra's tenant-controlled UPN may stand in; elsewhere an unverified claim is not stored
-            email: if entra { lookup_email(upn, email) } else { verified.clone() },
+            email: if entra {
+                lookup_email(upn, email)
+            } else {
+                verified.clone()
+            },
             verified_email: verified,
         })
     }
@@ -514,7 +523,9 @@ pub(crate) async fn callback(
         let detail = q.error_description.unwrap_or(error);
         return Ok((
             jar,
-            WebError::Forbidden(format!("The identity provider refused the sign-in: {detail}")),
+            WebError::Forbidden(format!(
+                "The identity provider refused the sign-in: {detail}"
+            )),
         )
             .into_response());
     }
@@ -600,7 +611,11 @@ async fn stale(
 /// tenant controls), else the `email` claim, which Microsoft documents as mutable and unverified,
 /// only when the UPN is not an address.
 pub(crate) fn lookup_email(upn: Option<&str>, email: Option<&str>) -> Option<String> {
-    let address = |v: Option<&str>| v.map(str::trim).filter(|v| v.contains('@')).map(str::to_string);
+    let address = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| v.contains('@'))
+            .map(str::to_string)
+    };
     address(upn).or_else(|| address(email))
 }
 
@@ -612,7 +627,11 @@ pub(crate) fn verified_email(
     email: Option<&str>,
     email_verified: Option<bool>,
 ) -> Option<String> {
-    let address = |v: Option<&str>| v.map(str::trim).filter(|v| v.contains('@')).map(str::to_string);
+    let address = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| v.contains('@'))
+            .map(str::to_string)
+    };
     let upn = if entra { address(upn) } else { None };
     upn.or_else(|| address(email).filter(|_| email_verified == Some(true)))
 }
@@ -878,14 +897,20 @@ pub(crate) async fn cli_confirm(
     };
     let key = paste_key(&cli_state);
     let ttl = state.limits().cli_code_ttl;
-    match state.store(move |s| s.issue_cli_code(&key, &record, ttl)).await? {
+    match state
+        .store(move |s| s.issue_cli_code(&key, &record, ttl))
+        .await?
+    {
         CliIssued::Issued => {}
         CliIssued::Expired => {
-            return Err(WebError::BadRequest("This conde login expired. Run conde login again.".into()));
+            return Err(WebError::BadRequest(
+                "This conde login expired. Run conde login again.".into(),
+            ));
         }
         CliIssued::Theirs => {
             return Err(WebError::Forbidden(
-                "Another account already signed in for this conde login. Run conde login again.".into(),
+                "Another account already signed in for this conde login. Run conde login again."
+                    .into(),
             ));
         }
     }
@@ -932,7 +957,11 @@ fn redeem_error(status: StatusCode, code: &str, message: &str) -> Response {
 
 fn store_failed(e: super::WebStoreError) -> Response {
     tracing::error!(error = %e, "cli code store failed");
-    redeem_error(StatusCode::INTERNAL_SERVER_ERROR, "internal", "store failed")
+    redeem_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "store failed",
+    )
 }
 
 fn pkce_matches(verifier: String, challenge: &str) -> bool {
@@ -969,7 +998,11 @@ pub(crate) async fn cli_redeem(
 ) -> Response {
     if let Err(wait) = state.0.limits.cli_redeem(ip) {
         tracing::info!(client_ip = %ip, wait, endpoint = "cli redeem", "rate limited");
-        return redeem_limited(wait, format!("too many sign-in attempts from this address; retry in {wait} s"), false);
+        return redeem_limited(
+            wait,
+            format!("too many sign-in attempts from this address; retry in {wait} s"),
+            false,
+        );
     }
     let invalid = |m: &str| redeem_error(StatusCode::BAD_REQUEST, "invalid_grant", m);
     if req.code.len() != 64 {
@@ -1047,7 +1080,8 @@ async fn paste_redeem(state: WebState, req: RedeemRequest) -> Response {
     // The state is in the URL anyone may hold; the verifier never leaves the CLI's host. A
     // request without it is not this run's: the record goes back untouched, and neither the
     // per-code tries nor the account's budget is spent.
-    let right_run = same_secret(&req.state, &code.state) && pkce_matches(req.code_verifier.clone(), &code.challenge);
+    let right_run = same_secret(&req.state, &code.state)
+        && pkce_matches(req.code_verifier.clone(), &code.challenge);
     if !right_run {
         tracing::info!(user = %code.user_name, "conde login code redeem without this run's verifier");
         if let Err(e) = state.store(move |s| s.restore_cli_code(&key, &code)).await {
@@ -1174,61 +1208,113 @@ mod tests {
             "https://login.microsoftonline.com/2e51b484-b008-4fc0-8f70-555c1317b555/v2.0",
         ] {
             let e = same_issuer(other, realm).unwrap_err().to_string();
-            assert_eq!(e, format!("id token rejected: the id token's issuer '{other}' is not the configured issuer '{realm}'"));
+            assert_eq!(
+                e,
+                format!(
+                    "id token rejected: the id token's issuer '{other}' is not the configured issuer '{realm}'"
+                )
+            );
         }
     }
 
     #[test]
     fn a_token_response_that_does_not_parse_is_logged_without_its_body() {
-        let body = br#"{"access_token":"at-SECRET","id_token":"it-SECRET","token_type":7}"#.to_vec();
+        let body =
+            br#"{"access_token":"at-SECRET","id_token":"it-SECRET","token_type":7}"#.to_vec();
         let mut de = serde_json::Deserializer::from_slice(&body);
         let parse = serde_path_to_error::deserialize::<_, EntraTokenResponse>(&mut de).unwrap_err();
-        let e: openidconnect::RequestTokenError<HttpError, StandardErrorResponse<CoreErrorResponseType>> =
-            openidconnect::RequestTokenError::Parse(parse, body);
+        let e: openidconnect::RequestTokenError<
+            HttpError,
+            StandardErrorResponse<CoreErrorResponseType>,
+        > = openidconnect::RequestTokenError::Parse(parse, body);
         let shown = exchange_failure(&e);
-        assert!(shown.starts_with("the token response does not parse: token_type"), "{shown}");
-        assert!(!shown.contains("SECRET") && !shown.contains("[123, 34"), "{shown}");
+        assert!(
+            shown.starts_with("the token response does not parse: token_type"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("SECRET") && !shown.contains("[123, 34"),
+            "{shown}"
+        );
     }
 
     #[test]
     fn entra_binds_by_oid_and_any_other_issuer_by_sub() {
         const T: &str = "2e51b484-b008-4fc0-8f70-555c1317b555";
-        let subject = |tenant, tid, oid| binding_subject(tenant, "pairwise-sub", tid, oid).map_err(|e| e.to_string());
+        let subject = |tenant, tid, oid| {
+            binding_subject(tenant, "pairwise-sub", tid, oid).map_err(|e| e.to_string())
+        };
         // Entra: the oid, never the per-app sub; a migrated (tid, oid) row is (issuer, oid).
         assert_eq!(subject(Some(T), Some(T), Some("oid-1")), Ok("oid-1".into()));
         assert_eq!(subject(Some(T), None, Some("oid-1")), Ok("oid-1".into()));
         // another issuer's tid and oid are its own claims: the sub still keys it
-        assert_eq!(subject(None, Some(T), Some("oid-1")), Ok("pairwise-sub".into()));
+        assert_eq!(
+            subject(None, Some(T), Some("oid-1")),
+            Ok("pairwise-sub".into())
+        );
         // Keycloak (or any other issuer): the sub
         assert_eq!(subject(None, None, None), Ok("pairwise-sub".into()));
-        assert_eq!(subject(None, None, Some("oid-1")), Ok("pairwise-sub".into()), "oid alone is no Entra token");
+        assert_eq!(
+            subject(None, None, Some("oid-1")),
+            Ok("pairwise-sub".into()),
+            "oid alone is no Entra token"
+        );
         // refused: another tenant, or an Entra token without oid
         assert_eq!(
             subject(Some(T), Some("other-tenant"), Some("oid-1")),
-            Err(format!("id token rejected: the id token's tenant 'other-tenant' is not the configured tenant '{T}'"))
+            Err(format!(
+                "id token rejected: the id token's tenant 'other-tenant' is not the configured tenant '{T}'"
+            ))
         );
-        assert_eq!(subject(Some(T), Some(T), None), Err("id token rejected: the id token has no oid claim".into()));
+        assert_eq!(
+            subject(Some(T), Some(T), None),
+            Err("id token rejected: the id token has no oid claim".into())
+        );
     }
 
     #[test]
     fn the_verified_email_is_entras_upn_or_a_verified_email_claim() {
         // Entra: the UPN when it is an address; the email claim only when marked verified.
-        assert_eq!(verified_email(true, Some("k@dakai.io"), Some("x@y.io"), None).as_deref(), Some("k@dakai.io"));
-        assert_eq!(verified_email(true, Some("krisz"), Some("x@y.io"), None), None);
-        assert_eq!(verified_email(true, Some("krisz"), Some("x@y.io"), Some(true)).as_deref(), Some("x@y.io"));
+        assert_eq!(
+            verified_email(true, Some("k@dakai.io"), Some("x@y.io"), None).as_deref(),
+            Some("k@dakai.io")
+        );
+        assert_eq!(
+            verified_email(true, Some("krisz"), Some("x@y.io"), None),
+            None
+        );
+        assert_eq!(
+            verified_email(true, Some("krisz"), Some("x@y.io"), Some(true)).as_deref(),
+            Some("x@y.io")
+        );
         // Any other issuer: never the UPN, only a verified email claim.
         assert_eq!(verified_email(false, Some("k@dakai.io"), None, None), None);
-        assert_eq!(verified_email(false, Some("k@dakai.io"), Some("k@dakai.io"), Some(false)), None);
-        assert_eq!(verified_email(false, Some("krisz"), Some(" k@dakai.io "), Some(true)).as_deref(), Some("k@dakai.io"));
+        assert_eq!(
+            verified_email(false, Some("k@dakai.io"), Some("k@dakai.io"), Some(false)),
+            None
+        );
+        assert_eq!(
+            verified_email(false, Some("krisz"), Some(" k@dakai.io "), Some(true)).as_deref(),
+            Some("k@dakai.io")
+        );
         assert_eq!(verified_email(false, None, Some("krisz"), Some(true)), None);
         assert_eq!(masked("krisztian@dakai.io"), "k***@dakai.io");
     }
 
     #[test]
     fn the_lookup_email_is_the_upn_unless_it_is_no_address() {
-        assert_eq!(lookup_email(Some("k@dakai.io"), Some("other@x.io")).as_deref(), Some("k@dakai.io"));
-        assert_eq!(lookup_email(Some("krisz"), Some("other@x.io")).as_deref(), Some("other@x.io"));
-        assert_eq!(lookup_email(None, Some("other@x.io")).as_deref(), Some("other@x.io"));
+        assert_eq!(
+            lookup_email(Some("k@dakai.io"), Some("other@x.io")).as_deref(),
+            Some("k@dakai.io")
+        );
+        assert_eq!(
+            lookup_email(Some("krisz"), Some("other@x.io")).as_deref(),
+            Some("other@x.io")
+        );
+        assert_eq!(
+            lookup_email(None, Some("other@x.io")).as_deref(),
+            Some("other@x.io")
+        );
         assert_eq!(lookup_email(Some("krisz"), None), None);
     }
 

@@ -366,7 +366,13 @@ impl PublishArgs {
     fn choice(&self) -> Option<crate::setup::Publish> {
         use crate::setup::Publish;
         if let Some(names) = &self.publish {
-            return Some(Publish::Names(names.iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()));
+            return Some(Publish::Names(
+                names
+                    .iter()
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect(),
+            ));
         }
         if self.publish_candidates {
             Some(Publish::Candidates)
@@ -564,7 +570,9 @@ impl Session {
         if resp.ok {
             return resp.result.ok_or_else(|| anyhow!("empty result"));
         }
-        let err = resp.error.ok_or_else(|| anyhow!("error response without error"))?;
+        let err = resp
+            .error
+            .ok_or_else(|| anyhow!("error response without error"))?;
         match (&self.actor, err.code) {
             (Err(identity), ErrorCode::Unauthenticated) => bail!("{identity}"),
             _ => bail!("{}", err.message),
@@ -620,12 +628,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
     };
     match cli.cmd {
-        Cmd::Daemon { interval, once, server, v1_bridge, retry_backoff, idle_timeout } => {
+        Cmd::Daemon {
+            interval,
+            once,
+            server,
+            v1_bridge,
+            retry_backoff,
+            idle_timeout,
+        } => {
             no_board("daemon", "")?;
             // Task Scheduler gives the bridge a console window of its own: log to a file instead
             #[cfg(windows)]
             let _ = crate::win::detach_console(&paths::data_dir().join("conde.log"));
-            tracing_subscriber::fmt().with_writer(std::io::stderr).with_target(false).init();
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_target(false)
+                .init();
             let mut opts = daemon::Options::new(paths::data_dir(), paths::socket_path());
             opts.interval = Duration::from_secs_f64(interval.max(0.05));
             opts.once = once;
@@ -638,23 +656,54 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Server { listen, data } => {
             no_board("server", "")?;
-            tracing_subscriber::fmt().with_writer(std::io::stdout).with_target(false).init();
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stdout)
+                .with_target(false)
+                .init();
             admin::server(listen.as_deref(), data)?;
             return Ok(0);
         }
-        Cmd::Enroll { server, host, key_stdin } => {
+        Cmd::Enroll {
+            server,
+            host,
+            key_stdin,
+        } => {
             return admin::enroll(&server, host.as_deref(), cli.board.as_deref(), key_stdin);
         }
-        Cmd::Login { server, host, no_browser, code } => {
-            return crate::login::run(&server, host.as_deref(), cli.board.as_deref(), !no_browser, code.as_deref());
+        Cmd::Login {
+            server,
+            host,
+            no_browser,
+            code,
+        } => {
+            return crate::login::run(
+                &server,
+                host.as_deref(),
+                cli.board.as_deref(),
+                !no_browser,
+                code.as_deref(),
+            );
         }
         Cmd::Mcp => {
             no_board("mcp", "")?;
             crate::mcp::run(paths::socket_path())?;
             return Ok(0);
         }
-        Cmd::Setup { claude, codex, service, all, keep_receiver_policy, yes: _, check, default_board, publish } => {
-            no_board("setup", "; the host's default board is conde setup --default-board <alias>")?;
+        Cmd::Setup {
+            claude,
+            codex,
+            service,
+            all,
+            keep_receiver_policy,
+            yes: _,
+            check,
+            default_board,
+            publish,
+        } => {
+            no_board(
+                "setup",
+                "; the host's default board is conde setup --default-board <alias>",
+            )?;
             let opts = crate::setup::Options {
                 keep_receiver_policy,
                 default_board,
@@ -663,67 +712,154 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             };
             return setup(opts, check);
         }
-        Cmd::Boards { forget: None, migrate: Some(alias), publish } => {
+        Cmd::Boards {
+            forget: None,
+            migrate: Some(alias),
+            publish,
+        } => {
             no_board("boards --migrate", "")?;
             return boards_migrate(&alias, publish.choice());
         }
-        Cmd::Boards { migrate: None, publish, .. } if publish.choice().is_some() => {
-            bail!("the --publish flags choose what stays published at a switch: conde boards --migrate <alias> --publish-...")
+        Cmd::Boards {
+            migrate: None,
+            publish,
+            ..
+        } if publish.choice().is_some() => {
+            bail!(
+                "the --publish flags choose what stays published at a switch: conde boards --migrate <alias> --publish-..."
+            )
         }
-        Cmd::History { cmd: HistoryCmd::Inventory { extract, snapshot, out, source } } => {
+        Cmd::History {
+            cmd:
+                HistoryCmd::Inventory {
+                    extract,
+                    snapshot,
+                    out,
+                    source,
+                },
+        } => {
             no_board("history", "")?;
             return crate::history::inventory_main(&extract, &snapshot, &out, &source);
         }
-        Cmd::History { cmd: HistoryCmd::Copy { manifest, from_csv, db, skip_agents, credentials, verify_as, dry_run } } => {
+        Cmd::History {
+            cmd:
+                HistoryCmd::Copy {
+                    manifest,
+                    from_csv,
+                    db,
+                    skip_agents,
+                    credentials,
+                    verify_as,
+                    dry_run,
+                },
+        } => {
             no_board("history", "")?;
-            return crate::history::copy_main(&manifest, &from_csv, db, skip_agents.as_deref(), credentials, verify_as, dry_run);
+            return crate::history::copy_main(
+                &manifest,
+                &from_csv,
+                db,
+                skip_agents.as_deref(),
+                credentials,
+                verify_as,
+                dry_run,
+            );
         }
-        Cmd::History { cmd: HistoryCmd::PruneCandidates { snapshot, out } } => {
+        Cmd::History {
+            cmd: HistoryCmd::PruneCandidates { snapshot, out },
+        } => {
             no_board("history", "")?;
             return crate::history::prune_main(&snapshot, out.as_deref());
         }
-        Cmd::Admin { cmd: AdminCmd::Slack { owner, member_id, server } } => {
+        Cmd::Admin {
+            cmd:
+                AdminCmd::Slack {
+                    owner,
+                    member_id,
+                    server,
+                },
+        } => {
             no_board("admin", "")?;
             admin::require_human()?;
             return admin::slack(&server, &owner, &member_id);
         }
-        Cmd::Board { cmd: BoardCmd::Move { alias, url, trust_new_address } } => {
+        Cmd::Board {
+            cmd:
+                BoardCmd::Move {
+                    alias,
+                    url,
+                    trust_new_address,
+                },
+        } => {
             no_board("board move", "; name the board as the first argument")?;
             return admin::board_move(&alias, &url, trust_new_address);
         }
-        Cmd::Admin { cmd: AdminCmd::User { cmd } } => {
+        Cmd::Admin {
+            cmd: AdminCmd::User { cmd },
+        } => {
             no_board("admin", "")?;
             admin::require_human()?;
             return match cmd {
-                UserCmd::Invite { name, email, server } => admin::user_invite(&server, &name, &email),
+                UserCmd::Invite {
+                    name,
+                    email,
+                    server,
+                } => admin::user_invite(&server, &name, &email),
                 UserCmd::List { server } => admin::user_list(&server),
             };
         }
-        Cmd::Admin { cmd: AdminCmd::Key { cmd } } => {
+        Cmd::Admin {
+            cmd: AdminCmd::Key { cmd },
+        } => {
             no_board("admin", "")?;
             admin::require_human()?;
             return match cmd {
-                KeyCmd::Create { user, host, label, data } => admin::key_create(data, &user, &host, &label),
-                KeyCmd::Revoke { host, id, data } => admin::key_revoke(data, host.as_deref(), id.as_deref()),
+                KeyCmd::Create {
+                    user,
+                    host,
+                    label,
+                    data,
+                } => admin::key_create(data, &user, &host, &label),
+                KeyCmd::Revoke { host, id, data } => {
+                    admin::key_revoke(data, host.as_deref(), id.as_deref())
+                }
                 KeyCmd::List { data } => admin::key_list(data),
             };
         }
         _ => {}
     }
-    if let Cmd::Import { dry_run, owner, host, expect_files, skip_agents } = &cli.cmd {
+    if let Cmd::Import {
+        dry_run,
+        owner,
+        host,
+        expect_files,
+        skip_agents,
+    } = &cli.cmd
+    {
         no_board("import", "")?;
         // `--from` is the global flag here: the kond data directory to import.
-        let dir = cli.from.as_deref().ok_or_else(|| anyhow!("conde import needs --from <kond data dir>"))?;
-        return crate::import::main(Path::new(dir), *dry_run, owner.as_deref(), host.as_deref(), *expect_files, skip_agents.as_deref());
+        let dir = cli
+            .from
+            .as_deref()
+            .ok_or_else(|| anyhow!("conde import needs --from <kond data dir>"))?;
+        return crate::import::main(
+            Path::new(dir),
+            *dry_run,
+            owner.as_deref(),
+            host.as_deref(),
+            *expect_files,
+            skip_agents.as_deref(),
+        );
     }
     // register, unregister, rename, pin and unpin act on the local registry only (§3 rule 3)
     let local_only = match (&cli.cmd, cli.board.as_deref()) {
         (_, None | Some(LOCAL_BOARD)) => None,
         (Cmd::Register { name, .. }, Some(b)) => Some(surface::local_only("register", name, b)),
         (Cmd::Unregister { name, .. }, Some(b)) => Some(surface::local_only("unregister", name, b)),
-        (Cmd::Rename { first, second }, Some(b)) => {
-            Some(surface::local_only("rename", second.as_deref().unwrap_or(first), b))
-        }
+        (Cmd::Rename { first, second }, Some(b)) => Some(surface::local_only(
+            "rename",
+            second.as_deref().unwrap_or(first),
+            b,
+        )),
         (Cmd::Pin { name, .. }, Some(b)) => Some(surface::local_only("pin", name, b)),
         (Cmd::Unpin { name }, Some(b)) => Some(surface::local_only("unpin", name, b)),
         _ => None,
@@ -732,7 +868,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         bail!(refusal);
     }
     let flag = cli.board.clone();
-    let check_ref = |r: &str| surface::check_ref(Surface::Cli, flag.as_deref(), r).map_err(|e| anyhow!(e));
+    let check_ref =
+        |r: &str| surface::check_ref(Surface::Cli, flag.as_deref(), r).map_err(|e| anyhow!(e));
     let mut session = Session {
         client: Client::connect(&paths::socket_path())?,
         actor: derive_address(&Markers::from_env(), harness_ancestor),
@@ -753,17 +890,32 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             unreachable!()
         }
         Cmd::Import { .. } | Cmd::Mcp | Cmd::Setup { .. } => unreachable!(),
-        Cmd::Send { to, text, attach, reply_to } => {
+        Cmd::Send {
+            to,
+            text,
+            attach,
+            reply_to,
+        } => {
             let reply_to = reply_to.as_deref().map(check_ref).transpose()?;
-            let attachments = attach.iter().map(|p| encode_attachment(p)).collect::<anyhow::Result<Vec<_>>>()?;
-            let target = if to.starts_with('#') { json!({"channel": to}) } else { json!({"agent": to}) };
+            let attachments = attach
+                .iter()
+                .map(|p| encode_attachment(p))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let target = if to.starts_with('#') {
+                json!({"channel": to})
+            } else {
+                json!({"agent": to})
+            };
             let r = sx.call(
                 "message.send",
                 json!({"to": target, "text": text, "reply_to": reply_to, "attachments": attachments}),
             )?;
             println!("{}", surface::sent_line(&r));
         }
-        Cmd::Inbox { after } => print(surface::inbox(&sx.call("inbox.list", json!({"after": after}))?, Surface::Cli)),
+        Cmd::Inbox { after } => print(surface::inbox(
+            &sx.call("inbox.list", json!({"after": after}))?,
+            Surface::Cli,
+        )),
         Cmd::Read { target } => {
             let body = match &target {
                 Some(t) if t.starts_with('#') => json!({"channel": t}),
@@ -776,14 +928,21 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let id = check_ref(&id)?;
             let r = sx.call("message.get", json!({"id": id}))?;
             let mut out = String::new();
-            surface::message(&mut out, &r["message"], surface::result_board(&r), Surface::Cli);
+            surface::message(
+                &mut out,
+                &r["message"],
+                surface::result_board(&r),
+                Surface::Cli,
+            );
             print!("{out}");
         }
         Cmd::Attachment { id, out } => {
             let id = check_ref(&id)?;
             let r = sx.call("attachment.get", json!({"attachment_id": id}))?;
             let bytes = B64.decode(s(&r["data"])).context("attachment data")?;
-            let name = Path::new(s(&r["filename"])).file_name().ok_or_else(|| anyhow!("attachment has no usable filename"))?;
+            let name = Path::new(s(&r["filename"]))
+                .file_name()
+                .ok_or_else(|| anyhow!("attachment has no usable filename"))?;
             let path = out.join(name);
             if path.exists() {
                 bail!("{} already exists", path.display());
@@ -793,7 +952,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::React { id, emoji, remove } => {
             let id = check_ref(&id)?;
-            let board = flag.clone().unwrap_or_else(|| surface::ref_board(&id).to_string());
+            let board = flag
+                .clone()
+                .unwrap_or_else(|| surface::ref_board(&id).to_string());
             let present = if remove {
                 false
             } else {
@@ -804,10 +965,16 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .any(|r| s(&r["emoji"]) == emoji && r["by"].as_array().into_iter().flatten().any(|b| s(b) == me));
+                    .any(|r| {
+                        s(&r["emoji"]) == emoji
+                            && r["by"].as_array().into_iter().flatten().any(|b| s(b) == me)
+                    });
                 !mine
             };
-            let r = sx.call("reaction.set", json!({"message_id": id, "emoji": emoji, "present": present}))?;
+            let r = sx.call(
+                "reaction.set",
+                json!({"message_id": id, "emoji": emoji, "present": present}),
+            )?;
             if present {
                 println!("reacted {emoji} to {id} in {}", s(&r["place"]));
             } else {
@@ -816,13 +983,21 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Page { text, done } => {
             let kind = if done { "done" } else { "blocked" };
-            println!("{}", surface::paged(&sx.call("human.page", json!({"text": text, "kind": kind}))?));
+            println!(
+                "{}",
+                surface::paged(&sx.call("human.page", json!({"text": text, "kind": kind}))?)
+            );
         }
-        Cmd::Human { cmd: HumanCmd::DonePages { state } } => {
+        Cmd::Human {
+            cmd: HumanCmd::DonePages { state },
+        } => {
             let r = sx.call("human.done_pages", json!({"on": state == "on"}))?;
             println!("{}", surface::done_pages(&r));
         }
-        Cmd::Sent { after } => print(surface::sent(&sx.call("receipt.list", json!({"after": after}))?, Surface::Cli)),
+        Cmd::Sent { after } => print(surface::sent(
+            &sx.call("receipt.list", json!({"after": after}))?,
+            Surface::Cli,
+        )),
         Cmd::Create { channel } => {
             let r = sx.call("channel.create", json!({"channel": channel}))?;
             println!("created {} (you are a member)", s(&r["channel"]));
@@ -842,7 +1017,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Invite { name, channel } => {
             let r = sx.call("channel.invite", json!({"name": name, "channel": channel}))?;
             let post = surface::qualify(surface::result_board(&r), s(&r["message_id"]));
-            println!("invited {} to {} (join post {post})", s(&r["name"]), s(&r["channel"]));
+            println!(
+                "invited {} to {} (join post {post})",
+                s(&r["name"]),
+                s(&r["channel"])
+            );
         }
         Cmd::Topic { channel, text } => {
             let r = sx.call("channel.topic", json!({"channel": channel, "topic": text}))?;
@@ -871,7 +1050,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("{}", surface::registered(&r, &name));
         }
         Cmd::Unregister { name, if_address } => {
-            let r = sx.call("agent.unregister", json!({"name": name, "if_address": if_address}))?;
+            let r = sx.call(
+                "agent.unregister",
+                json!({"name": name, "if_address": if_address}),
+            )?;
             if r["was_registered"].as_bool() == Some(true) {
                 println!("unregistered {} ({})", s(&r["name"]), s(&r["address"]));
             } else {
@@ -883,7 +1065,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 Some(new) => (Some(first), new),
                 None => (None, first),
             };
-            println!("{}", surface::renamed(&sx.call("agent.rename", json!({"old": old, "new": new}))?));
+            println!(
+                "{}",
+                surface::renamed(&sx.call("agent.rename", json!({"old": old, "new": new}))?)
+            );
         }
         Cmd::Pin { name, address } => {
             let r = sx.call("agent.pin", json!({"name": name, "address": address}))?;
@@ -910,12 +1095,23 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             );
         }
         Cmd::Whoami => println!("{}", surface::whoami(&sx.call("agent.whoami", json!({}))?)),
-        Cmd::Search { pattern, target, after } => {
+        Cmd::Search {
+            pattern,
+            target,
+            after,
+        } => {
             let after = after.map(crate::util::After::wire);
-            let r = sx.call("search", json!({"pattern": pattern, "target": target, "after": after}))?;
+            let r = sx.call(
+                "search",
+                json!({"pattern": pattern, "target": target, "after": after}),
+            )?;
             print(surface::search(&r, Surface::Cli));
         }
-        Cmd::Watch { agent, channel, wide } => {
+        Cmd::Watch {
+            agent,
+            channel,
+            wide,
+        } => {
             // the local board unless --board names one; never the default board
             let board = flag.clone().unwrap_or_else(|| LOCAL_BOARD.to_string());
             let filter = |mut body: Value| {
@@ -951,9 +1147,20 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 body = filter(json!({"after": r["cursor"]}));
             }
         }
-        Cmd::Profile { name, set: Some(kv) } => {
-            let r = sx.call("profile.set", json!({"name": name, "key": kv[0], "value": kv[1]}))?;
-            println!("profile {}: {} = {}", s(&r["name"]), s(&r["key"]), r["value"].as_str().unwrap_or("(unset)"));
+        Cmd::Profile {
+            name,
+            set: Some(kv),
+        } => {
+            let r = sx.call(
+                "profile.set",
+                json!({"name": name, "key": kv[0], "value": kv[1]}),
+            )?;
+            println!(
+                "profile {}: {} = {}",
+                s(&r["name"]),
+                s(&r["key"]),
+                r["value"].as_str().unwrap_or("(unset)")
+            );
         }
         Cmd::Profile { name, set: None } => {
             let r = sx.call("profile.get", json!({"name": name}))?;
@@ -974,22 +1181,36 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 println!("pinned: {p}");
             }
         }
-        Cmd::Publish { agent, as_name, take } => {
-            let board = surface::publication_board(flag.as_deref(), "publish", Surface::Cli).map_err(|e| anyhow!(e))?;
-            let shared = as_name.unwrap_or_else(|| agent.rsplit('/').next().unwrap_or(&agent).to_string());
+        Cmd::Publish {
+            agent,
+            as_name,
+            take,
+        } => {
+            let board = surface::publication_board(flag.as_deref(), "publish", Surface::Cli)
+                .map_err(|e| anyhow!(e))?;
+            let shared =
+                as_name.unwrap_or_else(|| agent.rsplit('/').next().unwrap_or(&agent).to_string());
             let mut body = json!({"agent": agent, "name": shared});
             if take {
                 body["take"] = json!(true);
             }
             let r = sx.call(op::MAILBOX_PUBLISH, body)?;
-            println!("{}", surface::published(&r, &agent, board, &shared, Surface::Cli).map_err(|e| anyhow!(e))?);
+            println!(
+                "{}",
+                surface::published(&r, &agent, board, &shared, Surface::Cli)
+                    .map_err(|e| anyhow!(e))?
+            );
         }
         Cmd::Unpublish { agent } => {
-            let board = surface::publication_board(flag.as_deref(), "unpublish", Surface::Cli).map_err(|e| anyhow!(e))?;
+            let board = surface::publication_board(flag.as_deref(), "unpublish", Surface::Cli)
+                .map_err(|e| anyhow!(e))?;
             let r = sx.call(op::MAILBOX_UNPUBLISH, json!({"agent": agent}))?;
             println!("{}", surface::unpublished(&r, &agent, board));
         }
-        Cmd::Boards { forget: Some(alias), .. } => {
+        Cmd::Boards {
+            forget: Some(alias),
+            ..
+        } => {
             let r = sx.call_on(surface::BOARD_FORGET, Some(&alias), json!({}))?;
             println!(
                 "forgot {alias}: {} publications and {} operation records removed on this host; nothing changed on the server",
@@ -997,22 +1218,47 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 r["ops_removed"].as_u64().unwrap_or(0)
             );
             if r["default_reset"] == true {
-                println!("default board reset to {}", r["default"].as_str().unwrap_or(LOCAL_BOARD));
+                println!(
+                    "default board reset to {}",
+                    r["default"].as_str().unwrap_or(LOCAL_BOARD)
+                );
             }
         }
-        Cmd::Boards { forget: None, migrate: Some(_), .. } => unreachable!(),
-        Cmd::Boards { forget: None, migrate: None, .. } => {
+        Cmd::Boards {
+            forget: None,
+            migrate: Some(_),
+            ..
+        } => unreachable!(),
+        Cmd::Boards {
+            forget: None,
+            migrate: None,
+            ..
+        } => {
             let live = sx.call(surface::BOARD_LIST, json!({}));
             print!("{}", boards_listing(live)?);
         }
         Cmd::Doctor => {
             println!("conde {}", crate::VERSION);
             let r = sx.call("doctor", json!({}))?;
-            println!("ok      daemon: reachable at {}", paths::socket_path().display());
+            println!(
+                "ok      daemon: reachable at {}",
+                paths::socket_path().display()
+            );
             let (same_build, bridge) = surface::bridge_build(&r["build"]);
-            println!("{}{bridge}", if same_build { "ok      " } else { "ISSUE   " });
+            println!(
+                "{}{bridge}",
+                if same_build { "ok      " } else { "ISSUE   " }
+            );
             for c in r["checks"].as_array().into_iter().flatten() {
-                println!("{}{}", if c["ok"] == true { "ok      " } else { "ISSUE   " }, s(&c["text"]));
+                println!(
+                    "{}{}",
+                    if c["ok"] == true {
+                        "ok      "
+                    } else {
+                        "ISSUE   "
+                    },
+                    s(&c["text"])
+                );
             }
             let issues = r["issues"].as_i64().unwrap_or(0) + i64::from(!same_build);
             if issues == 0 {
@@ -1027,7 +1273,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
 /// This caller's name on `board`: the local name, or its publication's shared name.
 fn name_on(whoami: &Value, board: &str) -> String {
     if board != LOCAL_BOARD
-        && let Some(p) = whoami["publications"].as_array().into_iter().flatten().find(|p| s(&p["board"]) == board)
+        && let Some(p) = whoami["publications"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| s(&p["board"]) == board)
     {
         return s(&p["name"]).to_string();
     }
@@ -1042,12 +1292,24 @@ fn boards_listing(live: anyhow::Result<Value>) -> anyhow::Result<String> {
         Ok(r) => (r["boards"].as_array().cloned().unwrap_or_default(), None),
         Err(e) => (Vec::new(), Some(format!("state unknown ({e:#})"))),
     };
-    let row = |alias: &str| rows.iter().find(|r| s(&r["board"]) == alias).cloned().unwrap_or(Value::Null);
+    let row = |alias: &str| {
+        rows.iter()
+            .find(|r| s(&r["board"]) == alias)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
     let mark = |alias: &str| if alias == default { "\tdefault" } else { "" };
     let mut out = String::new();
     let local = row(LOCAL_BOARD);
-    let agents = local["agents"].as_u64().map(|n| format!("\t{n} agents")).unwrap_or_default();
-    out.push_str(&format!("local\t{}{agents}{}\n", paths::data_dir().join("conde.db").display(), mark(LOCAL_BOARD)));
+    let agents = local["agents"]
+        .as_u64()
+        .map(|n| format!("\t{n} agents"))
+        .unwrap_or_default();
+    out.push_str(&format!(
+        "local\t{}{agents}{}\n",
+        paths::data_dir().join("conde.db").display(),
+        mark(LOCAL_BOARD)
+    ));
     for alias in boards::enrolled()? {
         let cfg = match boards::load(&boards::path(&alias)?) {
             Ok(c) => c,
@@ -1057,7 +1319,11 @@ fn boards_listing(live: anyhow::Result<Value>) -> anyhow::Result<String> {
             }
         };
         let r = row(&alias);
-        let state = r["state"].as_str().map(str::to_string).or_else(|| why.clone()).unwrap_or_else(|| "state unknown".into());
+        let state = r["state"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| why.clone())
+            .unwrap_or_else(|| "state unknown".into());
         let published: Vec<String> = r["published"]
             .as_array()
             .into_iter()
@@ -1074,8 +1340,17 @@ fn boards_listing(live: anyhow::Result<Value>) -> anyhow::Result<String> {
                 item
             })
             .collect();
-        let published = if published.is_empty() { String::new() } else { format!("\tpublished: {}", published.join(", ")) };
-        out.push_str(&format!("{alias}\t{}\thost {}\t{state}{published}{}\n", cfg.server, cfg.host_id, mark(&alias)));
+        let published = if published.is_empty() {
+            String::new()
+        } else {
+            format!("\tpublished: {}", published.join(", "))
+        };
+        out.push_str(&format!(
+            "{alias}\t{}\thost {}\t{state}{published}{}\n",
+            cfg.server,
+            cfg.host_id,
+            mark(&alias)
+        ));
     }
     Ok(out)
 }
@@ -1083,7 +1358,14 @@ fn boards_listing(live: anyhow::Result<Value>) -> anyhow::Result<String> {
 /// `conde boards --migrate <alias>`: the review `conde setup` runs, for one board.
 fn boards_migrate(alias: &str, publish: Option<crate::setup::Publish>) -> anyhow::Result<i32> {
     let env = crate::setup::Env::from_process()?;
-    let ok = crate::setup::migrate_review(&env, &mut crate::setup::System, &mut std::io::stdout(), alias, true, publish.as_ref())?;
+    let ok = crate::setup::migrate_review(
+        &env,
+        &mut crate::setup::System,
+        &mut std::io::stdout(),
+        alias,
+        true,
+        publish.as_ref(),
+    )?;
     Ok(i32::from(!ok))
 }
 
@@ -1104,14 +1386,22 @@ fn setup(mut opts: crate::setup::Options, check: bool) -> anyhow::Result<i32> {
 }
 
 fn encode_attachment(path: &Path) -> anyhow::Result<Value> {
-    let meta = std::fs::metadata(path).with_context(|| format!("attachment not found: {}", path.display()))?;
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("attachment not found: {}", path.display()))?;
     if !meta.is_file() {
         bail!("attachment is not a file: {}", path.display());
     }
     if meta.len() > MAX_ATTACHMENT as u64 {
-        bail!("attachment {} is {} bytes; the limit is {MAX_ATTACHMENT}", path.display(), meta.len());
+        bail!(
+            "attachment {} is {} bytes; the limit is {MAX_ATTACHMENT}",
+            path.display(),
+            meta.len()
+        );
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(json!({"filename": name, "data": B64.encode(bytes)}))
 }

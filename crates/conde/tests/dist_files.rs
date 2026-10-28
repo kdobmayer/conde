@@ -18,23 +18,41 @@ fn install_ps1_installs_the_released_binary_for_this_user() {
     assert!(INSTALL_PS1.contains("checksum mismatch for $name; nothing installed"));
     assert!(INSTALL_PS1.contains("SHA256SUMS has no line for $name; nothing installed"));
     // the user PATH, edited with its value kind kept; never the machine's
-    assert!(INSTALL_PS1.contains("[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)"));
+    assert!(
+        INSTALL_PS1
+            .contains("[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)")
+    );
     assert!(INSTALL_PS1.contains("DoNotExpandEnvironmentNames"));
     assert!(!INSTALL_PS1.contains("'Machine'"));
     // `irm | iex` runs it in the caller's shell: one script block, and no exit
-    let code: Vec<&str> =
-        INSTALL_PS1.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+    let code: Vec<&str> = INSTALL_PS1
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
     assert_eq!((code.first(), code.last()), (Some(&"& {"), Some(&"}")));
-    assert!(!code.iter().flat_map(|l| l.split_whitespace()).any(|w| w.eq_ignore_ascii_case("exit")));
+    assert!(
+        !code
+            .iter()
+            .flat_map(|l| l.split_whitespace())
+            .any(|w| w.eq_ignore_ascii_case("exit"))
+    );
 }
 
 #[test]
 fn the_release_publishes_the_installer_but_builds_no_windows_binary() {
-    for needle in ["needs: [web, macos, linux]", "cp dist/install.ps1 out/install.ps1", "-n install.ps1 -f out/install.ps1"] {
+    for needle in [
+        "needs: [web, macos, linux]",
+        "cp dist/install.ps1 out/install.ps1",
+        "-n install.ps1 -f out/install.ps1",
+    ] {
         assert!(RELEASE.contains(needle), "release.yml lacks {needle:?}");
     }
     for needle in ["windows-latest", "x86_64-pc-windows-msvc", "conde-windows-"] {
-        assert!(!RELEASE.contains(needle), "release.yml still has {needle:?}");
+        assert!(
+            !RELEASE.contains(needle),
+            "release.yml still has {needle:?}"
+        );
     }
 }
 
@@ -54,9 +72,16 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
     let release = |version: &str| {
         let fake = format!("#!/bin/sh\necho 'conde 0.1.0 ({version} 2026-10-14)'\n");
         std::fs::write(release_dir.join(name), &fake).unwrap();
-        std::fs::set_permissions(release_dir.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            release_dir.join(name),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         use sha2::Digest;
-        let sum: String = sha2::Sha256::digest(fake.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        let sum: String = sha2::Sha256::digest(fake.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         std::fs::write(release_dir.join("SHA256SUMS"), format!("{sum}  {name}\n")).unwrap();
         std::fs::write(dist.join("latest"), "v0.1.0\n").unwrap();
     };
@@ -68,7 +93,10 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
         runs.set(runs.get() + 1);
         let mark = format!("{}#{}", root.path().display(), runs.get());
         let mut child = std::process::Command::new("bash")
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/install.sh"))
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../dist/install.sh"
+            ))
             .env("CONDE_DIST_BASE_URL", format!("file://{}", dist.display()))
             .env("CONDE_INSTALL_DIR", &bin)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -101,7 +129,11 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
             panic!("the installer left processes behind: {left:?}");
         }
         let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8(out.stdout).unwrap()
     };
     let old = |script: &str, mode: u32| {
@@ -112,9 +144,21 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
 
     release("aaaaaaa");
     let first = install();
-    assert!(first.contains(&format!("installed {}/conde (conde 0.1.0 (aaaaaaa 2026-10-14))", bin.display())), "{first}");
-    assert!(first.contains("\nNext:\n  conde setup") && first.contains("conde login --server"), "{first}");
-    assert!(!first.contains("replaced") && !first.contains("an upgrade"), "{first}");
+    assert!(
+        first.contains(&format!(
+            "installed {}/conde (conde 0.1.0 (aaaaaaa 2026-10-14))",
+            bin.display()
+        )),
+        "{first}"
+    );
+    assert!(
+        first.contains("\nNext:\n  conde setup") && first.contains("conde login --server"),
+        "{first}"
+    );
+    assert!(
+        !first.contains("replaced") && !first.contains("an upgrade"),
+        "{first}"
+    );
 
     release("bbbbbbb");
     let second = install();
@@ -125,28 +169,70 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
         )),
         "{second}"
     );
-    assert!(second.contains("Next (an upgrade; your enrollment and names stay as they are, no sign-in):"), "{second}");
-    assert!(second.contains("\n  conde setup ") && second.contains("\n  conde doctor "), "{second}");
-    assert!(!second.contains("conde login"), "no sign-in on an upgrade: {second}");
+    assert!(
+        second
+            .contains("Next (an upgrade; your enrollment and names stay as they are, no sign-in):"),
+        "{second}"
+    );
+    assert!(
+        second.contains("\n  conde setup ") && second.contains("\n  conde doctor "),
+        "{second}"
+    );
+    assert!(
+        !second.contains("conde login"),
+        "no sign-in on an upgrade: {second}"
+    );
     // the old binary answered at once: install() found its watchdog gone with its sleep
 
     // An old binary that never answers: its probe is cut off after 5 s, the upgrade goes on,
     // and nothing it started is left behind (install() checks; the pid file shows it ran).
     let probe = root.path().join("probe.pid");
-    old(&format!("#!/bin/sh\necho $$ >'{}'\nexec sleep 120\n", probe.display()), 0o755);
+    old(
+        &format!(
+            "#!/bin/sh\necho $$ >'{}'\nexec sleep 120\n",
+            probe.display()
+        ),
+        0o755,
+    );
     let t = std::time::Instant::now();
     let hung = install();
-    assert!(std::fs::read_to_string(&probe).unwrap().trim().parse::<i32>().is_ok(), "the probe ran");
-    assert!(t.elapsed() < std::time::Duration::from_secs(15), "{:?}", t.elapsed());
-    assert!(hung.contains(&format!("replaced {}/conde (unknown version) with conde 0.1.0 (bbbbbbb 2026-10-14)", bin.display())), "{hung}");
+    assert!(
+        std::fs::read_to_string(&probe)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .is_ok(),
+        "the probe ran"
+    );
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(15),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(
+        hung.contains(&format!(
+            "replaced {}/conde (unknown version) with conde 0.1.0 (bbbbbbb 2026-10-14)",
+            bin.display()
+        )),
+        "{hung}"
+    );
     assert!(hung.contains("Next (an upgrade;"), "{hung}");
 
     // A silent or non-executable old conde is still an upgrade, of an unknown version.
     for (script, mode) in [("#!/bin/sh\nexit 0\n", 0o755), ("not a program\n", 0o644)] {
         old(script, mode);
         let out = install();
-        assert!(out.contains(&format!("replaced {}/conde (unknown version) with", bin.display())), "{mode:o}: {out}");
-        assert!(out.contains("Next (an upgrade;") && !out.contains("conde login"), "{mode:o}: {out}");
+        assert!(
+            out.contains(&format!(
+                "replaced {}/conde (unknown version) with",
+                bin.display()
+            )),
+            "{mode:o}: {out}"
+        );
+        assert!(
+            out.contains("Next (an upgrade;") && !out.contains("conde login"),
+            "{mode:o}: {out}"
+        );
     }
 }
 
@@ -164,7 +250,9 @@ fn kill(procs: &[(i32, String)]) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn marked(mark: &str) -> Vec<(i32, String)> {
     let needle = format!("{RUN_MARK}={mark}");
-    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
     dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|pid| {
             // unreadable (another user's) or a zombie (an empty environment): not this run's
@@ -173,7 +261,13 @@ fn marked(mark: &str) -> Vec<(i32, String)> {
         })
         .map(|pid| {
             let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            (pid, String::from_utf8_lossy(&cmd).replace('\0', " ").trim().to_string())
+            (
+                pid,
+                String::from_utf8_lossy(&cmd)
+                    .replace('\0', " ")
+                    .trim()
+                    .to_string(),
+            )
         })
         .collect()
 }

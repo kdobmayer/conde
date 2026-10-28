@@ -13,7 +13,10 @@ pub fn create_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
     }
     #[cfg(windows)]
     {
@@ -35,7 +38,11 @@ pub fn create_file(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
     }
     #[cfg(windows)]
     {
@@ -61,7 +68,11 @@ pub fn check(path: &Path) -> anyhow::Result<()> {
     if let Some(m) = crate::credentials::mode(path)
         && m & 0o077 != 0
     {
-        anyhow::bail!("{} has mode {m:03o}; it holds a secret, make it 0600 (chmod 600 {})", path.display(), path.display());
+        anyhow::bail!(
+            "{} has mode {m:03o}; it holds a secret, make it 0600 (chmod 600 {})",
+            path.display(),
+            path.display()
+        );
     }
     #[cfg(windows)]
     match foreign(path) {
@@ -83,7 +94,10 @@ pub fn doctor(path: &Path) -> (bool, String) {
     {
         match crate::credentials::mode(path) {
             Some(0o600) => (true, format!("credentials: {} mode 600", path.display())),
-            Some(m) => (false, format!("credentials: {} mode {m:03o}, expected 600", path.display())),
+            Some(m) => (
+                false,
+                format!("credentials: {} mode {m:03o}, expected 600", path.display()),
+            ),
             None => (false, format!("credentials: {} missing", path.display())),
         }
     }
@@ -93,9 +107,25 @@ pub fn doctor(path: &Path) -> (bool, String) {
             return (false, format!("credentials: {} missing", path.display()));
         }
         match foreign(path) {
-            Ok(others) if others.is_empty() => (true, format!("credentials: {} readable by this user only", path.display())),
-            Ok(others) => (false, format!("credentials: {} also readable by {}", path.display(), others.join(", "))),
-            Err(e) => (false, format!("credentials: {} permissions unreadable: {e}", path.display())),
+            Ok(others) if others.is_empty() => (
+                true,
+                format!("credentials: {} readable by this user only", path.display()),
+            ),
+            Ok(others) => (
+                false,
+                format!(
+                    "credentials: {} also readable by {}",
+                    path.display(),
+                    others.join(", ")
+                ),
+            ),
+            Err(e) => (
+                false,
+                format!(
+                    "credentials: {} permissions unreadable: {e}",
+                    path.display()
+                ),
+            ),
         }
     }
 }

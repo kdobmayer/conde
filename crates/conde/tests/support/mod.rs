@@ -42,13 +42,26 @@ impl Host {
         // Short paths: unix socket paths are limited to 107 bytes.
         let ulid = conde::util::new_ulid();
         let root = std::env::temp_dir().join(format!("cde-{}", &ulid[14..]));
-        for d in ["bin", "nopath", "claude/sessions", "cc", "codex", "config", "run"] {
+        for d in [
+            "bin",
+            "nopath",
+            "claude/sessions",
+            "cc",
+            "codex",
+            "config",
+            "run",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         for harness in ["codex", "claude"] {
             std::os::unix::fs::symlink("/bin/sh", root.join("bin").join(harness)).unwrap();
         }
-        Host { root, user: user.into(), host: host.into(), daemons: Vec::new() }
+        Host {
+            root,
+            user: user.into(),
+            host: host.into(),
+            daemons: Vec::new(),
+        }
     }
 
     pub fn sock(&self) -> PathBuf {
@@ -84,7 +97,11 @@ impl Host {
         self.daemons.push(child);
         let deadline = Instant::now() + WAIT;
         while UnixStream::connect(sock).is_err() {
-            assert!(Instant::now() < deadline, "daemon did not come up: {}", self.log(log));
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not come up: {}",
+                self.log(log)
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         pid
@@ -95,23 +112,38 @@ impl Host {
     }
 
     pub fn wait_log(&self, name: &str, needle: &str) {
-        wait_for(&format!("{needle:?} in {name}"), || self.log(name).contains(needle).then_some(()));
+        wait_for(&format!("{needle:?} in {name}"), || {
+            self.log(name).contains(needle).then_some(())
+        });
     }
 
     /// The exit status of a daemon this host started, once it exits.
     pub fn wait_exit(&mut self, pid: u32) -> ExitStatus {
-        let child = self.daemons.iter_mut().find(|c| c.id() == pid).expect("our daemon");
+        let child = self
+            .daemons
+            .iter_mut()
+            .find(|c| c.id() == pid)
+            .expect("our daemon");
         wait_for("daemon exit", || child.try_wait().unwrap())
     }
 
     pub fn terminate(&mut self, pid: u32) -> ExitStatus {
-        assert!(self.daemons.iter().any(|c| c.id() == pid), "only our own children are signalled");
+        assert!(
+            self.daemons.iter().any(|c| c.id() == pid),
+            "only our own children are signalled"
+        );
         unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         self.wait_exit(pid)
     }
 
     /// Run the CLI, optionally beneath a fake harness process.
-    pub fn conde(&self, harness: Option<&str>, env: &[(&str, &str)], args: &[&str], stdin: Option<&str>) -> Output {
+    pub fn conde(
+        &self,
+        harness: Option<&str>,
+        env: &[(&str, &str)],
+        args: &[&str],
+        stdin: Option<&str>,
+    ) -> Output {
         let mut cmd = match harness {
             Some(h) => {
                 let mut c = Command::new(self.root.join("bin").join(h));
@@ -125,8 +157,18 @@ impl Host {
         match stdin {
             None => cmd.stdin(Stdio::null()).output().unwrap(),
             Some(input) => {
-                let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-                child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+                let mut child = cmd
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(input.as_bytes())
+                    .unwrap();
                 child.wait_with_output().unwrap()
             }
         }
@@ -134,12 +176,22 @@ impl Host {
 
     pub fn ok(&self, harness: Option<&str>, env: &[(&str, &str)], args: &[&str]) -> String {
         let out = self.conde(harness, env, args, None);
-        assert!(out.status.success(), "conde {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "conde {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8(out.stdout).unwrap()
     }
 
     /// Like `ok`, against the daemon listening on `sock`.
-    pub fn ok_at(&self, sock: &Path, harness: Option<&str>, env: &[(&str, &str)], args: &[&str]) -> String {
+    pub fn ok_at(
+        &self,
+        sock: &Path,
+        harness: Option<&str>,
+        env: &[(&str, &str)],
+        args: &[&str],
+    ) -> String {
         let sock = sock.to_str().unwrap();
         let mut env = env.to_vec();
         env.push(("CONDE_SOCK", sock));
@@ -149,13 +201,24 @@ impl Host {
     /// `conde sent` as `actor`, the line for message `id`.
     pub fn sent_line(&self, harness: &str, env: &[(&str, &str)], id: &str) -> String {
         // `<board>  <id>  <to>  <status>...`
-        self.ok(Some(harness), env, &["sent"]).lines().find(|l| l.split("  ").nth(1) == Some(id)).unwrap_or_default().to_string()
+        self.ok(Some(harness), env, &["sent"])
+            .lines()
+            .find(|l| l.split("  ").nth(1) == Some(id))
+            .unwrap_or_default()
+            .to_string()
     }
 
-    pub fn wait_delivery(&self, harness: &str, env: &[(&str, &str)], id: &str, state: &str) -> String {
+    pub fn wait_delivery(
+        &self,
+        harness: &str,
+        env: &[(&str, &str)],
+        id: &str,
+        state: &str,
+    ) -> String {
         wait_for(&format!("delivery {state} of {id}"), || {
             let line = self.sent_line(harness, env, id);
-            line.ends_with(&format!("delivery: {state}")).then_some(line)
+            line.ends_with(&format!("delivery: {state}"))
+                .then_some(line)
         })
     }
 }
@@ -206,7 +269,11 @@ pub struct FakeClaude {
 
 fn proc_start() -> String {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
-    stat[stat.rfind(')').unwrap() + 2..].split_whitespace().nth(19).unwrap().to_string()
+    stat[stat.rfind(')').unwrap() + 2..]
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_string()
 }
 
 fn decode_uds(addr: &str) -> PathBuf {
@@ -214,7 +281,9 @@ fn decode_uds(addr: &str) -> PathBuf {
     let (mut out, mut i) = (Vec::new(), 0);
     while i < raw.len() {
         if raw[i] == b'%' {
-            out.push(u8::from_str_radix(std::str::from_utf8(&raw[i + 1..i + 3]).unwrap(), 16).unwrap());
+            out.push(
+                u8::from_str_radix(std::str::from_utf8(&raw[i + 1..i + 3]).unwrap(), 16).unwrap(),
+            );
             i += 3;
         } else {
             out.push(raw[i]);
@@ -231,14 +300,22 @@ impl FakeClaude {
         let pid = std::process::id();
         let info = json!({"pid": pid, "sessionId": session_id, "name": session_id, "status": "idle",
             "procStart": proc_start(), "messagingSocketPath": sock, "cwd": host.root});
-        std::fs::write(host.root.join(format!("claude/sessions/{pid}.json")), info.to_string()).unwrap();
-        let fake = FakeClaude { frames: Arc::default(), plans: Arc::default() };
+        std::fs::write(
+            host.root.join(format!("claude/sessions/{pid}.json")),
+            info.to_string(),
+        )
+        .unwrap();
+        let fake = FakeClaude {
+            frames: Arc::default(),
+            plans: Arc::default(),
+        };
         let (frames, plans) = (fake.frames.clone(), fake.plans.clone());
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { return };
                 conn.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                let lines: Vec<String> = BufReader::new(conn).lines().map_while(Result::ok).collect();
+                let lines: Vec<String> =
+                    BufReader::new(conn).lines().map_while(Result::ok).collect();
                 let Some(last) = lines.last() else { continue };
                 let f: Value = serde_json::from_str(last).unwrap();
                 let frame = Frame {
@@ -250,7 +327,10 @@ impl FakeClaude {
                 let steps = {
                     let mut frames = frames.lock().unwrap();
                     let key = frame.message_id().unwrap_or_default();
-                    let nth = frames.iter().filter(|x| x.message_id().unwrap_or_default() == key).count();
+                    let nth = frames
+                        .iter()
+                        .filter(|x| x.message_id().unwrap_or_default() == key)
+                        .count();
                     frames.push(frame.clone());
                     let mut p = plans.lock().unwrap();
                     if !p.1.contains_key(&key) {
@@ -283,7 +363,13 @@ impl FakeClaude {
     }
 
     pub fn frames_for(&self, message_id: &str) -> Vec<Frame> {
-        self.frames.lock().unwrap().iter().filter(|f| f.message_id().as_deref() == Some(message_id)).cloned().collect()
+        self.frames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| f.message_id().as_deref() == Some(message_id))
+            .cloned()
+            .collect()
     }
 
     pub fn wait_frames(&self, message_id: &str, n: usize) -> Vec<Frame> {

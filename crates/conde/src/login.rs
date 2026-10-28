@@ -58,14 +58,23 @@ impl std::fmt::Debug for Enrolled {
 }
 
 fn is_loopback(host: &str) -> bool {
-    let name = host.rsplit_once(':').filter(|(h, p)| !h.is_empty() && p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+    let name = host
+        .rsplit_once(':')
+        .filter(|(h, p)| !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        .map_or(host, |(h, _)| h);
     matches!(name, "127.0.0.1" | "localhost" | "[::1]")
 }
 
 /// The server's web origin: `https://host[:port]`. Plain http only to a loopback server.
 pub fn origin(server: &str) -> anyhow::Result<String> {
-    let (scheme, rest) = server.split_once("://").with_context(|| format!("'{server}' is not a URL (https://host)"))?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    let (scheme, rest) = server
+        .split_once("://")
+        .with_context(|| format!("'{server}' is not a URL (https://host)"))?;
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if authority.is_empty() || authority.contains('@') {
         bail!("'{server}' has no usable host");
     }
@@ -91,34 +100,59 @@ impl Run {
         let state: String = bytes[..32].iter().map(|b| format!("{b:02x}")).collect();
         let verifier = URL_SAFE_NO_PAD.encode(&bytes[32..]);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        Ok(Run { state, verifier, challenge })
+        Ok(Run {
+            state,
+            verifier,
+            challenge,
+        })
     }
 }
 
 fn getrandom(buf: &mut [u8]) -> anyhow::Result<()> {
     use std::io::Read;
-    std::fs::File::open("/dev/urandom")?.read_exact(buf).context("reading /dev/urandom")
+    std::fs::File::open("/dev/urandom")?
+        .read_exact(buf)
+        .context("reading /dev/urandom")
 }
 
 /// Signs in through the browser and redeems the code. `open` is handed the sign-in URL.
-pub async fn sign_in(server: &str, host: &str, open: impl FnOnce(&str), wait: Duration) -> anyhow::Result<Enrolled> {
+pub async fn sign_in(
+    server: &str,
+    host: &str,
+    open: impl FnOnce(&str),
+    wait: Duration,
+) -> anyhow::Result<Enrolled> {
     let origin = origin(server)?;
     let run = Run::new()?;
-    let listener = TcpListener::bind("127.0.0.1:0").await.context("opening the loopback listener")?;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("opening the loopback listener")?;
     let port = listener.local_addr()?.port();
-    let url = format!("{origin}/auth/cli?port={port}&state={}&challenge={}", run.state, run.challenge);
+    let url = format!(
+        "{origin}/auth/cli?port={port}&state={}&challenge={}",
+        run.state, run.challenge
+    );
     open(&url);
     let code = wait_for_code(&listener, &run.state, Instant::now() + wait).await?;
     drop(listener);
     redeem(&origin, &run, &code, host).await
 }
 
-async fn wait_for_code(listener: &TcpListener, state: &str, deadline: Instant) -> anyhow::Result<String> {
+async fn wait_for_code(
+    listener: &TcpListener,
+    state: &str,
+    deadline: Instant,
+) -> anyhow::Result<String> {
     loop {
         let (mut sock, _) = timeout_at(deadline, listener.accept())
             .await
-            .map_err(|_| anyhow::anyhow!("the browser did not finish the sign-in in time; run conde login again"))??;
-        let Ok(Ok(target)) = timeout(Duration::from_secs(5), request_target(&mut sock)).await else {
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the browser did not finish the sign-in in time; run conde login again"
+                )
+            })??;
+        let Ok(Ok(target)) = timeout(Duration::from_secs(5), request_target(&mut sock)).await
+        else {
             continue;
         };
         let (path, query) = target.split_once('?').unwrap_or((&target, ""));
@@ -126,17 +160,41 @@ async fn wait_for_code(listener: &TcpListener, state: &str, deadline: Instant) -
             respond(&mut sock, "404 Not Found", "Not found.").await;
             continue;
         }
-        let param = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        let param = |name: &str| {
+            query
+                .split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v)
+        };
         if param("state") != Some(state) {
-            respond(&mut sock, "400 Bad Request", "This sign-in belongs to another conde login run.").await;
+            respond(
+                &mut sock,
+                "400 Bad Request",
+                "This sign-in belongs to another conde login run.",
+            )
+            .await;
             continue;
         }
-        match param("code").filter(|c| c.len() == 64 && c.chars().all(|ch| ch.is_ascii_hexdigit())) {
+        match param("code").filter(|c| c.len() == 64 && c.chars().all(|ch| ch.is_ascii_hexdigit()))
+        {
             Some(code) => {
-                respond(&mut sock, "200 OK", "Signed in. You can close this tab and return to the terminal.").await;
+                respond(
+                    &mut sock,
+                    "200 OK",
+                    "Signed in. You can close this tab and return to the terminal.",
+                )
+                .await;
                 return Ok(code.to_string());
             }
-            None => respond(&mut sock, "400 Bad Request", "The sign-in response has no code.").await,
+            None => {
+                respond(
+                    &mut sock,
+                    "400 Bad Request",
+                    "The sign-in response has no code.",
+                )
+                .await
+            }
         }
     }
 }
@@ -152,7 +210,11 @@ async fn request_target(sock: &mut TcpStream) -> anyhow::Result<String> {
         }
         head.extend_from_slice(&buf[..n]);
     }
-    let line = String::from_utf8_lossy(&head).lines().next().unwrap_or_default().to_string();
+    let line = String::from_utf8_lossy(&head)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
     match line.split(' ').collect::<Vec<_>>()[..] {
         ["GET", target, version] if version.starts_with("HTTP/1.") => Ok(target.to_string()),
         _ => bail!("not a GET request"),
@@ -180,10 +242,12 @@ pub(crate) fn tls() -> anyhow::Result<rustls::ClientConfig> {
     if roots.is_empty() {
         bail!("no CA certificates found in the system bundle (install ca-certificates)");
     }
-    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()?
-        .with_root_certificates(roots)
-        .with_no_client_auth())
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_no_client_auth())
 }
 
 /// A redeem the server refused: its error code and message; on a 429, how long to wait and
@@ -224,8 +288,17 @@ async fn post_redeem(origin: &str, body: Value) -> anyhow::Result<Result<Enrolle
             login_expires_first: detail["login_expires_first"] == true,
         }));
     }
-    let enrolled: Enrolled = response.json().await.context("the server's redeem answer is not a host key")?;
-    if enrolled.key.is_empty() || enrolled.key.chars().any(|c| c.is_whitespace() || c.is_control()) || enrolled.host_id.is_empty() {
+    let enrolled: Enrolled = response
+        .json()
+        .await
+        .context("the server's redeem answer is not a host key")?;
+    if enrolled.key.is_empty()
+        || enrolled
+            .key
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        || enrolled.host_id.is_empty()
+    {
         bail!("the server's redeem answer is not a host key");
     }
     Ok(Ok(enrolled))
@@ -237,12 +310,17 @@ pub const LIMITED_WAIT: Duration = Duration::from_secs(60);
 /// Redeems the loopback's code. A 429 (the per-address limit, checked before the code is taken)
 /// is waited out and retried while the waits add up to at most [`LIMITED_WAIT`].
 async fn redeem(origin: &str, run: &Run, code: &str, host: &str) -> anyhow::Result<Enrolled> {
-    let body = json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": host});
+    let body =
+        json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": host});
     let mut waited = 0;
     loop {
         match post_redeem(origin, body.clone()).await? {
             Ok(enrolled) => return Ok(enrolled),
-            Err(r) if r.error == "rate_limited" && r.retry_after.is_some_and(|w| waited + w <= LIMITED_WAIT.as_secs()) => {
+            Err(r)
+                if r.error == "rate_limited"
+                    && r.retry_after
+                        .is_some_and(|w| waited + w <= LIMITED_WAIT.as_secs()) =>
+            {
                 let wait = r.retry_after.unwrap_or_default().max(1);
                 eprintln!("{}; retrying in {wait} s", r.message);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
@@ -266,19 +344,30 @@ pub struct Pending {
 
 impl std::fmt::Debug for Pending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pending").field("server", &self.server).field("started_at", &self.started_at).finish_non_exhaustive()
+        f.debug_struct("Pending")
+            .field("server", &self.server)
+            .field("started_at", &self.started_at)
+            .finish_non_exhaustive()
     }
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 /// Where a pasted-code login for `server` waits: `$XDG_CONFIG_HOME/conde/login/<digest>.json`.
 pub fn pending_path(server: &str) -> anyhow::Result<std::path::PathBuf> {
     let origin = origin(server)?;
-    let name: String = Sha256::digest(origin.as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect();
-    Ok(boards::config_dir()?.join("login").join(format!("{name}.json")))
+    let name: String = Sha256::digest(origin.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok(boards::config_dir()?
+        .join("login")
+        .join(format!("{name}.json")))
 }
 
 /// Starts a pasted-code login: stores the run at `path` (mode 0600) and returns the URL the
@@ -286,7 +375,12 @@ pub fn pending_path(server: &str) -> anyhow::Result<std::path::PathBuf> {
 pub fn start_code(server: &str, path: &std::path::Path) -> anyhow::Result<String> {
     let origin = origin(server)?;
     let run = Run::new()?;
-    let pending = Pending { server: origin.clone(), state: run.state.clone(), verifier: run.verifier, started_at: unix_now() };
+    let pending = Pending {
+        server: origin.clone(),
+        state: run.state.clone(),
+        verifier: run.verifier,
+        started_at: unix_now(),
+    };
     let dir = path.parent().context("the login path has no directory")?;
     crate::private::create_dir(dir)?;
     let tmp = dir.join(format!(".login.{}", std::process::id()));
@@ -295,7 +389,10 @@ pub fn start_code(server: &str, path: &std::path::Path) -> anyhow::Result<String
     std::io::Write::write_all(&mut f, serde_json::to_string(&pending)?.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
-    Ok(format!("{origin}/auth/cli?mode=code&state={}&challenge={}", run.state, run.challenge))
+    Ok(format!(
+        "{origin}/auth/cli?mode=code&state={}&challenge={}",
+        run.state, run.challenge
+    ))
 }
 
 /// The login waiting at `path` for `server`, if it is still fresh.
@@ -304,11 +401,15 @@ fn load_pending(server: &str, path: &std::path::Path) -> anyhow::Result<Pending>
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("no conde login is waiting for a code from {} on this host; {start}", origin(server)?)
+            bail!(
+                "no conde login is waiting for a code from {} on this host; {start}",
+                origin(server)?
+            )
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let pending: Pending = serde_json::from_slice(&raw).with_context(|| format!("{} is not a conde login", path.display()))?;
+    let pending: Pending = serde_json::from_slice(&raw)
+        .with_context(|| format!("{} is not a conde login", path.display()))?;
     if pending.server != origin(server)? {
         bail!("{} belongs to {}; {start}", path.display(), pending.server);
     }
@@ -330,7 +431,12 @@ pub enum CodeOutcome {
 /// Redeems `typed` for the login waiting at `path`. The waiting login is removed once the
 /// server is done with it (enrolled, expired, out of tries, or rate-limited past its expiry); a
 /// wrong or mistyped code, or any other refusal, keeps it.
-pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host: &str) -> anyhow::Result<CodeOutcome> {
+pub async fn finish_code(
+    server: &str,
+    path: &std::path::Path,
+    typed: &str,
+    host: &str,
+) -> anyhow::Result<CodeOutcome> {
     let pending = load_pending(server, path)?;
     let code = match code_typed(typed) {
         Ok(code) => code,
@@ -347,7 +453,10 @@ pub async fn finish_code(server: &str, path: &std::path::Path, typed: &str, host
             let _ = std::fs::remove_file(path);
             bail!("the server refused the sign-in: {}", r.message)
         }
-        Err(r) if ["invalid_code", "authorization_pending", "rate_limited"].contains(&r.error.as_str()) => {
+        Err(r)
+            if ["invalid_code", "authorization_pending", "rate_limited"]
+                .contains(&r.error.as_str()) =>
+        {
             Ok(CodeOutcome::Retry(r.message))
         }
         Err(r) => {
@@ -365,13 +474,22 @@ const FINAL: &[&str] = &["invalid_grant", "host_taken", "disabled"];
 
 /// A typed code in canonical form, or why it cannot be one (case, spaces and dashes are free).
 fn code_typed(typed: &str) -> Result<String, String> {
-    let code: String = typed.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_uppercase()).collect();
-    let alphabet = format!("a sign-in code has 8 characters from {CODE_ALPHABET} (there is no 0/O, 1/I/L or U)");
+    let code: String = typed
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let alphabet = format!(
+        "a sign-in code has 8 characters from {CODE_ALPHABET} (there is no 0/O, 1/I/L or U)"
+    );
     if let Some(bad) = code.chars().find(|c| !CODE_ALPHABET.contains(*c)) {
         return Err(format!("'{bad}' is not in a sign-in code: {alphabet}"));
     }
     if code.chars().count() != 8 {
-        return Err(format!("that is {} characters: {alphabet}", code.chars().count()));
+        return Err(format!(
+            "that is {} characters: {alphabet}",
+            code.chars().count()
+        ));
     }
     Ok(code)
 }
@@ -383,12 +501,20 @@ pub fn headless(os_is_linux: bool, display: Option<&str>, wayland: Option<&str>)
 }
 
 /// The pasted-code login: `code` is what `--code` carried (empty: start one).
-fn code_login(server: &str, host: &str, finish_hint: &str, code: &str, runtime: &tokio::runtime::Runtime) -> anyhow::Result<Option<Enrolled>> {
+fn code_login(
+    server: &str,
+    host: &str,
+    finish_hint: &str,
+    code: &str,
+    runtime: &tokio::runtime::Runtime,
+) -> anyhow::Result<Option<Enrolled>> {
     let path = pending_path(server)?;
     if !code.is_empty() {
         return match runtime.block_on(finish_code(server, &path, code, host))? {
             CodeOutcome::Enrolled(e) => Ok(Some(e)),
-            CodeOutcome::Retry(why) => bail!("{why}; run again with the code the page shows: {finish_hint}"),
+            CodeOutcome::Retry(why) => {
+                bail!("{why}; run again with the code the page shows: {finish_hint}")
+            }
         };
     }
     if let Ok(earlier) = load_pending(server, &path) {
@@ -398,13 +524,18 @@ fn code_login(server: &str, host: &str, finish_hint: &str, code: &str, runtime: 
         );
     }
     let url = start_code(server, &path)?;
-    eprintln!("Open this URL in a browser on any device and sign in:\n\n  {url}\n\nThe page then shows a one-time sign-in code.");
+    eprintln!(
+        "Open this URL in a browser on any device and sign in:\n\n  {url}\n\nThe page then shows a one-time sign-in code."
+    );
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!("When you have it, finish with:\n\n  {finish_hint}\n");
         return Ok(None);
     }
     loop {
-        let typed = crate::credentials::prompt_secret("Sign-in code: ", "conde login needs a terminal for the code prompt")?;
+        let typed = crate::credentials::prompt_secret(
+            "Sign-in code: ",
+            "conde login needs a terminal for the code prompt",
+        )?;
         if typed.is_empty() {
             eprintln!("No code entered. To finish later: {finish_hint}");
             return Ok(None);
@@ -419,7 +550,11 @@ fn code_login(server: &str, host: &str, finish_hint: &str, code: &str, runtime: 
 /// Opens `url` in the desktop browser; the URL is printed first for headless use.
 fn open_browser(url: &str) {
     eprintln!("Opening the browser to sign in. If it does not open, visit:\n\n  {url}\n");
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     let spawned = std::process::Command::new(opener)
         .arg(url)
         .stdin(std::process::Stdio::null())
@@ -437,7 +572,13 @@ pub const PENDING: i32 = 3;
 
 /// `conde login --server <url> [--host <id>] [--board <alias>] [--no-browser] [--code [<CODE>]]`.
 /// `code`: None without `--code`, empty for a bare `--code`.
-pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool, code: Option<&str>) -> anyhow::Result<i32> {
+pub fn run(
+    server: &str,
+    host: Option<&str>,
+    board: Option<&str>,
+    browser: bool,
+    code: Option<&str>,
+) -> anyhow::Result<i32> {
     origin(server)?;
     if let Some(alias) = board {
         boards::check_shared_alias(alias)?;
@@ -451,8 +592,12 @@ pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool,
             std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
         );
     let given_host = host;
-    let host = host.map(str::to_lowercase).unwrap_or_else(crate::util::local_host);
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let host = host
+        .map(str::to_lowercase)
+        .unwrap_or_else(crate::util::local_host);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let enrolled = if paste {
         let mut hint = format!("conde login --server {server}");
         if let Some(h) = given_host {
@@ -479,13 +624,28 @@ pub fn run(server: &str, host: Option<&str>, board: Option<&str>, browser: bool,
     let cfg = save(&path, &alias, server, &enrolled)?;
     println!("signed in as {}", enrolled.user);
     let bridge = crate::admin::reload_bridge(&crate::paths::socket_path(), &alias);
-    print!("{}", crate::admin::enrolled_text(&alias, &cfg, &path, enrolled.reenrolled, enrolled.replaced, &bridge));
+    print!(
+        "{}",
+        crate::admin::enrolled_text(
+            &alias,
+            &cfg,
+            &path,
+            enrolled.reenrolled,
+            enrolled.replaced,
+            &bridge
+        )
+    );
     Ok(0)
 }
 
 /// Stores the key as the board file `alias` (account: the signed-in user), refusing to
 /// retarget a pinned alias.
-pub fn save(path: &std::path::Path, alias: &str, server: &str, enrolled: &Enrolled) -> anyhow::Result<BoardConfig> {
+pub fn save(
+    path: &std::path::Path,
+    alias: &str,
+    server: &str,
+    enrolled: &Enrolled,
+) -> anyhow::Result<BoardConfig> {
     let cfg = BoardConfig {
         server: server.to_string(),
         host_id: enrolled.host_id.clone(),
@@ -502,9 +662,18 @@ mod tests {
 
     #[test]
     fn origins() {
-        assert_eq!(origin("https://Conde.nativeai.space/").unwrap(), "https://conde.nativeai.space");
-        assert_eq!(origin("wss://conde.nativeai.space/v1/bridge").unwrap(), "https://conde.nativeai.space");
-        assert_eq!(origin("http://127.0.0.1:8080").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(
+            origin("https://Conde.nativeai.space/").unwrap(),
+            "https://conde.nativeai.space"
+        );
+        assert_eq!(
+            origin("wss://conde.nativeai.space/v1/bridge").unwrap(),
+            "https://conde.nativeai.space"
+        );
+        assert_eq!(
+            origin("http://127.0.0.1:8080").unwrap(),
+            "http://127.0.0.1:8080"
+        );
         assert!(origin("http://conde.nativeai.space").is_err());
         assert!(origin("http://127.0.0.1.evil.example").is_err());
         assert!(origin("https://user@host").is_err());
@@ -516,6 +685,9 @@ mod tests {
         let run = Run::new().unwrap();
         assert_eq!(run.state.len(), 64);
         assert_eq!(run.verifier.len(), 43);
-        assert_eq!(run.challenge, URL_SAFE_NO_PAD.encode(Sha256::digest(run.verifier.as_bytes())));
+        assert_eq!(
+            run.challenge,
+            URL_SAFE_NO_PAD.encode(Sha256::digest(run.verifier.as_bytes()))
+        );
     }
 }

@@ -68,7 +68,9 @@ pub enum IdentityError {
          refusing to act as the human"
     )]
     UnknownAncestry,
-    #[error("cannot determine identity: no CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / USER in environment")]
+    #[error(
+        "cannot determine identity: no CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / USER in environment"
+    )]
     NoMarkers,
 }
 
@@ -109,7 +111,9 @@ pub fn derive_address<A: Into<Ancestry>>(
     }
     if let Some(session) = &m.claude_session {
         return match ancestor() {
-            Ancestry::Harness(Harness::Codex) => Err(IdentityError::InheritedClaudeMarker(Harness::Codex.as_str())),
+            Ancestry::Harness(Harness::Codex) => Err(IdentityError::InheritedClaudeMarker(
+                Harness::Codex.as_str(),
+            )),
             _ => Ok(format!("claude:{session}")),
         };
     }
@@ -142,7 +146,9 @@ pub trait ProcessTable {
 pub fn walk(table: &impl ProcessTable, start: u32) -> Ancestry {
     let mut pid = start;
     for _ in 0..64 {
-        let Some(entry) = table.entry(pid) else { return Ancestry::Unknown };
+        let Some(entry) = table.entry(pid) else {
+            return Ancestry::Unknown;
+        };
         if let Some(h) = entry.names.iter().find_map(|n| Harness::from_program(n)) {
             return Ancestry::Harness(h);
         }
@@ -164,7 +170,11 @@ pub fn harness_ancestor() -> Ancestry {
     {
         match crate::win::process_snapshot() {
             Ok(rows) => walk(
-                &WindowsTable { rows, created: conde_transport::win::process_created, cmdline: crate::win::command_line },
+                &WindowsTable {
+                    rows,
+                    created: conde_transport::win::process_created,
+                    cmdline: crate::win::command_line,
+                },
                 std::process::id(),
             ),
             Err(_) => Ancestry::Unknown,
@@ -195,9 +205,17 @@ impl ProcessTable for SystemTable {
 fn linux_entry(stat: &str, cmdline: Option<&[u8]>) -> Option<ProcEntry> {
     let (open, close) = (stat.find('(')?, stat.rfind(')')?);
     let comm = stat.get(open + 1..close)?.to_string();
-    let ppid = stat.get(close + 2..)?.split_whitespace().nth(1)?.parse().ok()?;
+    let ppid = stat
+        .get(close + 2..)?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
     let mut names = Vec::new();
-    if let Some(argv0) = cmdline.and_then(|raw| raw.split(|b| *b == 0).next()).filter(|a| !a.is_empty()) {
+    if let Some(argv0) = cmdline
+        .and_then(|raw| raw.split(|b| *b == 0).next())
+        .filter(|a| !a.is_empty())
+    {
         names.push(String::from_utf8_lossy(argv0).into_owned());
     }
     names.push(comm);
@@ -227,15 +245,25 @@ impl<C: Fn(u32) -> Option<u64>, L: Fn(u32) -> Option<String>> ProcessTable for W
                 (Some(p), Some(c)) => p <= c,
                 _ => true,
             };
-        Some(windows_entry(if parent { *ppid } else { 0 }, image, (self.cmdline)(pid).as_deref()))
+        Some(windows_entry(
+            if parent { *ppid } else { 0 },
+            image,
+            (self.cmdline)(pid).as_deref(),
+        ))
     }
 }
 
 /// A file name without directories or a `.exe` suffix, lowercased (`claude`).
 #[cfg(any(windows, test))]
 fn windows_program(path: &str) -> String {
-    let base = path.rsplit(['\\', '/']).next().unwrap_or(path).to_lowercase();
-    base.strip_suffix(".exe").map(str::to_string).unwrap_or(base)
+    let base = path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path)
+        .to_lowercase();
+    base.strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(base)
 }
 
 /// The first word of a command line, quoted or not.
@@ -256,12 +284,18 @@ fn windows_argv0(cmdline: &str) -> Option<&str> {
 fn windows_entry(ppid: u32, image: &str, cmdline: Option<&str>) -> ProcEntry {
     let mut names = vec![windows_program(image)];
     if let Some(line) = cmdline {
-        if let Some(argv0) = windows_argv0(line).map(windows_program).filter(|a| !names.contains(a)) {
+        if let Some(argv0) = windows_argv0(line)
+            .map(windows_program)
+            .filter(|a| !names.contains(a))
+        {
             names.push(argv0);
         }
         if names.iter().any(|n| n == "node" || n == "bun") {
             let line = line.to_lowercase().replace('\\', "/");
-            for (package, harness) in [("/@anthropic-ai/claude-code/", "claude"), ("/@openai/codex/", "codex")] {
+            for (package, harness) in [
+                ("/@anthropic-ai/claude-code/", "claude"),
+                ("/@openai/codex/", "codex"),
+            ] {
                 if line.contains(package) {
                     names.push(harness.to_string());
                 }
@@ -283,7 +317,13 @@ impl ProcessTable for SystemTable {
         let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
         let got = unsafe {
-            libc::proc_pidinfo(pid, libc::PROC_PIDT_SHORTBSDINFO, 0, (&raw mut info).cast::<c_void>(), size)
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                (&raw mut info).cast::<c_void>(),
+                size,
+            )
         };
         if got != size {
             return None;
@@ -291,7 +331,9 @@ impl ProcessTable for SystemTable {
         let comm: Vec<u8> = info.pbsi_comm.iter().map(|c| *c as u8).collect();
 
         let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast::<c_void>(), path.len() as u32) };
+        let n = unsafe {
+            libc::proc_pidpath(pid, path.as_mut_ptr().cast::<c_void>(), path.len() as u32)
+        };
         let path = (n > 0).then(|| String::from_utf8_lossy(&path[..n as usize]).into_owned());
 
         // argv0 (KERN_PROCARGS2) names a harness started through a symlink
@@ -301,12 +343,26 @@ impl ProcessTable for SystemTable {
         let mut len: libc::size_t = 0;
         let mut args = Vec::new();
         let sized = unsafe {
-            libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0)
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
         };
         if sized == 0 && len > 0 {
             args.resize(len, 0);
             let ok = unsafe {
-                libc::sysctl(mib.as_mut_ptr(), 3, args.as_mut_ptr().cast::<c_void>(), &mut len, std::ptr::null_mut(), 0)
+                libc::sysctl(
+                    mib.as_mut_ptr(),
+                    3,
+                    args.as_mut_ptr().cast::<c_void>(),
+                    &mut len,
+                    std::ptr::null_mut(),
+                    0,
+                )
             };
             args.truncate(if ok == 0 { len } else { 0 });
         }
@@ -369,8 +425,14 @@ mod tests {
     fn codex_is_authoritative_outside_claude() {
         let m = markers(Some("t1"), Some("s1"), Some("me"));
         assert_eq!(derive_address(&m, || CODEX).unwrap(), "codex:t1");
-        assert_eq!(derive_address(&m, || Ancestry::NoHarness).unwrap(), "codex:t1");
-        assert_eq!(derive_address(&m, || Ancestry::Unknown).unwrap(), "codex:t1");
+        assert_eq!(
+            derive_address(&m, || Ancestry::NoHarness).unwrap(),
+            "codex:t1"
+        );
+        assert_eq!(
+            derive_address(&m, || Ancestry::Unknown).unwrap(),
+            "codex:t1"
+        );
     }
 
     #[test]
@@ -382,15 +444,27 @@ mod tests {
     #[test]
     fn claude_with_only_inherited_codex_never_becomes_human() {
         let m = markers(Some("t1"), None, Some("me"));
-        assert_eq!(derive_address(&m, || CLAUDE), Err(IdentityError::UnderHarness("claude")));
+        assert_eq!(
+            derive_address(&m, || CLAUDE),
+            Err(IdentityError::UnderHarness("claude"))
+        );
     }
 
     #[test]
     fn markerless_shell_under_harness_refuses_human() {
         let m = markers(None, None, Some("me"));
-        assert_eq!(derive_address(&m, || CODEX), Err(IdentityError::UnderHarness("codex")));
-        assert_eq!(derive_address(&m, || Ancestry::NoHarness).unwrap(), "human:me");
-        assert_eq!(derive_address(&markers(None, None, None), || Ancestry::NoHarness), Err(IdentityError::NoMarkers));
+        assert_eq!(
+            derive_address(&m, || CODEX),
+            Err(IdentityError::UnderHarness("codex"))
+        );
+        assert_eq!(
+            derive_address(&m, || Ancestry::NoHarness).unwrap(),
+            "human:me"
+        );
+        assert_eq!(
+            derive_address(&markers(None, None, None), || Ancestry::NoHarness),
+            Err(IdentityError::NoMarkers)
+        );
     }
 
     #[test]
@@ -398,23 +472,38 @@ mod tests {
         let m = markers(None, None, Some("me"));
         let err = derive_address(&m, || Ancestry::Unknown).unwrap_err();
         assert_eq!(err, IdentityError::UnknownAncestry);
-        assert!(err.to_string().contains("cannot determine the process ancestry; refusing to act as the human"));
+        assert!(
+            err.to_string()
+                .contains("cannot determine the process ancestry; refusing to act as the human")
+        );
         // an Option-only caller with no harness known is Unknown, not "no harness"
-        assert_eq!(derive_address(&m, || None::<Harness>), Err(IdentityError::UnknownAncestry));
+        assert_eq!(
+            derive_address(&m, || None::<Harness>),
+            Err(IdentityError::UnknownAncestry)
+        );
     }
 
     #[test]
     fn claude_marker_counts_unless_the_nearest_harness_is_codex() {
         let m = markers(None, Some("s1"), Some("me"));
         assert_eq!(derive_address(&m, || CLAUDE).unwrap(), "claude:s1");
-        assert_eq!(derive_address(&m, || Ancestry::NoHarness).unwrap(), "claude:s1");
-        assert_eq!(derive_address(&m, || Ancestry::Unknown).unwrap(), "claude:s1");
+        assert_eq!(
+            derive_address(&m, || Ancestry::NoHarness).unwrap(),
+            "claude:s1"
+        );
+        assert_eq!(
+            derive_address(&m, || Ancestry::Unknown).unwrap(),
+            "claude:s1"
+        );
     }
 
     #[test]
     fn codex_child_never_inherits_the_parent_claude_identity() {
         let m = markers(None, Some("parent"), Some("me"));
-        assert_eq!(derive_address(&m, || CODEX), Err(IdentityError::InheritedClaudeMarker("codex")));
+        assert_eq!(
+            derive_address(&m, || CODEX),
+            Err(IdentityError::InheritedClaudeMarker("codex"))
+        );
     }
 
     struct Fake(HashMap<u32, ProcEntry>);
@@ -468,14 +557,26 @@ mod tests {
         // path name the version, argv0 names the harness
         let t = darwin_table(&[
             (500, 300, "conde", None, vec![]),
-            (300, 1, "2.1.77", Some("/Users/k/.local/share/claude/versions/2.1.77"), procargs2(
-                "/Users/k/.local/share/claude/versions/2.1.77",
-                &["claude", "--resume"],
-            )),
+            (
+                300,
+                1,
+                "2.1.77",
+                Some("/Users/k/.local/share/claude/versions/2.1.77"),
+                procargs2(
+                    "/Users/k/.local/share/claude/versions/2.1.77",
+                    &["claude", "--resume"],
+                ),
+            ),
         ]);
         assert_eq!(walk(&t, 500), CLAUDE);
         // comm truncated to 16 chars: the full path still decides
-        let t = darwin_table(&[(500, 1, "a-very-long-name-xx", Some("/usr/local/bin/codex"), vec![])]);
+        let t = darwin_table(&[(
+            500,
+            1,
+            "a-very-long-name-xx",
+            Some("/usr/local/bin/codex"),
+            vec![],
+        )]);
         assert_eq!(walk(&t, 500), CODEX);
     }
 
@@ -484,7 +585,13 @@ mod tests {
         // Terminal -> login (root, no argv readable) -> zsh -> conde
         let t = darwin_table(&[
             (500, 400, "conde", None, vec![]),
-            (400, 350, "zsh", Some("/bin/zsh"), procargs2("/bin/zsh", &["-zsh"])),
+            (
+                400,
+                350,
+                "zsh",
+                Some("/bin/zsh"),
+                procargs2("/bin/zsh", &["-zsh"]),
+            ),
             (350, 1, "login", Some("/usr/bin/login"), vec![]),
         ]);
         assert_eq!(walk(&t, 500), Ancestry::NoHarness);
@@ -495,7 +602,10 @@ mod tests {
 
     #[test]
     fn darwin_argv0_parsing() {
-        assert_eq!(darwin_argv0(&procargs2("/x/y", &["codex", "exec"])).as_deref(), Some("codex"));
+        assert_eq!(
+            darwin_argv0(&procargs2("/x/y", &["codex", "exec"])).as_deref(),
+            Some("codex")
+        );
         assert_eq!(darwin_argv0(&procargs2("/x/y", &[])), None);
         assert_eq!(darwin_argv0(&[1, 0]), None);
         assert_eq!(darwin_argv0(&[]), None);
@@ -503,7 +613,11 @@ mod tests {
 
     #[test]
     fn linux_entries_from_proc_files() {
-        let e = linux_entry("123 (my (odd) comm) S 77 1 1 0", Some(b"/home/k/.local/bin/claude\0--x\0")).unwrap();
+        let e = linux_entry(
+            "123 (my (odd) comm) S 77 1 1 0",
+            Some(b"/home/k/.local/bin/claude\0--x\0"),
+        )
+        .unwrap();
         assert_eq!(e.ppid, 77);
         assert_eq!(e.names, ["/home/k/.local/bin/claude", "my (odd) comm"]);
         assert_eq!(linux_entry("garbage", None), None);
@@ -526,20 +640,37 @@ mod tests {
         cmdlines: &'static [(u32, &'static str)],
     ) -> WindowsTable<impl Fn(u32) -> Option<u64>, impl Fn(u32) -> Option<String>> {
         WindowsTable {
-            rows: rows.iter().map(|(pid, ppid, image)| (*pid, (*ppid, image.to_string()))).collect(),
+            rows: rows
+                .iter()
+                .map(|(pid, ppid, image)| (*pid, (*ppid, image.to_string())))
+                .collect(),
             created: move |pid| created.iter().find(|(p, _)| *p == pid).map(|(_, t)| *t),
-            cmdline: move |pid| cmdlines.iter().find(|(p, _)| *p == pid).map(|(_, c)| c.to_string()),
+            cmdline: move |pid| {
+                cmdlines
+                    .iter()
+                    .find(|(p, _)| *p == pid)
+                    .map(|(_, c)| c.to_string())
+            },
         }
     }
 
     #[test]
     fn windows_walk_finds_the_harness_and_ends_at_an_exited_parent() {
         // conde <- pwsh <- claude <- explorer, whose parent (userinit) exited long ago
-        let rows = [(40, 30, "conde.exe"), (30, 20, "pwsh.exe"), (20, 10, "claude.exe"), (10, 6, "explorer.exe")];
+        let rows = [
+            (40, 30, "conde.exe"),
+            (30, 20, "pwsh.exe"),
+            (20, 10, "claude.exe"),
+            (10, 6, "explorer.exe"),
+        ];
         let t = windows_table(&rows, &[(40, 400), (30, 300), (20, 200), (10, 100)], &[]);
         assert_eq!(walk(&t, 40), CLAUDE);
         // a shell straight under explorer: no harness, and the dead parent is the root, not unknown
-        let rows = [(40, 30, "conde.exe"), (30, 10, "pwsh.exe"), (10, 6, "explorer.exe")];
+        let rows = [
+            (40, 30, "conde.exe"),
+            (30, 10, "pwsh.exe"),
+            (10, 6, "explorer.exe"),
+        ];
         let t = windows_table(&rows, &[(40, 400), (30, 300), (10, 100)], &[]);
         assert_eq!(walk(&t, 40), Ancestry::NoHarness);
         assert_eq!(t.entry(10).unwrap().ppid, 0);
@@ -548,7 +679,11 @@ mod tests {
     #[test]
     fn windows_walk_stops_at_a_reused_parent_pid() {
         // the shell's real parent exited and its pid now belongs to a younger codex
-        let rows = [(40, 30, "conde.exe"), (30, 20, "cmd.exe"), (20, 1, "codex.exe")];
+        let rows = [
+            (40, 30, "conde.exe"),
+            (30, 20, "cmd.exe"),
+            (20, 1, "codex.exe"),
+        ];
         let t = windows_table(&rows, &[(40, 400), (30, 300), (20, 350)], &[]);
         assert_eq!(walk(&t, 40), Ancestry::NoHarness);
         // unreadable creation times (a protected process) keep the link
@@ -560,14 +695,26 @@ mod tests {
 
     #[test]
     fn windows_names_cover_npm_installs() {
-        let e = windows_entry(5, "Codex.EXE", Some(r#""C:\Users\k\AppData\Local\codex\codex.exe" app-server"#));
+        let e = windows_entry(
+            5,
+            "Codex.EXE",
+            Some(r#""C:\Users\k\AppData\Local\codex\codex.exe" app-server"#),
+        );
         assert_eq!(e.names, ["codex"]);
-        let e = windows_entry(5, "node.exe", Some(
-            r#""C:\Program Files\nodejs\node.exe" C:\Users\k\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js --resume"#,
-        ));
+        let e = windows_entry(
+            5,
+            "node.exe",
+            Some(
+                r#""C:\Program Files\nodejs\node.exe" C:\Users\k\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js --resume"#,
+            ),
+        );
         assert_eq!(e.names, ["node", "claude"]);
         assert_eq!(Harness::from_program(&e.names[1]), Some(Harness::Claude));
-        let e = windows_entry(5, "node.exe", Some(r#"node C:\npm\node_modules\@openai\codex\bin\codex.js"#));
+        let e = windows_entry(
+            5,
+            "node.exe",
+            Some(r#"node C:\npm\node_modules\@openai\codex\bin\codex.js"#),
+        );
         assert_eq!(e.names, ["node", "codex"]);
         // a script host running something else is just itself
         let e = windows_entry(5, "node.exe", Some("node server.js"));

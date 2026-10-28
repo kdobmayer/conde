@@ -18,8 +18,13 @@ async fn get(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
 
 async fn server(base: Option<&str>) -> conde_remote::ServerHandle {
     let d = Arc::new(Dispatcher::open_in_memory().unwrap());
-    let config = ServerConfig { dist_base_url: base.map(Into::into), ..ServerConfig::default() };
-    conde::cloud::start(d, "127.0.0.1:0".parse().unwrap(), config).await.unwrap()
+    let config = ServerConfig {
+        dist_base_url: base.map(Into::into),
+        ..ServerConfig::default()
+    };
+    conde::cloud::start(d, "127.0.0.1:0".parse().unwrap(), config)
+        .await
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -31,17 +36,33 @@ async fn release_files_redirect_to_the_container() {
         ("/install.ps1", "install.ps1"),
         ("/dist/conde-darwin-arm64", "conde-darwin-arm64"),
         ("/dist/conde-windows-x86_64.exe", "conde-windows-x86_64.exe"),
-        ("/dist/conde-linux-x86_64.sha256", "conde-linux-x86_64.sha256"),
+        (
+            "/dist/conde-linux-x86_64.sha256",
+            "conde-linux-x86_64.sha256",
+        ),
         ("/dist/latest", "latest"),
     ] {
         for method in ["GET", "HEAD"] {
             let r = get(addr, method, path).await;
             assert!(r.starts_with("http/1.1 302"), "{method} {path}: {r}");
-            assert!(r.contains(&format!("\r\nlocation: https://stconde.blob.core.windows.net/dist/{file}\r\n")), "{r}");
+            assert!(
+                r.contains(&format!(
+                    "\r\nlocation: https://stconde.blob.core.windows.net/dist/{file}\r\n"
+                )),
+                "{r}"
+            );
             assert!(r.contains("\r\ncache-control: no-store\r\n"), "{r}");
         }
     }
-    for path in ["/dist/..", "/dist/.env", "/dist/a%2Fb", "/dist/a%2F..%2Fb", "/dist/x%00", "/dist/", "/dist/a/b"] {
+    for path in [
+        "/dist/..",
+        "/dist/.env",
+        "/dist/a%2Fb",
+        "/dist/a%2F..%2Fb",
+        "/dist/x%00",
+        "/dist/",
+        "/dist/a/b",
+    ] {
         let r = get(addr, "GET", path).await;
         assert!(r.starts_with("http/1.1 404"), "{path}: {r}");
         assert!(!r.contains("location:"), "{path}: {r}");

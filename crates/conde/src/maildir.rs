@@ -9,11 +9,17 @@ pub struct MailMessage {
 
 impl MailMessage {
     pub fn header(&self, key: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn headers_named<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-        self.headers.iter().filter(move |(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .filter(move |(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn parse(raw: &str) -> MailMessage {
@@ -25,11 +31,18 @@ impl MailMessage {
                 None => (line.to_string(), String::new()),
             })
             .collect();
-        MailMessage { headers, body: body.to_string() }
+        MailMessage {
+            headers,
+            body: body.to_string(),
+        }
     }
 
     pub fn render(&self) -> String {
-        let mut out: String = self.headers.iter().map(|(k, v)| format!("{k}: {v}\n")).collect();
+        let mut out: String = self
+            .headers
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}\n"))
+            .collect();
         out.push('\n');
         out.push_str(&self.body);
         if !out.ends_with('\n') {

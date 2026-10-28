@@ -17,7 +17,12 @@ use crate::store::{Agent, topics};
 
 /// The caller's names bound on its host, by name.
 fn bound_here(ctx: &Ctx) -> OpResult<Vec<Agent>> {
-    Ok(ctx.db.agents_on_host(&ctx.p.host)?.into_iter().filter(|a| a.owner_id == ctx.p.user_id).collect())
+    Ok(ctx
+        .db
+        .agents_on_host(&ctx.p.host)?
+        .into_iter()
+        .filter(|a| a.owner_id == ctx.p.user_id)
+        .collect())
 }
 
 /// `host.migrate_preview`: the host's bound names, each with its evidence (one entry per via,
@@ -30,7 +35,11 @@ pub fn preview(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     for e in ctx.db.host_evidence(ctx.p.user_id, &ctx.p.host)? {
         let via = if e.via == "dm" { "dm" } else { "channel" };
         let source = if e.imported { "imported" } else { "later" };
-        let entry = found.entry(e.agent_id).or_default().entry((via, e.with, source)).or_default();
+        let entry = found
+            .entry(e.agent_id)
+            .or_default()
+            .entry((via, e.with, source))
+            .or_default();
         entry.0 += 1;
         if e.created_at > entry.1 {
             entry.1 = e.created_at;
@@ -45,7 +54,11 @@ pub fn preview(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
             .map(|((via, with, source), (messages, last_at))| Evidence {
                 via: if via == "dm" { Via::Dm } else { Via::Channel },
                 with,
-                source: if source == "imported" { EvidenceSource::Imported } else { EvidenceSource::Later },
+                source: if source == "imported" {
+                    EvidenceSource::Imported
+                } else {
+                    EvidenceSource::Later
+                },
                 messages,
                 last_at,
             })
@@ -53,7 +66,11 @@ pub fn preview(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         rows.push(PreviewRow {
             agent_id: a.id.clone(),
             name: a.name.clone(),
-            address: a.address.as_ref().map(ToString::to_string).unwrap_or_default(),
+            address: a
+                .address
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             pin: a.pinned.clone(),
             candidate: !evidence.is_empty(),
             evidence,
@@ -69,26 +86,37 @@ pub fn preview(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
 pub fn migrate(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     ctx.shared_board()?;
     if ctx.mailbox_only {
-        return Err(conflict(format!("host '{}' already migrated to v2", ctx.p.host)));
+        return Err(conflict(format!(
+            "host '{}' already migrated to v2",
+            ctx.p.host
+        )));
     }
     let b: MigrateBody = parse(body)?;
     let rows = bound_here(ctx)?;
     let publish: BTreeSet<&str> = b.publish.iter().map(String::as_str).collect();
     if let Some(stray) = publish.iter().find(|id| !rows.iter().any(|a| a.id == **id)) {
-        return Err(bad_request(format!("agent {stray} is not one of your names bound on host '{}'", ctx.p.host)));
+        return Err(bad_request(format!(
+            "agent {stray} is not one of your names bound on host '{}'",
+            ctx.p.host
+        )));
     }
     let now = ctx.now_iso();
     let fenced = ctx.db.fence_host(&ctx.p.host, &now)?;
     let mut bindings = Vec::with_capacity(rows.len());
     for a in rows {
-        let Some(address) = a.address.clone() else { continue };
+        let Some(address) = a.address.clone() else {
+            continue;
+        };
         let published = if publish.contains(a.id.as_str()) {
             let target = match address.kind {
                 Kind::Human => address.clone(),
                 _ => Address::new(Kind::Mailbox, &a.id, &ctx.p.host),
             };
             ctx.db.set_binding(&a.id, Some(&target))?;
-            Some(Route { mailbox_id: a.id.clone(), route_generation: u64::try_from(a.binding_version + 1).unwrap_or(0) })
+            Some(Route {
+                mailbox_id: a.id.clone(),
+                route_generation: u64::try_from(a.binding_version + 1).unwrap_or(0),
+            })
         } else {
             ctx.db.set_binding(&a.id, None)?;
             None
@@ -96,7 +124,13 @@ pub fn migrate(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         if a.pinned.is_some() {
             ctx.db.set_pin(&a.id, None)?;
         }
-        bindings.push(ManifestRow { agent_id: a.id, name: a.name, address: address.to_string(), pin: a.pinned, published });
+        bindings.push(ManifestRow {
+            agent_id: a.id,
+            name: a.name,
+            address: address.to_string(),
+            pin: a.pinned,
+            published,
+        });
     }
     ctx.db.replace_endpoints(&ctx.p.host, "", &[], &now)?;
     ctx.db.set_host_mailbox_only(&ctx.p.host)?;

@@ -41,7 +41,11 @@ pub fn run(binary: &str, cases: &[Case]) {
     if failed.is_empty() {
         println!("\n{binary}: ok. {passed} passed; 0 failed\n");
     } else {
-        println!("\n{binary}: FAILED. {passed} passed; {} failed: {}\n", failed.len(), failed.join(", "));
+        println!(
+            "\n{binary}: FAILED. {passed} passed; {} failed: {}\n",
+            failed.len(),
+            failed.join(", ")
+        );
         std::process::exit(101);
     }
 }

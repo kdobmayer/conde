@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 use super::agents::{self, Agent};
 use super::messages::{Target, forbid_non_member, insert_message};
 use crate::address::normalize_channel;
-use crate::dispatch::{Ctx, OpResult, bad_request, conflict, forbidden, not_found, one_line, opt_str, str_param};
+use crate::dispatch::{
+    Ctx, OpResult, bad_request, conflict, forbidden, not_found, one_line, opt_str, str_param,
+};
 pub use crate::store::Channel;
 use crate::store::Tx;
 use crate::util::new_ulid;
@@ -14,7 +16,8 @@ use crate::util::new_ulid;
 pub const MAX_TOPIC: usize = 256;
 
 fn parse_name(raw: &str) -> OpResult<String> {
-    normalize_channel(raw).ok_or_else(|| bad_request(format!("invalid channel name '{raw}' (expected '#name')")))
+    normalize_channel(raw)
+        .ok_or_else(|| bad_request(format!("invalid channel name '{raw}' (expected '#name')")))
 }
 
 /// A topic as stored: trimmed, one line, at most MAX_TOPIC characters; empty clears it.
@@ -22,7 +25,10 @@ fn parse_topic(raw: &str) -> OpResult<Option<String>> {
     let topic = raw.trim();
     one_line(topic, "topic")?;
     if topic.chars().count() > MAX_TOPIC {
-        return Err(bad_request(format!("topic is {} characters; the limit is {MAX_TOPIC}", topic.chars().count())));
+        return Err(bad_request(format!(
+            "topic is {} characters; the limit is {MAX_TOPIC}",
+            topic.chars().count()
+        )));
     }
     Ok((!topic.is_empty()).then(|| topic.to_string()))
 }
@@ -33,7 +39,11 @@ pub fn by_name(db: &dyn Tx, name: &str) -> OpResult<Option<Channel>> {
 
 fn existing(ctx: &Ctx, raw: &str) -> OpResult<Channel> {
     let name = parse_name(raw)?;
-    by_name(ctx.db, &name)?.ok_or_else(|| not_found(format!("no channel '#{name}' (create it with: conde create '#{name}')")))
+    by_name(ctx.db, &name)?.ok_or_else(|| {
+        not_found(format!(
+            "no channel '#{name}' (create it with: conde create '#{name}')"
+        ))
+    })
 }
 
 pub fn member_ids(db: &dyn Tx, channel_id: &str) -> OpResult<Vec<String>> {
@@ -68,11 +78,19 @@ pub(crate) fn add_member(ctx: &Ctx, channel: &Channel, agent_id: &str) -> OpResu
 pub fn create(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
     let name = parse_name(str_param(body, "channel")?)?;
-    let topic = opt_str(body, "topic")?.map(parse_topic).transpose()?.flatten();
+    let topic = opt_str(body, "topic")?
+        .map(parse_topic)
+        .transpose()?
+        .flatten();
     if by_name(ctx.db, &name)?.is_some() {
         return Err(conflict(format!("channel '#{name}' already exists")));
     }
-    let channel = Channel { id: new_ulid(), name, created_by: me.id.clone(), topic };
+    let channel = Channel {
+        id: new_ulid(),
+        name,
+        created_by: me.id.clone(),
+        topic,
+    };
     ctx.db.insert_channel(&channel)?;
     add_member(ctx, &channel, &me.id)?;
     Ok(json!({"channel": format!("#{}", channel.name), "topic": channel.topic}))
@@ -83,7 +101,10 @@ pub fn topic(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
     let channel = existing(ctx, str_param(body, "channel")?)?;
     if channel.created_by != me.id && !me.is_human() {
-        return Err(forbidden(format!("only the creator of #{} or a human sets its topic", channel.name)));
+        return Err(forbidden(format!(
+            "only the creator of #{} or a human sets its topic",
+            channel.name
+        )));
     }
     let topic = parse_topic(str_param(body, "topic")?)?;
     ctx.db.set_channel_topic(&channel.id, topic.as_deref())?;
@@ -100,8 +121,19 @@ pub fn join(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     add_member(ctx, &channel, &me.id)?;
     let text = format!("@{} joined {label}.", me.canonical());
-    let post = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new(), None)?.id;
-    Ok(json!({"channel": label, "already_member": false, "message_id": post, "topic": channel.topic}))
+    let post = insert_message(
+        ctx,
+        &me,
+        Target::Channel(&channel),
+        &text,
+        None,
+        Vec::new(),
+        None,
+    )?
+    .id;
+    Ok(
+        json!({"channel": label, "already_member": false, "message_id": post, "topic": channel.topic}),
+    )
 }
 
 pub fn leave(ctx: &Ctx, body: &Value) -> OpResult<Value> {
@@ -120,11 +152,27 @@ pub fn invite(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let invitee = agents::lookup_bound(ctx, str_param(body, "name")?)?;
     agents::unprotected(ctx, &invitee)?;
     if read_seq(ctx.db, &channel.id, &invitee.id)?.is_some() {
-        return Err(conflict(format!("{} is already a member of '{label}'", invitee.canonical())));
+        return Err(conflict(format!(
+            "{} is already a member of '{label}'",
+            invitee.canonical()
+        )));
     }
     add_member(ctx, &channel, &invitee.id)?;
-    let text = format!("@{} was added to {label} by {}.", invitee.canonical(), me.canonical());
-    let post = insert_message(ctx, &me, Target::Channel(&channel), &text, None, Vec::new(), None)?.id;
+    let text = format!(
+        "@{} was added to {label} by {}.",
+        invitee.canonical(),
+        me.canonical()
+    );
+    let post = insert_message(
+        ctx,
+        &me,
+        Target::Channel(&channel),
+        &text,
+        None,
+        Vec::new(),
+        None,
+    )?
+    .id;
     Ok(json!({"channel": label, "name": invitee.canonical(), "message_id": post}))
 }
 
@@ -149,7 +197,13 @@ pub fn members(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         .db
         .channel_member_status(&channel.id)?
         .into_iter()
-        .map(|(name, behind)| if member { json!({"name": name, "behind": behind}) } else { json!({"name": name}) })
+        .map(|(name, behind)| {
+            if member {
+                json!({"name": name, "behind": behind})
+            } else {
+                json!({"name": name})
+            }
+        })
         .collect();
     Ok(json!({"channel": format!("#{}", channel.name), "members": members}))
 }

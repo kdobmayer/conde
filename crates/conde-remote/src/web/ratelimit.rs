@@ -45,7 +45,10 @@ struct Bucket<K: Hash + Eq + Clone> {
 
 impl<K: Hash + Eq + Clone> Bucket<K> {
     fn new(quota: Quota) -> Bucket<K> {
-        Bucket { limiter: DefaultKeyedRateLimiter::dashmap(quota), checks: AtomicU64::new(0) }
+        Bucket {
+            limiter: DefaultKeyedRateLimiter::dashmap(quota),
+            checks: AtomicU64::new(0),
+        }
     }
 
     /// Ok, or the whole seconds until the next request would pass (at least 1).
@@ -69,7 +72,9 @@ impl Limiters {
     pub(crate) fn new(l: RateLimits) -> Limiters {
         Limiters {
             cli_redeem: Bucket::new(per_minute(l.cli_redeem_per_min)),
-            cli_guesses: Bucket::new(Quota::per_hour(n(l.cli_guesses_per_hour)).allow_burst(n(l.cli_guesses_per_hour))),
+            cli_guesses: Bucket::new(
+                Quota::per_hour(n(l.cli_guesses_per_hour)).allow_burst(n(l.cli_guesses_per_hour)),
+            ),
         }
     }
 
@@ -88,13 +93,25 @@ mod tests {
 
     #[test]
     fn a_bucket_runs_out_and_names_the_wait() {
-        let l = Limiters::new(RateLimits { cli_redeem_per_min: 1, cli_guesses_per_hour: 2 });
+        let l = Limiters::new(RateLimits {
+            cli_redeem_per_min: 1,
+            cli_guesses_per_hour: 2,
+        });
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert!(l.cli_redeem(ip).is_ok());
-        assert!((1..=60).contains(&l.cli_redeem(ip).unwrap_err()), "per minute");
-        assert!(l.cli_redeem("10.0.0.2".parse().unwrap()).is_ok(), "per address");
+        assert!(
+            (1..=60).contains(&l.cli_redeem(ip).unwrap_err()),
+            "per minute"
+        );
+        assert!(
+            l.cli_redeem("10.0.0.2".parse().unwrap()).is_ok(),
+            "per address"
+        );
         assert!(l.cli_guess(7).is_ok() && l.cli_guess(7).is_ok());
-        assert!((1..=3600).contains(&l.cli_guess(7).unwrap_err()), "per hour");
+        assert!(
+            (1..=3600).contains(&l.cli_guess(7).unwrap_err()),
+            "per hour"
+        );
         assert!(l.cli_guess(8).is_ok(), "per account");
     }
 }
@@ -110,7 +127,11 @@ fn internal(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => {
             // 100.64.0.0/10 (RFC 6598): Container Apps' ingress may connect from it.
             let shared = v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64;
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || shared
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || shared
         }
         IpAddr::V6(v6) => {
             v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
@@ -141,7 +162,10 @@ pub(crate) fn client_ip(parts: &axum::http::request::Parts) -> IpAddr {
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &S) -> Result<ClientIp, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<ClientIp, Self::Rejection> {
         Ok(ClientIp(client_ip(parts)))
     }
 }
@@ -156,22 +180,42 @@ mod ip_tests {
             b = b.header("x-forwarded-for", *v);
         }
         let (mut parts, _) = b.body(()).unwrap().into_parts();
-        parts.extensions.insert(axum::extract::ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
+        parts.extensions.insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
         parts
     }
 
     #[test]
     fn the_proxy_appended_address_counts_only_behind_a_private_peer() {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
-        assert_eq!(client_ip(&parts("10.0.0.5:1", &["6.6.6.6, 203.0.113.9"])), ip("203.0.113.9"));
-        assert_eq!(client_ip(&parts("10.0.0.5:1", &["6.6.6.6", "203.0.113.9"])), ip("203.0.113.9"));
+        assert_eq!(
+            client_ip(&parts("10.0.0.5:1", &["6.6.6.6, 203.0.113.9"])),
+            ip("203.0.113.9")
+        );
+        assert_eq!(
+            client_ip(&parts("10.0.0.5:1", &["6.6.6.6", "203.0.113.9"])),
+            ip("203.0.113.9")
+        );
         assert_eq!(client_ip(&parts("10.0.0.5:1", &[])), ip("10.0.0.5"));
         for ingress in ["100.64.0.1:1", "100.100.12.7:1", "100.127.255.254:1"] {
-            assert_eq!(client_ip(&parts(ingress, &["203.0.113.9"])), ip("203.0.113.9"), "{ingress}: shared address space");
+            assert_eq!(
+                client_ip(&parts(ingress, &["203.0.113.9"])),
+                ip("203.0.113.9"),
+                "{ingress}: shared address space"
+            );
         }
         for public in ["100.63.255.255:1", "100.128.0.1:1"] {
-            assert_eq!(client_ip(&parts(public, &["203.0.113.9"])), ip(&public[..public.len() - 2]), "{public}");
+            assert_eq!(
+                client_ip(&parts(public, &["203.0.113.9"])),
+                ip(&public[..public.len() - 2]),
+                "{public}"
+            );
         }
-        assert_eq!(client_ip(&parts("198.51.100.1:1", &["203.0.113.9"])), ip("198.51.100.1"), "a public peer is the client");
+        assert_eq!(
+            client_ip(&parts("198.51.100.1:1", &["203.0.113.9"])),
+            ip("198.51.100.1"),
+            "a public peer is the client"
+        );
     }
 }

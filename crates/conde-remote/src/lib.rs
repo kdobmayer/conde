@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use client::{
-    BridgeClient, BridgeConfig, BridgeState, CallError, Inbound, MAX_REASON_BYTES, StopReason, moved_to, rpc,
+    BridgeClient, BridgeConfig, BridgeState, CallError, Inbound, MAX_REASON_BYTES, StopReason,
+    moved_to, rpc,
 };
 pub use secret::{SecretError, secret_env, secret_from};
 pub use server::{MAX_FRAME_BYTES, ServerConfig, ServerHandle, serve, start, start_on};
@@ -43,13 +44,21 @@ pub trait Dispatcher: Send + Sync {
     fn dispatch(&self, principal: &Principal, request: serde_json::Value) -> serde_json::Value;
     /// A request that arrived on `bridge_instance`'s bridge connection; the board
     /// refuses it once that instance is fenced. Default: [`Dispatcher::dispatch`].
-    fn dispatch_bridge(&self, principal: &Principal, _bridge_instance: &str, request: serde_json::Value) -> serde_json::Value {
+    fn dispatch_bridge(
+        &self,
+        principal: &Principal,
+        _bridge_instance: &str,
+        request: serde_json::Value,
+    ) -> serde_json::Value {
         self.dispatch(principal, request)
     }
     /// A read from a signed-in browser, executed for the owner without an actor (the request's
     /// `actor` and `from` are dropped). Default: refused.
     fn dispatch_web(&self, _user: &WebPrincipal, request: serde_json::Value) -> serde_json::Value {
-        let id = request.get("request_id").cloned().unwrap_or(serde_json::Value::Null);
+        let id = request
+            .get("request_id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         serde_json::json!({"v": 1, "type": "response", "request_id": id, "ok": false,
             "error": {"code": "forbidden", "message": "this server takes no browser requests"}})
     }
@@ -121,7 +130,12 @@ pub trait NotificationSource: Send + Sync {
     /// `Rejected` (the instance is fenced) close the connection, so the bridge reconnects with a
     /// fresh hello. Default: returns `Accepted` without recording; the board implementation
     /// records the set.
-    fn endpoints(&self, _host_id: &str, _bridge_instance: &str, _endpoints: &[Endpoint]) -> Recorded {
+    fn endpoints(
+        &self,
+        _host_id: &str,
+        _bridge_instance: &str,
+        _endpoints: &[Endpoint],
+    ) -> Recorded {
         Recorded::Accepted
     }
     /// Store events, from this or any other server replica: the server wakes the
@@ -140,7 +154,10 @@ pub trait NotificationSource: Send + Sync {
 pub enum Polled {
     Due(Vec<Notify>),
     /// v2: the due notifications and the host's current routes, read in one snapshot.
-    Routed { notifies: Vec<Notify>, routes: Routes },
+    Routed {
+        notifies: Vec<Notify>,
+        routes: Routes,
+    },
     /// A newer instance fenced this one.
     Fenced,
 }

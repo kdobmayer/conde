@@ -13,7 +13,10 @@ fn main() {
         println!("{NAME}: test");
         return;
     }
-    let filtered_out = args.iter().find(|a| !a.starts_with('-')).is_some_and(|f| !NAME.contains(f.as_str()));
+    let filtered_out = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .is_some_and(|f| !NAME.contains(f.as_str()));
     if filtered_out || args.iter().any(|a| a == "--ignored") || cfg!(not(unix)) {
         println!("\ncodex_fallback: ok. 0 passed; 0 failed\n");
         return;
@@ -62,7 +65,11 @@ exit 2
             .filter(|l| !l.is_empty())
             .map(|l| {
                 let mut parts: Vec<String> = l.split('\u{1e}').map(str::to_string).collect();
-                let thread = parts.pop().unwrap().trim_start_matches("thread=").to_string();
+                let thread = parts
+                    .pop()
+                    .unwrap()
+                    .trim_start_matches("thread=")
+                    .to_string();
                 (parts, thread)
             })
             .collect()
@@ -73,7 +80,13 @@ exit 2
     }
 
     fn queue(thread: &str, text: &str) -> Vec<String> {
-        vec!["queue".into(), "--thread".into(), thread.into(), "--message".into(), format!("{PROVENANCE}{text}")]
+        vec![
+            "queue".into(),
+            "--thread".into(),
+            thread.into(),
+            "--message".into(),
+            format!("{PROVENANCE}{text}"),
+        ]
     }
 
     pub fn codex_delivery_falls_back_to_the_daemon_start_and_codex_queue() {
@@ -81,7 +94,8 @@ exit 2
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         std::fs::write(bin.join("codex"), FAKE_CODEX).unwrap();
-        std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         let home = dir.path().join("codex-home");
         let sock = codex_control_socket(&home);
         let log = dir.path().join("calls");
@@ -91,21 +105,37 @@ exit 2
         set("FAKE_LOG", Some(log.to_str().unwrap()));
         // the daemon must not inherit the calling session's marker
         set("CODEX_THREAD_ID", Some("parent-thread"));
-        for v in ["FAKE_DAEMON_MAKES", "FAKE_DAEMON_EXIT", "FAKE_QUEUE_STDERR", "FAKE_QUEUE_STDOUT"] {
+        for v in [
+            "FAKE_DAEMON_MAKES",
+            "FAKE_DAEMON_EXIT",
+            "FAKE_QUEUE_STDERR",
+            "FAKE_QUEUE_STDOUT",
+        ] {
             set(v, None);
         }
 
         // No control socket and the daemon will not start: `codex queue` takes the message, with the
         // provenance line in front.
         set("FAKE_DAEMON_EXIT", Some("1"));
-        assert_eq!(codex_notify_with_id("th-1", "hello", Some("att-1")).unwrap(), CodexOutcome::Queued);
+        assert_eq!(
+            codex_notify_with_id("th-1", "hello", Some("att-1")).unwrap(),
+            CodexOutcome::Queued
+        );
         let seen = calls(&log);
-        assert_eq!(seen.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>(), [daemon_start(), queue("th-1", "hello")]);
-        assert_eq!(seen[0].1, "", "CODEX_THREAD_ID is scrubbed from the daemon's environment");
+        assert_eq!(
+            seen.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>(),
+            [daemon_start(), queue("th-1", "hello")]
+        );
+        assert_eq!(
+            seen[0].1, "",
+            "CODEX_THREAD_ID is scrubbed from the daemon's environment"
+        );
 
         // The queue fails too: both reasons, the queue's stderr verbatim.
         set("FAKE_QUEUE_STDERR", Some("thread th-1 not found"));
-        let err = codex_notify_with_id("th-1", "hello", None).unwrap_err().to_string();
+        let err = codex_notify_with_id("th-1", "hello", None)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             err,
             "codex delivery failed: codex app-server daemon start exited with exit status: 1; \
@@ -116,7 +146,9 @@ exit 2
         // A queue that explains itself on stdout only is quoted from there.
         set("FAKE_QUEUE_STDERR", None);
         set("FAKE_QUEUE_STDOUT", Some("no such thread"));
-        let err = codex_notify_with_id("th-1", "hello", None).unwrap_err().to_string();
+        let err = codex_notify_with_id("th-1", "hello", None)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             err,
             "codex delivery failed: codex app-server daemon start exited with exit status: 1; \
@@ -129,7 +161,9 @@ exit 2
         // The daemon starts but its socket never appears.
         set("FAKE_DAEMON_EXIT", Some("0"));
         set("FAKE_QUEUE_STDERR", Some("busy"));
-        let err = codex_notify_with_id("th-1", "hello", None).unwrap_err().to_string();
+        let err = codex_notify_with_id("th-1", "hello", None)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             err,
             format!(
@@ -144,11 +178,17 @@ exit 2
         // The daemon creates its socket path, but what is there does not answer: the direct turn
         // fails and the queue still delivers.
         set("FAKE_DAEMON_MAKES", Some(sock.to_str().unwrap()));
-        assert_eq!(codex_notify_with_id("th-2", "again", None).unwrap(), CodexOutcome::Queued);
+        assert_eq!(
+            codex_notify_with_id("th-2", "again", None).unwrap(),
+            CodexOutcome::Queued
+        );
         let seen: Vec<_> = calls(&log).into_iter().map(|(a, _)| a).collect();
         assert_eq!(seen, [daemon_start(), queue("th-2", "again")]);
         // Now present: no second daemon start, straight to the (failing) socket, then the queue.
-        assert_eq!(codex_notify_with_id("th-2", "third", None).unwrap(), CodexOutcome::Queued);
+        assert_eq!(
+            codex_notify_with_id("th-2", "third", None).unwrap(),
+            CodexOutcome::Queued
+        );
         let seen: Vec<_> = calls(&log).into_iter().map(|(a, _)| a).collect();
         assert_eq!(seen, [queue("th-2", "third")]);
         set("FAKE_DAEMON_MAKES", None);
@@ -158,11 +198,16 @@ exit 2
         set("CODEX_HOME", None);
         let saved_home = std::env::var("HOME").ok();
         set("HOME", None);
-        assert_eq!(codex_notify_with_id("th-3", "homeless", None).unwrap(), CodexOutcome::Queued);
+        assert_eq!(
+            codex_notify_with_id("th-3", "homeless", None).unwrap(),
+            CodexOutcome::Queued
+        );
         let seen: Vec<_> = calls(&log).into_iter().map(|(a, _)| a).collect();
         assert_eq!(seen, [queue("th-3", "homeless")]);
         set("FAKE_QUEUE_STDERR", Some("nope"));
-        let err = codex_notify_with_id("th-3", "homeless", None).unwrap_err().to_string();
+        let err = codex_notify_with_id("th-3", "homeless", None)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             err,
             "codex delivery failed: cannot locate the codex home (CODEX_HOME and HOME unset); \
@@ -175,7 +220,9 @@ exit 2
 
         // No codex on PATH: neither the daemon nor the queue can run.
         set("PATH", Some("/nonexistent-conde-bin"));
-        let err = codex_notify_with_id("th-4", "hello", None).unwrap_err().to_string();
+        let err = codex_notify_with_id("th-4", "hello", None)
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             err,
             "codex delivery failed: cannot start the codex app-server daemon: No such file or directory (os error 2); \

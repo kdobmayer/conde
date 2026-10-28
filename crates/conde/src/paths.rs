@@ -9,11 +9,16 @@ pub fn data_dir() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        windows_data_dir(std::env::var_os("LOCALAPPDATA").map(PathBuf::from), conde_transport::home_dir())
+        windows_data_dir(
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            conde_transport::home_dir(),
+        )
     }
     #[cfg(not(windows))]
     {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
         home.join(".local/share/conde")
     }
 }
@@ -22,7 +27,11 @@ pub fn data_dir() -> PathBuf {
 pub fn windows_data_dir(local_appdata: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
     local_appdata
         .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or_else(|| home.unwrap_or_else(|| PathBuf::from(".")).join("AppData").join("Local"))
+        .unwrap_or_else(|| {
+            home.unwrap_or_else(|| PathBuf::from("."))
+                .join("AppData")
+                .join("Local")
+        })
         .join("conde")
         .join("data")
 }
@@ -57,7 +66,13 @@ pub fn pipe_for_user(user: &str) -> String {
     let name: String = user
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!(r"\\.\pipe\conde-{name}")
 }
@@ -77,7 +92,11 @@ mod tests {
         );
         assert_eq!(
             windows_data_dir(None, Some(PathBuf::from("H"))),
-            PathBuf::from("H").join("AppData").join("Local").join("conde").join("data")
+            PathBuf::from("H")
+                .join("AppData")
+                .join("Local")
+                .join("conde")
+                .join("data")
         );
     }
 }

@@ -39,6 +39,9 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   the demo realm drops and re-adds the `conde-admin` manage-users role for a few seconds (invites fail in that
   window; a dependency fix in infra/gcp/realms); an admin call to clear a user's recorded realm account (today a
   documented SQL statement); inviting a pre-existing realm account is unsupported.
+- S2c (desk, small): Keycloak account console theme (React-based, not covered by the login theme); master realm
+  display name "conde admin" (today the label under the wordmark reads KEYCLOAK); the unused image 26.8.1-conde3 in
+  Artifact Registry can go with the next registry cleanup.
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

@@ -7,7 +7,7 @@ ENV KC_DB=postgres \
     KC_HEALTH_ENABLED=true \
     KC_METRICS_ENABLED=true
 
-# The demo realm's email theme (invitation text with the onboarding steps); realms pick it with email_theme.
+# The conde login theme (design B sign-in pages) and the demo invitation email theme; realms pick them by name.
 COPY themes/ /opt/keycloak/themes/
 
 RUN /opt/keycloak/bin/kc.sh build

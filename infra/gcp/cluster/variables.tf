@@ -38,3 +38,20 @@ variable "argocd_repo_key_version" {
   type    = number
   default = 1
 }
+
+# The client id of the OAuth client `iap-admin` (docs/infra-gcp-s4-iap.md); not a secret.
+variable "iap_client_id" {
+  type = string
+
+  validation {
+    condition     = endswith(var.iap_client_id, ".apps.googleusercontent.com")
+    error_message = "iap_client_id is an OAuth client id (<number>-<id>.apps.googleusercontent.com)."
+  }
+}
+
+# Bump after adding a new version of the iap-admin-client-secret secret: the Argo CD release upgrades and its hooks
+# re-import the secret into keycloak/iap-admin and argocd/iap-admin.
+variable "iap_client_secret_version" {
+  type    = number
+  default = 1
+}

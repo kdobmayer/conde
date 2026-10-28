@@ -243,6 +243,7 @@ resource "kubernetes_deployment_v1" "keycloak" {
           dynamic "env" {
             for_each = {
               KC_HOSTNAME                 = "https://${local.keycloak_hostname}"
+              KC_HOSTNAME_ADMIN           = "https://${local.keycloak_admin_hostname}"
               KC_PROXY_HEADERS            = "xforwarded"
               KC_HTTP_ENABLED             = "true"
               KC_HTTP_PORT                = "8080"
@@ -398,8 +399,8 @@ resource "kubernetes_service_v1" "keycloak" {
   }
 }
 
-# Only the workspace realms, the infra realm (Argo CD sign-in), static resources and the admin paths; Cloud Armor holds
-# admin to the allowlist.
+# Only the workspace realms, the infra realm (Argo CD sign-in), static resources and, until the admin host behind IAP is
+# verified, the admin paths, which Cloud Armor holds to the allowlist (docs/infra-gcp-s4-iap.md).
 resource "kubernetes_manifest" "keycloak_route" {
   manifest = {
     apiVersion = "gateway.networking.k8s.io/v1"
@@ -426,6 +427,117 @@ resource "kubernetes_manifest" "keycloak_route" {
       }]
     }
   }
+}
+
+# The admin console host: its own Service, so the load balancer gives it its own backend service, which IAP guards
+# (iap.tf). The console needs the master realm (its own sign-in: the realm's frontend URL is this host, realms root)
+# and the theme resources; it calls the admin API on KC_HOSTNAME_ADMIN. /_gcp_gatekeeper is IAP's sign-in return
+# path, kept on the IAP backend so the load balancer never sends it to the 404 default.
+resource "kubernetes_service_v1" "keycloak_admin" {
+  metadata {
+    name      = "keycloak-admin"
+    namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+  }
+
+  lifecycle {
+    ignore_changes = [metadata[0].annotations]
+  }
+
+  spec {
+    type     = "ClusterIP"
+    selector = local.keycloak_labels
+
+    port {
+      name        = "http"
+      port        = 8080
+      target_port = "http"
+    }
+  }
+}
+
+resource "kubernetes_manifest" "keycloak_admin_route" {
+  manifest = {
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "keycloak-admin"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      parentRefs = [{
+        name        = kubernetes_manifest.gateway.manifest.metadata.name
+        namespace   = kubernetes_namespace_v1.gateway.metadata[0].name
+        sectionName = "https"
+      }]
+      hostnames = [local.keycloak_admin_hostname]
+      rules = [{
+        matches = [for prefix in ["/admin", "/realms/master", "/resources", "/_gcp_gatekeeper"] : {
+          path = { type = "PathPrefix", value = prefix }
+        }]
+        backendRefs = [{
+          name = kubernetes_service_v1.keycloak_admin.metadata[0].name
+          port = 8080
+        }]
+      }]
+    }
+  }
+}
+
+resource "kubernetes_manifest" "keycloak_admin_health_check" {
+  manifest = {
+    apiVersion = "networking.gke.io/v1"
+    kind       = "HealthCheckPolicy"
+    metadata = {
+      name      = "keycloak-admin"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      default = {
+        checkIntervalSec   = 10
+        timeoutSec         = 5
+        healthyThreshold   = 1
+        unhealthyThreshold = 3
+        config = {
+          type = "HTTP"
+          httpHealthCheck = {
+            port        = 9000
+            requestPath = "/health/ready"
+          }
+        }
+      }
+      targetRef = {
+        group = ""
+        kind  = "Service"
+        name  = kubernetes_service_v1.keycloak_admin.metadata[0].name
+      }
+    }
+  }
+}
+
+# The Secret it names is written by the pre-install/pre-upgrade hook of the Argo CD release (iap.tf).
+resource "kubernetes_manifest" "keycloak_admin_backend" {
+  manifest = {
+    apiVersion = "networking.gke.io/v1"
+    kind       = "GCPBackendPolicy"
+    metadata = {
+      name      = "keycloak-admin"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      default = {
+        timeoutSec     = 60
+        securityPolicy = local.platform.cloud_armor_admin_policy_names["keycloak-admin"]
+        iap            = local.iap_policy
+      }
+      targetRef = {
+        group = ""
+        kind  = "Service"
+        name  = kubernetes_service_v1.keycloak_admin.metadata[0].name
+      }
+    }
+  }
+
+  depends_on = [helm_release.argocd]
 }
 
 resource "kubernetes_manifest" "keycloak_health_check" {

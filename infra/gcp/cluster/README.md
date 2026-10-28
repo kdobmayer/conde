@@ -1,10 +1,15 @@
 # conde cluster layer on GCP
 
 The Kubernetes objects every workspace shares: the Gateway (`gateway.tf`), Keycloak (`keycloak.tf`) and Argo CD
-(`argocd.tf`). Applied locally as terraform@conde-prod, from a machine on the admin allowlist:
+(`argocd.tf`), and Identity-Aware Proxy in front of the admin backends (`iap.tf`). Applied locally as
+terraform@conde-prod, which reaches the API server on the cluster's DNS endpoint:
 
     export GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=terraform@conde-prod.iam.gserviceaccount.com
     cd infra/gcp/cluster && terraform init && terraform apply
+
+`iap_client_id` (`variables.tf`) is the client id of the OAuth client `iap-admin`. A new admin backend gets its
+backend service from the Gateway controller during the apply, after Terraform has read the Gateway, so its IAP grant
+lands in a second apply; until then the check `iap_backend_services` warns.
 
 On an empty cluster the first apply runs in three steps, because the repository key must exist before the hook that
 copies it, and `kubernetes_manifest` needs the Argo CD CRDs at plan time:
@@ -17,11 +22,15 @@ copies it, and `kubernetes_manifest` needs the Argo CD CRDs at plan time:
 ## Argo CD
 
 https://argocd.conde.cloud, chart `argo-cd` 10.10.3 (Argo CD v3.5.5) from https://argoproj.github.io/argo-helm. The
-server runs without TLS behind the Gateway, which terminates HTTPS with the wildcard certificate. Cloud Armor rule
-1003 of `conde-web` (`infra/gcp/platform/edge.tf`) refuses every request for the host from outside `admin_cidrs`:
-UI, API and CLI alike. The CLI goes through the load balancer with gRPC-Web:
+server runs without TLS behind the Gateway, which terminates HTTPS with the wildcard certificate. The whole host is
+behind Identity-Aware Proxy (`iap.tf`): only kdobmayer.devops@gmail.com passes, then signs in to Argo CD itself; the
+Cloud Armor policy `conde-argocd` throttles each client IP. The CLI cannot answer IAP's browser sign-in, so it goes
+through a port-forward to the server instead of the load balancer:
 
-    argocd login argocd.conde.cloud --grpc-web --sso
+    kubectl port-forward -n argocd svc/argocd-server 18081:80 --address=127.0.0.1 &
+    argocd login 127.0.0.1:18081 --plaintext --sso
+
+(IAP also admits a program that sends a Google-signed ID token in `Proxy-Authorization`; not set up.)
 
 Sign-in is OIDC against the Keycloak realm `infra` (`infra/gcp/realms`), public client `argocd` with PKCE, no client
 secret and no Dex. Access is the `groups` claim: `infra-admins` is `role:admin`, and everyone else, signed in or not,
@@ -79,6 +88,16 @@ exception, and holds exactly these:
 | `argocd-initial-admin-secret` | `password` (the local admin's first password) | the server at first start; delete it once the local admin is off |
 | `argocd-redis` | `auth` (the Redis password between the Argo CD components) | the chart's `argocd-redis-secret-init` Job |
 | `repo-conde` | `sshPrivateKey` (the deploy key), `url`, `type`, `name` | the `argocd-repo-import-hook` Job, from Secret Manager |
+| `iap-admin` | `key` (the IAP OAuth client secret) | the `iap-secret-import-hook` Job, from Secret Manager |
+
+The second exception is the IAP OAuth client secret: GCPBackendPolicy reads it only from a Kubernetes Secret in the
+backend's namespace, so `iap-admin` exists in `argocd` and in `keycloak`, written by the Job `iap-secret-import-hook`
+in each. It copies `iap-admin-client-secret` from Secret Manager the way the repository import does (its own Workload
+Identity principal with access to that one secret, a role that can create Secrets and read and patch only
+`iap-admin`, server-side apply, TTL deletion ten minutes after it finishes), as a pre-install and pre-upgrade hook of
+the Argo CD release, so the Secret exists before a policy names it. In `keycloak`, a NetworkPolicy of its own lets
+only that Job reach the API server. To rotate: add a version to `iap-admin-client-secret`, raise
+`iap_client_secret_version` by one, apply.
 
 There is no TLS material: the server runs without TLS behind the Gateway, and the repo server's internal certificate
 is generated in memory. The Helm release record (`sh.helm.release.v1.argocd.*`) holds the chart values, which carry

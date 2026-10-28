@@ -161,7 +161,7 @@ locals {
         hostnames = [local.argocd_hostname]
       }
     }
-    extraObjects = [
+    extraObjects = concat([
       {
         apiVersion = "networking.gke.io/v1"
         kind       = "HealthCheckPolicy"
@@ -180,7 +180,7 @@ locals {
           targetRef = { group = "", kind = "Service", name = "argocd-server" }
         }
       },
-      # The UI's watch streams stay open; Cloud Armor holds the whole host to admin_cidrs (platform rule 1003).
+      # The UI's watch streams stay open; the whole host is behind IAP (iap.tf), Cloud Armor throttles per IP.
       {
         apiVersion = "networking.gke.io/v1"
         kind       = "GCPBackendPolicy"
@@ -188,13 +188,14 @@ locals {
         spec = {
           default = {
             timeoutSec     = 3600
-            securityPolicy = local.platform.cloud_armor_policy_name
+            securityPolicy = local.platform.cloud_armor_admin_policy_names["argocd"]
+            iap            = local.iap_policy
           }
           targetRef = { group = "", kind = "Service", name = "argocd-server" }
         }
       },
       local.argocd_repo_import_job,
-    ]
+    ], local.iap_secret_import_jobs)
   }
 }
 
@@ -230,6 +231,12 @@ resource "helm_release" "argocd" {
     kubernetes_role_binding_v1.argocd_repo_import,
     kubernetes_manifest.argocd_repo_ssh_key,
     kubernetes_config_map_v1.argocd_repo_import,
+    # The IAP secret hooks (iap.tf), and the Keycloak policy that lets its hook reach the API server.
+    google_secret_manager_secret_iam_member.iap_secret_import,
+    kubernetes_role_binding_v1.iap_secret_import,
+    kubernetes_manifest.iap_secret_import,
+    kubernetes_config_map_v1.iap_secret_import,
+    kubernetes_network_policy_v1.keycloak_iap_secret_import,
   ]
 }
 

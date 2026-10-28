@@ -46,14 +46,10 @@ about 115 USD, at the price of the single-replica outage the two replicas were i
 |---|---|---|---|---|
 | Cloudflare: domain `conde.cloud` | yearly registration at cost | 1 domain; DNS zone and the Pages project `site` are on the free plan, no paid feature in use | 20.20 USD a year (owner, `docs/infra-plan-gcp.md`) | 1.68 |
 | Resend | free plan: 3,000 emails a month, 100 a day, 3 domains, 30 days retention; the next plan is Pro at 20 USD a month for 50,000 emails | invite emails only | https://resend.com/pricing | 0.00 |
-| GitHub Actions, repository `DakaiGroup/conde` | the organization is on GitHub Enterprise Cloud: 50,000 included minutes a month for private repositories, billed to the Dakai organization, not to the owner; beyond them Linux 2-core 0.006 USD a minute, macOS 3- or 4-core 0.062 USD a minute | a release run is two macOS jobs of 1 m 40 s each and about 17 Linux job-minutes (web, build-id, two Linux builds, publish; runs of 2026-10-15 and 2026-10-27) | https://docs.github.com/en/billing/concepts/product-billing/github-actions | 0.00 |
+| GitHub Actions, repository `kdobmayer/conde` (private, personal account) | included minutes per month on the personal plan: 2,000 on Free, 3,000 on Pro (the plan is on https://github.com/settings/billing; the API scope of this machine cannot read it); macOS draws 10 included minutes per minute, Windows 2, Linux 1; beyond the allowance Linux 2-core 0.006 USD a minute, macOS 0.062 | a release run is two macOS jobs of 1 m 40 s each and about 17 Linux job-minutes (57 included minutes); a CI run is about 15 Linux minutes; on 2026-10-28 there were 3 releases and 7 CI runs (about 280 included minutes in one day) | https://docs.github.com/en/billing/concepts/product-billing/github-actions | 0.00 within the allowance |
 | **Total** | | | | **360.59** |
 
-GitHub Actions per release, should the allowance ever be exhausted: 4 macOS minutes (each job rounded up to whole
-minutes) at 0.062 plus 17 Linux minutes at 0.006 is 0.35 USD. At two releases a day that is 21 USD a month, at one
-a week 1.50 USD. In included minutes, if macOS still draws them at ten times the Linux rate (the English page no
-longer prints a multiplier table on 2026-10-28; the Japanese page still lists Linux 1, Windows 2, macOS 10), a
-release consumes 57 minutes, two a day 3,420 a month, one a week 250 a month, out of 50,000.
+GitHub Actions per release, beyond the allowance: 4 macOS minutes (each job rounded up) at 0.062 plus 17 Linux minutes at 0.006 is 0.35 USD. In included minutes a release consumes 57 and a CI run about 15. The build-up cadence of 2026-10-28 (3 releases, 7 CI runs) would exhaust a Free plan's 2,000 minutes in about a week; the steady cadence of one release and a handful of CI runs a week (about 300 minutes a month) stays inside it. The macOS multiplier is the one GitHub documents for included minutes; the English page no longer prints the table on 2026-10-28, the Japanese page still lists Linux 1, Windows 2, macOS 10.
 
 ## Trial credit
 

@@ -19,6 +19,17 @@ oidc:
   # Defaults to https://<hostname>/auth/callback.
   redirectUri: ""
 
+# How the admin API's invites reach the invited person (CONDE_JOIN_SIGN_IN): google or microsoft, one email the
+# server sends through Resend; password, Keycloak's account-setup email; empty, no email.
+invite:
+  signIn: ""
+  # Password workspaces: the Keycloak admin API at its in-cluster address (the public host blocks /admin), with
+  # the network policy egress to that namespace.
+  keycloakAdmin:
+    url: http://keycloak.keycloak.svc.cluster.local:8080
+    clientId: conde-admin
+    namespace: keycloak
+
 logLevel: info
 distBaseUrl: https://storage.googleapis.com/conde-cloud-dist
 # Extra container env entries, appended after the chart's own.
@@ -66,7 +77,8 @@ networkPolicy:
   egress: []
 
 # Portable secrets (gcp.enabled false): the container env comes from one Secret holding DATABASE_URL,
-# CONDE_ADMIN_KEY, OIDC_CLIENT_SECRET and optionally CONDE_SLACK_BOT_TOKEN.
+# CONDE_ADMIN_KEY, OIDC_CLIENT_SECRET and optionally CONDE_SLACK_BOT_TOKEN, RESEND_API_KEY and
+# KEYCLOAK_ADMIN_CLIENT_SECRET.
 existingSecret: ""
 # Or let External Secrets Operator create that Secret (named <release>-env) from a store.
 externalSecret:
@@ -94,6 +106,10 @@ gcp:
     adminKey: ""
     oidcClientSecret: ""
     slackBotToken: ""
+    # The Resend API key the invite email is sent with; empty mounts none.
+    resendApiKey: ""
+    # The Keycloak admin client's secret; required when invite.signIn is password.
+    keycloakAdminClientSecret: ""
   # Cloud Armor policy attached to the backend.
   securityPolicy: ""
   backendTimeoutSec: 3600

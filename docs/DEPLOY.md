@@ -63,11 +63,51 @@ To bind explicitly: `POST /v1/admin/users {"issuer","subject","name":"<existing 
 `{"tid","oid",...}` still works; admin bearer key from the vault). To move a binding: `UPDATE
 identities SET user_id = <user id> WHERE issuer = ... AND subject = ...;` then `DELETE FROM
 web_sessions WHERE user_id = <old user id>;` through the job, and have the person sign in again.
+On an Entra workspace the invite gate matches the account's user principal name. Microsoft documents
+preferred_username as mutable and not for authorization; conde relies on it because the workspace pins
+one tenant whose administrators assign and can reassign UPNs, and an unclaimed invite stays open until
+the user is disabled. Already bound users are matched by their object id, never by the UPN.
+Admission has no expiry (decision, 2026-10-28): the invite gate admits the invited email until the
+user is disabled; disable a user whose invite should no longer stand.
 Never enable Keycloak's "Trust Email" on a brokered identity provider: conde matches invites on the
 email Keycloak marks verified, so trusting a provider's unverified address lets it claim an invite.
 Migration 0017 renames the identities columns, so this version is not rolling-safe beside an older
 replica: deploy with the old replicas drained (maxUnavailable 1 with one replica, or scale to zero
 first) or accept a short outage; a rollback needs a reverse migration, not just the old image.
+
+## The invite email
+
+`conde admin user invite <name> <email> [--by <who>] --server <url>` creates the user and sends the
+person one email, chosen by the server's `CONDE_JOIN_SIGN_IN` (per tenant: `invite.signIn` in
+deploy/tenants/<name>.yaml):
+
+- `google`, `microsoft`: the server sends it through Resend (`RESEND_API_KEY` or `_FILE`, the shared
+  Secret Manager secret `resend-api-key`; sender `CONDE_MAIL_FROM`, default `conde <no-reply@conde.cloud>`).
+  It carries the steps of https://conde.cloud/docs/setup with the workspace's address and the invited
+  email; `CONDE_WORKSPACE_NAME` names the workspace (default: the public host's first label). `--by`
+  puts "<who> invited you" in the subject and first line. Without a key nothing is sent and the CLI
+  says so. The request carries an Idempotency-Key from the user, the address and the inviter, so the
+  same invite repeated within Resend's 24-hour window is answered without a second email.
+- `password`: the server creates the realm account through the Keycloak admin REST API and Keycloak
+  sends its account-setup email (verify the address, choose a password; the link lasts 7 days). conde
+  never sets a password. It calls Keycloak at `KEYCLOAK_ADMIN_URL`, the in-cluster Service, since the
+  public host blocks `/admin`. It signs in as the realm's service-account client
+  `KEYCLOAK_ADMIN_CLIENT_ID` (default `conde-admin`, infra/gcp/realms/demo.tf) with the secret in
+  `KEYCLOAK_ADMIN_CLIENT_SECRET` or `_FILE` (Secret Manager `keycloak-admin-<name>`); the realm is the
+  issuer's. The account id and a correlation value (the admin-only user attribute `conde_invite`) are
+  recorded on the user: a re-invite reuses the id, and after a lost create answer only the account
+  carrying the value is adopted. A re-invite asks Keycloak only for the actions still pending, so an
+  account that is set up gets no new link. Inviting a person who already has an account in the realm
+  is not supported in this release: the invite answers 409 and sends nothing. Names need at least 3
+  characters there (the realm's username rule).
+- unset: no email.
+
+A user who has signed in already, or is disabled, gets no email. A mail or Keycloak failure after
+the user was created answers 502 with the user in place; run the invite again once it is fixed.
+
+When a user's realm account was deleted in Keycloak, a re-invite answers "the recorded sign-in account
+no longer matches". Clear the record through the job, then invite again, which creates a new account:
+`UPDATE users SET keycloak_id = NULL, keycloak_invite = NULL WHERE name = '<name>';`
 
 ## Moving a board to a new address
 

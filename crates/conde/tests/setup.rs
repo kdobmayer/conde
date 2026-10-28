@@ -2079,3 +2079,234 @@ fn a_bounded_probe_that_hangs_is_cut_off() {
     );
     assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
 }
+
+/// What the service manager reports for a loaded bridge that runs `exe`: `systemctl --user show
+/// conde.service -p ExecStart` (systemd 25x) or `launchctl print gui/<uid>/<label>` (macOS 15).
+fn loaded(os: Os, exe: &Path) -> String {
+    let exe = exe.display();
+    match os {
+        Os::Linux => format!(
+            "ExecStart={{ path={exe} ; argv[]={exe} daemon ; ignore_errors=no ; start_time=[n/a] ; \
+             stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }}\n"
+        ),
+        _ => format!(
+            "gui/501/{label} = {{\n\tactive count = 1\n\tpath = /Users/x/Library/LaunchAgents/{label}.plist\n\
+             \ttype = LaunchAgent\n\tstate = running\n\n\tprogram = {exe}\n\targuments = {{\n\t\t{exe}\n\
+             \t\tdaemon\n\t}}\n\n\tpid = 4242\n}}\n",
+            label = setup::LAUNCHD_LABEL
+        ),
+    }
+}
+
+/// `conde update` restarts the bridge service only when the service manager's loaded program is
+/// the file just updated (directly or through a symlink). The unit file on disk is a pre-check
+/// only: a drop-in, a unit changed without daemon-reload or an agent loaded from another plist can
+/// run another binary, and then the bridge is left running and the human is told.
+#[test]
+fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
+    let restart = |env: &Env, host: &mut Fake, updated: &Path| {
+        let mut out = Vec::new();
+        let r = setup::restart_service(env, host, &mut out, updated);
+        (
+            r.map_err(|e| format!("{e:#}")),
+            String::from_utf8(out).unwrap(),
+        )
+    };
+    let put = |p: &Path, text: &str| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    let runs_other = |path: &Path| {
+        format!(
+            "the bridge service runs {}, not the updated binary; run conde setup to point it here",
+            path.display()
+        )
+    };
+
+    for os in [Os::Linux, Os::MacOs] {
+        let root = temp_root();
+        let env = env(&root, os);
+        put(&env.exe, "the updated conde");
+        let service = match os {
+            Os::Linux => env.systemd_unit(),
+            _ => env.launchd_plist(),
+        };
+        let unit_for = |exe: &Path| {
+            let e = Env {
+                exe: exe.to_path_buf(),
+                ..env.clone()
+            };
+            match os {
+                Os::Linux => setup::systemd_unit(&e),
+                _ => setup::launchd_plist(&e),
+            }
+        };
+        let restart_call = match os {
+            Os::Linux => "systemctl --user restart conde.service".to_string(),
+            _ => format!("launchctl kickstart -k gui/501/{}", setup::LAUNCHD_LABEL),
+        };
+        let mut host = Fake::new(&env, &["systemctl"]);
+        host.launchd_loaded = true;
+        // what the manager has loaded: `systemctl show` on Linux, `launchctl print` on macOS
+        let manager = |host: &mut Fake, text: String| match os {
+            Os::Linux => host.show_out = text,
+            _ => host.print_out = text,
+        };
+        let restarted = |host: &mut Fake| host.take_calls().contains(&restart_call);
+        let other = root.join("other/conde");
+        put(&other, "another conde");
+        let gone = root.join("gone/conde");
+
+        let (r, out) = restart(&env, &mut host, &env.exe);
+        assert!(
+            r.is_ok() && out.contains("no bridge service installed"),
+            "{os:?}: {out}"
+        );
+        assert!(host.take_calls().is_empty(), "{os:?}");
+
+        // the file and the manager both name the updated binary: restarted
+        put(&service, &unit_for(&env.exe));
+        manager(&mut host, loaded(os, &env.exe));
+        let (r, out) = restart(&env, &mut host, &env.exe);
+        assert!(
+            r.is_ok() && out.contains("onto the new build"),
+            "{os:?}: {out}"
+        );
+        assert!(restarted(&mut host), "{os:?}");
+
+        // the file names the updated binary, but the manager runs another one, a missing one,
+        // or reports none: nothing restarted
+        for exe in [&other, &gone] {
+            manager(&mut host, loaded(os, exe));
+            let (r, out) = restart(&env, &mut host, &env.exe);
+            assert!(
+                r.is_ok() && out.contains(&runs_other(exe)),
+                "{os:?} {exe:?}: {out}"
+            );
+            assert!(!out.contains("onto the new build"), "{os:?}: {out}");
+            assert!(!restarted(&mut host), "{os:?} loaded {exe:?}: restarted");
+        }
+        manager(&mut host, String::new());
+        let (r, out) = restart(&env, &mut host, &env.exe);
+        assert!(
+            r.is_ok() && out.contains("cannot tell which binary the bridge service runs"),
+            "{os:?}: {out}"
+        );
+        assert!(
+            !restarted(&mut host),
+            "{os:?}: restarted without a loaded program"
+        );
+
+        // the file itself names another binary, a missing one, or none: refused before asking
+        manager(&mut host, loaded(os, &env.exe));
+        for exe in [&other, &gone] {
+            put(&service, &unit_for(exe));
+            let (r, out) = restart(&env, &mut host, &env.exe);
+            assert!(
+                r.is_ok() && out.contains(&runs_other(exe)),
+                "{os:?} {exe:?}: {out}"
+            );
+            assert!(!restarted(&mut host), "{os:?} {exe:?}: restarted");
+        }
+        put(&service, "written by hand, no program\n");
+        let (r, out) = restart(&env, &mut host, &env.exe);
+        assert!(
+            r.is_ok() && out.contains("cannot tell which binary the bridge service runs"),
+            "{os:?}: {out}"
+        );
+        assert!(!restarted(&mut host), "{os:?}");
+
+        // a symlink to the updated binary in the file and in the manager counts as that binary
+        #[cfg(unix)]
+        {
+            let link = root.join("link/conde");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&env.exe, &link).unwrap();
+            put(&service, &unit_for(&link));
+            manager(&mut host, loaded(os, &link));
+            let (r, out) = restart(&env, &mut host, &env.exe);
+            assert!(
+                r.is_ok() && out.contains("onto the new build"),
+                "{os:?} link: {out}"
+            );
+            assert!(restarted(&mut host), "{os:?} link");
+        }
+    }
+
+    // macOS: an agent that is not loaded is not loaded behind the human's back
+    let root = temp_root();
+    let mac = env(&root, Os::MacOs);
+    put(&mac.exe, "conde");
+    put(&mac.launchd_plist(), &setup::launchd_plist(&mac));
+    let mut host = Fake::new(&mac, &[]);
+    let (r, out) = restart(&mac, &mut host, &mac.exe);
+    assert!(
+        r.is_ok() && out.contains("installed but not loaded"),
+        "{out}"
+    );
+    assert!(!host.take_calls().iter().any(|c| c.contains("kickstart")));
+
+    // a failed restart of the right service is an error
+    let root = temp_root();
+    let linux = env(&root, Os::Linux);
+    put(&linux.exe, "conde");
+    put(&linux.systemd_unit(), &setup::systemd_unit(&linux));
+    let mut host = Fake::new(&linux, &["systemctl"]);
+    host.show_out = loaded(Os::Linux, &linux.exe);
+    host.fail = Some("systemctl --user restart");
+    assert!(restart(&linux, &mut host, &linux.exe).0.is_err());
+
+    // programs read back from what setup writes and from what the managers print, for paths
+    // that need quoting or escaping
+    for odd in [
+        "/opt/my tools/conde",
+        "/opt/a\"b/conde",
+        "/opt/100%/con$de",
+        "/opt/a&b<c>/conde",
+    ] {
+        let e = Env {
+            exe: PathBuf::from(odd),
+            ..linux.clone()
+        };
+        assert_eq!(
+            setup::exec_start_program(&setup::systemd_unit(&e)).as_deref(),
+            Some(odd)
+        );
+        assert_eq!(
+            setup::plist_program(&setup::launchd_plist(&e)).as_deref(),
+            Some(odd)
+        );
+        assert_eq!(
+            setup::systemd_loaded_program(&loaded(Os::Linux, Path::new(odd))).as_deref(),
+            Some(odd)
+        );
+        assert_eq!(
+            setup::launchd_loaded_program(&loaded(Os::MacOs, Path::new(odd))).as_deref(),
+            Some(odd)
+        );
+    }
+    // verbatim from systemd 25x on the bridge host this was built on
+    let real = "ExecStart={ path=/home/kdobmayer/.local/bin/conde ; argv[]=/home/kdobmayer/.local/bin/conde daemon ; ignore_errors=no ; start_time=[Wed 2026-10-28 02:28:47 CET] ; stop_time=[n/a] ; pid=3563548 ; code=(null) ; status=0/0 }\n";
+    assert_eq!(
+        setup::systemd_loaded_program(real).as_deref(),
+        Some("/home/kdobmayer/.local/bin/conde")
+    );
+    // without a path= or a program = line, the first argument
+    let argv_only = "ExecStart={ argv[]=/opt/conde daemon ; ignore_errors=no }\n";
+    assert_eq!(
+        setup::systemd_loaded_program(argv_only).as_deref(),
+        Some("/opt/conde")
+    );
+    let args_only = "gui/501/x = {\n\targuments = {\n\t\t/opt/conde\n\t\tdaemon\n\t}\n}\n";
+    assert_eq!(
+        setup::launchd_loaded_program(args_only).as_deref(),
+        Some("/opt/conde")
+    );
+    for none in ["", "ExecStart=\n", "ExecStart={ }\n"] {
+        assert_eq!(setup::systemd_loaded_program(none), None, "{none:?}");
+    }
+    assert_eq!(
+        setup::launchd_loaded_program("gui/501/x = {\n\tstate = running\n}\n"),
+        None
+    );
+}

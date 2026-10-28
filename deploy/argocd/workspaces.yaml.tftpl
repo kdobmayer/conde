@@ -28,7 +28,7 @@ spec:
         path: charts/conde-workspace
         helm:
           releaseName: conde
-          # The tenant file is not a values file: only its boardName, oidc and replicas keys reach the chart, as
+          # The tenant file is not a values file: only its boardName, oidc, replicas and invite keys reach the chart, as
           # parameters below.
           valueFiles:
             - ../../deploy/image.yaml
@@ -59,6 +59,14 @@ spec:
               value: '{{ trimSuffix ".yaml" .path.filename }}-oidc-client-secret'
             - name: gcp.secrets.slackBotToken
               value: '{{ trimSuffix ".yaml" .path.filename }}-slack-bot-token'
+            - name: invite.signIn
+              value: '{{ dig "invite" "signIn" "" . }}'
+            # One Resend key for every workspace; the Keycloak admin client secret (infra/gcp/realms) is read on
+            # password workspaces only.
+            - name: gcp.secrets.resendApiKey
+              value: resend-api-key
+            - name: gcp.secrets.keycloakAdminClientSecret
+              value: 'keycloak-admin-{{ trimSuffix ".yaml" .path.filename }}'
             - name: gcp.dbinit.image
               value: ${postgres_image}
             - name: gcp.dbinit.adminSecret

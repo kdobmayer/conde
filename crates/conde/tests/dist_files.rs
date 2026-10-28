@@ -271,3 +271,83 @@ fn marked(mark: &str) -> Vec<(i32, String)> {
         })
         .collect()
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod dist_stub;
+
+/// install.sh and `conde update` read one layout: the same default base, and from one fake
+/// bucket both install the same release bytes and refuse the same bad checksum in the same words.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn install_sh_and_conde_update_agree_on_the_layout() {
+    use dist_stub::{Bucket, NAME, fake_binary};
+    let script = include_str!("../../../dist/install.sh");
+    let default = script
+        .lines()
+        .find_map(|l| l.strip_prefix("base=${CONDE_DIST_BASE_URL:-"))
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("install.sh sets base from CONDE_DIST_BASE_URL");
+    assert_eq!(default, conde::update::DEFAULT_BASE);
+
+    let root = dist_stub::temp_dir();
+    let bucket = Bucket::serve(&root.path().join("bucket"));
+    let release = fake_binary("99.0.0");
+    bucket.release("99.0.0", &release, true);
+    bucket.release("97.0.0", &fake_binary("97.0.0"), false);
+    bucket.latest("99.0.0");
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let run = |cmd: &mut std::process::Command, vars: &[(&str, &std::ffi::OsStr)]| {
+        let out = cmd
+            .env_clear()
+            .envs(vars.iter().copied())
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("CONDE_DIST_BASE_URL", &bucket.url)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+
+    let by_script = root.path().join("script");
+    let install = |version: Option<&str>| {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../dist/install.sh"
+        ));
+        let mut vars = vec![("CONDE_INSTALL_DIR", by_script.as_os_str())];
+        if let Some(v) = version {
+            vars.push(("CONDE_VERSION", std::ffi::OsStr::new(v)));
+        }
+        run(&mut cmd, &vars)
+    };
+    let by_update = root.path().join("update/conde");
+    dist_stub::place_conde(&by_update);
+    let update = |args: &[&str]| {
+        run(
+            std::process::Command::new(&by_update)
+                .arg("update")
+                .args(args),
+            &[],
+        )
+    };
+
+    let mismatch = format!("checksum mismatch for {NAME}; nothing installed");
+    let (ok, text) = install(Some("97.0.0"));
+    assert!(!ok && text.contains(&mismatch), "install.sh: {text}");
+    let (ok, text) = update(&["--version", "97.0.0"]);
+    assert!(!ok && text.contains(&mismatch), "conde update: {text}");
+
+    let (ok, text) = install(None);
+    assert!(ok, "install.sh: {text}");
+    let (ok, text) = update(&[]);
+    assert!(ok, "conde update: {text}");
+    assert_eq!(std::fs::read(by_script.join("conde")).unwrap(), release);
+    assert_eq!(std::fs::read(&by_update).unwrap(), release);
+}

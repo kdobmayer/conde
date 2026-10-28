@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use conde_remote::web::{
     AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, HostKey, Identity, Invite,
-    Invited, KeyDisplay, Limits, LoginTxn, Minted, SessionRecord, WebResult, WebStore,
-    WebStoreError, WebUser,
+    Invited, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount, SessionRecord, WebResult,
+    WebStore, WebStoreError, WebUser,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -477,6 +477,31 @@ impl WebStore for WebBoard {
             t.revoke_credential(key, &iso(now))?;
             Ok(Some(one.host.clone()))
         })
+    }
+
+    fn user_issuers(&self, user_id: i64) -> WebResult<Vec<String>> {
+        self.read(|t| t.identity_issuers(user_id))
+    }
+
+    fn realm_account(&self, user_id: i64) -> WebResult<RealmAccount> {
+        let (id, invite) = self.read(|t| t.user_keycloak(user_id))?;
+        Ok(RealmAccount { id, invite })
+    }
+
+    fn claim_realm_invite(&self, user_id: i64, candidate: &str) -> WebResult<RealmAccount> {
+        let (id, invite) = self.write(|t| {
+            t.claim_user_keycloak_invite(user_id, candidate)?;
+            Ok(t.user_keycloak(user_id)?)
+        })?;
+        Ok(RealmAccount { id, invite })
+    }
+
+    fn record_realm_id(&self, user_id: i64, invite: &str, id: &str) -> WebResult<RealmAccount> {
+        let (id, invite) = self.write(|t| {
+            t.record_user_keycloak_id(user_id, invite, id)?;
+            Ok(t.user_keycloak(user_id)?)
+        })?;
+        Ok(RealmAccount { id, invite })
     }
 
     fn set_slack_member(&self, name: &str, member_id: &str) -> WebResult<Option<WebUser>> {

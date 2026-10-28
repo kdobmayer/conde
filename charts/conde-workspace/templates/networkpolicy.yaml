@@ -1,5 +1,6 @@
 {{- if .Values.networkPolicy.enabled }}
-# Deny by default; in from the configured sources to 8080 only, out to kube-dns and the configured egress list.
+# Deny by default; in from the configured sources to 8080 only, out to kube-dns, Keycloak's admin API on a password
+# workspace, and the configured egress list.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,6 +33,18 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    {{- if eq .Values.invite.signIn "password" }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.invite.keycloakAdmin.namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
     {{- range .Values.networkPolicy.egress }}
     - to:
         - ipBlock:

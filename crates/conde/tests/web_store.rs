@@ -155,6 +155,19 @@ on_both!(
     the_invite_gate_binds_exactly_one_verified_email_match,
     a_generic_issuer_needs_a_verified_email,
     an_entra_sign_in_lands_on_its_migrated_binding_by_oid,
+    an_invite_sends_one_email_with_the_steps,
+    a_password_invite_has_keycloak_send_the_account_setup_email,
+    a_lost_create_answer_resumes_and_a_foreign_account_is_refused,
+    a_realm_token_failure_answers_502_with_the_user_created,
+    two_racing_invites_record_one_realm_account,
+    a_set_up_realm_account_gets_no_new_link,
+    disabled_and_signed_in_users_get_no_email,
+    accounts_this_invite_did_not_create_are_refused,
+    realm_failures_answer_502_with_the_user_created,
+    a_microsoft_invite_names_the_microsoft_account,
+    a_password_workspace_needs_three_character_names,
+    the_realm_record_is_claimed_and_recorded_once,
+    a_slow_sign_in_server_is_cut_off_at_the_deadline,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -1390,4 +1403,962 @@ async fn a_last_try_ends_the_login_record_unless_its_account_reissued(d: Arc<Dis
         );
     })
     .await;
+}
+
+// --- the invite email ----------------------------------------------------------------------
+
+use conde_remote::web::invite::{DEFAULT_FROM, INVITE_ATTRIBUTE};
+use conde_remote::web::{InviteConfig, KeycloakAdmin, Resend, SignIn};
+
+/// A Resend stand-in: records each request (Authorization, body) and answers `status`.
+#[derive(Default)]
+struct ResendStub {
+    seen: Mutex<Vec<(String, Value)>>,
+    /// The Idempotency-Key of each request.
+    keys: Mutex<Vec<Option<String>>>,
+    status: AtomicUsize,
+}
+
+async fn resend_emails(
+    State(stub): State<Arc<ResendStub>>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let auth = headers[header::AUTHORIZATION].to_str().unwrap().to_string();
+    let key = headers
+        .get("idempotency-key")
+        .map(|v| v.to_str().unwrap().to_string());
+    stub.keys.lock().unwrap().push(key);
+    stub.seen.lock().unwrap().push((auth, body));
+    let status = StatusCode::from_u16(stub.status.load(Ordering::SeqCst) as u16).unwrap();
+    (
+        status,
+        axum::Json(json!({"id": "re-1", "message": "stub answer"})),
+    )
+        .into_response()
+}
+
+async fn start_resend() -> (String, Arc<ResendStub>) {
+    let stub = Arc::new(ResendStub::default());
+    stub.status.store(200, Ordering::SeqCst);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/emails", post(resend_emails))
+        .with_state(stub.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, stub)
+}
+
+/// A Keycloak admin API stand-in for realm `demo`.
+#[derive(Default)]
+struct KcStub {
+    accounts: Mutex<Vec<Value>>,
+    /// The next create stores the account and answers 502, as if its answer was lost.
+    lose_next_create: std::sync::atomic::AtomicBool,
+    token_fails: std::sync::atomic::AtomicBool,
+    tokens: Mutex<Vec<HashMap<String, String>>>,
+    creates: Mutex<Vec<Value>>,
+    /// (account id, lifespan, body) of each execute-actions-email.
+    actions: Mutex<Vec<(String, String, Value)>>,
+    /// The token answer waits this long (milliseconds), so concurrent invites overlap.
+    token_delay_ms: AtomicUsize,
+    /// When set, the create answers this status instead.
+    create_status: AtomicUsize,
+    /// When set, execute-actions-email answers this status instead of 204.
+    actions_status: AtomicUsize,
+    /// The search returns every account, whatever its email.
+    search_ignores_email: std::sync::atomic::AtomicBool,
+}
+
+const KC_TOKEN: &str = "kc-admin-token";
+const KC_SECRET: &str = "kc-client-secret";
+
+fn kc_authorized(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .is_some_and(|v| v == format!("Bearer {KC_TOKEN}").as_str())
+}
+
+async fn kc_token(
+    State(kc): State<Arc<KcStub>>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    kc.tokens.lock().unwrap().push(form.clone());
+    let delay = kc.token_delay_ms.load(Ordering::SeqCst) as u64;
+    tokio::time::sleep(Duration::from_millis(delay)).await;
+    if kc.token_fails.load(Ordering::SeqCst)
+        || form.get("client_secret").map(String::as_str) != Some(KC_SECRET)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "unauthorized_client"})),
+        )
+            .into_response();
+    }
+    axum::Json(json!({"access_token": KC_TOKEN, "token_type": "Bearer"})).into_response()
+}
+
+async fn kc_create(
+    State(kc): State<Arc<KcStub>>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    if !kc_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    kc.creates.lock().unwrap().push(body.clone());
+    if let status @ 1.. = kc.create_status.load(Ordering::SeqCst) {
+        let status = StatusCode::from_u16(status as u16).unwrap();
+        return (
+            status,
+            axum::Json(json!({"errorMessage": "invalidEmailMessage"})),
+        )
+            .into_response();
+    }
+    let mut accounts = kc.accounts.lock().unwrap();
+    let taken = accounts.iter().any(|a| {
+        a["username"] == body["username"]
+            || a["email"]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case(body["email"].as_str().unwrap())
+    });
+    if taken {
+        return (
+            StatusCode::CONFLICT,
+            axum::Json(json!({"errorMessage": "User exists with same email"})),
+        )
+            .into_response();
+    }
+    let id = format!("kc-{}", accounts.len() + 1);
+    let mut account = body.clone();
+    account["id"] = json!(id);
+    account["email"] = json!(body["email"].as_str().unwrap().to_lowercase());
+    accounts.push(account);
+    if kc.lose_next_create.swap(false, Ordering::SeqCst) {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    (
+        StatusCode::CREATED,
+        [(
+            header::LOCATION,
+            format!("http://kc/admin/realms/demo/users/{id}"),
+        )],
+    )
+        .into_response()
+}
+
+async fn kc_search(
+    State(kc): State<Arc<KcStub>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !kc_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    assert_eq!(q.get("exact").map(String::as_str), Some("true"));
+    let email = q["email"].to_lowercase();
+    let found: Vec<Value> = kc
+        .accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|a| kc.search_ignores_email.load(Ordering::SeqCst) || a["email"] == email.as_str())
+        .cloned()
+        .collect();
+    axum::Json(found).into_response()
+}
+
+async fn kc_user(
+    State(kc): State<Arc<KcStub>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !kc_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match kc
+        .accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == id.as_str())
+    {
+        Some(a) => axum::Json(a.clone()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": "User not found"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn kc_actions(
+    State(kc): State<Arc<KcStub>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    if !kc_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let status @ 1.. = kc.actions_status.load(Ordering::SeqCst) {
+        return (
+            StatusCode::from_u16(status as u16).unwrap(),
+            axum::Json(json!({"errorMessage": "smtp down"})),
+        )
+            .into_response();
+    }
+    kc.actions
+        .lock()
+        .unwrap()
+        .push((id, q.get("lifespan").cloned().unwrap_or_default(), body));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn start_keycloak() -> (String, Arc<KcStub>) {
+    let kc = Arc::new(KcStub::default());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/realms/demo/protocol/openid-connect/token", post(kc_token))
+        .route("/admin/realms/demo/users", post(kc_create).get(kc_search))
+        .route("/admin/realms/demo/users/{id}", get(kc_user))
+        .route(
+            "/admin/realms/demo/users/{id}/execute-actions-email",
+            axum::routing::put(kc_actions),
+        )
+        .with_state(kc.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, kc)
+}
+
+async fn mail_env(d: &Arc<Dispatcher>, invite: InviteConfig) -> Env<WebBoard> {
+    Env::uninvited(Arc::new(WebBoard::new(d.clone())), move |c| {
+        c.invite = invite
+    })
+    .await
+}
+
+async fn invite_req(env: &Env<WebBoard>, body: Value) -> (StatusCode, Value) {
+    admin(env, "/v1/admin/users", Some(body), Some(ADMIN_KEY)).await
+}
+
+/// The stored (realm account id, invite correlation value) of `name`.
+async fn realm_record(d: &Arc<Dispatcher>, name: &str) -> (Option<String>, Option<String>) {
+    let (d, name) = (d.clone(), name.to_string());
+    blocking(move || {
+        d.with_conn(|t| t.user_keycloak(t.user_id(&name)?.unwrap()))
+            .unwrap()
+    })
+    .await
+}
+
+/// A Google workspace: the invite sends one email through Resend with the setup steps; a failed
+/// send answers 502 with the user created; a user who signed in already gets nothing; without
+/// mail the invite says so.
+async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
+    let (resend_url, resend) = start_resend().await;
+    let env = mail_env(
+        &d,
+        InviteConfig {
+            sign_in: Some(SignIn::Google),
+            workspace: "clearscale".into(),
+            resend: Some(Resend {
+                api_key: "re_test_key".into(),
+                from: DEFAULT_FROM.into(),
+                base_url: resend_url,
+            }),
+            keycloak: None,
+            deadline: None,
+        },
+    )
+    .await;
+    let (status, got) = invite_req(
+        &env,
+        json!({"name": "ann", "email": "ann@clearscale.example", "inviter": "Krisz"}),
+    )
+    .await;
+    assert_eq!(
+        (status, got["mail"].as_str(), got["status"].as_str()),
+        (StatusCode::OK, Some("sent"), Some("invited")),
+        "{got}"
+    );
+    {
+        let seen = resend.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let (auth, mail) = &seen[0];
+        assert_eq!(auth, "Bearer re_test_key");
+        assert_eq!(mail["from"], DEFAULT_FROM);
+        assert_eq!(mail["to"], json!(["ann@clearscale.example"]));
+        assert_eq!(mail["subject"], "Krisz invited you to clearscale on conde");
+        let text = mail["text"].as_str().unwrap();
+        for step in [
+            "curl -fsSL https://conde.cloud/install.sh | bash",
+            &format!("conde login --server {}", env.base),
+            "sign in with your Google account ann@clearscale.example",
+            &format!("The workspace is {}.", env.base),
+            "https://conde.cloud/docs/setup",
+        ] {
+            assert!(text.contains(step), "{step}: {text}");
+        }
+        assert!(
+            mail["html"]
+                .as_str()
+                .unwrap()
+                .contains("sign in with your Google account ann@clearscale.example")
+        );
+    }
+
+    resend.status.store(500, Ordering::SeqCst);
+    let (status, got) = invite_req(
+        &env,
+        json!({"name": "bob", "email": "bob@clearscale.example"}),
+    )
+    .await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("failed")),
+        "{got}"
+    );
+    let message = got["message"].as_str().unwrap();
+    assert!(
+        message.contains("user bob exists on the board") && message.contains("500"),
+        "{message}"
+    );
+    assert!(!message.contains("re_test_key"), "{message}");
+    let users = {
+        let s = env.store.clone();
+        blocking(move || s.list_users().unwrap()).await
+    };
+    assert!(
+        users.iter().any(|u| u.name == "bob"),
+        "the user was created"
+    );
+
+    // the provider's person signs in; a re-invite then sends nothing
+    resend.status.store(200, Ordering::SeqCst);
+    let (status, _) = invite_req(&env, json!({"name": INVITED.0, "email": INVITED.1})).await;
+    assert_eq!(status, StatusCode::OK);
+    Browser::new().sign_in(&env).await;
+    let before = resend.seen.lock().unwrap().len();
+    let (status, got) = invite_req(&env, json!({"name": INVITED.0, "email": INVITED.1})).await;
+    assert_eq!(
+        (status, got["status"].as_str(), got["mail"].as_str()),
+        (StatusCode::OK, Some("exists"), Some("none")),
+        "{got}"
+    );
+    assert_eq!(resend.seen.lock().unwrap().len(), before);
+
+    let bare = mail_env(
+        &d,
+        InviteConfig {
+            sign_in: Some(SignIn::Google),
+            ..InviteConfig::default()
+        },
+    )
+    .await;
+    let (status, got) = invite_req(
+        &bare,
+        json!({"name": "cy", "email": "cy@clearscale.example"}),
+    )
+    .await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("unconfigured")),
+        "{got}"
+    );
+}
+
+fn demo_invite(kc_url: &str) -> InviteConfig {
+    InviteConfig {
+        sign_in: Some(SignIn::Password),
+        workspace: "demo".into(),
+        resend: None,
+        keycloak: Some(KeycloakAdmin {
+            url: kc_url.to_string(),
+            realm: "demo".into(),
+            client_id: "conde-admin".into(),
+            client_secret: KC_SECRET.into(),
+        }),
+        deadline: None,
+    }
+}
+
+/// A password workspace: the realm account is created (unverified, with the two required actions
+/// and the invite's correlation value) and Keycloak sends its account-setup email; the id is
+/// recorded, a re-invite uses it alone, and one whose email changed is refused.
+async fn a_password_invite_has_keycloak_send_the_account_setup_email(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "Ann@Demo.example"})).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    let token = kc.tokens.lock().unwrap()[0].clone();
+    assert_eq!(
+        (token["grant_type"].as_str(), token["client_id"].as_str()),
+        ("client_credentials", "conde-admin")
+    );
+    let create = kc.creates.lock().unwrap()[0].clone();
+    assert_eq!(create["username"], "ann");
+    assert_eq!(create["email"], "Ann@Demo.example");
+    assert_eq!(
+        (
+            create["enabled"].as_bool(),
+            create["emailVerified"].as_bool()
+        ),
+        (Some(true), Some(false))
+    );
+    assert_eq!(
+        create["requiredActions"],
+        json!(["VERIFY_EMAIL", "UPDATE_PASSWORD"])
+    );
+    assert!(
+        create.get("credentials").is_none(),
+        "conde never sets a password"
+    );
+    let mark = create["attributes"][INVITE_ATTRIBUTE][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        mark.len() == 32 && mark.chars().all(|c| c.is_ascii_hexdigit()),
+        "{mark}"
+    );
+    assert_eq!(
+        *kc.actions.lock().unwrap(),
+        [(
+            "kc-1".to_string(),
+            "604800".to_string(),
+            json!(["VERIFY_EMAIL", "UPDATE_PASSWORD"])
+        )]
+    );
+    assert_eq!(
+        realm_record(&d, "ann").await,
+        (Some("kc-1".into()), Some(mark))
+    );
+
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "Ann@Demo.example"})).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    assert_eq!(
+        kc.creates.lock().unwrap().len(),
+        1,
+        "the recorded account is reused"
+    );
+    assert_eq!(kc.actions.lock().unwrap().len(), 2);
+
+    kc.accounts.lock().unwrap()[0]["email"] = json!("someone@else.example");
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "Ann@Demo.example"})).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{got}");
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("the recorded sign-in account no longer matches"),
+        "{got}"
+    );
+    assert_eq!(kc.actions.lock().unwrap().len(), 2);
+}
+
+/// A create whose answer was lost: the retry's 409 lookup finds the account carrying this
+/// invite's value, records it and has the email sent once. An account the invite did not
+/// create (no value) is refused with 409 and no email.
+async fn a_lost_create_answer_resumes_and_a_foreign_account_is_refused(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    kc.lose_next_create.store(true, Ordering::SeqCst);
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{got}");
+    let (id, mark) = realm_record(&d, "ann").await;
+    assert_eq!(id, None);
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    assert_eq!(kc.creates.lock().unwrap().len(), 2);
+    assert_eq!(
+        kc.actions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| a.0.as_str())
+            .collect::<Vec<_>>(),
+        ["kc-1"]
+    );
+    assert_eq!(realm_record(&d, "ann").await, (Some("kc-1".into()), mark));
+
+    kc.accounts.lock().unwrap().push(
+        json!({"id": "kc-eve", "username": "eve", "email": "eve@demo.example", "enabled": true}),
+    );
+    let (status, got) = invite_req(&env, json!({"name": "eve", "email": "eve@demo.example"})).await;
+    assert_eq!(
+        (status, got["error"].as_str()),
+        (StatusCode::CONFLICT, Some("conflict")),
+        "{got}"
+    );
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("already has an account with this email that this invitation did not create"),
+        "{got}"
+    );
+    assert_eq!(
+        kc.actions.lock().unwrap().len(),
+        1,
+        "no email for a foreign account"
+    );
+    assert_eq!(realm_record(&d, "eve").await.0, None);
+}
+
+/// A token refusal is a 502 naming the step; the user exists and nothing reached the realm.
+async fn a_realm_token_failure_answers_502_with_the_user_created(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    kc.token_fails.store(true, Ordering::SeqCst);
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(
+        (status, got["user"].as_str(), got["mail"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("ann"), Some("failed")),
+        "{got}"
+    );
+    let message = got["message"].as_str().unwrap();
+    assert!(
+        message.contains("the admin token request was refused (401"),
+        "{message}"
+    );
+    assert!(!message.contains(KC_SECRET), "{message}");
+    assert!(kc.creates.lock().unwrap().is_empty() && kc.actions.lock().unwrap().is_empty());
+}
+
+/// A user invited on the board whose realm invite already holds the correlation `value`.
+async fn preclaimed(env: &Env<WebBoard>, name: &str, email: &str, value: &str) -> i64 {
+    let (s, name, email, value) = (
+        env.store.clone(),
+        name.to_string(),
+        email.to_string(),
+        value.to_string(),
+    );
+    blocking(move || {
+        let web::Invited::Created(u) = s.invite_user(&name, &email).unwrap() else {
+            panic!("a new user")
+        };
+        let stored = s.claim_realm_invite(u.user_id, &value).unwrap();
+        assert_eq!(stored.invite.as_deref(), Some(value.as_str()));
+        u.user_id
+    })
+    .await
+}
+
+fn google_invite(resend_url: String, sign_in: SignIn) -> InviteConfig {
+    InviteConfig {
+        sign_in: Some(sign_in),
+        workspace: "clearscale".into(),
+        resend: Some(Resend {
+            api_key: "re_test_key".into(),
+            from: DEFAULT_FROM.into(),
+            base_url: resend_url,
+        }),
+        ..InviteConfig::default()
+    }
+}
+
+/// Two invites of one user at once: one correlation value wins, one realm account is created and
+/// recorded, and both answers agree.
+async fn two_racing_invites_record_one_realm_account(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    kc.token_delay_ms.store(300, Ordering::SeqCst);
+    let body = json!({"name": "ann", "email": "ann@demo.example"});
+    let (a, b) = tokio::join!(
+        invite_req(&env, body.clone()),
+        invite_req(&env, body.clone())
+    );
+    assert_eq!(
+        (a.0, b.0),
+        (StatusCode::OK, StatusCode::OK),
+        "{} {}",
+        a.1,
+        b.1
+    );
+    assert_eq!(kc.accounts.lock().unwrap().len(), 1);
+    let (id, mark) = realm_record(&d, "ann").await;
+    assert_eq!(id.as_deref(), Some("kc-1"));
+    let created = kc.creates.lock().unwrap().clone();
+    assert!(
+        created
+            .iter()
+            .all(|c| c["attributes"][INVITE_ATTRIBUTE][0].as_str() == mark.as_deref()),
+        "{created:?}"
+    );
+    kc.token_delay_ms.store(0, Ordering::SeqCst);
+    let (status, got) = invite_req(&env, body).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    assert_eq!(realm_record(&d, "ann").await.0.as_deref(), Some("kc-1"));
+}
+
+/// A re-invite asks only for the actions the account still has pending; an account that set its
+/// password and verified its address gets nothing.
+async fn a_set_up_realm_account_gets_no_new_link(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    let body = json!({"name": "ann", "email": "ann@demo.example"});
+    assert_eq!(invite_req(&env, body.clone()).await.0, StatusCode::OK);
+    kc.accounts.lock().unwrap()[0]["requiredActions"] = json!(["UPDATE_PASSWORD"]);
+    let (status, got) = invite_req(&env, body.clone()).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    assert_eq!(kc.actions.lock().unwrap()[1].2, json!(["UPDATE_PASSWORD"]));
+    kc.accounts.lock().unwrap()[0]["requiredActions"] = json!([]);
+    let (status, got) = invite_req(&env, body).await;
+    assert_eq!(
+        (status, got["mail"].as_str(), got["reason"].as_str()),
+        (StatusCode::OK, Some("none"), Some("set up")),
+        "{got}"
+    );
+    assert_eq!(
+        kc.actions.lock().unwrap().len(),
+        2,
+        "no link to an account that is set up"
+    );
+}
+
+/// No email for a disabled user (either path) or for a user already bound to the issuer, whose
+/// answer carries the real outcome.
+async fn disabled_and_signed_in_users_get_no_email(d: Arc<Dispatcher>) {
+    let k = Some(ADMIN_KEY);
+    let (resend_url, resend) = start_resend().await;
+    let google = mail_env(&d, google_invite(resend_url, SignIn::Google)).await;
+    let ann = json!({"name": "ann", "email": "ann@clearscale.example"});
+    assert_eq!(invite_req(&google, ann.clone()).await.0, StatusCode::OK);
+    assert_eq!(
+        admin(&google, "/v1/admin/users/ann/disable", Some(json!({})), k)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, got) = invite_req(&google, ann).await;
+    assert_eq!(
+        (status, got["mail"].as_str(), got["reason"].as_str()),
+        (StatusCode::OK, Some("none"), Some("disabled")),
+        "{got}"
+    );
+    assert_eq!(resend.seen.lock().unwrap().len(), 1);
+
+    let (kc_url, kc) = start_keycloak().await;
+    let demo = mail_env(&d, demo_invite(&kc_url)).await;
+    let bob = json!({"name": "bob", "email": "bob@demo.example"});
+    assert_eq!(invite_req(&demo, bob.clone()).await.0, StatusCode::OK);
+    assert_eq!(
+        admin(&demo, "/v1/admin/users/bob/disable", Some(json!({})), k)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let tokens = kc.tokens.lock().unwrap().len();
+    let (status, got) = invite_req(&demo, bob).await;
+    assert_eq!(
+        (status, got["reason"].as_str()),
+        (StatusCode::OK, Some("disabled")),
+        "{got}"
+    );
+    assert_eq!(
+        kc.tokens.lock().unwrap().len(),
+        tokens,
+        "the realm is not called"
+    );
+
+    // bound without an email (the admin's binding), then invited: "email set", nothing sent
+    let bind = json!({"issuer": demo.idp.issuer, "subject": "s-carl", "name": "carl"});
+    assert_eq!(
+        admin(&demo, "/v1/admin/users", Some(bind), k).await.0,
+        StatusCode::OK
+    );
+    let (status, got) =
+        invite_req(&demo, json!({"name": "carl", "email": "carl@demo.example"})).await;
+    assert_eq!(
+        (
+            status,
+            got["status"].as_str(),
+            got["mail"].as_str(),
+            got["reason"].as_str()
+        ),
+        (
+            StatusCode::OK,
+            Some("email set"),
+            Some("none"),
+            Some("signed in")
+        ),
+        "{got}"
+    );
+    assert_eq!(kc.tokens.lock().unwrap().len(), tokens);
+    // the provider's person signs in after the invite; a re-invite answers "exists"
+    assert_eq!(
+        invite_req(&demo, json!({"name": INVITED.0, "email": INVITED.1}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    Browser::new().sign_in(&demo).await;
+    let actions = kc.actions.lock().unwrap().len();
+    let (status, got) = invite_req(&demo, json!({"name": INVITED.0, "email": INVITED.1})).await;
+    assert_eq!(
+        (status, got["status"].as_str(), got["mail"].as_str()),
+        (StatusCode::OK, Some("exists"), Some("none")),
+        "{got}"
+    );
+    assert_eq!(kc.actions.lock().unwrap().len(), actions);
+}
+
+/// After a 409 only the one account carrying this invite's value and its email is adopted:
+/// another value, two matches, a matching value under another email, or a name taken by an
+/// account with another email are 409 to the admin with no email.
+async fn accounts_this_invite_did_not_create_are_refused(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    let account = |id: &str, name: &str, email: &str, value: Option<&str>| {
+        let mut a = json!({"id": id, "username": name, "email": email, "enabled": true});
+        if let Some(v) = value {
+            a["attributes"] = json!({INVITE_ATTRIBUTE: [v]});
+        }
+        a
+    };
+    let refused = |got: &Value, wording: &str| {
+        assert_eq!(got["error"], "conflict", "{got}");
+        let m = got["message"].as_str().unwrap();
+        assert!(m.contains(wording), "{m}");
+    };
+    preclaimed(&env, "ann", "ann@demo.example", "v-ann").await;
+    kc.accounts
+        .lock()
+        .unwrap()
+        .push(account("kc-a", "ann", "ann@demo.example", Some("v-other")));
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    refused(
+        &got,
+        "an account with this email that this invitation did not create",
+    );
+
+    preclaimed(&env, "bob", "bob@demo.example", "v-bob").await;
+    kc.accounts.lock().unwrap().extend([
+        account("kc-b1", "bob", "bob@demo.example", Some("v-bob")),
+        account("kc-b2", "bob2", "bob@demo.example", Some("v-bob")),
+    ]);
+    let (status, got) = invite_req(&env, json!({"name": "bob", "email": "bob@demo.example"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+
+    // the name is taken by an account with another email: nothing found by this email
+    preclaimed(&env, "cyd", "cyd@demo.example", "v-cyd").await;
+    kc.accounts.lock().unwrap().push(account(
+        "kc-c",
+        "cyd",
+        "cyd@elsewhere.example",
+        Some("v-cyd"),
+    ));
+    let (status, got) = invite_req(&env, json!({"name": "cyd", "email": "cyd@demo.example"})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    refused(
+        &got,
+        "the sign-in server already has an account that this invitation did not create",
+    );
+    assert!(
+        !got["message"].as_str().unwrap().contains("with this email"),
+        "{got}"
+    );
+    // a search that also returns it: the value matches, the email does not
+    kc.search_ignores_email.store(true, Ordering::SeqCst);
+    kc.accounts.lock().unwrap().retain(|a| a["id"] == "kc-c");
+    let (status, got) = invite_req(&env, json!({"name": "cyd", "email": "cyd@demo.example"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+    assert!(
+        kc.actions.lock().unwrap().is_empty(),
+        "no email for a foreign account"
+    );
+    assert_eq!(realm_record(&d, "cyd").await.0, None);
+}
+
+/// A refused create (other than 409) and a refused actions email are 502 with the user created.
+async fn realm_failures_answer_502_with_the_user_created(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    kc.create_status.store(400, Ordering::SeqCst);
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(
+        (status, got["user"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("ann")),
+        "{got}"
+    );
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalidEmailMessage"),
+        "{got}"
+    );
+    kc.create_status.store(0, Ordering::SeqCst);
+    kc.actions_status.store(500, Ordering::SeqCst);
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{got}");
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("sending the account-setup email was refused (500"),
+        "{got}"
+    );
+    assert_eq!(
+        realm_record(&d, "ann").await.0.as_deref(),
+        Some("kc-1"),
+        "a retry resumes with the account"
+    );
+    let users = {
+        let s = env.store.clone();
+        blocking(move || s.list_users().unwrap()).await
+    };
+    assert!(users.iter().any(|u| u.name == "ann"));
+}
+
+/// A Microsoft workspace's email names the Microsoft account; its Idempotency-Key is stable for
+/// the same user and email.
+async fn a_microsoft_invite_names_the_microsoft_account(d: Arc<Dispatcher>) {
+    let (resend_url, resend) = start_resend().await;
+    let env = mail_env(&d, google_invite(resend_url, SignIn::Microsoft)).await;
+    let body = json!({"name": "ann", "email": "ann@dakai.example"});
+    let (status, got) = invite_req(&env, body.clone()).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("sent")),
+        "{got}"
+    );
+    let text = resend.seen.lock().unwrap()[0].1["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("sign in with your Microsoft account ann@dakai.example"),
+        "{text}"
+    );
+    assert!(!text.contains("Google"), "{text}");
+    invite_req(&env, body).await;
+    let keys = resend.keys.lock().unwrap().clone();
+    assert!(
+        keys[0].as_deref().is_some_and(|k| !k.contains("ann@")),
+        "{keys:?}"
+    );
+    assert_eq!(keys[0], keys[1]);
+}
+
+/// The realm's username validator needs three characters: a shorter name is refused before
+/// anything is created.
+async fn a_password_workspace_needs_three_character_names(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    let (status, got) = invite_req(&env, json!({"name": "al", "email": "al@demo.example"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
+    assert_eq!(
+        got["message"],
+        "on a password workspace the name needs at least 3 characters"
+    );
+    assert!(kc.tokens.lock().unwrap().is_empty());
+    let users = {
+        let s = env.store.clone();
+        blocking(move || s.list_users().unwrap()).await
+    };
+    assert!(!users.iter().any(|u| u.name == "al"));
+}
+
+/// The realm record's two conditional writers: a correlation value is claimed once; an id is
+/// recorded once, only under the stored value; neither replaces what is stored.
+async fn the_realm_record_is_claimed_and_recorded_once(d: Arc<Dispatcher>) {
+    let board = Arc::new(WebBoard::new(d.clone()));
+    blocking(move || {
+        let uid = board.ensure_user("ann").unwrap().user_id;
+        let record = |id: Option<&str>, invite: &str| web::RealmAccount {
+            id: id.map(String::from),
+            invite: Some(invite.to_string()),
+        };
+        assert_eq!(
+            board.realm_account(uid).unwrap(),
+            web::RealmAccount::default()
+        );
+        assert_eq!(
+            board.claim_realm_invite(uid, "v1").unwrap(),
+            record(None, "v1")
+        );
+        assert_eq!(
+            board.claim_realm_invite(uid, "v2").unwrap(),
+            record(None, "v1"),
+            "the first value stays"
+        );
+        assert_eq!(
+            board.record_realm_id(uid, "v2", "kc-x").unwrap(),
+            record(None, "v1"),
+            "only under the stored value"
+        );
+        assert_eq!(
+            board.record_realm_id(uid, "v1", "kc-1").unwrap(),
+            record(Some("kc-1"), "v1")
+        );
+        assert_eq!(
+            board.record_realm_id(uid, "v1", "kc-2").unwrap(),
+            record(Some("kc-1"), "v1"),
+            "the id stays"
+        );
+        assert_eq!(
+            board.claim_realm_invite(uid, "v3").unwrap(),
+            record(Some("kc-1"), "v1")
+        );
+        assert_eq!(
+            board.realm_account(uid).unwrap(),
+            record(Some("kc-1"), "v1")
+        );
+    })
+    .await;
+}
+
+/// A sign-in server that does not answer is cut off at the invite's deadline: 502, user created.
+async fn a_slow_sign_in_server_is_cut_off_at_the_deadline(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let mut config = demo_invite(&kc_url);
+    config.deadline = Some(Duration::from_secs(1));
+    let env = mail_env(&d, config).await;
+    kc.token_delay_ms.store(3000, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(
+        (status, got["user"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("ann")),
+        "{got}"
+    );
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not answer within 1 s"),
+        "{got}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(2500),
+        "{:?}",
+        started.elapsed()
+    );
 }

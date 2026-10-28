@@ -14,6 +14,7 @@
 mod admin;
 pub(crate) mod app;
 mod auth;
+pub mod invite;
 mod keys;
 mod pages;
 mod ratelimit;
@@ -35,6 +36,7 @@ pub use app::embedded as app_embedded;
 /// no bridge claims those humans' notifications.
 pub const BROWSER_HOST: &str = "web";
 pub use auth::{Oidc, RedeemResponse};
+pub use invite::{InviteConfig, KeycloakAdmin, Resend, SignIn};
 pub use keys::new_host_key;
 pub use ratelimit::RateLimits;
 
@@ -65,6 +67,8 @@ pub struct WebConfig {
     pub cli_code_ttl: Duration,
     /// The rate limits of the `conde login` redeem.
     pub limits: RateLimits,
+    /// How the admin API's invites reach the invited person.
+    pub invite: InviteConfig,
 }
 
 impl std::fmt::Debug for WebConfig {
@@ -73,6 +77,7 @@ impl std::fmt::Debug for WebConfig {
             .field("issuer", &self.issuer)
             .field("client_id", &self.client_id)
             .field("redirect_uri", &self.redirect_uri)
+            .field("invite", &self.invite)
             .finish_non_exhaustive()
     }
 }
@@ -87,6 +92,14 @@ pub enum ConfigError {
     RedirectUri(String),
     #[error("OIDC_ISSUER '{0}' must be an https URL")]
     Issuer(String),
+    #[error("CONDE_JOIN_SIGN_IN '{0}' must be google, microsoft or password")]
+    JoinSignIn(String),
+    #[error("KEYCLOAK_ADMIN_URL '{0}' must be an http or https URL")]
+    KeycloakUrl(String),
+    #[error(
+        "OIDC_ISSUER '{0}' names no Keycloak realm (https://<host>/realms/<realm>), which CONDE_JOIN_SIGN_IN=password needs"
+    )]
+    Realm(String),
     #[error(transparent)]
     Secret(#[from] crate::SecretError),
 }
@@ -118,6 +131,10 @@ impl WebConfig {
             .ok_or_else(|| ConfigError::RedirectUri(redirect_uri.to_string()))?
             .to_string();
         Ok(WebConfig {
+            invite: InviteConfig {
+                workspace: invite::workspace_of(&public_url),
+                ..InviteConfig::default()
+            },
             issuer: issuer.to_string(),
             entra_tenant: entra_tenant_of(issuer),
             client_id: client_id.to_string(),
@@ -189,10 +206,11 @@ impl WebConfig {
         if !issuer.starts_with("https://") {
             return Err(ConfigError::Issuer(issuer.clone()));
         }
-        let config = WebConfig::oidc(issuer, client_id, client_secret, redirect_uri)?;
+        let mut config = WebConfig::oidc(issuer, client_id, client_secret, redirect_uri)?;
         if !config.public_url.starts_with("https://") {
             return Err(ConfigError::RedirectUri(config.redirect_uri));
         }
+        config.invite = InviteConfig::from_vars(&var, &config.public_url, &config.issuer)?;
         Ok(Some(config))
     }
 
@@ -282,6 +300,14 @@ pub enum Invited {
     OtherEmail(String),
     /// Another user has the email.
     EmailTaken(String),
+}
+
+/// The realm account of a password workspace's invite: the Keycloak user id once known, and the
+/// correlation value its create request carried as the `conde_invite` attribute.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RealmAccount {
+    pub id: Option<String>,
+    pub invite: Option<String>,
 }
 
 /// A user as the admin API lists it.
@@ -490,6 +516,24 @@ pub trait WebStore: Send + Sync {
     /// Sets the user's disabled flag (disabling also deletes the user's browser sessions);
     /// returns the user's hosts, or None for an unknown user.
     fn set_disabled(&self, name: &str, disabled: bool) -> WebResult<Option<Vec<String>>>;
+    /// The issuers the user holds an identity of. Default: refused (a store without invites).
+    fn user_issuers(&self, _user_id: i64) -> WebResult<Vec<String>> {
+        Err(WebStoreError("this board has no invites".into()))
+    }
+    /// The realm account an invite recorded for the user (password workspaces).
+    fn realm_account(&self, _user_id: i64) -> WebResult<RealmAccount> {
+        Err(WebStoreError("this board has no invites".into()))
+    }
+    /// Stores `candidate` as the user's correlation value unless a value or an account id is
+    /// stored already, in one transaction; the stored record, which every concurrent invite uses.
+    fn claim_realm_invite(&self, _user_id: i64, _candidate: &str) -> WebResult<RealmAccount> {
+        Err(WebStoreError("this board has no invites".into()))
+    }
+    /// Records the account id when the stored value is `invite` and no id is recorded, in one
+    /// transaction; the stored record.
+    fn record_realm_id(&self, _user_id: i64, _invite: &str, _id: &str) -> WebResult<RealmAccount> {
+        Err(WebStoreError("this board has no invites".into()))
+    }
     /// Sets the user's Slack member id as the admin's (a lookup by email never replaces it);
     /// None for an unknown user. Default: refused (a store without human paging).
     fn set_slack_member(&self, _name: &str, _member_id: &str) -> WebResult<Option<WebUser>> {

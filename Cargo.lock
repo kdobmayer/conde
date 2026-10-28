@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "conde"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -437,6 +437,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rustls-native-certs",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -454,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "conde-remote"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "askama",
@@ -485,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "conde-transport"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "serde_json",

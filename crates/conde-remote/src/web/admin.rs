@@ -1,7 +1,7 @@
 //! The admin API under `/v1/admin`, authenticated by the `CONDE_ADMIN_KEY` bearer: mint, list
-//! and revoke host keys, invite users by email, bind users to an identity, list, disable and
-//! enable users. The key is compared through its digest in constant time and never logged; every
-//! answer is `no-store`.
+//! and revoke host keys, invite users by email (and send the invite email, [`super::invite`]),
+//! bind users to an identity, list, disable and enable users. The key is compared through its
+//! digest in constant time and never logged; every answer is `no-store`.
 
 use std::sync::Arc;
 
@@ -14,7 +14,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::auth::base_name;
+use super::auth::{base_name, http_client};
+use super::invite::{DEADLINE, InviteConfig, Realm, RealmError, SignIn, invite_mail, send_resend};
 use super::keys::{MintError, host_slug, mint};
 use super::session::digest;
 use super::{
@@ -31,11 +32,21 @@ struct Issuer {
     entra_tenant: Option<String>,
 }
 
+/// What an invite needs to reach the person: the sign-in's address and issuer, and the mail.
+struct Invites {
+    config: InviteConfig,
+    server: String,
+    issuer: String,
+    http: reqwest::Client,
+}
+
 struct Inner {
     core: Core,
     key_digest: String,
     /// With sign-in configured, bound identities must be of its issuer.
     issuer: Option<Issuer>,
+    /// With sign-in configured.
+    invites: Option<Invites>,
 }
 
 /// Shared state of the admin routes.
@@ -50,6 +61,12 @@ impl AdminState {
             issuer: sign_in.map(|c| Issuer {
                 url: c.issuer.clone(),
                 entra_tenant: c.entra_tenant.clone(),
+            }),
+            invites: sign_in.map(|c| Invites {
+                config: c.invite.clone(),
+                server: c.public_url.clone(),
+                issuer: c.issuer.clone(),
+                http: http_client(std::time::Duration::from_secs(15)),
             }),
         }))
     }
@@ -271,6 +288,9 @@ struct CreateUserRequest {
     /// The invite's email.
     #[serde(default)]
     email: Option<String>,
+    /// Who invites, named in the invite email.
+    #[serde(default)]
+    inviter: Option<String>,
     #[serde(default)]
     display: Option<String>,
     #[serde(default)]
@@ -293,15 +313,43 @@ fn bad_request(message: &str) -> Response {
 }
 
 /// An email address as an invite takes it: trimmed, one `@` between a local part and a domain,
-/// no spaces or control characters, at most 254 characters.
+/// no spaces, control characters or the address syntax's specials (`<>(),;:"[]\`, so no display
+/// name or second address rides along), at most 254 characters.
 pub(crate) fn email_address(input: &str) -> Option<String> {
     let email = input.trim();
     let ok = email.len() <= 254
-        && !email.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !email
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "<>(),;:\"[]\\".contains(c))
         && email.split_once('@').is_some_and(|(local, domain)| {
             !local.is_empty() && !domain.is_empty() && !domain.contains('@')
         });
     ok.then(|| email.to_string())
+}
+
+/// A Unicode format character (general category Cf): bidirectional overrides, zero-width
+/// characters and the like, which can make a name read as something else.
+fn is_format(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2
+        | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+        | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// The inviter an invite email names: trimmed, at most 80 characters, no control or format
+/// characters; None when empty.
+fn inviter_name(input: &str) -> Result<Option<String>, ()> {
+    let name = input.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let ok = name.chars().count() <= 80 && !name.chars().any(|c| c.is_control() || is_format(c));
+    if ok {
+        Ok(Some(name.to_string()))
+    } else {
+        Err(())
+    }
 }
 
 /// The issuer a binding request names: `{issuer, subject}`, or Entra's `{tid, oid}` mapped to
@@ -362,7 +410,7 @@ async fn create_user(
     if !binding {
         return invite_user(state, req).await;
     }
-    if req.email.is_some() {
+    if req.email.is_some() || req.inviter.is_some() {
         return bad_request("email goes with the invite, {name, email}, not with an identity");
     }
     let (issuer, subject) = match binding_key(&state, &req) {
@@ -426,7 +474,8 @@ async fn create_user(
     }
 }
 
-/// The invite form of `POST /v1/admin/users`: `{name, email}`.
+/// The invite form of `POST /v1/admin/users`: `{name, email, inviter?}`. Creates the user, then
+/// sends the invite email per the workspace's sign-in ([`super::invite`]).
 async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
     let (Some(name), Some(email)) = (req.name.as_deref(), req.email.as_deref()) else {
         return bad_request("an invite is {name, email}");
@@ -437,6 +486,17 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
     let Some(email) = email_address(email) else {
         return bad_request("email must be an address like name@example.com");
     };
+    let Ok(inviter) = inviter_name(req.inviter.as_deref().unwrap_or_default()) else {
+        return bad_request(
+            "inviter must be 1 to 80 characters, without control or format characters",
+        );
+    };
+    let invites = state.0.invites.as_ref();
+    let sign_in = invites.and_then(Invites::sends);
+    // the realm's username validator
+    if sign_in == Some(SignIn::Password) && name.chars().count() < 3 {
+        return bad_request("on a password workspace the name needs at least 3 characters");
+    }
     let (target, address) = (name.clone(), email.clone());
     let result = state
         .core()
@@ -463,10 +523,174 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
         Err(e) => return store_failed(e),
     };
     tracing::info!(user = %user.name, outcome, "admin invited a user");
-    reply(
-        StatusCode::OK,
-        json!({"user": user.name, "email": email, "status": outcome, "disabled": user.disabled}),
-    )
+    let answer = |status: StatusCode, mail: &str, extra: Value| {
+        let mut body = json!({"user": user.name, "email": email, "status": outcome,
+                              "disabled": user.disabled, "mail": mail});
+        if let (Some(b), Value::Object(extra)) = (body.as_object_mut(), extra) {
+            b.extend(extra);
+        }
+        reply(status, body)
+    };
+    let failed = |status: StatusCode, code: &str, why: &str| {
+        tracing::warn!(user = %user.name, %why, "the invite email was not sent");
+        answer(
+            status,
+            "failed",
+            json!({"error": code, "message": format!(
+                "user {} exists on the board, but no invite email was sent: {why}", user.name)}),
+        )
+    };
+    let (Some(invites), Some(sign_in)) = (invites, sign_in) else {
+        return answer(StatusCode::OK, "unconfigured", json!({}));
+    };
+    if user.disabled {
+        return answer(StatusCode::OK, "none", json!({"reason": "disabled"}));
+    }
+    let user_id = user.user_id;
+    let issuers = match state.core().store(move |s| s.user_issuers(user_id)).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::error!(error = %e, "admin store call failed");
+            return failed(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "the board's store failed",
+            );
+        }
+    };
+    if issuers.contains(&invites.issuer) {
+        return answer(StatusCode::OK, "none", json!({"reason": "signed in"}));
+    }
+    let deadline = invites.config.deadline.unwrap_or(DEADLINE);
+    let delivery = deliver(&state, invites, sign_in, &user, &email, inviter.as_deref());
+    match tokio::time::timeout(deadline, delivery).await {
+        Err(_) => failed(
+            StatusCode::BAD_GATEWAY,
+            "mail_failed",
+            &format!(
+                "the mail service or the sign-in server did not answer within {} s",
+                deadline.as_secs()
+            ),
+        ),
+        Ok(Ok(Delivered::Sent)) => answer(StatusCode::OK, "sent", json!({})),
+        Ok(Ok(Delivered::Keycloak)) => answer(StatusCode::OK, "keycloak", json!({})),
+        Ok(Ok(Delivered::SetUp)) => answer(StatusCode::OK, "none", json!({"reason": "set up"})),
+        Ok(Err(RealmError::Conflict(why))) => failed(StatusCode::CONFLICT, "conflict", &why),
+        Ok(Err(RealmError::Failed(why))) => failed(StatusCode::BAD_GATEWAY, "mail_failed", &why),
+    }
+}
+
+/// What an invite's delivery did.
+enum Delivered {
+    /// The server sent the email through Resend.
+    Sent,
+    /// Keycloak sends its account-setup email.
+    Keycloak,
+    /// The realm account is set up already; nothing was sent.
+    SetUp,
+}
+
+impl Invites {
+    /// The sign-in an invite is delivered for, when its mail is configured.
+    fn sends(&self) -> Option<SignIn> {
+        match self.config.sign_in {
+            Some(s @ (SignIn::Google | SignIn::Microsoft)) if self.config.resend.is_some() => {
+                Some(s)
+            }
+            Some(SignIn::Password) if self.config.keycloak.is_some() => Some(SignIn::Password),
+            _ => None,
+        }
+    }
+}
+
+async fn deliver(
+    state: &AdminState,
+    invites: &Invites,
+    sign_in: SignIn,
+    user: &WebUser,
+    email: &str,
+    inviter: Option<&str>,
+) -> Result<Delivered, RealmError> {
+    match (&invites.config.resend, &invites.config.keycloak) {
+        (_, Some(kc)) if sign_in == SignIn::Password => {
+            realm_invite(state, invites, kc, user.user_id, &user.name, email).await
+        }
+        (Some(resend), _) => {
+            let mail = invite_mail(
+                &invites.config.workspace,
+                &invites.server,
+                sign_in,
+                email,
+                inviter,
+            )
+            .map_err(RealmError::Failed)?;
+            // the same invite again (user, address, inviter) is answered by Resend without a send
+            let seed = format!("{}\n{}", email.to_lowercase(), inviter.unwrap_or_default());
+            let key = format!("conde-invite/{}/{}", user.user_id, &digest(&seed)[..32]);
+            send_resend(&invites.http, resend, email, &mail, &key)
+                .await
+                .map_err(RealmError::Failed)?;
+            Ok(Delivered::Sent)
+        }
+        _ => Err(RealmError::Failed("no mail is configured".into())),
+    }
+}
+
+/// A password workspace's invite: the realm account (the recorded one, else a new one marked with
+/// the correlation value every concurrent invite of the user shares), then Keycloak's
+/// account-setup email for the actions still pending.
+async fn realm_invite(
+    state: &AdminState,
+    invites: &Invites,
+    kc: &super::KeycloakAdmin,
+    user_id: i64,
+    name: &str,
+    email: &str,
+) -> Result<Delivered, RealmError> {
+    let store_error = |e: super::WebStoreError| {
+        tracing::error!(error = %e, "admin store call failed");
+        RealmError::Failed("the board's store failed".into())
+    };
+    let mut account = state
+        .core()
+        .store(move |s| s.realm_account(user_id))
+        .await
+        .map_err(store_error)?;
+    if account.id.is_none() && account.invite.is_none() {
+        let candidate = super::session::random_token()[..32].to_string();
+        account = state
+            .core()
+            .store(move |s| s.claim_realm_invite(user_id, &candidate))
+            .await
+            .map_err(store_error)?;
+    }
+    let Some(invite) = account.invite.clone() else {
+        return Err(RealmError::Failed(
+            "the recorded sign-in account has no invite value".into(),
+        ));
+    };
+    let realm = Realm::open(&invites.http, kc).await?;
+    let found = realm
+        .account(account.id.as_deref(), &invite, name, email)
+        .await?;
+    if account.id.is_none() {
+        let (value, id) = (invite.clone(), found.id.clone());
+        let stored = state
+            .core()
+            .store(move |s| s.record_realm_id(user_id, &value, &id))
+            .await
+            .map_err(store_error)?;
+        if stored.id.as_deref() != Some(found.id.as_str()) {
+            return Err(RealmError::Failed(
+                "another invite of this user recorded a different sign-in account; run the invite again".into(),
+            ));
+        }
+    }
+    if found.pending.is_empty() {
+        return Ok(Delivered::SetUp);
+    }
+    realm.send_setup_email(&found.id, &found.pending).await?;
+    Ok(Delivered::Keycloak)
 }
 
 /// `GET /v1/admin/users`: every user with their email, the issuers they are bound to, and
@@ -595,8 +819,34 @@ mod tests {
             "a@b@c",
             "ann b@example.com",
             "ann\u{7}@x.io",
+            "x<attacker@evil.com>",
+            "\"ann\"@x.io",
+            "ann@x.io,eve@y.io",
+            "ann@[10.0.0.1]",
+            "ann;b@x.io",
+            "ann(c)@x.io",
+            "a\\b@x.io",
+            "ann:b@x.io",
         ] {
             assert_eq!(email_address(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn inviter_names() {
+        assert_eq!(
+            inviter_name(" Krisz D ").unwrap().as_deref(),
+            Some("Krisz D")
+        );
+        assert_eq!(inviter_name("").unwrap(), None);
+        for bad in [
+            "a\u{202E}b",
+            "a\u{200B}b",
+            "\u{FEFF}x",
+            "a\nb",
+            &"x".repeat(81),
+        ] {
+            assert!(inviter_name(bad).is_err(), "{bad:?}");
         }
     }
 

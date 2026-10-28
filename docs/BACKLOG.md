@@ -11,6 +11,34 @@ commit messages, no attribution, `cargo test --workspace` green on both stores
 timing bounds), no new clippy warning, docs updated where behavior changes.
 Review and integration by desk, one batch at a time; one release per batch.
 
+## Deferred by the owner (conde.cloud on GCP, 2026-10-28)
+
+Items the owner decided to do later, not now. Each names who does it.
+
+- D1 (owner): replace the GitHub Actions secret CLOUDFLARE_API_TOKEN, which today is the conde-terraform
+  token (DNS edit + Zone settings + Pages edit on conde.cloud), with a token holding only "Cloudflare Pages:
+  Edit". Create it at dash.cloudflare.com/profile/api-tokens, then `pass insert -f conde/cloudflare-pages-token`
+  and desk runs `pass show conde/cloudflare-pages-token | gh secret set CLOUDFLARE_API_TOKEN -R kdobmayer/conde`.
+- D2 (owner): sign in to Keycloak's admin console as the permanent `admin` (temporary password in Secret
+  Manager keycloak-admin-temp-password), set the password and the authenticator, then delete the
+  bootstrap-admin user (infra/gcp/realms/README.md, step 4 and 5) and add master to `no_password_grant`.
+- D3 (owner): sign in to Argo CD at argocd.conde.cloud through the infra realm as `krisztian` (temporary
+  password in Secret Manager infra-krisztian-temp-password; sets password and authenticator); then desk flips
+  `argocd_local_admin` to false and deletes argocd-initial-admin-secret.
+- D4 (desk): Identity-Aware Proxy in front of the admin surfaces (Keycloak console on its own hostname and
+  backend, Argo CD), replacing the IP allowlist (docs/infra-plan-gcp.md 8b).
+- D5 (desk): Keycloak login theme in the conde branding, design option B (docs/infra-plan-gcp.md 8c), with
+  the web front end rebuild.
+- D6 (desk): Keycloak file vault for the Google and SMTP secrets so they leave Terraform state.
+- D7 (desk): Cloudflare 2FA on the account (owner, one click; it holds the domain) and a Cloud Armor policy
+  of its own for the Argo CD backend (default deny, allowlist only) instead of the host-header rule.
+- D8 (desk, after cutover): revisit the network layer: FQDN egress policies, Cilium cluster-wide policies,
+  Cloud Service Mesh if a pod-to-pod requirement appears; Cloudflare Tunnel plus Access as an alternative
+  edge, measured on the real streams.
+- D9 (desk): the invite email flow (`conde admin invite`, the join page, the Keycloak account creation) and
+  `conde update`; the site then documents them.
+- D10 (desk): archive, later delete, the DakaiGroup/conde repository once the Dakai cutover is done.
+
 ## Standing items (no claim needed)
 
 - S1. Release smoke on the NUC after every release, unattended with the

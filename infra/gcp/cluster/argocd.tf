@@ -494,6 +494,7 @@ resource "kubernetes_manifest" "argocd_workspaces" {
     project         = local.project
     postgres_image  = local.postgres_image
     pg_admin_secret = "pg-admin-password"
+    public_https    = join(" ", [for w in sort(var.workspaces_public_https) : jsonencode(w)])
     # The same shape either way: the provider cannot drop the automated block in place.
     sync_policy = jsonencode({
       automated = { enabled = var.workspaces_auto_sync, selfHeal = true, prune = false }

@@ -61,8 +61,9 @@ locals {
     # The GKE metadata server (Workload Identity tokens): its address, and its port on the node under Dataplane V2.
     { cidr = "169.254.169.254/32", except = [], ports = [{ protocol = "TCP", port = "80" }] },
     { cidr = "169.254.169.252/32", except = [], ports = [{ protocol = "TCP", port = "988" }] },
-    { cidr = "0.0.0.0/0", except = local.private_ranges, ports = [{ protocol = "TCP", port = "443" }] },
   ]
+  # Any public address on 443; the FQDN policies name the hosts instead.
+  public_https_egress = { cidr = "0.0.0.0/0", except = local.private_ranges, ports = [{ protocol = "TCP", port = "443" }] }
 }
 
 # ── Nodes: Autopilot runs them as the default compute service account, which has no roles in this project ─────

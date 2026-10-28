@@ -688,7 +688,7 @@ resource "kubernetes_network_policy_v1" "keycloak" {
     }
 
     dynamic "egress" {
-      for_each = local.network_policy_egress
+      for_each = concat(local.network_policy_egress, [local.public_https_egress])
       content {
         to {
           ip_block {

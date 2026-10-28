@@ -61,8 +61,8 @@ spec:
               value: '{{ trimSuffix ".yaml" .path.filename }}-slack-bot-token'
             - name: invite.signIn
               value: '{{ dig "invite" "signIn" "" . }}'
-            # One Resend key for every workspace; the Keycloak admin client secret (infra/gcp/realms) is read on password
-            # workspaces only.
+            # One Resend key for every workspace; the Keycloak admin client secret (infra/gcp/realms) is read on
+            # password workspaces only.
             - name: gcp.secrets.resendApiKey
               value: resend-api-key
             - name: gcp.secrets.keycloakAdminClientSecret

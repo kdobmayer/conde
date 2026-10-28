@@ -36,7 +36,7 @@ variable "workspaces_auto_sync" {
 # the broad reach back for one workspace without a commit to the gitops branch.
 variable "workspaces_public_https" {
   type    = set(string)
-  default = ["dakai"]
+  default = []
 }
 
 # Bump after adding a new version of the argocd-repo-ssh-key secret: the Argo CD release upgrades and its hook re-imports

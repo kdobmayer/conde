@@ -45,3 +45,47 @@ resource "cloudflare_dns_record" "gateway" {
 output "records" {
   value = { for k, r in merge({ auth = cloudflare_dns_record.certificate_authorization }, cloudflare_dns_record.gateway) : k => "${r.name} ${r.type} ${r.content}" }
 }
+
+# Outbound mail (Resend, EU region): DKIM, the bounce MX and SPF on the `send` subdomain, click tracking,
+# and a DMARC policy so nothing else can send as conde.cloud.
+resource "cloudflare_dns_record" "resend_dkim" {
+  zone_id = local.zone_id
+  name    = "resend._domainkey.conde.cloud"
+  type    = "TXT"
+  content = "\"p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCsOxePB89Eghh7LbwzRVXfeCDu5tULAjO8+3Awd7y2pOJjtooQJF60GSZGdAVzKDhiC3+DQAtkUip4tfxi2osbCiUroWcxIcu2zQy2RUCw1SFI781s0ti8E/v+C61yePhXVC3thFm4KIs0F4yfQOPlevD6nDVhvkIpRrLYhQk4YwIDAQAB\""
+  ttl     = 300
+}
+
+resource "cloudflare_dns_record" "resend_bounce_mx" {
+  zone_id  = local.zone_id
+  name     = "send.conde.cloud"
+  type     = "MX"
+  content  = "feedback-smtp.eu-west-1.amazonses.com"
+  priority = 10
+  ttl      = 300
+}
+
+resource "cloudflare_dns_record" "resend_spf" {
+  zone_id = local.zone_id
+  name    = "send.conde.cloud"
+  type    = "TXT"
+  content = "\"v=spf1 include:amazonses.com ~all\""
+  ttl     = 300
+}
+
+resource "cloudflare_dns_record" "resend_tracking" {
+  zone_id = local.zone_id
+  name    = "rsend.conde.cloud"
+  type    = "CNAME"
+  content = "send.forge.rmta.net"
+  ttl     = 300
+  proxied = false
+}
+
+resource "cloudflare_dns_record" "dmarc" {
+  zone_id = local.zone_id
+  name    = "_dmarc.conde.cloud"
+  type    = "TXT"
+  content = "\"v=DMARC1; p=quarantine; rua=mailto:kdobmayer.devops@gmail.com\""
+  ttl     = 300
+}

@@ -1,26 +1,33 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { RpcError, rpc } from './api';
-	import { onBoard, sameOwner, short } from './board.svelte';
+	import { board, onBoard, sameOwner, short } from './board.svelte';
+	import { KIND, firstLine, replyContext } from './conversation';
 	import { acceptEarlier, acceptNewest, emptyThread } from './thread';
-	import { bytes, clock, day } from './time';
-	import type { History, Message } from './types';
-	import Delivery from './Delivery.svelte';
+	import { day } from './time';
+	import type { History, Message as Msg } from './types';
+	import Message from './Message.svelte';
+	import Announcer from './ui/Announcer.svelte';
+	import EmptyState from './ui/EmptyState.svelte';
+	import ErrorLine from './ui/ErrorLine.svelte';
+	import SkeletonRows from './ui/SkeletonRows.svelte';
 
 	/** One of the owner's agents, and its counterpart: `#name` for a channel, else an agent's
-	 * canonical name. Read-only: the owner sees what the agent can read. */
-	let { agent, target }: { agent: string; target: string } = $props();
+	 * canonical name. Read-only: the owner sees what the agent can read. `back` is the phone's way
+	 * back to the list this conversation was opened from; `members` a channel's member count. */
+	let { agent, target, back = null, members = null }: { agent: string; target: string; back?: { href: string; label: string } | null; members?: number | null } = $props();
 	const isChannel = $derived(target.startsWith('#'));
 
-	let messages = $state<Message[]>([]);
+	let messages = $state<Msg[]>([]);
 	let thread = emptyThread();
 	let head = $state<History | null>(null);
 	let more = $state(false);
 	let loading = $state(true);
+	let fetching = $state(false);
 	let error = $state('');
+	let asOf = $state<number | null>(null);
 	let notMember = $state(false);
-	let quoted = $state<Record<string, Message | 'missing'>>({});
-	let flash = $state('');
+	let announce = $state('');
 	let scroller: HTMLElement | undefined = $state();
 
 	const PAGE = 100;
@@ -49,11 +56,15 @@
 			const h = await rpc<History>('owner.history', query({ limit: PAGE }));
 			if (mine !== generation || !sameOwner()) return;
 			const stick = first || !thread.paged || nearBottom();
+			const known = thread.messages.at(-1)?.seq ?? Infinity;
+			const arrived = h.messages.filter((m) => m.seq > known).length;
+			if (arrived > 0) announce = arrived === 1 ? '1 new message' : `${arrived} new messages`;
 			thread = acceptNewest(thread, h);
 			messages = thread.messages;
 			more = thread.more;
 			head = h;
 			error = '';
+			asOf = Date.now();
 			notMember = false;
 			loading = false; // render the messages before scrolling to them
 			if (stick) await scrollToEnd();
@@ -67,9 +78,11 @@
 		}
 	}
 
+	/** The page before the oldest loaded message, keeping the reading position. */
 	async function earlier() {
 		const first = messages[0];
-		if (!first || !scroller) return;
+		if (!first || !scroller || fetching) return;
+		fetching = true;
 		const height = scroller.scrollHeight;
 		try {
 			const h = await rpc<History>('owner.history', query({ before: first.seq, limit: PAGE }));
@@ -81,34 +94,13 @@
 			scroller.scrollTop = scroller.scrollHeight - height;
 		} catch (e) {
 			error = (e as Error).message;
+		} finally {
+			fetching = false;
 		}
 	}
 
-	async function showReply(id: string) {
-		const el = document.getElementById(`m-${id}`);
-		if (el) {
-			el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-			flash = id;
-			setTimeout(() => (flash = ''), 1500);
-			return;
-		}
-		if (quoted[id]) {
-			const { [id]: _, ...rest } = quoted;
-			quoted = rest;
-			return;
-		}
-		try {
-			const r = await rpc<{ message: Message }>('owner.message', { id });
-			if (!sameOwner()) return;
-			quoted = { ...quoted, [id]: r.message };
-		} catch {
-			quoted = { ...quoted, [id]: 'missing' };
-		}
-	}
-
-	function preview(id: string): string {
-		const m = messages.find((x) => x.message_id === id);
-		return m ? `${short(m.from)}: ${m.text.split('\n')[0]}` : 'an earlier message';
+	function onscroll() {
+		if (more && !fetching && !error && scroller && scroller.scrollTop < 400) void earlier();
 	}
 
 	$effect(() => {
@@ -118,7 +110,7 @@
 		thread = emptyThread();
 		more = false;
 		head = null;
-		quoted = {};
+		asOf = null;
 		loading = true;
 		void refresh(true);
 		return onBoard((topics) => {
@@ -126,217 +118,218 @@
 		});
 	});
 
-	const title = $derived(`${short(agent)} · ${isChannel ? target : short(target)}`);
+	const own = $derived(new Set((board.rail?.agents ?? []).map((a) => a.name)));
+	/** DM speakers by bare name (the header names the pair); channel speakers as `short` gives them. */
+	const speaker = $derived(isChannel ? short : (n: string) => n.slice(n.indexOf('/') + 1));
+	const days = $derived.by(() => {
+		const out: { day: string; items: { m: Msg; i: number }[] }[] = [];
+		messages.forEach((m, i) => {
+			const d = day(m.date);
+			if (out.at(-1)?.day !== d) out.push({ day: d, items: [] });
+			out.at(-1)!.items.push({ m, i });
+		});
+		return out;
+	});
+	function parentOf(i: number) {
+		const id = replyContext(messages, i);
+		if (!id) return null;
+		const p = messages.find((m) => m.message_id === id);
+		return p ? { from: speaker(p.from), line: firstLine(p.text, 60) } : 'earlier';
+	}
+
+	const self = $derived(short(agent));
+	const counterpart = $derived.by(() => {
+		const fa = board.fleet?.agents.find((a) => a.name === target);
+		const owner = target.slice(0, target.indexOf('/'));
+		const online = fa ? board.fleet!.hosts.some((h) => h.owner === fa.owner && h.host === fa.host && h.online) : null;
+		const kind = KIND[head?.kind ?? fa?.kind ?? ''] ?? null;
+		const whose = owner === board.session?.user ? 'your' : `${owner}’s`;
+		return { name: speaker(target), whose, kind, host: fa?.host ?? null, online };
+	});
+	const ownMembers = $derived((board.rail?.agents ?? []).filter((a) => a.channels.some((c) => c.channel === target)).map((a) => short(a.name)));
 </script>
 
 <section class="conv">
 	<header class="head">
-		<a class="back" href="#/" aria-label="All conversations">‹</a>
+		{#if back}
+			<a class="back" href={back.href} aria-label={`Back to ${back.label}`}>
+				<svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="M7 3 2 8l5 5M2 8h12" fill="none" stroke="currentColor" stroke-width="1.6" /></svg>
+			</a>
+		{/if}
 		<div class="title">
-			<h1>{title}</h1>
-			{#if head?.topic}<p class="muted topic">{head.topic}</p>{/if}
-			{#if !isChannel && head?.kind}<p class="muted topic">{head.kind}</p>{/if}
+			{#if isChannel}
+				<h1>{target}</h1>
+				<p class="mdeck">{members !== null ? `${members} members · ` : ''}yours: {ownMembers.join(', ') || self}</p>
+				<p class="deck">
+					{#if head?.topic}{head.topic}<br />{/if}
+					<span class="facts">{members !== null ? `${members} members; ` : ''}yours: {ownMembers.join(', ') || self}. You read the channel while one of your agents is a member; nothing is sent from here.</span>
+				</p>
+			{:else}
+				{@const c = counterpart}
+				<h1>{self} <span class="amp">&amp;</span> {c.name}</h1>
+				<p class="mdeck">{c.whose} {c.kind ?? 'agent'}{c.host ? ` on ${c.host}` : ''}{c.online !== null ? ` · ${c.online ? 'online' : 'offline'}` : ''}</p>
+				<p class="deck">
+					Direct messages with {c.whose} {c.kind ? `${c.kind} agent` : 'agent'}{c.host ? ` on ${c.host}` : ''}{c.online !== null ? `, ${c.online ? 'online now' : 'offline'}` : ''}.
+					You read what {self} reads; nothing is sent from here.
+				</p>
+			{/if}
 		</div>
 	</header>
 
-	<div class="scroll" bind:this={scroller}>
+	<div class="scroll" bind:this={scroller} {onscroll}>
+		<div class="spacer"></div>
 		{#if loading}
-			<p class="muted pad">Loading…</p>
+			<SkeletonRows count={6} height={72} />
 		{:else if notMember}
-			<p class="pad">{short(agent)} is not in {target} any more.</p>
+			<EmptyState text={`${self} is not in ${target} any more.`} />
 		{:else}
 			{#if more}
-				<div class="pad center"><button class="quiet" onclick={earlier}>Load earlier messages</button></div>
+				<div class="earlier">
+					<button class="quiet" onclick={earlier} disabled={fetching}>{fetching ? 'Loading earlier messages' : 'Earlier messages'}</button>
+				</div>
 			{/if}
 			{#if messages.length === 0 && !error}
-				<p class="muted pad">No messages yet.</p>
+				<EmptyState text="No messages yet." />
 			{/if}
-			{#each messages as m, i (m.message_id)}
-				{#if i === 0 || day(messages[i - 1]!.date) !== day(m.date)}
-					<div class="day muted"><span>{day(m.date)}</span></div>
-				{/if}
-				<article id={`m-${m.message_id}`} class="msg" class:mine={m.from === head?.agent} class:flash={flash === m.message_id}>
-					<div class="meta">
-						<span class="from">{short(m.from)}</span>
-						<time datetime={m.date} title={new Date(m.date).toLocaleString()}>{clock(m.date)}</time>
-						{#if m.reply_to}
-							<button class="link reply-link" onclick={() => showReply(m.reply_to!)}>
-								reply to {preview(m.reply_to)}
-							</button>
-						{/if}
-					</div>
-					{#if m.reply_to && quoted[m.reply_to]}
-						{@const q = quoted[m.reply_to]}
-						<blockquote>
-							{#if q === 'missing'}
-								<span class="muted">That message is not visible to you.</span>
-							{:else if q}
-								<span class="muted">{short(q.from)} · {day(q.date)} {clock(q.date)}</span>
-								<div class="text">{q.text}</div>
-							{/if}
-						</blockquote>
-					{/if}
-					{#if m.text}<div class="text">{m.text}</div>{/if}
-					{#if m.attachments.length > 0}
-						<ul class="atts">
-							{#each m.attachments as a (a.attachment_id)}
-								<li>
-									<a href={`/v1/attachments/${encodeURIComponent(a.attachment_id)}`} download={a.filename}>{a.filename}</a>
-									<span class="muted">{bytes(a.size)}</span>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-					{#if m.reactions.length > 0}
-						<div class="reactions">
-							{#each m.reactions as r (r.emoji)}
-								<span class="tag" title={r.by.join(', ')}>{r.emoji} {r.by.length}</span>
-							{/each}
-						</div>
-					{/if}
-					<Delivery message={m} />
-					<div class="actions">
-						<span class="muted id">{m.message_id}</span>
-					</div>
-				</article>
+			{#each days as g (g.day)}
+				<section class="day" aria-label={g.day}>
+					<h2>{g.day}</h2>
+					<ol>
+						{#each g.items as { m, i } (m.message_id)}
+							<li><Message message={m} {speaker} mine={own.has(m.from)} parent={parentOf(i)} /></li>
+						{/each}
+					</ol>
+				</section>
 			{/each}
 		{/if}
-		{#if error}<p class="error pad">{error}</p>{/if}
+		{#if error}<ErrorLine {error} asOf={messages.length > 0 ? asOf : null} retry={() => refresh()} />{/if}
 	</div>
+	<Announcer message={announce} />
 </section>
 
 <style>
 	.conv {
+		--pad: 56px;
 		display: flex;
 		flex-direction: column;
+		flex: 1;
 		height: 100%;
+		min-width: 0;
 		min-height: 0;
 	}
 	.head {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 10px;
-		padding: 8px 16px;
-		border-bottom: 1px solid var(--line);
 		flex: none;
+		padding: 34px var(--pad) 20px;
+		border-bottom: 1px solid var(--line);
 	}
 	.back {
 		display: none;
-		font-size: 24px;
-		line-height: 1;
-		text-decoration: none;
-		color: inherit;
-		padding: 0 6px 2px 0;
 	}
 	.title {
 		min-width: 0;
 	}
 	h1 {
-		font-size: 16px;
-		font-weight: 650;
 		margin: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		font: 600 36px/1.15 var(--serif);
+		letter-spacing: -0.015em;
+		overflow-wrap: anywhere;
 	}
-	.topic {
-		margin: 0;
-		font-size: 13px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+	.amp {
+		font-style: italic;
+		font-weight: 400;
+		color: var(--faint);
+	}
+	.mdeck {
+		display: none;
+	}
+	.deck {
+		margin: 10px 0 0;
+		max-width: 660px;
+		font: 16px/1.5 var(--serif);
+		color: var(--muted);
+	}
+	.facts {
+		color: var(--muted);
 	}
 	.scroll {
 		flex: 1;
+		min-height: 0;
 		overflow-y: auto;
-		padding: 8px 0 16px;
-	}
-	.pad {
-		padding: 8px 16px;
-	}
-	.center {
-		text-align: center;
-	}
-	.day {
-		text-align: center;
-		font-size: 12px;
-		margin: 14px 0 6px;
-	}
-	.msg {
-		padding: 6px 16px;
-		border-left: 3px solid transparent;
-	}
-	.msg.mine {
-		background: var(--mine);
-	}
-	.msg.flash {
-		border-left-color: var(--accent);
-	}
-	.meta {
 		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
-		gap: 8px;
-		font-size: 13px;
+		flex-direction: column;
+		padding: 0 var(--pad) 44px;
 	}
-	.from {
-		font-weight: 650;
+	.spacer {
+		margin-top: auto;
 	}
-	time {
+	.earlier {
+		padding: 18px 0 0;
+	}
+	.day h2 {
+		margin: 30px 0 4px;
+		font: italic 400 15px/1 var(--serif);
 		color: var(--muted);
-		font-size: 12px;
 	}
-	.reply-link {
-		font-size: 12.5px;
-		max-width: 100%;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		text-align: left;
-	}
-	.text {
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-		margin-top: 2px;
-	}
-	blockquote {
-		margin: 4px 0;
-		padding: 4px 10px;
-		border-left: 3px solid var(--line);
-		font-size: 13.5px;
-	}
-	.atts {
+	ol {
 		list-style: none;
-		margin: 4px 0 0;
+		margin: 0;
 		padding: 0;
-		font-size: 13.5px;
 	}
-	.atts a {
-		overflow-wrap: anywhere;
-	}
-	.reactions {
-		display: flex;
-		gap: 4px;
-		flex-wrap: wrap;
-		margin-top: 4px;
-	}
-	.actions {
-		display: flex;
-		gap: 10px;
-		align-items: baseline;
-		font-size: 12px;
-		margin-top: 2px;
-	}
-	.id {
-		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-		font-size: 11px;
+	@media (max-width: 1280px) {
+		.conv {
+			--pad: 32px;
+			--margin: 140px;
+		}
+		.head {
+			padding-top: 28px;
+		}
+		h1 {
+			font-size: 30px;
+		}
 	}
 	@media (max-width: 720px) {
-		.back {
-			display: block;
+		.conv {
+			--pad: 18px;
 		}
-		.id {
+		.head {
+			align-items: center;
+			padding: 10px var(--pad) 10px;
+		}
+		.back {
+			display: grid;
+			place-items: center;
+			flex: none;
+			width: 44px;
+			height: 44px;
+			margin-left: -12px;
+			color: var(--fg);
+		}
+		h1 {
+			font-size: 22px;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		.deck {
 			display: none;
+		}
+		.mdeck {
+			display: block;
+			margin: 2px 0 0;
+			font-size: 13px;
+			color: var(--muted);
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		.scroll {
+			padding-bottom: 24px;
+		}
+		.day h2 {
+			margin-top: 22px;
 		}
 	}
 </style>

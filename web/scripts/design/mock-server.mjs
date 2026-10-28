@@ -1,7 +1,8 @@
 // Design-only mock of the conde web API over the design fixture, serving a built app.
 // Usage: node scripts/design/mock-server.mjs <build-dir> <port>
 // Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
-// owner.search, fleet.list; the last three per docs/web-ui-v2/ia.md "Server contract"),
+// owner.search, fleet.list, channel.list; the feed, thread and search ops per docs/web-ui-v2/ia.md
+// "Server contract"),
 // /v1/events (a WebSocket that sends the hello frame) and /keys (the server's keys page
 // template from crates/conde-remote/src/web/pages.rs, filled with fixture rows).
 
@@ -155,6 +156,16 @@ function answer(raw, res) {
 		}
 		case 'fleet.list':
 			result = fx.fleet;
+			break;
+		case 'channel.list':
+			result = {
+				channels: Object.entries(fx.channels).map(([channel, c]) => ({
+					channel,
+					topic: c.topic,
+					members: c.members.length,
+					messages: fx.messages.filter((x) => x.to === channel).length
+				}))
+			};
 			break;
 		case 'owner.feed':
 			result = feed(b);

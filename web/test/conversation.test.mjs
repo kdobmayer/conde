@@ -128,7 +128,7 @@ test('Delivery renders U8\'s StateWord with the detail, the id only behind the d
 	assert.match(source, /<StateWord \{message\} \/>/);
 	assert.match(source, /deliveryWord\(message,/);
 	const markup = source.split('</script>')[1].split('<style>')[0];
-	const disclosure = markup.slice(markup.indexOf('<Disclosure>'), markup.indexOf('</Disclosure>'));
+	const disclosure = markup.slice(markup.indexOf('<Disclosure'), markup.indexOf('</Disclosure>'));
 	assert.match(disclosure, /\{message\.message_id\}/, 'the id is inside the disclosure');
 	assert.equal(markup.split('message.message_id').length - 1, 1, 'and nowhere else');
 	const message = readFileSync(new URL('../src/lib/Message.svelte', import.meta.url), 'utf8').split('</script>')[1];

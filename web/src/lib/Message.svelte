@@ -11,17 +11,20 @@
 		message,
 		speaker,
 		mine = false,
+		selected = false,
 		parent = null
 	}: {
 		message: Message;
 		speaker: (name: string) => string;
 		mine?: boolean;
+		/** The message the conversation was opened at. */
+		selected?: boolean;
 		/** The replied-to message's speaker and first line, or `earlier` when it is not loaded. */
 		parent?: { from: string; line: string } | 'earlier' | null;
 	} = $props();
 </script>
 
-<article id={`m-${message.message_id}`} class="msg" class:mine aria-label={`${speaker(message.from)}, ${clock(message.date)}`}>
+<article id={`m-${message.message_id}`} class="msg" class:mine class:selected aria-current={selected ? 'true' : undefined} aria-label={`${speaker(message.from)}, ${clock(message.date)}`}>
 	<div class="side">
 		<b title={message.from}>{speaker(message.from)}</b>
 		<time datetime={message.date} title={new Date(message.date).toLocaleString()}>{clock(message.date)}</time>
@@ -54,6 +57,13 @@
 		gap: 28px;
 		padding: 14px 0;
 		scroll-margin: 40px;
+	}
+	.selected {
+		margin: 0 -18px;
+		padding-right: 16px;
+		padding-left: 16px;
+		border-left: 2px solid var(--accent);
+		background: var(--mine);
 	}
 	.side {
 		display: flex;

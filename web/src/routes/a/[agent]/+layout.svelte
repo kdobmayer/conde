@@ -17,7 +17,7 @@
 	const lists = $derived(me ? conversationsOf(me) : { dms: [], channels: [] });
 	/** The conversation on screen: the DM route's counterpart, else the most recent one. */
 	const open = $derived(
-		page.route.id === '/a/[agent]/dm/[owner]/[name]' ? `${page.params.owner}/${page.params.name}` : me ? latestOf(me) : null
+		page.route.id?.startsWith('/a/[agent]/dm/') ? `${page.params.owner}/${page.params.name}` : me ? latestOf(me) : null
 	);
 	const atList = $derived(page.route.id === '/a/[agent]');
 

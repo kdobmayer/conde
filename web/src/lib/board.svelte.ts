@@ -18,7 +18,10 @@ export const board = $state({
 	/** Server clock minus this browser's clock, from the last fleet answer. */
 	skewMs: 0,
 	live: false,
+	/** The last `owner.list` failure, cleared by the next success. */
 	error: '' as string,
+	/** The last `fleet.list` failure, cleared by the next success. */
+	fleetError: '' as string,
 	/** Ticks once a second: relative times and retry clocks read it. */
 	now: Date.now()
 });
@@ -85,8 +88,9 @@ export async function refreshFleet(): Promise<void> {
 		if (!sameOwner()) return;
 		board.skewMs = Date.parse(fleet.now) - (asked + Date.now()) / 2;
 		board.fleet = fleet;
+		board.fleetError = '';
 	} catch (e) {
-		board.error = (e as Error).message;
+		board.fleetError = (e as Error).message;
 	}
 }
 

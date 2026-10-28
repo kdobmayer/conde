@@ -22,10 +22,7 @@
 	const now = $derived(board.now + board.skewMs);
 	const view = $derived(board.fleet && board.session ? orderFleet(board.fleet, board.session.user, now) : null);
 	const ttl = $derived(board.fleet?.online_ttl_s ?? 90);
-	// `board.error` is shared with the rail; the fleet is the one failing when its answer is older
-	// than this page's 30 s refresh allows.
 	const asOf = $derived(board.fleet ? Date.parse(board.fleet.now) : null);
-	const stale = $derived(asOf !== null && now - asOf > 45_000);
 	// The column headers' one-line explanations (under 720 px a key above the table says them).
 	const cols = $derived([
 		{ label: 'Host, agent', x: `online: heartbeat within ${ttl} s` },
@@ -50,14 +47,14 @@
 
 	<div class="body">
 		{#if !view}
-			{#if board.error}
-				<ErrorLine error={board.error} retry={() => void refreshFleet()} />
+			{#if board.fleetError}
+				<ErrorLine error={board.fleetError} retry={() => void refreshFleet()} />
 			{:else}
 				<SkeletonRows count={6} height={40} />
 			{/if}
 		{:else}
-			{#if board.error && stale}
-				<ErrorLine error={board.error} asOf={asOf === null ? null : asOf - board.skewMs} retry={() => void refreshFleet()} />
+			{#if board.fleetError}
+				<ErrorLine error={board.fleetError} asOf={asOf === null ? null : asOf - board.skewMs} retry={() => void refreshFleet()} />
 			{/if}
 
 			<h2><span>Your hosts</span></h2>

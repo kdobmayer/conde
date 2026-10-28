@@ -8,7 +8,10 @@
 	import Disclosure from './ui/Disclosure.svelte';
 	import StateWord from './ui/StateWord.svelte';
 
-	let { message }: { message: Message } = $props();
+	let { message, open = false }: { message: Message; open?: boolean } = $props();
+	// `open` is only where the detail starts; the reader toggles it from there
+	// svelte-ignore state_referenced_locally
+	let expanded = $state(open);
 	const w = $derived(deliveryWord(message, board.now + board.skewMs));
 	const recipients = $derived(message.delivery?.recipients ?? []);
 	const readBy = $derived(message.delivery?.read_by ?? null);
@@ -36,7 +39,7 @@
 </script>
 
 <div class="delivery">
-	<Disclosure>
+	<Disclosure bind:open={expanded}>
 		{#snippet label()}
 			{#if w}
 				<span class="word"><StateWord {message} />{#if w.detail}{' '}<span class:bad={w.tone === 'problem'}>{w.detail}</span>{/if}</span>

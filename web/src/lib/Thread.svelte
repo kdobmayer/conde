@@ -13,14 +13,15 @@
 	// The thread view (ia.md "Thread view"): the segment around the selected message as the
 	// server answered it, in tree order; a header computed from the returned messages only
 	// (place, count, participants, time span, the link to the whole conversation); each message
-	// in full with its attachments, reactions and, for messages an own agent sent, delivery per
-	// recipient. Beside the Feed it has its own kicker and Close; in the sheet the sheet has them.
+	// in full with its attachments, reactions and its delivery (Delivery.svelte, as in the
+	// conversation; the selected message's detail starts open). Beside the Feed it has its own kicker and Close; in the sheet the sheet has them.
 	import { tick } from 'svelte';
 	import type { ThreadView } from './thread-view.svelte';
 	import { treeOrder } from './thread-tree';
 	import { board, short } from './board.svelte';
-	import { bytes, clock, countdown } from './time';
+	import { bytes, clock } from './time';
 	import { headline, timeSpan } from './feed-view';
+	import Delivery from './Delivery.svelte';
 	import ErrorLine from './ui/ErrorLine.svelte';
 	import SkeletonRows from './ui/SkeletonRows.svelte';
 
@@ -52,34 +53,20 @@
 		return !!me && name.startsWith(`${me}/`);
 	};
 
-	/** The whole conversation the thread is in: the channel, or the DM through the own party. */
+	/** The whole conversation the thread is in, opened at the selected message: the channel, or the
+	 * DM through the own party. */
 	const convo = $derived.by(() => {
 		if (!sel) return null;
-		if (sel.place !== 'dm') return { href: `#/c/${encodeURIComponent(sel.place.slice(1))}`, label: 'Read the whole channel' };
+		const m = `/m/${encodeURIComponent(sel.message_id)}`;
+		if (sel.place !== 'dm') return { href: `#/c/${encodeURIComponent(sel.place.slice(1))}${m}`, label: 'Read the whole channel' };
 		const mine = own(sel.from) ? sel.from : sel.to;
 		const other = mine === sel.from ? sel.to : sel.from;
 		const [owner = '', name = ''] = other.split('/');
 		return {
-			href: `#/a/${encodeURIComponent(short(mine))}/dm/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+			href: `#/a/${encodeURIComponent(short(mine))}/dm/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${m}`,
 			label: `Read the whole conversation as ${short(mine)}`
 		};
 	});
-
-	const WORD: Record<string, string> = {
-		queued: 'queued',
-		sending: 'sending',
-		retrying: 'retrying',
-		notified: 'notified',
-		held: 'held for approval',
-		delivered: 'delivered',
-		read: 'read',
-		unread: 'unread',
-		denied: 'denied',
-		refused: 'refused',
-		gone: 'recipient gone',
-		sent: 'sent'
-	};
-	const PROBLEM = new Set(['retrying', 'held', 'denied', 'refused', 'gone']);
 
 	function go(e: MouseEvent, id: string) {
 		if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -141,7 +128,6 @@
 			{/if}
 			<ol>
 				{#each lines as { message: m, depth, re } (m.message_id)}
-					{@const recipients = own(m.from) ? (m.delivery?.recipients ?? []) : []}
 					<li class:focus={m.message_id === selected} class:nested={depth > 0} style:--depth={depth} data-id={m.message_id} aria-current={m.message_id === selected ? 'true' : undefined}>
 						<div class="sp"><b class:own={own(m.from)}>{short(m.from)}</b><time datetime={m.date}>{clock(m.date)}</time></div>
 						{#if re}<p class="re">re {short(re.from)} {clock(re.date)}: {re.line}</p>{/if}
@@ -158,22 +144,7 @@
 								{#each m.reactions as r (r.emoji)}<span>{r.emoji} {r.by.map(short).join(', ')}</span>{/each}
 							</div>
 						{/if}
-						{#if recipients.length > 0}
-							<ul class="dl">
-								{#each recipients as r (r.recipient)}
-									<li>
-										to {short(r.recipient)}: <span class:bad={PROBLEM.has(r.state)}>{WORD[r.state] ?? r.state}</span>
-										{#if r.state === 'read' && r.read_at}{clock(r.read_at)}{/if}
-										{#if r.state === 'retrying' && r.retry_at}· next try {countdown(r.retry_at, board.now + board.skewMs)}{/if}
-										{#if r.attempts && r.attempts > 1}· {r.attempts} attempts{/if}
-										{#if r.last_error}· last error: {r.last_error.status}{r.last_error.reason ? ` (${r.last_error.reason})` : ''}{/if}
-									</li>
-								{/each}
-							</ul>
-						{/if}
-						{#if m.delivery?.read_by}
-							<p class="rd">Read by {m.delivery.read_by.read} of {m.delivery.read_by.total} members</p>
-						{/if}
+						<div class="foot"><Delivery message={m} open={m.message_id === selected} /></div>
 					</li>
 				{/each}
 			</ol>
@@ -315,8 +286,7 @@
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
-	.att,
-	.dl {
+	.att {
 		list-style: none;
 		margin: 6px 0 0;
 		padding: 0;
@@ -334,13 +304,12 @@
 		font-size: 12px;
 		color: var(--muted);
 	}
-	.bad {
-		color: var(--accent);
-	}
-	.rd {
-		margin: 6px 0 0;
-		font-size: 12px;
-		color: var(--muted);
+	.foot {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0 16px;
+		margin-top: 4px;
 	}
 	.more {
 		margin: 12px 0 0;

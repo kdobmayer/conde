@@ -2,6 +2,7 @@
 	import { tick } from 'svelte';
 	import { RpcError, rpc } from './api';
 	import { board, onBoard, sameOwner, short } from './board.svelte';
+	import { showBack, type Back } from './back.svelte';
 	import { KIND, firstLine, replyContext } from './conversation';
 	import { acceptEarlier, acceptNewest, emptyThread } from './thread';
 	import { day } from './time';
@@ -14,8 +15,15 @@
 
 	/** One of the owner's agents, and its counterpart: `#name` for a channel, else an agent's
 	 * canonical name. Read-only: the owner sees what the agent can read. `back` is the phone's way
-	 * back to the list this conversation was opened from; `members` a channel's member count. */
-	let { agent, target, back = null, members = null }: { agent: string; target: string; back?: { href: string; label: string } | null; members?: number | null } = $props();
+	 * back to the list this conversation was opened from (shown in the shell's top bar); `members`
+	 * a channel's member count; `at` a message to open at instead of the newest. */
+	let {
+		agent,
+		target,
+		back = null,
+		members = null,
+		at = null
+	}: { agent: string; target: string; back?: Back | null; members?: number | null; at?: string | null } = $props();
 	const isChannel = $derived(target.startsWith('#'));
 
 	let messages = $state<Msg[]>([]);
@@ -31,6 +39,14 @@
 	let scroller: HTMLElement | undefined = $state();
 
 	const PAGE = 100;
+	/** How far back opening at a message pages before it gives up: 20 pages of 100. */
+	const REACH_PAGES = 20;
+	/** The message opened at, marked once it is on screen; `far` when it was not reached. */
+	let marked = $state<string | null>(null);
+	let far = $state(false);
+	let reaching = false;
+
+	$effect(() => showBack(back));
 
 	function query(extra: Record<string, unknown> = {}) {
 		return { agent, ...(isChannel ? { channel: target } : { with: target }), ...extra };
@@ -67,7 +83,8 @@
 			asOf = Date.now();
 			notMember = false;
 			loading = false; // render the messages before scrolling to them
-			if (stick) await scrollToEnd();
+			if (first && at) await openAt(at);
+			else if (stick) await scrollToEnd();
 		} catch (e) {
 			if (mine !== generation) return;
 			if (e instanceof RpcError && e.code === 'forbidden' && isChannel && e.message.startsWith('not a member'))
@@ -99,7 +116,32 @@
 		}
 	}
 
+	/** Pages back until `id` is loaded (at most REACH_PAGES), then brings it into view and marks
+	 * it; when it is not reached the conversation opens at the newest with a line saying so. */
+	async function openAt(id: string) {
+		reaching = true;
+		try {
+			const has = () => messages.some((m) => m.message_id === id);
+			for (let i = 0; i < REACH_PAGES && !has() && more && !error; i++) {
+				const n = messages.length;
+				await earlier();
+				if (messages.length === n) break;
+			}
+			if (!has()) {
+				far = true;
+				await scrollToEnd();
+				return;
+			}
+			marked = id;
+			await tick();
+			document.getElementById(`m-${id}`)?.scrollIntoView({ block: 'center' });
+		} finally {
+			reaching = false;
+		}
+	}
+
 	function onscroll() {
+		if (reaching) return;
 		if (more && !fetching && !error && scroller && scroller.scrollTop < 400) void earlier();
 	}
 
@@ -111,6 +153,8 @@
 		more = false;
 		head = null;
 		asOf = null;
+		marked = null;
+		far = false;
 		loading = true;
 		void refresh(true);
 		return onBoard((topics) => {
@@ -151,11 +195,6 @@
 
 <section class="conv">
 	<header class="head">
-		{#if back}
-			<a class="back" href={back.href} aria-label={`Back to ${back.label}`}>
-				<svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="M7 3 2 8l5 5M2 8h12" fill="none" stroke="currentColor" stroke-width="1.6" /></svg>
-			</a>
-		{/if}
 		<div class="title">
 			{#if isChannel}
 				<h1>{target}</h1>
@@ -188,6 +227,9 @@
 					<button class="quiet" onclick={earlier} disabled={fetching}>{fetching ? 'Loading earlier messages' : 'Earlier messages'}</button>
 				</div>
 			{/if}
+			{#if far}
+				<p class="far">The message this link points to is further back than the loaded messages, or not visible to {self}.</p>
+			{/if}
 			{#if messages.length === 0 && !error}
 				<EmptyState text="No messages yet." />
 			{/if}
@@ -196,7 +238,7 @@
 					<h2>{g.day}</h2>
 					<ol>
 						{#each g.items as { m, i } (m.message_id)}
-							<li><Message message={m} {speaker} mine={own.has(m.from)} parent={parentOf(i)} /></li>
+							<li><Message message={m} {speaker} mine={own.has(m.from)} parent={parentOf(i)} selected={m.message_id === marked} /></li>
 						{/each}
 					</ol>
 				</section>
@@ -224,9 +266,6 @@
 		flex: none;
 		padding: 34px var(--pad) 20px;
 		border-bottom: 1px solid var(--line);
-	}
-	.back {
-		display: none;
 	}
 	.title {
 		min-width: 0;
@@ -268,6 +307,11 @@
 	.earlier {
 		padding: 18px 0 0;
 	}
+	.far {
+		margin: 18px 0 0;
+		font: italic 14px/1.5 var(--serif);
+		color: var(--muted);
+	}
 	.day h2 {
 		margin: 30px 0 4px;
 		font: italic 400 15px/1 var(--serif);
@@ -297,15 +341,6 @@
 		.head {
 			align-items: center;
 			padding: 10px var(--pad) 10px;
-		}
-		.back {
-			display: grid;
-			place-items: center;
-			flex: none;
-			width: 44px;
-			height: 44px;
-			margin-left: -12px;
-			color: var(--fg);
 		}
 		h1 {
 			font-size: 22px;

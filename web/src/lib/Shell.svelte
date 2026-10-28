@@ -6,6 +6,7 @@
 	import { page } from '$app/state';
 	import { board, short } from './board.svelte';
 	import { SECTIONS, navAgents, navChannels, sectionOf } from './nav.svelte';
+	import { back } from './back.svelte';
 	import UserMenu from './UserMenu.svelte';
 	import Mark from './Mark.svelte';
 
@@ -15,7 +16,7 @@
 	const agents = $derived(navAgents(board.rail, board.fleet));
 	const channels = $derived(navChannels(board.rail));
 	const openAgent = $derived(page.route.id?.startsWith('/a/') ? page.params.agent : undefined);
-	const openChannel = $derived(page.route.id === '/c/[name]' ? `#${page.params.name}` : undefined);
+	const openChannel = $derived(page.route.id?.startsWith('/c/') ? `#${page.params.name}` : undefined);
 	const sectionLabel = $derived(SECTIONS.find((s) => s.id === section)?.label ?? '');
 	const scope = $derived(
 		agents.length === 1
@@ -69,7 +70,11 @@
 	</aside>
 
 	<header class="mbar">
-		<a class="mword" href="#/">conde</a>
+		{#if back.link}
+			<a class="mback" href={back.link.href} aria-label={`Back to ${back.link.label}`}>← {back.link.label}</a>
+		{:else}
+			<a class="mword" href="#/">conde</a>
+		{/if}
 		<span class="mtitle">{sectionLabel}</span>
 		<span class="mlive" title={liveTitle}><i class:online={board.live} aria-hidden="true"></i><span class="sr-only">{liveWord}</span></span>
 	</header>
@@ -253,6 +258,14 @@
 		}
 		.mword {
 			font: 600 22px/1 var(--serif);
+		}
+		.mback {
+			min-width: 0;
+			overflow: hidden;
+			font-size: 14px;
+			color: var(--muted);
+			text-overflow: ellipsis;
+			white-space: nowrap;
 		}
 		.mtitle {
 			font-size: 11px;

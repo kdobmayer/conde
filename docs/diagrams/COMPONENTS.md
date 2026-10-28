@@ -5,7 +5,7 @@ Paths are relative to the repository root.
 
 ## Owner, teammate, Cloudflare (top band)
 
-- Owner, kdobmayer.devops@gmail.com: `infra/gcp/cluster/iap.tf` (`iap_member`), `infra/gcp/realms/main.tf` (`owner_email`).
+- Owner, krisztian@conde.cloud: `infra/gcp/cluster/iap.tf` (`iap_member`), `infra/gcp/realms/main.tf` (`owner_email`).
 - Terraform as terraform@conde-prod, state in conde-tfstate: `infra/gcp/*/versions.tf` (gcs backend
   `conde-tfstate-476201321288`, `impersonate_service_account`).
 - Owner's browser to the Keycloak console and Argo CD, signed in to IAP by Google: `infra/gcp/cluster/README.md` (Argo CD),

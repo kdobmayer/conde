@@ -19,7 +19,7 @@ locals {
   keycloak_url = "https://auth.conde.cloud"
   # The master realm's own URL (its sign-in and the admin console, behind IAP); the other realms stay on auth.conde.cloud.
   master_url  = "https://admin-auth.conde.cloud"
-  owner_email = "kdobmayer.devops@gmail.com"
+  owner_email = "krisztian@conde.cloud"
 
   # Workspaces that sign in through Keycloak; dakai signs in directly against its Entra tenant.
   tenants = {

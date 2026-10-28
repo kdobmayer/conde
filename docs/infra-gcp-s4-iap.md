@@ -2,7 +2,7 @@
 
 The Keycloak admin console and the master realm move to their own host, https://admin-auth.conde.cloud, and Argo CD
 stays on https://argocd.conde.cloud; both hosts sit behind Identity-Aware Proxy (IAP), which lets only
-kdobmayer.devops@gmail.com through. Then the IP allowlist (`admin_cidrs`, Cloud Armor rules 1000 and 1001 of
+krisztian@conde.cloud through. Then the IP allowlist (`admin_cidrs`, Cloud Armor rules 1000 and 1001 of
 `conde-web`) goes, and the public host https://auth.conde.cloud serves only the workspace realms, the `infra` realm
 and the theme resources, with unconditional denies for `/admin` and `/realms/master`.
 
@@ -19,7 +19,7 @@ and the theme resources, with unconditional denies for `/admin` and `/realms/mas
 - IAP (`infra/gcp/cluster/iap.tf`): the custom OAuth client `iap-admin`; its secret written by Terraform into the
   Kubernetes Secret `iap-admin` in `keycloak` and `argocd` as write-only data from an ephemeral Secret Manager read,
   so it is in neither plan nor state (the second exception to "no Kubernetes Secret carries a value",
-  infra/gcp/cluster/README.md); and `roles/iap.httpsResourceAccessor` for user:kdobmayer.devops@gmail.com on the
+  infra/gcp/cluster/README.md); and `roles/iap.httpsResourceAccessor` for user:krisztian@conde.cloud on the
   two backend services only.
 - Cloud Armor (`infra/gcp/platform/edge.tf`): `conde-keycloak-admin` (300 requests a minute per IP) and
   `conde-argocd` (600), throttles only; IAP decides who gets in. Cloud Armor is evaluated before IAP.
@@ -41,7 +41,7 @@ Google account; the IAM grant then decides.
 2. Open the client `iap-admin` again, Authorised redirect URIs, Add URI:
    `https://iap.googleapis.com/v1/oauth/clientIds/<client ID>:handleRedirect`, Save.
 3. https://console.cloud.google.com/auth/audience?project=conde-prod: user type must be External. If the publishing
-   status is Testing, add kdobmayer.devops@gmail.com under Test users.
+   status is Testing, add krisztian@conde.cloud under Test users.
 4. In a terminal (the secret is read without echo and stays out of the shell history):
 
        read -rs S && printf '%s' "$S" | pass insert -m conde/iap-admin-client-secret && unset S
@@ -86,7 +86,7 @@ d) Verify (every item, before step e):
       the `keycloak-keycloak-admin-8080` and `argocd-argocd-server-80` rows show True, the client ID, and
       `conde-keycloak-admin` and `conde-argocd`; every other row has IAP off and `conde-web`.
    2. The grant, on each of the two: `gcloud iap web get-iam-policy --resource-type=backend-services --service=<name>`:
-      only user:kdobmayer.devops@gmail.com with roles/iap.httpsResourceAccessor. Nothing project-wide:
+      only user:krisztian@conde.cloud with roles/iap.httpsResourceAccessor. Nothing project-wide:
       `gcloud iap web get-iam-policy` shows no binding.
    3. `kubectl get gcpbackendpolicy -A`: `keycloak-admin` and `argocd-server` attached, no error condition. The
       Secret's data key `key` follows Google's published examples; the CRD does not name the key, so an error here

@@ -13,3 +13,10 @@ variable "provider_url" {
   type    = string
   default = "https://auth.conde.cloud"
 }
+
+# Bump to rotate the master realm's `terraform` client secret: one targeted apply sets a new secret on the client and
+# writes it to keycloak-terraform-client-secret (README.md: Rotating the terraform client secret).
+variable "terraform_client_secret_version" {
+  type    = number
+  default = 2
+}

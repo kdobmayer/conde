@@ -66,7 +66,7 @@ resource "keycloak_openid_client" "terraform" {
   service_accounts_enabled     = true
 
   client_secret_wo         = ephemeral.random_password.terraform_client_secret.result
-  client_secret_wo_version = "1"
+  client_secret_wo_version = tostring(var.terraform_client_secret_version)
 }
 
 resource "keycloak_openid_client_service_account_realm_role" "terraform" {
@@ -78,7 +78,7 @@ resource "keycloak_openid_client_service_account_realm_role" "terraform" {
 resource "google_secret_manager_secret_version" "terraform_client_secret" {
   secret                 = google_secret_manager_secret.generated["keycloak-terraform-client-secret"].id
   secret_data_wo         = ephemeral.random_password.terraform_client_secret.result
-  secret_data_wo_version = 1
+  secret_data_wo_version = var.terraform_client_secret_version
 
   lifecycle {
     replace_triggered_by = [keycloak_openid_client.terraform.id]

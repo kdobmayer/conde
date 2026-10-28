@@ -65,6 +65,17 @@ default requires them from the user), so an invited user gets no "complete your 
 5. Add `"master"` to `no_password_grant` in flows.tf and apply: the first-apply path above was the last user of the
    master realm's password grant.
 
+## Rotating the terraform client secret
+
+Raise `terraform_client_secret_version` (`variables.tf`) by one, then, with the current secret still exported:
+
+    ./run.sh apply -target=keycloak_openid_client.terraform -target=google_secret_manager_secret_version.terraform_client_secret
+    export KEYCLOAK_CLIENT_SECRET="$(gcloud secrets versions access latest --secret keycloak-terraform-client-secret --project conde-prod)"
+    ./run.sh plan    # signs in with the new secret
+
+The targeted apply changes only the client and its secret, so the provider does not sign in again with the old secret
+after Keycloak has stopped accepting it. The secret version holding the old value is destroyed with the apply.
+
 ## Later switches
 
 - MFA for a password realm: `require_mfa = { demo = true, clearscale = false }` makes Configure OTP a default

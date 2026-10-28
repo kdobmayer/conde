@@ -9,33 +9,67 @@ use axum::response::{IntoResponse, Response};
 use super::HostKey;
 use super::session::random_token;
 
-const CSS: &str = r#":root{--bg:#fafaf9;--fg:#1c1917;--muted:#78716c;--line:#e7e5e4;--accent:#1d4ed8;--on-accent:#fff;--danger:#b91c1c;--code:#f0efed;color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--muted:#a8a29e;--line:#44403c;--accent:#93c5fd;--on-accent:#1c1917;--danger:#fca5a5;--code:#292524}}
+/// Design B's tokens and type from web/src/app.css, inlined (the CSP allows no stylesheet or
+/// font source, so the fonts are the app's stacks without its bundled files). Dark only.
+const CSS: &str = r#":root{--bg:#131518;--panel:#191c20;--soft:#20242a;--line:#2a2e34;--fg:#ebe6dc;--muted:#b8b2a7;--faint:#8e887e;--accent:#d4886b;--on-accent:#131518;--danger:#d4886b;--serif:'Source Serif 4','Source Serif Pro',Georgia,'Times New Roman',serif;--sans:Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}
-header form{margin:0}
-.brand{font-weight:600;color:inherit;text-decoration:none;margin-right:auto}
-.brand .mark{display:inline-block;vertical-align:-2px;margin-right:6px}
-.who{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-main{max-width:880px;margin:0 auto;padding:24px 16px}
-h1{font-size:22px;font-weight:600;margin:0 0 12px}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 var(--sans);-webkit-text-size-adjust:100%}
 a{color:var(--accent)}
+a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+header{display:flex;align-items:center;gap:28px;padding:18px 32px;border-bottom:1px solid var(--line)}
+header form{flex:none;margin:0}
+header button{white-space:nowrap}
+.brand{display:flex;align-items:center;gap:9px;font:600 24px/1 var(--serif);letter-spacing:-.01em;color:inherit;text-decoration:none}
+.brand .mark{width:18px;height:18px}
+header nav{display:flex;gap:24px;margin-right:auto}
+header nav a{font:17px/1 var(--serif);color:var(--muted);text-decoration:none;padding:6px 0}
+header nav a:hover,header nav a[aria-current]{color:var(--fg)}
+header nav a[aria-current]{text-decoration:underline;text-decoration-color:var(--accent);text-decoration-thickness:2px;text-underline-offset:8px}
+.who{min-width:0;font-size:13px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{max-width:960px;margin:0 auto;padding:40px 32px 56px}
+h1{font:600 34px/1.15 var(--serif);letter-spacing:-.01em;margin:0 0 14px;overflow-wrap:anywhere}
+*+h1{margin-top:48px}
+main>p{max-width:660px;font:17px/1.55 var(--serif)}
+.muted{color:var(--muted)}
 .wrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse;margin:20px 0}
-th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
-th{font-weight:500;color:var(--muted);font-size:13px}
-form.row{display:flex;gap:8px;max-width:480px;margin:16px 0}
+table{width:100%;border-collapse:collapse;margin:24px 0}
+th,td{text-align:left;padding:11px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+th,td code,td:last-child{white-space:nowrap}
+th:first-child,td:first-child{padding-left:0}
+th:last-child,td:last-child{padding-right:0;text-align:right}
+th{font:400 10.5px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+td{font-size:13.5px}
+form.row{display:flex;gap:8px;max-width:480px;margin:20px 0}
 form.inline{margin:0}
-input[type=text]{font:inherit;flex:1;min-width:0;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit}
+input[type=text]{font:inherit;flex:1;min-width:0;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:inherit}
+input::placeholder{color:var(--faint)}
 button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:var(--on-accent);cursor:pointer}
 button.quiet{background:transparent;color:var(--fg);border-color:var(--line)}
 button.danger{background:transparent;color:var(--danger);border-color:var(--danger);padding:3px 10px}
-.muted{color:var(--muted)}
-code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);border-radius:6px}
-code{padding:1px 5px}
+code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--soft);border-radius:4px}
+code{padding:1px 4px}
 pre{padding:10px 12px;white-space:pre-wrap;word-break:break-all}
-.notice{border-left:3px solid var(--accent);padding:8px 12px;background:var(--code);border-radius:0 6px 6px 0}"#;
+.notice{border-left:2px solid var(--accent);padding:10px 14px;background:var(--panel)}
+@media (max-width:720px){
+header{flex-wrap:wrap;gap:12px;padding:14px 16px}
+.brand{font-size:22px}
+.who{flex:1 1 0;text-align:right}
+header nav{order:1;flex-basis:calc(100% + 32px);gap:0;margin:2px -16px -14px;border-top:1px solid var(--line)}
+header nav a{flex:1;text-align:center;font-size:15px;padding:14px 0 13px;color:var(--faint)}
+header nav a[aria-current]{text-underline-offset:6px}
+main{padding:24px 16px 40px}
+h1{font-size:28px}
+*+h1{margin-top:36px}
+.wrap{overflow:visible}
+table,tbody,tr,td{display:block}
+thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+tr{margin:0 0 12px;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+td,td:first-child,td:last-child{display:flex;justify-content:flex-end;align-items:baseline;gap:6px;padding:6px 0;border:0;white-space:normal;text-align:right;overflow-wrap:anywhere}
+td::before{content:attr(data-label);flex:none;margin-right:auto;padding-right:10px;text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+td:empty{display:none}
+td:last-child{justify-content:flex-end;padding-top:10px}
+button.danger{padding:6px 14px}
+}"#;
 
 const COPY_JS: &str = "document.getElementById('copy').addEventListener('click',function(){var b=this;\
 navigator.clipboard.writeText(document.getElementById('key').textContent.trim()).then(function(){b.textContent='Copied'})});";
@@ -63,7 +97,8 @@ pub(crate) struct Header<'a> {
 <body>
 <header>
 <a class="brand" href="/">{{ mark|safe }}conde</a>
-{% if let Some(h) = header %}<span class="who">{{ h.display }}</span>
+{% if let Some(h) = header %}<nav aria-label="Sections"><a href="/#/">Feed</a><a href="/#/agents">Agents</a><a href="/#/channels">Channels</a><a href="/#/fleet">Fleet</a><a href="/keys" aria-current="page">Keys</a></nav>
+<span class="who">{{ h.display }}</span>
 <form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{ h.csrf }}"><button class="quiet">Sign out</button></form>{% endif %}
 </header>
 <main>
@@ -120,9 +155,9 @@ impl From<&HostKey> for KeyRow {
 <thead><tr><th>Host</th><th>Label</th><th>Created</th><th>Last seen</th><th>State</th><th></th></tr></thead>
 <tbody>
 {% for k in rows %}<tr>
-<td><code>{{ k.host_id }}</code></td><td>{{ k.label }}</td><td>{{ k.created }}</td><td>{{ k.last_seen }}</td>
-{% if let Some(at) = k.revoked %}<td class="muted">revoked {{ at }}</td><td></td>
-{% else %}<td>live</td><td><form method="post" action="/keys/{{ k.host_id|urlencode }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Revoke</button></form></td>{% endif %}
+<td data-label="Host"><code>{{ k.host_id }}</code></td><td data-label="Label">{{ k.label }}</td><td data-label="Created">{{ k.created }}</td><td data-label="Last seen">{{ k.last_seen }}</td>
+{% if let Some(at) = k.revoked %}<td class="muted" data-label="State">revoked {{ at }}</td><td></td>
+{% else %}<td data-label="State">live</td><td><form method="post" action="/keys/{{ k.host_id|urlencode }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Revoke</button></form></td>{% endif %}
 </tr>
 {% endfor %}</tbody>
 </table></div>{% endif %}"#
@@ -373,5 +408,109 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("/keys/a%3Cb/revoke"), "{body}");
+    }
+
+    fn keys_page(header: Option<Header<'_>>, revoked: Option<&str>) -> String {
+        let key = HostKey {
+            key_id: "k".into(),
+            host_id: "work-laptop".into(),
+            label: Some("Work Laptop".into()),
+            created_at: None,
+            last_seen: None,
+            revoked_at: revoked.map(String::from),
+        };
+        let body = render(&KeysBody {
+            csrf: "c",
+            server: "https://s",
+            rows: vec![KeyRow::from(&key)],
+        });
+        render(&Layout {
+            title: "Host keys",
+            css: CSS,
+            mark: "",
+            header,
+            body: &body,
+            nonce: None,
+            js: COPY_JS,
+        })
+    }
+
+    #[test]
+    fn signed_in_pages_carry_the_app_nav() {
+        let page = keys_page(
+            Some(Header {
+                display: "Ann",
+                csrf: "c",
+            }),
+            None,
+        );
+        assert!(page.contains(r#"<a class="brand" href="/">"#), "{page}");
+        for link in [
+            r#"<a href="/#/">Feed</a>"#,
+            r#"<a href="/#/agents">Agents</a>"#,
+            r#"<a href="/#/channels">Channels</a>"#,
+            r#"<a href="/#/fleet">Fleet</a>"#,
+            r#"<a href="/keys" aria-current="page">Keys</a>"#,
+        ] {
+            assert!(page.contains(link), "{link} missing: {page}");
+        }
+        let public = render(&Layout {
+            title: "Not found",
+            css: CSS,
+            mark: "",
+            header: None,
+            body: "",
+            nonce: None,
+            js: COPY_JS,
+        });
+        assert!(
+            !public.contains("<nav"),
+            "a signed-out page has no app nav: {public}"
+        );
+    }
+
+    #[test]
+    fn keys_forms_are_unchanged() {
+        let page = keys_page(
+            Some(Header {
+                display: "Ann",
+                csrf: "c",
+            }),
+            None,
+        );
+        for form in [
+            r#"<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="c"><button class="quiet">Sign out</button></form>"#,
+            "<form method=\"post\" action=\"/keys\" class=\"row\">\n<input type=\"hidden\" name=\"csrf\" value=\"c\">\n<input type=\"text\" name=\"label\" required maxlength=\"64\"",
+            r#"<form method="post" action="/keys/work-laptop/revoke" class="inline"><input type="hidden" name="csrf" value="c"><button class="danger">Revoke</button></form>"#,
+        ] {
+            assert!(page.contains(form), "{form} missing: {page}");
+        }
+        assert_eq!(page.matches("<form").count(), 3, "{page}");
+        assert!(
+            page.contains(r#"<td data-label="State">live</td>"#),
+            "{page}"
+        );
+        let revoked = keys_page(
+            Some(Header {
+                display: "Ann",
+                csrf: "c",
+            }),
+            Some("2026-10-09"),
+        );
+        assert!(
+            revoked.contains(r#"<td class="muted" data-label="State">revoked 2026-10-09</td>"#),
+            "{revoked}"
+        );
+        assert!(!revoked.contains("/revoke"), "{revoked}");
+    }
+
+    #[test]
+    fn the_stylesheet_is_dark_only_and_inline_safe() {
+        assert!(CSS.contains("--bg:#131518") && CSS.contains("--accent:#d4886b"));
+        assert!(CSS.contains("color-scheme:dark") && !CSS.contains("prefers-color-scheme"));
+        assert!(
+            !CSS.contains("@font-face") && !CSS.contains("url("),
+            "the CSP allows no font or image source in CSS"
+        );
     }
 }

@@ -35,6 +35,12 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S6 (desk): delete the Azure conde resources once the Dakai cutover is a week old (2026-11-04 at the earliest;
   the resource list shown to the owner before the destroy, per his rule); the DakaiGroup/conde repository was
   deleted by the owner on 2026-10-28.
+- S9 (desk, after v0.5.0): the old board's names still in the product text: `dakai` examples in mcp.rs, cli.rs,
+  surface.rs, boards.rs and site cli.md; `boards::path("dakai")` in history.rs; the launchd label
+  `space.nativeai.conde` (a rename needs a migration of existing installs); Postgres in CI (today the postgres
+  cases pass without running when CONDE_TEST_PG is unset: make CI set it, and make an unset variable skip
+  visibly); an older daemon drops the welcome from board.info during an upgrade (harmless, prints the default
+  guide); the web view shows the admin role.
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

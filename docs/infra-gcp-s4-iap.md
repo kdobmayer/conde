@@ -56,6 +56,9 @@ Environment as in the READMEs: `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=terraform@con
 `CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT` the same. Steps b to d run at the commit before "Retire the admin IP
 allowlist"; the public admin paths stay open to `admin_cidrs` until step e, so there is a way back until then.
 
+Every apply runs with `TF_LOG` unset: the Kubernetes provider logs the `iap-admin` Secret object, value included, at
+INFO when it creates or updates it. Provider logs are never collected as evidence of a step; the checks below are.
+
 b) Secrets and permissions.
    - Terraform's own identity can set IAP policies: `gcloud projects add-iam-policy-binding conde-prod
      --member=serviceAccount:terraform@conde-prod.iam.gserviceaccount.com --role=roles/iap.admin --condition=None`
@@ -104,7 +107,14 @@ d) Verify (every item, before step e):
       `curl -sI -H 'Host: admin-auth.conde.cloud' https://auth.conde.cloud/admin/` answers the IAP redirect (the load
       balancer routes on the Host header, so a mismatched certificate name gives no way around IAP); the cluster's
       HTTPRoutes (`kubectl get httproute -A -o wide`) name admin-auth.conde.cloud once and argocd.conde.cloud once.
-   8. The realms root signs in through the port-forward: `./run.sh plan` shows no changes.
+   8. Encoded paths on the public host cannot reach the admin or master paths. From an address outside `admin_cidrs`
+      (Cloud Shell), each of these answers 403 and never Keycloak's master realm or console:
+      `https://auth.conde.cloud/realms/demo/%2e%2e/master/.well-known/openid-configuration`,
+      `https://auth.conde.cloud/realms/demo/..%2fmaster/.well-known/openid-configuration`,
+      `https://auth.conde.cloud/resources/%2e%2e/admin/master/console/`
+      (`curl -s -o /dev/null -w '%{http_code}\n' '<url>'`). Cloud Armor evaluates the normalised path, so rules
+      1000 and 1001 are what refuse them; rule 1002 is defence in depth only.
+   9. The realms root signs in through the port-forward: `./run.sh plan` shows no changes.
 
 e) Retire the allowlist (the commit "Retire the admin IP allowlist").
    - platform: `terraform apply`: rules 1000 and 1001 of `conde-web` deny `/admin`, `/admin/*`, `/realms/master` and
@@ -126,7 +136,9 @@ e) Retire the allowlist (the commit "Retire the admin IP allowlist").
   a client's Home URL and an identity provider's redirect URI shown in the console point at the admin host. The
   redirect URI to register at Google for a company realm stays
   `https://auth.conde.cloud/realms/<name>/broker/google/endpoint` (infra/gcp/realms/README.md).
-- Rotation of the IAP client secret: infra/gcp/cluster/README.md, Kubernetes Secrets that hold values.
+- Rotation of the IAP client secret: add a version to `iap-admin-client-secret`, set `iap_client_secret_version`
+  to its number, apply the cluster root with `TF_LOG` unset (infra/gcp/cluster/README.md, Kubernetes Secrets that hold
+  values). The Secrets hold exactly that version; a new "latest" alone changes nothing.
 
 Sources read for this design: Keycloak 26.8.1 `HostnameV2Provider.java` (the realm's `frontendUrl` overrides the
 frontend URL; the admin URL is `hostname-admin`), `AdminConsole.java` (the console's sign-in server is the realm's

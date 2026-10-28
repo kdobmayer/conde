@@ -49,9 +49,14 @@ variable "iap_client_id" {
   }
 }
 
-# Bump after adding a new version of the iap-admin-client-secret secret: the apply writes it again into keycloak/iap-admin
-# and argocd/iap-admin.
+# The Secret Manager version of iap-admin-client-secret written into keycloak/iap-admin and argocd/iap-admin. After adding
+# a version, set its number here and apply; a new "latest" alone changes nothing.
 variable "iap_client_secret_version" {
   type    = number
   default = 1
+
+  validation {
+    condition     = var.iap_client_secret_version >= 1 && floor(var.iap_client_secret_version) == var.iap_client_secret_version
+    error_message = "iap_client_secret_version is a Secret Manager version number (1, 2, ...)."
+  }
 }

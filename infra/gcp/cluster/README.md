@@ -93,8 +93,10 @@ exception, and holds exactly these:
 The second exception is the IAP OAuth client secret: GCPBackendPolicy reads it only from a Kubernetes Secret in the
 backend's namespace, so `iap-admin` exists in `argocd` and in `keycloak`. Terraform reads `iap-admin-client-secret`
 from Secret Manager as an ephemeral value and writes it as the Secret's write-only data (`data_wo`), so the value is in
-neither the plan nor the state; the Secret object itself is the only copy outside Secret Manager. To rotate: add a
-version to `iap-admin-client-secret`, raise `iap_client_secret_version` by one, apply.
+neither the plan nor the state; the Secret object itself is the only copy outside Secret Manager. It reads one explicit
+version, `iap_client_secret_version`, which is also the write-only revision, so the Secret holds exactly that version.
+To rotate: add a version to `iap-admin-client-secret`, set `iap_client_secret_version` to its number, apply with
+`TF_LOG` unset (the provider logs the Secret object, value included, at INFO when it creates or updates it).
 
 ## Workspaces
 

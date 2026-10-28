@@ -20,13 +20,16 @@ locals {
   }
 }
 
-# Read during plan and apply only; the value is in neither the plan nor the state.
+# One explicit version, read during plan and apply only; the value is in neither the plan nor the state.
 ephemeral "google_secret_manager_secret_version" "iap_client_secret" {
   project = local.project
   secret  = local.iap_secret_manager_secret
+  version = tostring(var.iap_client_secret_version)
 }
 
-# Write-only data: the provider sends it once per revision and never reads it back into state.
+# Write-only data: the provider writes it only when the revision changes and never reads it back into state, so the
+# revision is the version number read above. The provider logs the Secret object, value included, at INFO on create and
+# update: apply this root with TF_LOG unset.
 resource "kubernetes_secret_v1" "iap" {
   for_each = local.iap_namespaces
 

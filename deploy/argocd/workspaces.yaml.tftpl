@@ -1,5 +1,5 @@
-# One Application per deploy/tenants/<name>.yaml; the tenant file is the chart's values file. Rendered by
-# infra/gcp/cluster/argocd.tf, which fills the revision, the sync policy and the platform values.
+# One Application ws-<name> per deploy/tenants/<name>.yaml. Rendered by infra/gcp/cluster/argocd.tf, which fills the
+# revision, the sync policy, the platform values and the platform constants.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -19,7 +19,7 @@ spec:
     preserveResourcesOnDeletion: true
   template:
     metadata:
-      name: ws-{{ .name }}
+      name: 'ws-{{ trimSuffix ".yaml" .path.filename }}'
     spec:
       project: conde
       source:
@@ -28,12 +28,40 @@ spec:
         path: charts/conde-workspace
         helm:
           releaseName: conde
+          # The tenant file is not a values file: only its boardName and oidc keys reach the chart, as parameters below.
           valueFiles:
             - ../../deploy/image.yaml
-            - ../../{{ .path.path }}/{{ .path.filename }}
-          # Takes precedence over the value files, so a tenant file cannot change the platform values.
           valuesObject: ${platform_values}
+          # Highest precedence. The workspace's name, address, identities, database, secrets and network policy follow
+          # from the file name alone.
+          parameters:
+            - name: name
+              value: '{{ trimSuffix ".yaml" .path.filename }}'
+            - name: hostname
+              value: '{{ trimSuffix ".yaml" .path.filename }}.${domain}'
+            - name: boardName
+              value: '{{ dig "boardName" (trimSuffix ".yaml" .path.filename) . }}'
+            - name: oidc.issuer
+              value: '{{ .oidc.issuer }}'
+            - name: oidc.clientId
+              value: '{{ .oidc.clientId }}'
+            - name: gcp.serviceAccount
+              value: 'conde-{{ trimSuffix ".yaml" .path.filename }}@${project}.iam.gserviceaccount.com'
+            - name: gcp.database
+              value: 'conde_{{ trimSuffix ".yaml" .path.filename }}'
+            - name: gcp.secrets.adminKey
+              value: '{{ trimSuffix ".yaml" .path.filename }}-admin-key'
+            - name: gcp.secrets.oidcClientSecret
+              value: '{{ trimSuffix ".yaml" .path.filename }}-oidc-client-secret'
+            - name: gcp.secrets.slackBotToken
+              value: '{{ trimSuffix ".yaml" .path.filename }}-slack-bot-token'
+            - name: gcp.dbinit.image
+              value: ${postgres_image}
+            - name: gcp.dbinit.adminSecret
+              value: ${pg_admin_secret}
+            - name: networkPolicy.enabled
+              value: "true"
       destination:
         server: https://kubernetes.default.svc
-        namespace: ws-{{ .name }}
+        namespace: 'ws-{{ trimSuffix ".yaml" .path.filename }}'
       syncPolicy: ${sync_policy}

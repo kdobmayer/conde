@@ -6,12 +6,12 @@ The Kubernetes objects every workspace shares: the Gateway (`gateway.tf`), Keycl
     export GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=terraform@conde-prod.iam.gserviceaccount.com
     cd infra/gcp/cluster && terraform init && terraform apply
 
-On an empty cluster the first apply runs in three steps, because the repository key must exist before the Job that
+On an empty cluster the first apply runs in three steps, because the repository key must exist before the hook that
 copies it, and `kubernetes_manifest` needs the Argo CD CRDs at plan time:
 
     terraform apply -target=google_secret_manager_secret.argocd_repo_ssh_key
     # add the deploy key (Repository access below)
-    terraform apply -target=helm_release.argocd -target=kubernetes_job_v1.argocd_repo_import
+    terraform apply -target=helm_release.argocd
     terraform apply
 
 ## Argo CD
@@ -47,10 +47,12 @@ Gateway address, through which the server reaches the `infra` realm.
 ## Repository access
 
 Argo CD reads github.com/kdobmayer/conde with a read-only deploy key (`argocd-conde-prod`). The private key lives in
-Secret Manager as `argocd-repo-ssh-key`; the Job `argocd-repo-import` mounts that one secret through the Secret
-Manager CSI add-on (its Workload Identity principal can read nothing else), builds the repository Secret `repo-conde`
-with kustomize and writes it by server-side apply, so no last-applied annotation copies the key. Its role can create
-Secrets and read and patch only `repo-conde`; its log is the object name. GitHub's SSH host keys, as published at
+Secret Manager as `argocd-repo-ssh-key`. The Job `argocd-repo-import-hook`, a post-install and post-upgrade hook of
+the Argo CD release, mounts that one secret through the Secret Manager CSI add-on (its Workload Identity principal can
+read nothing else), builds the repository Secret `repo-conde` with kustomize and writes it by server-side apply, so no
+last-applied annotation copies the key. Its role can create Secrets and read and patch only `repo-conde`; its log is
+the object name. Ten minutes after it finishes, the TTL controller deletes the Job and its pod, and with the pod its
+service account token. GitHub's SSH host keys, as published at
 https://api.github.com/meta, are in `argocd-ssh-known-hosts-cm` through the chart values.
 
 To rotate the key:
@@ -60,7 +62,8 @@ To rotate the key:
     gcloud secrets versions add argocd-repo-ssh-key --data-file=- --project conde-prod \
       --impersonate-service-account terraform@conde-prod.iam.gserviceaccount.com < "$D/id"
     rm -r "$D"
-    terraform apply -replace=kubernetes_job_v1.argocd_repo_import
+    # raise argocd_repo_key_version in variables.tf by one, then:
+    terraform apply                                       # the release upgrades and the hook re-imports the key
     argocd repo list    # STATUS Successful
     gh repo deploy-key list -R kdobmayer/conde && gh repo deploy-key delete <old id> -R kdobmayer/conde
 
@@ -75,7 +78,7 @@ exception, and holds exactly these:
 | `argocd-secret` | `server.secretkey` (signs Argo CD session tokens), `admin.password` (bcrypt hash), `admin.passwordMtime` | the chart creates it empty; the server fills it at first start |
 | `argocd-initial-admin-secret` | `password` (the local admin's first password) | the server at first start; delete it once the local admin is off |
 | `argocd-redis` | `auth` (the Redis password between the Argo CD components) | the chart's `argocd-redis-secret-init` Job |
-| `repo-conde` | `sshPrivateKey` (the deploy key), `url`, `type`, `name` | the `argocd-repo-import` Job, from Secret Manager |
+| `repo-conde` | `sshPrivateKey` (the deploy key), `url`, `type`, `name` | the `argocd-repo-import-hook` Job, from Secret Manager |
 
 There is no TLS material: the server runs without TLS behind the Gateway, and the repo server's internal certificate
 is generated in memory. The Helm release record (`sh.helm.release.v1.argocd.*`) holds the chart values, which carry
@@ -84,15 +87,22 @@ no secret.
 ## Workspaces
 
 Terraform applies the AppProject `conde` (`deploy/argocd/project.yaml`: this repository only, `ws-*` namespaces only,
-only the kinds the chart renders) and the ApplicationSet `conde-workspaces` (`deploy/argocd/workspaces.yaml.tftpl`).
-The ApplicationSet makes one Application `ws-<name>` per `deploy/tenants/<name>.yaml` on the branch
-`gitops_revision` (default `main`) and renders `charts/conde-workspace` with three layers of values: the tenant file,
-`deploy/image.yaml` (written by the release workflow), and the platform values from this root (project, Cloud SQL,
-Gateway, Cloud Armor policy, egress list), which take precedence, so a tenant file cannot change them.
+Namespace objects named `ws-*` only, only the kinds the chart renders) and the ApplicationSet `conde-workspaces`
+(`deploy/argocd/workspaces.yaml.tftpl`). The ApplicationSet makes one Application `ws-<name>` per
+`deploy/tenants/<name>.yaml` on the branch `gitops_revision` (default `main`) and renders `charts/conde-workspace`
+from three sources:
+
+- the file name `<name>`: the workspace name, `<name>.conde.cloud`, the Google service account, the database
+  `conde_<name>`, the Secret Manager secrets, the dbinit image and admin secret, and the network policy switch, all
+  as Helm parameters, which outrank every other source;
+- the tenant file, of which only `boardName`, `oidc.issuer` and `oidc.clientId` are read (it is not a values file, so
+  nothing else in it reaches the chart);
+- `deploy/image.yaml`, written by the release workflow, and the platform values from this root (project, Cloud SQL,
+  Gateway, Cloud Armor policy, egress list).
 
 A git files generator rather than a list in Terraform: adding or removing a workspace is a commit to
-`deploy/tenants/`, without a Terraform apply, and the tenant file is the chart's values file as it is. A new workspace
-still needs its GCP side first (`infra/gcp/workspaces`, `infra/gcp/realms`).
+`deploy/tenants/`, without a Terraform apply. A new workspace still needs its GCP side first (`infra/gcp/workspaces`,
+`infra/gcp/realms`).
 
 `preserveResourcesOnDeletion` is on: deleting a tenant file or the ApplicationSet leaves the workspace running.
 Sync is automated with self-heal, so a change made by hand to a workspace object is reverted to git; a new image goes

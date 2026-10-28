@@ -22,7 +22,8 @@ spec:
       - "path": "pg-admin-password"
         "resourceName": "projects/{{ .Values.gcp.project }}/secrets/{{ .Values.gcp.dbinit.adminSecret }}/versions/latest"
 ---
-# Once per workspace, as the instance's admin user: gives the IAM user its database and public schema. Idempotent.
+# As the instance's admin user: gives the IAM user its database and public schema, and closes the database to every
+# other role. Idempotent. A Job's pod template is immutable, so Argo CD recreates it (and so reruns it) on a change.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -30,6 +31,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
 spec:
   backoffLimit: 6
   template:
@@ -60,7 +62,8 @@ spec:
               export PGPASSWORD
               psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres \
                 -c "GRANT \"$ROLE\" TO postgres" \
-                -c "ALTER DATABASE \"$DB\" OWNER TO \"$ROLE\""
+                -c "ALTER DATABASE \"$DB\" OWNER TO \"$ROLE\"" \
+                -c "REVOKE CONNECT, TEMPORARY ON DATABASE \"$DB\" FROM PUBLIC"
               psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d "$DB" \
                 -c "ALTER SCHEMA public OWNER TO \"$ROLE\""
           env:

@@ -47,14 +47,14 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   Terraform state and still in GCP (owner's deletion list); the `deploy` service account's display name still
   says "GKE rollout" (rides the next foundation change).
 - S9 (desk, after v0.5.0): what remains of the old board's names: the launchd label `space.nativeai.conde`
-  (a rename needs a migration of existing installs), and `dakai` in the shipped skills (skills/claude,
-  skills/codex), the README and test fixtures (the product text, the CLI help, the MCP descriptions and the
-  site's CLI page now say `acme`); an older daemon drops the welcome from board.info during an upgrade
-  (harmless, prints the default guide; the fix is a direct board.info read in setup when the daemon's answer
-  has none, more than a one-line read, so left). Done on the s9 branch: CI's Postgres service and
-  CONDE_TEST_PG were already in place; a Postgres-only case now prints its skip in a plain `cargo test` and
-  fails under CI; the web view marks admins; the server and the daemon install their SIGTERM handling before
-  they answer, which fixes the flaky `server_on_postgres_stops_cleanly_on_sigterm`.
+  (a rename needs a migration of existing installs), and the README's install, dist and readme URLs at
+  `conde.nativeai.space` (the served README's test pins them; the invite page already says
+  `conde.cloud/install.sh`); test fixtures keep `dakai` as a value. An older daemon drops the welcome from
+  board.info during an upgrade (harmless, prints the default guide; the fix is a direct board.info read in setup
+  when the daemon's answer has none, more than a one-line read, so left). Done: the shipped skills name the
+  host's first enrolled board, rendered by `conde setup` (`<alias>` with none), and the README's board example
+  is `acme` at `acme.conde.cloud` (s9b branch); CI's Postgres service and CONDE_TEST_PG, the Postgres-only
+  skips, admins on the web view and the SIGTERM ordering (s9 branch).
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

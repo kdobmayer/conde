@@ -40,7 +40,8 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   `space.nativeai.conde` (a rename needs a migration of existing installs); Postgres in CI (today the postgres
   cases pass without running when CONDE_TEST_PG is unset: make CI set it, and make an unset variable skip
   visibly); an older daemon drops the welcome from board.info during an upgrade (harmless, prints the default
-  guide); the web view shows the admin role.
+  guide); the web view shows the admin role; `server_on_postgres_stops_cleanly_on_sigterm` is flaky: the server
+  answers /healthz before its SIGTERM handling is installed (crates/conde/src/cloud.rs), a defect with no owner yet.
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

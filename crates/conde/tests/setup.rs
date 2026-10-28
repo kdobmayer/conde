@@ -1139,6 +1139,39 @@ fn skills_name_the_enrolled_board_or_a_placeholder() {
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
+
+    // a board sorting before dakai: without a shared default the skills name the first one;
+    // --default-board is applied before they are written, so check agrees right after setup
+    let cfg = conde::boards::BoardConfig {
+        server: "https://acme.test".into(),
+        host_id: "box".into(),
+        owner: "krisz".into(),
+        key: "k".into(),
+    };
+    conde::boards::store(&env.boards_dir().join("acme.json"), "acme", &cfg).unwrap();
+    let (ok, out) = verify(&env, &opts, &mut host);
+    assert!(
+        !ok && out.contains("ISSUE   claude: skill ~/.claude/skills/conde/SKILL.md differs"),
+        "{out}"
+    );
+    host.daemon.insert("board.info", Ok(board_info(true)));
+    let mut with_default = opts.clone();
+    with_default.boards = true;
+    with_default.default_board = Some("dakai".into());
+    let (ok, out) = run(&env, &with_default, &mut host);
+    assert!(ok, "{out}");
+    assert_eq!(
+        read(&env.claude_skill()),
+        setup::skill_text(setup::CLAUDE_SKILL, "conde", Some("dakai"))
+    );
+    let (ok, out) = verify(&env, &with_default, &mut host);
+    assert!(ok, "{out}");
+    for want in [
+        "ok      claude: skill ~/.claude/skills/conde/SKILL.md up to date",
+        "ok      codex: skill ~/.codex/skills/conde/SKILL.md up to date",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 

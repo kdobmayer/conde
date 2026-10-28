@@ -52,9 +52,9 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   `conde.cloud/install.sh`); test fixtures keep `dakai` as a value. An older daemon drops the welcome from
   board.info during an upgrade (harmless, prints the default guide; the fix is a direct board.info read in setup
   when the daemon's answer has none, more than a one-line read, so left). Done: the shipped skills name the
-  host's first enrolled board, rendered by `conde setup` (`<alias>` with none), and the README's board example
-  is `acme` at `acme.conde.cloud` (s9b branch); CI's Postgres service and CONDE_TEST_PG, the Postgres-only
-  skips, admins on the web view and the SIGTERM ordering (s9 branch).
+  host's default shared board, else its first enrolled one, rendered by `conde setup` (`<alias>` with none),
+  and the README's board example is `acme` at `acme.conde.cloud` (s9b branch); CI's Postgres service and
+  CONDE_TEST_PG, the Postgres-only skips, admins on the web view and the SIGTERM ordering (s9 branch).
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

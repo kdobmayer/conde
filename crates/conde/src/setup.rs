@@ -660,6 +660,17 @@ pub fn run(
         let r = adopt_v1_credential(env, host, out);
         part("boards", r, out)?;
     }
+    if let Some(want) = opts.default_board.as_ref().filter(|_| opts.boards) {
+        // before the skills, which name the default board
+        let r =
+            boards::write_default(&env.default_board(), &env.boards_dir(), want).and_then(|()| {
+                Ok(writeln!(
+                    out,
+                    "boards: default board for names and channels: {want}"
+                )?)
+            });
+        part("boards", r, out)?;
+    }
     if opts.service {
         let r = match env.os {
             Os::Linux => systemd(env, host, out),
@@ -813,7 +824,7 @@ pub fn verify(
             let skill = env.claude_skill_for(&name);
             match file(
                 &skill,
-                skill_text(CLAUDE_SKILL, &name, skill_board(env).as_deref()).as_bytes(),
+                skill_text(CLAUDE_SKILL, &name, board_alias(env).as_deref()).as_bytes(),
             )? {
                 None => line(
                     "ok",
@@ -883,7 +894,7 @@ pub fn verify(
             let skill = env.codex_skill_for(&name);
             match file(
                 &skill,
-                skill_text(CODEX_SKILL, &name, skill_board(env).as_deref()).as_bytes(),
+                skill_text(CODEX_SKILL, &name, board_alias(env).as_deref()).as_bytes(),
             )? {
                 None => line(
                     "ok",
@@ -1699,9 +1710,8 @@ fn default_board(
 ) -> anyhow::Result<()> {
     let path = env.default_board();
     let current = boards::read_default(&path)?;
-    if let Some(want) = &opts.default_board {
-        boards::write_default(&path, &env.boards_dir(), want)?;
-        writeln!(out, "boards: default board for names and channels: {want}")?;
+    if opts.default_board.is_some() {
+        // applied by run before the skills
         return Ok(());
     }
     if enrolled.is_empty() {
@@ -2185,8 +2195,8 @@ fn holder(env: &Env, present: bool, command: Option<&str>, sock: Option<&str>) -
     }
 }
 
-/// The alias a second registration is named after: the default shared board, else the first
-/// enrolled one.
+/// The alias a second registration is named after, and the board the skills name: the default
+/// shared board, else the first enrolled one.
 fn board_alias(env: &Env) -> Option<String> {
     let enrolled = boards::enrolled_in(&env.boards_dir()).ok()?;
     match boards::read_default(&env.default_board()) {
@@ -2230,15 +2240,6 @@ fn mcp_name(
         _ => None,
     };
     Ok((pick, displaced))
-}
-
-/// The shared board the skills name: the first enrolled alias, read before setup can change the
-/// default board, so `setup --check` agrees with what setup wrote.
-fn skill_board(env: &Env) -> Option<String> {
-    boards::enrolled_in(&env.boards_dir())
-        .ok()?
-        .into_iter()
-        .next()
 }
 
 /// The skill as written for an MCP server registered as `mcp`: under a second name it is
@@ -2296,7 +2297,7 @@ fn claude(
         )?;
     }
     let skill = env.claude_skill_for(&name);
-    let text = skill_text(CLAUDE_SKILL, &name, skill_board(env).as_deref());
+    let text = skill_text(CLAUDE_SKILL, &name, board_alias(env).as_deref());
     writeln!(
         out,
         "claude: skill {} {}",
@@ -2483,7 +2484,7 @@ fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {
         )?;
     }
     let skill = env.codex_skill_for(&name);
-    let skill_body = skill_text(CODEX_SKILL, &name, skill_board(env).as_deref());
+    let skill_body = skill_text(CODEX_SKILL, &name, board_alias(env).as_deref());
     writeln!(
         out,
         "codex: skill {} {}",

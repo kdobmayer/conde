@@ -1748,6 +1748,73 @@ fn admin_user_realm_clear_posts_with_the_admin_key() {
     assert_eq!(e, "a user name is [a-z0-9_-]");
 }
 
+/// `conde admin user promote|demote` and `conde admin welcome set` post with the admin key; the
+/// user list marks admins; the welcome prints as newcomers get it.
+#[test]
+fn admin_roles_and_the_welcome_post_with_the_admin_key() {
+    let key = "q7Zx2Lm9Vt4Rk8Wp3Ny6Hb1Jc5Fd0GsUe";
+    let (url, seen) = one_admin_answer(json!({"user": "krisztian", "admin": true}));
+    let line = conde::admin::set_role(&url, key, " Krisztian ", true).unwrap();
+    assert_eq!(line, format!("krisztian is an admin of {url}"));
+    assert!(
+        seen.join()
+            .unwrap()
+            .starts_with("POST /v1/admin/users/krisztian/promote HTTP/1.1\r\n")
+    );
+    let (url, seen) = one_admin_answer(json!({"user": "krisztian", "admin": false}));
+    let line = conde::admin::set_role(&url, key, "krisztian", false).unwrap();
+    assert_eq!(line, format!("krisztian is no longer an admin of {url}"));
+    assert!(
+        seen.join()
+            .unwrap()
+            .starts_with("POST /v1/admin/users/krisztian/demote HTTP/1.1\r\n")
+    );
+
+    let users = json!({"users": [{"name": "krisztian", "email": null, "issuers": [], "disabled": false, "admin": true}]});
+    let (url, seen) = one_admin_answer(users);
+    assert_eq!(
+        conde::admin::list_users(&url, key).unwrap(),
+        ["krisztian\t-\tnot signed in yet\tenabled\tadmin"]
+    );
+    seen.join().unwrap();
+
+    let answer = json!({"stored": {"admin_agent": "krisztian/networkoptix"},
+        "welcome": {"admin_agent": "krisztian/networkoptix", "lobby": null,
+                    "guide": "https://conde.cloud/docs/setup", "text": "Hi."}});
+    let (url, seen) = one_admin_answer(answer);
+    let welcome = conde_remote::web::WelcomePatch {
+        admin_agent: Some(Some("krisztian/networkoptix".into())),
+        guide: Some(Some("https://conde.cloud/docs/setup".into())),
+        ..Default::default()
+    };
+    let text = conde::admin::set_welcome(&url, key, &welcome).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "welcome of {url}:\n  admin agent: krisztian/networkoptix\n  lobby: (none)\n  \
+             guide: https://conde.cloud/docs/setup\n  text: Hi.\n"
+        )
+    );
+    let request = seen.join().unwrap();
+    assert!(
+        request.starts_with("POST /v1/admin/welcome HTTP/1.1\r\n"),
+        "{request}"
+    );
+    assert!(
+        request.ends_with(
+            r#"{"admin_agent":"krisztian/networkoptix","guide":"https://conde.cloud/docs/setup"}"#
+        ),
+        "a set sends only what it changes: {request}"
+    );
+    let (url, seen) = one_admin_answer(json!({"welcome": {}}));
+    conde::admin::set_welcome(&url, key, &conde_remote::web::WelcomePatch::clear()).unwrap();
+    let request = seen.join().unwrap();
+    assert!(
+        request.ends_with(r#"{"admin_agent":null,"guide":null,"lobby":null,"text":null}"#),
+        "clear: {request}"
+    );
+}
+
 /// The admin key never travels over plain http, except to this machine.
 #[test]
 fn admin_slack_refuses_plain_http_off_this_machine() {

@@ -170,6 +170,12 @@ on_both!(
     the_realm_record_is_cleared_and_claimed_anew,
     a_cleared_user_is_invited_again_with_a_new_realm_account,
     a_slow_sign_in_server_is_cut_off_at_the_deadline,
+    the_welcome_names_a_published_agent_of_an_admin,
+    a_first_enrollment_is_greeted_once_and_the_admin_agent_told,
+    a_keys_page_enrollment_is_greeted,
+    a_conde_login_enrollment_is_greeted,
+    two_concurrent_first_mints_greet_once,
+    an_unshared_board_sends_no_welcome,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -284,8 +290,9 @@ async fn the_invite_gate_binds_exactly_one_verified_email_match(d: Arc<Dispatche
     assert_eq!(
         list,
         json!({"users": [
-            {"name": "kd", "email": "Krisztian.Dobmayer@dakai.example", "issuers": [env.idp.issuer], "disabled": false},
-            {"name": "kd-2", "email": "kd2@dakai.example", "issuers": [], "disabled": false},
+            {"name": "kd", "email": "Krisztian.Dobmayer@dakai.example", "issuers": [env.idp.issuer], "disabled": false,
+             "admin": false},
+            {"name": "kd-2", "email": "kd2@dakai.example", "issuers": [], "disabled": false, "admin": false},
         ]})
     );
 }
@@ -2509,4 +2516,418 @@ async fn a_slow_sign_in_server_is_cut_off_at_the_deadline(d: Arc<Dispatcher>) {
         "{:?}",
         started.elapsed()
     );
+}
+
+// --- the workspace's welcome -----------------------------------------------------------------
+
+/// `owner/name` published (mailbox-bound) on `host`, a v2 host, as `conde publish` leaves it; its
+/// id.
+async fn published(d: &Arc<Dispatcher>, owner: &str, name: &str, host: &str) -> String {
+    let (d, owner, name, host) = (
+        d.clone(),
+        owner.to_string(),
+        name.to_string(),
+        host.to_string(),
+    );
+    blocking(move || {
+        d.with_tx(|t| {
+            let id = conde::util::new_ulid();
+            let user = t.ensure_user(&owner)?;
+            t.ensure_host(&host, user)?;
+            t.set_host_mailbox_only(&host)?;
+            t.insert_agent(&id, user, &name)?;
+            let at = conde::address::Address::new(conde::address::Kind::Mailbox, &id, &host);
+            t.set_binding(&id, Some(&at))?;
+            Ok(id)
+        })
+        .unwrap()
+    })
+    .await
+}
+
+/// The DMs `owner/name` has, as (from, text).
+async fn dms(d: &Arc<Dispatcher>, owner: &str, name: &str) -> Vec<(String, String)> {
+    let (d, owner, name) = (d.clone(), owner.to_string(), name.to_string());
+    blocking(move || {
+        d.with_conn(|t| {
+            let Some(user) = t.user_id(&owner)? else {
+                return Ok(Vec::new());
+            };
+            let Some(agent) = t.agent_by_name(user, &name)? else {
+                return Ok(Vec::new());
+            };
+            Ok(t.inbox(&agent.id, 0, 100)?
+                .into_iter()
+                .map(|m| (m.sender, m.text))
+                .collect())
+        })
+        .unwrap()
+    })
+    .await
+}
+
+async fn mint(env: &Env<WebBoard>, user: &str, host: &str) {
+    let (status, got) = admin(
+        env,
+        "/v1/admin/keys",
+        Some(json!({"user": user, "host_label": host})),
+        Some(ADMIN_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+}
+
+/// The board shared under `name`, as `conde server` serves it: the greeting names it.
+fn shared(d: &Arc<Dispatcher>) {
+    d.share("clearscale");
+}
+
+/// `boss` is an admin with the published agent `boss/helper` on host box, named by the welcome;
+/// the agent's id.
+async fn welcome_ready(d: &Arc<Dispatcher>, env: &Env<WebBoard>) -> String {
+    shared(d);
+    let k = Some(ADMIN_KEY);
+    mint(env, "boss", "box").await;
+    let id = published(d, "boss", "helper", "box").await;
+    admin(env, "/v1/admin/users/boss/promote", Some(json!({})), k).await;
+    let w = json!({"admin_agent": "boss/helper", "text": "Hi from ClearScale."});
+    let (status, got) = admin(env, "/v1/admin/welcome", Some(w), k).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    id
+}
+
+/// One op as `p`: the response.
+async fn op_as(
+    d: &Arc<Dispatcher>,
+    p: conde::dispatch::Principal,
+    actor: Option<String>,
+    op: &str,
+    body: Value,
+) -> conde::protocol::Response {
+    let (d, op) = (d.clone(), op.to_string());
+    blocking(move || {
+        let mut req = conde::protocol::Request::new(conde::util::new_ulid(), &op, body);
+        req.actor = actor;
+        req.idempotency_key = Some(conde::util::new_ulid());
+        d.dispatch(&p, &req)
+    })
+    .await
+}
+
+/// The owner view of `user` in the browser: its feed as JSON text.
+async fn feed_of(d: &Arc<Dispatcher>, user: &str) -> String {
+    let d2 = d.clone();
+    let name = user.to_string();
+    let user_id = blocking(move || d2.with_conn(|t| t.user_id(&name)).unwrap().unwrap()).await;
+    let p = conde::dispatch::Principal {
+        user_id,
+        user: user.to_string(),
+        host: web::BROWSER_HOST.to_string(),
+        local: false,
+        bridge_instance: None,
+        bridge_connection: None,
+        browser: true,
+    };
+    let r = op_as(d, p, None, "owner.feed", json!({})).await;
+    assert!(r.ok, "{:?}", r.error);
+    r.result.unwrap().to_string()
+}
+
+/// The welcome's admin agent must be a published agent of an admin user (promote and demote with
+/// the admin key, the role in the user list); its lobby a channel; GET shows it with the
+/// defaults filled. A change keeps the fields it leaves out; null (or `welcome set` without
+/// --agent) clears one; clearing everything resets it.
+async fn the_welcome_names_a_published_agent_of_an_admin(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    let k = Some(ADMIN_KEY);
+    let set = |w: Value| {
+        let env = &env;
+        async move { admin(env, "/v1/admin/welcome", Some(w), k).await }
+    };
+    let (status, got) = admin(&env, "/v1/admin/welcome", None, k).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(
+        got["welcome"],
+        json!({"admin_agent": null, "lobby": null, "guide": "https://conde.cloud/docs/setup",
+               "text": web::DEFAULT_WELCOME_TEXT})
+    );
+    assert_eq!(
+        admin(&env, "/v1/admin/welcome", None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let agent = json!({"admin_agent": "krisztian/networkoptix"});
+    let (status, got) = set(agent.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("no user krisztian"),
+        "{got}"
+    );
+    published(&d, "krisztian", "networkoptix", "box").await;
+    let (status, got) = set(agent.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+    assert!(
+        got["message"].as_str().unwrap().contains("not an admin"),
+        "{got}"
+    );
+
+    let (status, got) = admin(
+        &env,
+        "/v1/admin/users/krisztian/promote",
+        Some(json!({})),
+        k,
+    )
+    .await;
+    assert_eq!(
+        (status, got),
+        (StatusCode::OK, json!({"user": "krisztian", "admin": true}))
+    );
+    let (_, users) = admin(&env, "/v1/admin/users", None, k).await;
+    assert_eq!(users["users"][0]["admin"], true, "{users}");
+    assert_eq!(
+        admin(&env, "/v1/admin/users/nobody/promote", Some(json!({})), k)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, got) = set(json!({"admin_agent": "krisztian/desk"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a published agent"),
+        "{got}"
+    );
+    let (status, got) = set(json!({"lobby": "#team"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{got}");
+    assert!(
+        got["message"]
+            .as_str()
+            .unwrap()
+            .contains("no channel #team"),
+        "{got}"
+    );
+    let (status, got) = set(json!({"admin_agent": "desk"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
+
+    let (status, got) =
+        set(json!({"admin_agent": "Krisztian/NetworkOptix", "text": "Hi from ClearScale."})).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    // a change of the guide alone keeps the agent and the text
+    let (status, got) = set(json!({"guide": "https://clearscale.conde.cloud/readme"})).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    let (_, got) = admin(&env, "/v1/admin/welcome", None, k).await;
+    assert_eq!(
+        got["welcome"],
+        json!({"admin_agent": "krisztian/networkoptix", "lobby": null,
+               "guide": "https://clearscale.conde.cloud/readme", "text": "Hi from ClearScale."})
+    );
+    // `welcome set` without --agent: the agent is cleared, the rest kept
+    let (_, got) = set(json!({"admin_agent": null})).await;
+    assert_eq!(got["stored"]["admin_agent"], Value::Null, "{got}");
+    assert_eq!(got["stored"]["text"], "Hi from ClearScale.", "{got}");
+    // `welcome clear`
+    let (_, got) =
+        set(json!({"admin_agent": null, "lobby": null, "guide": null, "text": null})).await;
+    assert_eq!(
+        got["stored"],
+        json!({"admin_agent": null, "lobby": null, "guide": null, "text": null})
+    );
+
+    let (status, got) = admin(&env, "/v1/admin/users/krisztian/demote", Some(json!({})), k).await;
+    assert_eq!(
+        (status, got),
+        (StatusCode::OK, json!({"user": "krisztian", "admin": false}))
+    );
+    let (status, got) = set(agent).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a demoted user's agent is refused: {got}"
+    );
+}
+
+/// A user's first host enrollment greets the newcomer's human name in the admin agent's name
+/// and sends the admin agent an arrival notice (notified), once: not for the user's second host,
+/// not for the admin's own enrollment, and nothing while the welcome names no admin agent. The
+/// greeting is in the owner view of the newcomer and the admin, nobody else's; the admin agent's
+/// reply to the human name is refused.
+async fn a_first_enrollment_is_greeted_once_and_the_admin_agent_told(d: Arc<Dispatcher>) {
+    shared(&d);
+    let env = env(&d).await;
+    let k = Some(ADMIN_KEY);
+    // the admin's own first enrollment, before any welcome: nothing to send
+    mint(&env, "krisztian", "box").await;
+    let admin_id = published(&d, "krisztian", "networkoptix", "box").await;
+    admin(
+        &env,
+        "/v1/admin/users/krisztian/promote",
+        Some(json!({})),
+        k,
+    )
+    .await;
+    // no admin agent named: a newcomer arrives unannounced (and counts as arrived)
+    mint(&env, "bob", "bob-box").await;
+    assert!(dms(&d, "krisztian", "networkoptix").await.is_empty());
+    assert!(dms(&d, "bob", "human").await.is_empty());
+
+    let w = json!({"admin_agent": "krisztian/networkoptix", "text": "Hi from ClearScale."});
+    assert_eq!(
+        admin(&env, "/v1/admin/welcome", Some(w), k).await.0,
+        StatusCode::OK
+    );
+    mint(&env, "ann", "laptop").await;
+    let notices = dms(&d, "krisztian", "networkoptix").await;
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    let (from, text) = &notices[0];
+    assert_eq!(from, "ann/human");
+    assert!(
+        text.starts_with("ann enrolled host laptop (admin key) at ")
+            && text.ends_with(
+                "; say hello (their human name takes no messages; greet one of their published agents)"
+            ),
+        "{text}"
+    );
+    let greetings = dms(&d, "ann", "human").await;
+    assert_eq!(greetings.len(), 1, "{greetings:?}");
+    let (from, text) = &greetings[0];
+    assert_eq!(from, "krisztian/networkoptix");
+    assert!(
+        text.starts_with("Hi from ClearScale.\n\nYou are in, ann"),
+        "{text}"
+    );
+    assert!(
+        text.contains("conde send krisztian/networkoptix \"<your question>\" --board clearscale")
+            && text.contains("conde publish <name> --board clearscale"),
+        "{text}"
+    );
+    // the notice reaches the admin agent's host as a notification; the greeting pages no one
+    let d2 = d.clone();
+    let pending = blocking(move || {
+        d2.with_conn(|t| t.due_notifications(i64::MAX, "box", 10))
+            .unwrap()
+    })
+    .await;
+    assert_eq!(
+        pending
+            .iter()
+            .map(|n| n.recipient_id.as_str())
+            .collect::<Vec<_>>(),
+        [admin_id.as_str()]
+    );
+    // the owner views: the newcomer's and the admin's, not a third owner's
+    assert!(feed_of(&d, "ann").await.contains("You are in, ann"));
+    assert!(feed_of(&d, "krisztian").await.contains("You are in, ann"));
+    assert!(!feed_of(&d, "bob").await.contains("You are in, ann"));
+    // the admin agent answering the notice is told to greet a published agent instead
+    let d2 = d.clone();
+    let p = blocking(move || d2.principal("krisztian", "box", false).unwrap()).await;
+    let notice_id = blocking({
+        let d = d.clone();
+        let admin_id = admin_id.clone();
+        move || {
+            d.with_conn(|t| t.inbox(&admin_id, 0, 10))
+                .unwrap()
+                .remove(0)
+                .id
+        }
+    })
+    .await;
+    let r = op_as(
+        &d,
+        p,
+        Some(format!("mailbox:{admin_id}")),
+        "message.send",
+        json!({"to": {"agent": "ann/human"}, "text": "hello", "reply_to": notice_id}),
+    )
+    .await;
+    let e = r.error.expect("refused");
+    assert_eq!(
+        e.code,
+        conde::protocol::ErrorCode::Forbidden,
+        "{}",
+        e.message
+    );
+    assert!(
+        e.message.contains("message one of `ann`'s agents"),
+        "{}",
+        e.message
+    );
+
+    // the second host of the same user, and bob's after the welcome was set: no more
+    mint(&env, "ann", "desktop").await;
+    mint(&env, "bob", "bob-laptop").await;
+    assert_eq!(dms(&d, "krisztian", "networkoptix").await.len(), 1);
+    assert_eq!(dms(&d, "ann", "human").await.len(), 1);
+    assert!(dms(&d, "bob", "human").await.is_empty());
+}
+
+/// The keys page is an enrollment: its first key greets the user.
+async fn a_keys_page_enrollment_is_greeted(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    welcome_ready(&d, &env).await;
+    let b = Browser::new();
+    let csrf = csrf_of(&b.sign_in(&env).await);
+    key_of(&b.create_key(&env, &csrf, "Work Laptop").await);
+    let notices = dms(&d, "boss", "helper").await;
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0]
+            .1
+            .starts_with("krisztian-dobmayer enrolled host work-laptop (keys page) at "),
+        "{notices:?}"
+    );
+    assert_eq!(dms(&d, "krisztian-dobmayer", "human").await.len(), 1);
+}
+
+/// `conde login` is an enrollment: its redeemed key greets the user.
+async fn a_conde_login_enrollment_is_greeted(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    welcome_ready(&d, &env).await;
+    let b = Browser::new();
+    let run = cli_run();
+    let code = browser_leg(&env, &b, &run).await;
+    let body = json!({"code": code, "state": run.state, "code_verifier": run.verifier, "host": "Test-Box"});
+    let (status, got) = redeem(&env, body).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    let notices = dms(&d, "boss", "helper").await;
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0]
+            .1
+            .starts_with("krisztian-dobmayer enrolled host test-box (conde login) at "),
+        "{notices:?}"
+    );
+    let greetings = dms(&d, "krisztian-dobmayer", "human").await;
+    assert_eq!(greetings.len(), 1, "{greetings:?}");
+    assert_eq!(greetings[0].0, "boss/helper");
+}
+
+/// Two first enrollments of one user at once: one greeting, one notice.
+async fn two_concurrent_first_mints_greet_once(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    welcome_ready(&d, &env).await;
+    tokio::join!(mint(&env, "ann", "laptop"), mint(&env, "ann", "desktop"));
+    assert_eq!(dms(&d, "boss", "helper").await.len(), 1);
+    assert_eq!(dms(&d, "ann", "human").await.len(), 1);
+}
+
+/// A board served without its shared name writes no greeting (its commands would name no board).
+async fn an_unshared_board_sends_no_welcome(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    let k = Some(ADMIN_KEY);
+    mint(&env, "boss", "box").await;
+    published(&d, "boss", "helper", "box").await;
+    admin(&env, "/v1/admin/users/boss/promote", Some(json!({})), k).await;
+    let w = json!({"admin_agent": "boss/helper"});
+    assert_eq!(
+        admin(&env, "/v1/admin/welcome", Some(w), k).await.0,
+        StatusCode::OK
+    );
+    mint(&env, "ann", "laptop").await;
+    assert!(dms(&d, "boss", "helper").await.is_empty());
+    assert!(dms(&d, "ann", "human").await.is_empty());
 }

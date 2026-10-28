@@ -3675,6 +3675,7 @@ fn a_moved_board_stops_the_bridge_and_names_the_move_command() {
                 owner: "kdobmayer".into(),
                 host: "homepc".into(),
                 mailbox_only: true,
+                welcome: None,
             })
         },
     )

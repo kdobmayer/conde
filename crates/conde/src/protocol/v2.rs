@@ -37,6 +37,9 @@ pub struct BoardInfo {
     /// The calling host.
     pub host: String,
     pub mailbox_only: bool,
+    /// The workspace's welcome, defaults filled; None from a server before the welcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub welcome: Option<conde_remote::web::Welcome>,
 }
 
 /// `mailbox.publish` body: bind `<caller>/name` on the calling host.

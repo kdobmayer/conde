@@ -22,7 +22,7 @@ use super::session::digest;
 use super::{
     BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, WebConfig, WebStore,
 };
-use super::{BridgeRegistry, WebUser, entra_issuer};
+use super::{BridgeRegistry, SetWelcome, WebUser, WelcomePatch, entra_issuer};
 
 /// The shortest admin key accepted.
 pub(crate) const MIN_KEY_LEN: usize = 32;
@@ -173,6 +173,9 @@ pub fn router(state: AdminState) -> Router {
         .route("/v1/admin/users/{name}/disable", post(disable_user))
         .route("/v1/admin/users/{name}/enable", post(enable_user))
         .route("/v1/admin/users/{name}/slack", post(set_slack))
+        .route("/v1/admin/users/{name}/promote", post(promote_user))
+        .route("/v1/admin/users/{name}/demote", post(demote_user))
+        .route("/v1/admin/welcome", get(get_welcome).post(set_welcome))
         .route(
             "/v1/admin/users/{name}/realm-account/clear",
             post(clear_realm_account),
@@ -219,7 +222,17 @@ async fn create_key(State(state): State<AdminState>, Json(req): Json<CreateKey>)
         Ok(u) => u,
         Err(e) => return store_failed(e),
     };
-    match mint(state.core(), owner.user_id, base.clone(), label.clone(), 1).await {
+    let how = super::Enrollment::Admin;
+    match mint(
+        state.core(),
+        owner.user_id,
+        base.clone(),
+        label.clone(),
+        1,
+        how,
+    )
+    .await
+    {
         Ok(k) => {
             tracing::info!(%user, host = %k.host_id, "admin minted a host key");
             reply(
@@ -334,7 +347,7 @@ pub(crate) fn email_address(input: &str) -> Option<String> {
 
 /// A Unicode format character (general category Cf): bidirectional overrides, zero-width
 /// characters and the like, which can make a name read as something else.
-fn is_format(c: char) -> bool {
+pub fn is_format(c: char) -> bool {
     matches!(c as u32,
         0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2
         | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
@@ -822,9 +835,212 @@ async fn set_slack(
     }
 }
 
+async fn set_admin(state: AdminState, name: String, admin: bool) -> Response {
+    let Some(name) = owner_name(&name) else {
+        return fail(StatusCode::BAD_REQUEST, "bad_request", "bad user name");
+    };
+    let target = name.clone();
+    match state
+        .core()
+        .store(move |s| s.set_admin(&target, admin))
+        .await
+    {
+        Ok(Some(user)) => {
+            tracing::info!(user = %user.name, admin, "admin set the user's admin role");
+            reply(StatusCode::OK, json!({"user": user.name, "admin": admin}))
+        }
+        Ok(None) => fail(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// `POST /v1/admin/users/{name}/promote`: the user becomes a workspace admin, whose published
+/// agent the welcome can name.
+async fn promote_user(State(state): State<AdminState>, Path(name): Path<String>) -> Response {
+    set_admin(state, name, true).await
+}
+
+/// `POST /v1/admin/users/{name}/demote`: the user is no longer a workspace admin.
+async fn demote_user(State(state): State<AdminState>, Path(name): Path<String>) -> Response {
+    set_admin(state, name, false).await
+}
+
+/// `GET /v1/admin/welcome`: the welcome as stored and as newcomers get it (defaults filled).
+async fn get_welcome(State(state): State<AdminState>) -> Response {
+    match state.core().store(|s| s.welcome()).await {
+        Ok(w) => reply(
+            StatusCode::OK,
+            json!({"stored": w, "welcome": w.clone().filled()}),
+        ),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// A welcome field as set: trimmed, None when empty.
+fn field(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// The admin agent's form, `owner/name`, lowercased.
+fn agent_form(a: String) -> Result<String, &'static str> {
+    let a = a.to_lowercase();
+    let ok = a.split_once('/').is_some_and(|(owner, name)| {
+        owner_name(owner).as_deref() == Some(owner)
+            && !name.is_empty()
+            && name.len() <= 200
+            && name.split('.').all(|p| {
+                !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            })
+    });
+    if ok {
+        Ok(a)
+    } else {
+        Err("admin_agent is an agent's full name, owner/name")
+    }
+}
+
+/// The lobby's form, `#name`.
+fn lobby_form(l: String) -> Result<String, &'static str> {
+    let name = l.strip_prefix('#').unwrap_or(&l).to_lowercase();
+    let ok = (1..=200).contains(&name.len())
+        && name.split('.').all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        });
+    if ok {
+        Ok(format!("#{name}"))
+    } else {
+        Err("lobby is a channel, #name")
+    }
+}
+
+fn guide_form(g: String) -> Result<String, &'static str> {
+    if super::welcome_url(&g) {
+        Ok(g)
+    } else {
+        Err(
+            "guide is an https URL of at most 512 characters, without spaces, control or format characters",
+        )
+    }
+}
+
+fn text_form(t: String) -> Result<String, &'static str> {
+    let bad = |c: char| c.is_control() || is_format(c) || matches!(c, '\u{2028}' | '\u{2029}');
+    if t.chars().count() <= 600 && !t.chars().any(bad) {
+        Ok(t)
+    } else {
+        Err(
+            "text is one paragraph of at most 600 characters, without control, format or line-separator characters",
+        )
+    }
+}
+
+/// The change's fields checked for form (the board checks that they exist): each field present
+/// is trimmed (empty clears it like null) and must be an agent's `owner/name`, a `#channel`, an
+/// https URL, one short paragraph.
+fn patch_form(req: WelcomePatch) -> Result<WelcomePatch, &'static str> {
+    fn check(
+        v: Option<Option<String>>,
+        form: fn(String) -> Result<String, &'static str>,
+    ) -> Result<Option<Option<String>>, &'static str> {
+        v.map(|v| field(v).map(form).transpose()).transpose()
+    }
+    Ok(WelcomePatch {
+        admin_agent: check(req.admin_agent, agent_form)?,
+        lobby: check(req.lobby, lobby_form)?,
+        guide: check(req.guide, guide_form)?,
+        text: check(req.text, text_form)?,
+    })
+}
+
+/// `POST /v1/admin/welcome {admin_agent?, lobby?, guide?, text?}`: changes the workspace's
+/// welcome; a field present replaces the stored one (null or empty clears it), an absent one
+/// stays. The admin agent it sets must be a published agent of an admin user, the lobby a channel
+/// on the board. An unset guide or text falls back to the default.
+async fn set_welcome(State(state): State<AdminState>, Json(req): Json<WelcomePatch>) -> Response {
+    let change = match patch_form(req) {
+        Ok(c) => c,
+        Err(message) => return bad_request(message),
+    };
+    match state.core().store(move |s| s.set_welcome(&change)).await {
+        Ok(SetWelcome::Stored(w)) => {
+            tracing::info!(admin_agent = ?w.admin_agent, lobby = ?w.lobby, "admin set the welcome");
+            reply(
+                StatusCode::OK,
+                json!({"stored": w, "welcome": w.clone().filled()}),
+            )
+        }
+        Ok(SetWelcome::Refused(why)) => fail(StatusCode::CONFLICT, "conflict", &why),
+        Err(e) => store_failed(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn welcome_forms() {
+        let set = |v: &str| Some(Some(v.to_string()));
+        let w = patch_form(WelcomePatch {
+            admin_agent: set(" Krisztian/NetworkOptix "),
+            lobby: set("lobby"),
+            guide: set(" "),
+            text: None,
+        })
+        .unwrap();
+        assert_eq!(w.admin_agent, set("krisztian/networkoptix"));
+        assert_eq!(w.lobby, set("#lobby"));
+        assert_eq!(w.guide, Some(None), "an empty field clears it");
+        assert_eq!(w.text, None, "an absent field stays");
+        for bad in [
+            WelcomePatch {
+                admin_agent: set("desk"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                admin_agent: set("a/b/c"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                admin_agent: set("a/b;id"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                lobby: set("#a b"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                guide: set("http://x.io"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                guide: set("https://x.io/\u{202E}a"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set("a\u{202E}b"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set("a\u{2028}b"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set("a\u{2029}b"),
+                ..WelcomePatch::default()
+            },
+            WelcomePatch {
+                text: set(&"x".repeat(601)),
+                ..WelcomePatch::default()
+            },
+        ] {
+            assert!(patch_form(bad.clone()).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn slack_member_ids() {

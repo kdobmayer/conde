@@ -97,6 +97,8 @@ Owner's own steps, at his pace, none blocking the above:
   the target are on different filesystems (not atomic); stage next to the target
   instead. Area: dist/install.sh, dist_files test.
 
+- B21. Admin users act in the web view (invite, disable) without the admin key: later.
+
 ## Waiting on a decision or an observation (do not take)
 
 - W1. [I] Refresh reuse grace (a token consumed less than 10 s ago answers

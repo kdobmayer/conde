@@ -481,6 +481,48 @@ enum AdminCmd {
         #[command(subcommand)]
         cmd: UserCmd,
     },
+    /// The workspace's welcome: what conde setup and conde login print, and the greeting a
+    /// newcomer's first enrollment gets (the admin key; CONDE_ADMIN_KEY or a prompt).
+    Welcome {
+        #[command(subcommand)]
+        cmd: WelcomeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum WelcomeCmd {
+    /// Change the welcome: the admin's agent newcomers write to with questions (without
+    /// --agent, none), and the team channel, the setup guide and a short text, each kept as stored
+    /// unless given ('' clears it).
+    Set {
+        /// The admin's agent, owner/name: a published agent of an admin user.
+        #[arg(long, value_name = "OWNER/NAME")]
+        agent: Option<String>,
+        /// The team channel newcomers join, #name.
+        #[arg(long, value_name = "#CHANNEL")]
+        lobby: Option<String>,
+        /// The setup guide's URL (default https://conde.cloud/docs/setup).
+        #[arg(long, value_name = "URL")]
+        guide: Option<String>,
+        /// One short paragraph the greeting opens with.
+        #[arg(long)]
+        text: Option<String>,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
+    /// Reset the welcome: no admin agent and no lobby, the default guide and text.
+    Clear {
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
+    /// Show the welcome as newcomers get it.
+    Show {
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -512,7 +554,22 @@ enum UserCmd {
         #[arg(long, value_name = "URL")]
         server: String,
     },
-    /// List users: name, email, the identity issuers they signed in with, enabled or disabled.
+    /// Make NAME a workspace admin, whose published agent the welcome can name.
+    Promote {
+        name: String,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
+    /// Take the workspace admin role from NAME.
+    Demote {
+        name: String,
+        /// The server URL (https://host).
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
+    /// List users: name, email, the identity issuers they signed in with, enabled or disabled,
+    /// and the admin role.
     List {
         /// The server URL (https://host).
         #[arg(long, value_name = "URL")]
@@ -837,6 +894,35 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 } => admin::user_invite(&server, &name, &email, by.as_deref()),
                 UserCmd::List { server } => admin::user_list(&server),
                 UserCmd::RealmClear { name, server } => admin::user_realm_clear(&server, &name),
+                UserCmd::Promote { name, server } => admin::user_role(&server, &name, true),
+                UserCmd::Demote { name, server } => admin::user_role(&server, &name, false),
+            };
+        }
+        Cmd::Admin {
+            cmd: AdminCmd::Welcome { cmd },
+        } => {
+            no_board("admin", "")?;
+            admin::require_human()?;
+            return match cmd {
+                WelcomeCmd::Set {
+                    agent,
+                    lobby,
+                    guide,
+                    text,
+                    server,
+                } => admin::welcome_set(
+                    &server,
+                    &conde_remote::web::WelcomePatch {
+                        admin_agent: Some(agent),
+                        lobby: lobby.map(Some),
+                        guide: guide.map(Some),
+                        text: text.map(Some),
+                    },
+                ),
+                WelcomeCmd::Clear { server } => {
+                    admin::welcome_set(&server, &conde_remote::web::WelcomePatch::clear())
+                }
+                WelcomeCmd::Show { server } => admin::welcome_show(&server),
             };
         }
         Cmd::Admin {

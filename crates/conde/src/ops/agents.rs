@@ -158,17 +158,28 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({"name": agent.canonical(), "address": own.to_string(), "joined": joined}))
 }
 
-/// A name's first registration joins `#lobby` when it exists: a plain
-/// membership at the end of the log, no join post, no notification.
+/// A name's first registration (or publish) joins `#lobby` and the workspace welcome's lobby when
+/// they exist: a plain membership at the end of the log, no join post, no notification. The
+/// channels joined, `#a, #b`.
 pub(crate) fn join_lobby(ctx: &Ctx, agent: &Agent) -> OpResult<Option<String>> {
-    let Some(lobby) = ctx.db.channel_by_name(LOBBY)? else {
-        return Ok(None);
-    };
-    if ctx.db.read_seq(&lobby.id, &agent.id)?.is_some() {
-        return Ok(None);
+    let mut names = vec![LOBBY.to_string()];
+    if let Some(welcome) = crate::welcome::lobby(ctx.db)?
+        && welcome != LOBBY
+    {
+        names.push(welcome);
     }
-    channels::add_member(ctx, &lobby, &agent.id)?;
-    Ok(Some(format!("#{}", lobby.name)))
+    let mut joined = Vec::new();
+    for name in names {
+        let Some(lobby) = ctx.db.channel_by_name(&name)? else {
+            continue;
+        };
+        if ctx.db.read_seq(&lobby.id, &agent.id)?.is_some() {
+            continue;
+        }
+        channels::add_member(ctx, &lobby, &agent.id)?;
+        joined.push(format!("#{}", lobby.name));
+    }
+    Ok((!joined.is_empty()).then(|| joined.join(", ")))
 }
 
 /// Self-only for agents (only the caller's own binding); the human owner may

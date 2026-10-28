@@ -9,7 +9,7 @@ use axum_extra::extract::cookie::{CookieJar, SameSite};
 use serde::Deserialize;
 
 use super::session::{self, Session, WebError, digest, random_token};
-use super::{Core, HostKey, Minted, WebState, pages};
+use super::{Core, Enrollment, HostKey, Minted, WebState, pages};
 
 /// How many `-N` suffixes the browser flows try when a host id belongs to another user.
 pub(crate) const HOST_SUFFIXES: u32 = 20;
@@ -77,13 +77,15 @@ impl From<MintError> for WebError {
 
 /// Mints a key for the user on `base` (or `base-2`.. up to `suffixes` candidates when another
 /// user owns it), revoking the host's previous live keys and disconnecting its bridge when
-/// there were any. A disabled user gets no key.
+/// there were any. A disabled user gets no key. A host new to the board runs the welcome
+/// ([`super::WebStore::enrolled`]); its failure is logged, never the mint's.
 pub(crate) async fn mint(
     core: &Core,
     user_id: i64,
     base: String,
     label: String,
     suffixes: u32,
+    how: Enrollment,
 ) -> Result<NewKey, MintError> {
     let key = new_host_key();
     let token_digest = digest(&key);
@@ -119,6 +121,15 @@ pub(crate) async fn mint(
         core.registry.disconnect_host(&host_id);
     }
     tracing::info!(user_id, host = %host_id, replaced, new_host, "host key minted");
+    if new_host {
+        let (host, now) = (host_id.clone(), core.now());
+        if let Err(e) = core
+            .store(move |s| s.enrolled(user_id, &host, how, now))
+            .await
+        {
+            tracing::error!(user_id, host = %host_id, error = %e, "the welcome failed");
+        }
+    }
     Ok(NewKey {
         host_id,
         key,
@@ -223,7 +234,15 @@ pub(crate) async fn create(
         WebError::BadRequest("The machine name needs at least one letter or digit.".into())
     })?;
     let user_id = session.record.user_id;
-    let minted = mint(state.core(), user_id, base, label, HOST_SUFFIXES).await?;
+    let minted = mint(
+        state.core(),
+        user_id,
+        base,
+        label,
+        HOST_SUFFIXES,
+        Enrollment::KeysPage,
+    )
+    .await?;
     let token = random_token();
     let display = super::KeyDisplay {
         user_id,

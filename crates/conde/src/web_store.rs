@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use conde_remote::web::{
-    AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, HostKey, Identity, Invite,
-    Invited, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount, SessionRecord, WebResult,
-    WebStore, WebStoreError, WebUser,
+    AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrollment, HostKey, Identity,
+    Invite, Invited, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount, SessionRecord, SetWelcome,
+    WebResult, WebStore, WebStoreError, WebUser, Welcome, WelcomePatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -445,6 +445,7 @@ impl WebStore for WebBoard {
                     name: u.name,
                     email: u.email,
                     disabled: u.disabled,
+                    admin: u.admin,
                 });
             }
             Ok(out)
@@ -526,5 +527,34 @@ impl WebStore for WebBoard {
             Some(u) => Ok(Some(t.set_user_disabled(u.user_id, disabled)?)),
             None => Ok(None),
         })
+    }
+
+    fn set_admin(&self, name: &str, admin: bool) -> WebResult<Option<WebUser>> {
+        self.write(|t| match t.user_by_name(name)? {
+            Some(u) => {
+                t.set_user_admin(u.user_id, admin)?;
+                Ok(Some(web_user(u)))
+            }
+            None => Ok(None),
+        })
+    }
+
+    fn welcome(&self) -> WebResult<Welcome> {
+        self.read(crate::welcome::stored)
+    }
+
+    fn set_welcome(&self, change: &WelcomePatch) -> WebResult<SetWelcome> {
+        self.write(|t| crate::welcome::set(t, change))
+    }
+
+    fn enrolled(&self, user_id: i64, host_id: &str, how: Enrollment, _now: i64) -> WebResult<()> {
+        // the greeting names the board in commands: never without its name
+        let board = self
+            .d
+            .shared_name()
+            .ok_or_else(|| WebStoreError("this board is not shared: no welcome".into()))?
+            .to_string();
+        let now_ms = self.d.now_ms();
+        self.write(|t| crate::welcome::enrolled(t, &board, user_id, host_id, how, now_ms))
     }
 }

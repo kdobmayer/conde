@@ -50,6 +50,7 @@ fn board_info_round_trip() {
         owner: "kdobmayer".into(),
         host: "homepc".into(),
         mailbox_only: true,
+        welcome: None,
     };
     round_trip(
         &info,

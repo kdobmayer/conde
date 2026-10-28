@@ -191,6 +191,16 @@ a:hover {
 .conde-realm:empty {
 	display: none;
 }
+/* The master realm's default display name is Keycloak's logo markup; show its text as the kicker instead. */
+.conde-realm div.kc-logo-text {
+	width: auto;
+	height: auto;
+	margin: 0;
+	background: none;
+}
+.conde-realm div.kc-logo-text span {
+	display: inline;
+}
 
 .pf-v5-c-login__main {
 	margin: 0;
@@ -408,10 +418,16 @@ input:-webkit-autofill {
 	border-left: 2px solid var(--faint);
 	margin-bottom: 24px !important;
 }
+.pf-v5-c-alert__icon {
+	color: var(--muted) !important;
+}
 .pf-v5-c-alert.pf-m-danger,
 .pf-v5-c-alert.pf-m-warning {
 	--pf-v5-c-alert__icon--Color: var(--accent);
 	border-left-color: var(--accent);
+}
+.pf-v5-c-alert:is(.pf-m-danger, .pf-m-warning) .pf-v5-c-alert__icon {
+	color: var(--accent) !important;
 }
 .pf-v5-c-alert__title,
 .pf-v5-c-alert .kc-feedback-text {

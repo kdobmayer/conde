@@ -116,47 +116,61 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         return bridge.pass();
     }
     let runtime = runtime()?;
+    let stop = {
+        let _rt = runtime.enter();
+        termination()
+    };
     let daemon = runtime.block_on(async { Daemon::start(&opts, notifier) })?;
-    runtime.block_on(daemon.serve(termination()));
+    runtime.block_on(daemon.serve(stop));
     drop(runtime);
     tracing::info!("conde daemon stopped");
     Ok(())
 }
 
 /// Resolves on Ctrl-C, Ctrl-Break, closing the console or system shutdown. A
-/// scheduled task's End is a hard stop that this never sees.
+/// scheduled task's End is a hard stop that this never sees. The handlers are in place when
+/// this returns (inside the runtime), before the future is first polled.
 #[cfg(windows)]
-pub async fn termination() {
-    use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
-    let (Ok(mut brk), Ok(mut close), Ok(mut shutdown)) =
-        (ctrl_break(), ctrl_close(), ctrl_shutdown())
-    else {
-        tracing::error!("cannot watch the console control events");
-        let _ = tokio::signal::ctrl_c().await;
-        return;
-    };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => tracing::info!("Ctrl-C: shutting down"),
-        _ = brk.recv() => tracing::info!("Ctrl-Break: shutting down"),
-        _ = close.recv() => tracing::info!("console closed: shutting down"),
-        _ = shutdown.recv() => tracing::info!("system shutdown: shutting down"),
+pub fn termination() -> impl Future<Output = ()> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+    let watch = (ctrl_c(), ctrl_break(), ctrl_close(), ctrl_shutdown());
+    async move {
+        let (Ok(mut c), Ok(mut brk), Ok(mut close), Ok(mut shutdown)) = watch else {
+            tracing::error!("cannot watch the console control events");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = c.recv() => tracing::info!("Ctrl-C: shutting down"),
+            _ = brk.recv() => tracing::info!("Ctrl-Break: shutting down"),
+            _ = close.recv() => tracing::info!("console closed: shutting down"),
+            _ = shutdown.recv() => tracing::info!("system shutdown: shutting down"),
+        }
     }
 }
 
-/// Resolves on SIGTERM or SIGINT.
+/// Resolves on SIGTERM or SIGINT. The handlers are in place when this returns (inside the
+/// runtime), so a signal before the first poll is not the default action's kill.
 #[cfg(unix)]
-pub async fn termination() {
-    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("cannot watch SIGTERM: {e}");
-            let _ = tokio::signal::ctrl_c().await;
-            return;
+pub fn termination() -> impl Future<Output = ()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let watch = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    );
+    async move {
+        let (mut term, mut int) = match watch {
+            (Ok(term), Ok(int)) => (term, int),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::error!("cannot watch SIGTERM / SIGINT: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => tracing::info!("SIGTERM: shutting down"),
+            _ = int.recv() => tracing::info!("SIGINT: shutting down"),
         }
-    };
-    tokio::select! {
-        _ = term.recv() => tracing::info!("SIGTERM: shutting down"),
-        _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT: shutting down"),
     }
 }
 

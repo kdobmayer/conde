@@ -682,6 +682,8 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // the handlers before the listener answers /healthz: a SIGTERM from then on is a clean stop
+        let stop = crate::daemon::termination();
         let dist_base_url = std::env::var("CONDE_DIST_BASE_URL")
             .ok()
             .filter(|u| !u.is_empty());
@@ -720,7 +722,7 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
             crate::slack::spawn(d, Arc::new(config)).await?;
         }
         tracing::info!(addr = %handle.local_addr(), "conde server ready");
-        crate::daemon::termination().await;
+        stop.await;
         tracing::info!("terminating: closing bridge connections");
         match tokio::time::timeout(SHUTDOWN_GRACE, handle.shutdown()).await {
             Ok(r) => r?,

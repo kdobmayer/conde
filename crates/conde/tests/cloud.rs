@@ -673,22 +673,46 @@ fn server_on_postgres_stops_cleanly_on_sigterm() {
         pg::skip("conde server on Postgres");
         return;
     };
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let child = std::process::Command::new(BIN)
-        .args(["server", "--listen", &format!("127.0.0.1:{port}")])
+    // port 0: the server binds and logs its address, so no other process can take it between
+    let mut child = std::process::Command::new(BIN)
+        .args(["server", "--listen", "127.0.0.1:0"])
         .env("DATABASE_URL", &db)
+        .env("NO_COLOR", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let pid = child.id();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut log = String::new();
+        for line in std::io::BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if let Some(addr) = line
+                .split_once("conde server ready addr=")
+                .map(|(_, a)| a.trim().to_string())
+            {
+                let _ = ready_tx.send(addr);
+            }
+            log.push_str(&line);
+            log.push('\n');
+        }
+        log
+    });
+    let Ok(addr) = ready_rx.recv_timeout(WAIT) else {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        panic!(
+            "no ready line\n{}{}",
+            reader.join().unwrap(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
     wait_for("healthz 200", || {
         use std::io::{Read, Write};
-        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+        let mut s = std::net::TcpStream::connect(&addr).ok()?;
         s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
             .ok()?;
         let mut raw = String::new();
@@ -700,10 +724,11 @@ fn server_on_postgres_stops_cleanly_on_sigterm() {
     let out = child.wait_with_output().unwrap();
     let log = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
+        reader.join().unwrap(),
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "exit {:?}\n{log}", out.status);
+    assert!(log.contains("SIGTERM: shutting down"), "{log}");
     assert!(!log.contains("panicked"), "{log}");
 }
 

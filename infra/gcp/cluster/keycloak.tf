@@ -96,6 +96,44 @@ resource "kubernetes_manifest" "keycloak_secrets" {
   }
 }
 
+# Keycloak's file vault: a realm's `${vault.<key>}` reads the file `<realm>_<key>` (underscores in either doubled), so
+# these values stay out of the realms state. One Secret Manager secret can back several files.
+locals {
+  keycloak_vault = merge(
+    { for realm in ["demo", "clearscale", "infra", "master"] : "${realm}_smtp-password" => "resend-api-key" },
+    { "clearscale_google-client-secret" = "clearscale-google-oauth-client-secret" },
+  )
+}
+
+resource "google_secret_manager_secret_iam_member" "keycloak_vault" {
+  for_each = toset(values(local.keycloak_vault))
+
+  project   = local.project
+  secret_id = "projects/${local.project}/secrets/${each.value}"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = google_service_account.keycloak.member
+}
+
+resource "kubernetes_manifest" "keycloak_vault" {
+  manifest = {
+    apiVersion = "secrets-store.csi.x-k8s.io/v1"
+    kind       = "SecretProviderClass"
+    metadata = {
+      name      = "keycloak-vault"
+      namespace = kubernetes_namespace_v1.keycloak.metadata[0].name
+    }
+    spec = {
+      provider = "gke"
+      parameters = {
+        secrets = yamlencode([for path, secret in local.keycloak_vault : {
+          resourceName = "projects/${local.project}/secrets/${secret}/versions/latest"
+          path         = path
+        }])
+      }
+    }
+  }
+}
+
 resource "kubernetes_deployment_v1" "keycloak" {
   metadata {
     name      = "keycloak"
@@ -214,6 +252,7 @@ resource "kubernetes_deployment_v1" "keycloak" {
               KC_DB_URL                   = "jdbc:postgresql://127.0.0.1:5432/keycloak"
               KC_DB_USERNAME              = "keycloak"
               KC_BOOTSTRAP_ADMIN_USERNAME = "bootstrap-admin"
+              KC_VAULT_DIR                = "/vault"
             }
             content {
               name  = env.key
@@ -284,6 +323,12 @@ resource "kubernetes_deployment_v1" "keycloak" {
             mount_path = "/secrets"
             read_only  = true
           }
+
+          volume_mount {
+            name       = "vault"
+            mount_path = "/vault"
+            read_only  = true
+          }
         }
 
         volume {
@@ -293,6 +338,17 @@ resource "kubernetes_deployment_v1" "keycloak" {
             read_only = true
             volume_attributes = {
               secretProviderClass = kubernetes_manifest.keycloak_secrets.manifest.metadata.name
+            }
+          }
+        }
+
+        volume {
+          name = "vault"
+          csi {
+            driver    = "secrets-store-gke.csi.k8s.io"
+            read_only = true
+            volume_attributes = {
+              secretProviderClass = kubernetes_manifest.keycloak_vault.manifest.metadata.name
             }
           }
         }
@@ -314,6 +370,7 @@ resource "kubernetes_deployment_v1" "keycloak" {
     google_project_iam_member.keycloak_sql_client,
     google_service_account_iam_member.keycloak_workload_identity,
     google_secret_manager_secret_iam_member.keycloak,
+    google_secret_manager_secret_iam_member.keycloak_vault,
     google_secret_manager_secret_version.keycloak_bootstrap_admin,
   ]
 }

@@ -41,6 +41,14 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S2c (desk, small): Keycloak account console theme (React-based, not covered by the login theme); master realm
   display name "conde admin" (today the label under the wordmark reads KEYCLOAK); the unused image 26.8.1-conde3 in
   Artifact Registry can go with the next registry cleanup.
+- S8 (desk, housekeeping found by the diagram read, 2026-10-28): remove `/realms/dakai` from the public Keycloak
+  route (no such realm); drop the unused project-wide `roles/container.developer` of the `deploy` service account
+  (no workflow deploys through the DNS endpoint; releases go through deploy/image.yaml and Argo CD); fix
+  workspaces/README.md (four mounted secrets, five on demo; dakai's OIDC secret is the Entra app's); refresh
+  docs/COST-conde-cloud.md after the cost cuts and S4 (5 rules on conde-web plus the two admin policies, 20
+  secrets); add an "as built" note to docs/infra-plan-gcp.md where the code diverged (roots cluster/realms/dns,
+  no dakai realm, Argo CD instead of a deploy workflow, CSI instead of ESO, Resend instead of Gmail, apex and www
+  proxied to Pages); redraw the diagram at the final revision (replicas after the cuts).
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

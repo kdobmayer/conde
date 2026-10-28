@@ -7,11 +7,10 @@ variable "require_mfa" {
   }
 }
 
-# The Keycloak the provider calls. run.sh sets http://127.0.0.1:18080, a port-forward to the Keycloak Service; the public
-# URL serves the admin paths only to admin_cidrs, and only until the allowlist is retired (docs/infra-gcp-s4-iap.md).
+# The Keycloak the provider calls, set by run.sh: a port-forward to the Keycloak Service. The public host serves no
+# admin path.
 variable "provider_url" {
-  type    = string
-  default = "https://auth.conde.cloud"
+  type = string
 }
 
 # Bump to rotate the master realm's `terraform` client secret: one targeted apply sets a new secret on the client and

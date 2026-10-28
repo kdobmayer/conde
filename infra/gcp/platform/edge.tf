@@ -35,14 +35,9 @@ resource "google_certificate_manager_certificate_map_entry" "wildcard" {
   certificates = [google_certificate_manager_certificate.conde.id]
 }
 
-locals {
-  # Cloud Armor allows at most five subexpressions per rule (one path match plus up to four ranges) and no regex groups.
-  admin_from_allowlist = join(" || ", [for c in var.admin_cidrs : "inIpRange(origin.ip, '${c}')"])
-}
-
 resource "google_compute_security_policy" "web" {
   name        = "conde-web"
-  description = "conde Gateway backends: login rate ban, admin paths from the allowlist only, default allow"
+  description = "conde Gateway backends: login rate ban, no Keycloak admin paths, default allow"
 
   adaptive_protection_config {
     layer_7_ddos_defense_config {
@@ -50,13 +45,16 @@ resource "google_compute_security_policy" "web" {
     }
   }
 
+  # The Keycloak console and the master realm are served only on admin-auth.conde.cloud, behind IAP, whose backend has
+  # its own policy; the public routes do not carry these paths, and these rules refuse them should a path ever reach
+  # Keycloak through a public route.
   rule {
     priority    = 1000
     action      = "deny(403)"
-    description = "Keycloak admin console and master realm only from admin_cidrs"
+    description = "No Keycloak admin console or master realm on the public backends"
     match {
       expr {
-        expression = "request.path.matches('^/admin/|^/realms/master/') && !(${local.admin_from_allowlist})"
+        expression = "request.path.matches('^/admin/|^/realms/master/')"
       }
     }
   }
@@ -65,33 +63,21 @@ resource "google_compute_security_policy" "web" {
   rule {
     priority    = 1001
     action      = "deny(403)"
-    description = "Bare /admin and /realms/master only from admin_cidrs"
+    description = "No bare /admin or /realms/master on the public backends"
     match {
       expr {
-        expression = "(request.path == '/admin' || request.path == '/realms/master') && !(${local.admin_from_allowlist})"
+        expression = "request.path == '/admin' || request.path == '/realms/master'"
       }
     }
   }
 
-  # Argo CD has its own sign-in, but its host is an admin surface: allowlisted addresses only until IAP (S4).
-  rule {
-    priority    = 1003
-    action      = "deny(403)"
-    description = "Argo CD host only from admin_cidrs"
-    match {
-      expr {
-        expression = "request.headers['host'].lower().startsWith('argocd.conde.cloud') && !(${local.admin_from_allowlist})"
-      }
-    }
-  }
-
-  # Keycloak normalises percent-encoded dot segments (`/realms/demo/%2e%2e/master/...` serves the master
-  # realm). Cloud Armor evaluates the normalised path, so rule 1000 already catches that (verified from a
-  # non-allowlisted address); this rule is defence in depth should that evaluation ever change.
+  # Keycloak normalises percent-encoded dot segments (`/realms/demo/%2e%2e/master/...` serves the master realm). Cloud
+  # Armor evaluates the normalised path, so encoded input does not match here; the canonical-path denies 1000 and 1001
+  # refuse the admin and master paths after normalisation. Defence in depth only, should that evaluation change.
   rule {
     priority    = 1002
     action      = "deny(403)"
-    description = "No percent-encoded or dot-segment paths toward Keycloak"
+    description = "Defence in depth only: the admin and master paths are protected by the canonical-path denies after normalisation"
     match {
       expr {
         expression = "request.headers['host'].lower().startsWith('auth.conde.cloud') && (request.path.contains('%') || request.path.contains('..'))"

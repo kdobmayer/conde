@@ -19,7 +19,11 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S1 (desk): the invite email flow: `conde admin invite <name> <email> --board <ws>`, the join page
   `/join/<token>` (set password, then the one line for the agent), Keycloak account creation through its
   admin API, mail through Resend; `conde update`; the site documents both.
-- S2 (desk): Keycloak login theme in the conde branding, design option B (docs/infra-plan-gcp.md 8c).
+- S2 (desk): the web front end v2 in design B, Editorial (docs/web-ui-v2/plan.md items U1 to U16, with the
+  owner's 2026-10-28 choice of B: skin A is not built further and U16 removes it; the plan's "dark only"
+  stays unless the owner says otherwise). Landed on the `web-v2` integration branch, one merge to main, as
+  the plan prescribes. The Keycloak login theme (S2b) is built from the same tokens right after.
+- S2b (desk): Keycloak login theme in the conde branding, design B (docs/infra-plan-gcp.md 8c).
 - S3 (desk): the landing page second pass with the owner's illustration (text-free variant by Astra,
   lowercase "conde", under the headline at about 60% width; a square crop for the social preview); two
   rendered options for the owner: a three-step strip, a short real agent-human exchange in the serif, the

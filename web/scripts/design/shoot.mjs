@@ -1,7 +1,9 @@
 // Design-only: headless screenshots of pages on a local server, one at a time.
 // Usage: node scripts/design/shoot.mjs <shots.json>
 // shots.json: [{ "url": "...", "out": "path.png", "size": "desktop" | "tablet" | "phone", "scheme": "light" | "dark",
-//                "wait"?: "css selector", "click"?: "css selector" }]
+//                "wait"?: "css selector", "click"?: "css selector",
+//                "storage"?: { key: value } (localStorage before the page loads),
+//                "fill"?: ["css selector", "text"] (typed after load, before "wait") }]
 // Needs playwright-core 1.64.0 (npm i --no-save) and a Chromium headless shell under
 // ~/.cache/ms-playwright (CHROME overrides the path). The clock is fixed to the fixture's NOW
 // in Europe/Budapest so relative times and day labels are stable.
@@ -32,9 +34,11 @@ for (const s of shots) {
 	});
 	const page = await context.newPage();
 	await page.clock.setFixedTime(NOW);
+	if (s.storage) await page.addInitScript((entries) => Object.entries(entries).forEach(([k, v]) => localStorage.setItem(k, v)), s.storage);
 	page.on('pageerror', (e) => console.error(`${s.out}: page error: ${e.message}`));
 	await page.goto(s.url, { waitUntil: 'networkidle' });
 	if (s.click) await page.click(s.click);
+	if (s.fill) await page.fill(s.fill[0], s.fill[1]);
 	if (s.wait) await page.waitForSelector(s.wait);
 	await page.waitForTimeout(400);
 	await page.screenshot({ path: s.out });

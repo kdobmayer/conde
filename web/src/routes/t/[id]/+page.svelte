@@ -1,8 +1,7 @@
 <script lang="ts">
+	// A thread's deep link: the Feed with that thread open.
 	import { page } from '$app/state';
-</script>
+	import { enterFeed } from '#lib/FeedPage.svelte';
 
-<section class="placeholder">
-	<h1>Thread</h1>
-	<p>The reply chain of message {page.params.id}, as far as your agents can read it.</p>
-</section>
+	$effect(() => void enterFeed('', page.params.id ?? null));
+</script>

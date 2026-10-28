@@ -3,7 +3,11 @@
 //! as the release workflow uploads them, served from a temp directory, for install.sh and
 //! `conde update` alike.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
@@ -43,6 +47,42 @@ pub fn sha256(bytes: &[u8]) -> String {
 pub struct Bucket {
     pub root: PathBuf,
     pub url: String,
+    gates: Gates,
+}
+
+type Gates = Arc<Mutex<HashMap<String, Arc<Gate>>>>;
+
+/// A held file: its request waits until [`Gate::open`].
+#[derive(Default)]
+pub struct Gate {
+    arrived: std::sync::atomic::AtomicUsize,
+    open: AtomicBool,
+}
+
+impl Gate {
+    /// Waits until the held file was requested; panics after `limit`.
+    pub fn wait_arrived(&self, limit: Duration) {
+        self.wait_requests(1, limit);
+    }
+
+    /// Waits until `n` requests for the held file are waiting; panics after `limit`.
+    pub fn wait_requests(&self, n: usize, limit: Duration) {
+        let end = Instant::now() + limit;
+        while self.arrived.load(Ordering::SeqCst) < n {
+            assert!(Instant::now() < end, "the held file was never requested");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn open(&self) {
+        self.open.store(true, Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone)]
+struct Served {
+    root: PathBuf,
+    gates: Gates,
 }
 
 impl Bucket {
@@ -52,7 +92,11 @@ impl Bucket {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
-        let dir = root.to_path_buf();
+        let gates: Gates = Arc::default();
+        let served = Served {
+            root: root.to_path_buf(),
+            gates: gates.clone(),
+        };
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -61,7 +105,7 @@ impl Bucket {
             rt.block_on(async move {
                 let app = axum::Router::new()
                     .route("/{*file}", axum::routing::get(file))
-                    .with_state(dir);
+                    .with_state(served);
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 axum::serve(listener, app).await.unwrap();
             });
@@ -69,7 +113,18 @@ impl Bucket {
         Bucket {
             root: root.to_path_buf(),
             url,
+            gates,
         }
+    }
+
+    /// Holds `path` (e.g. `v99.0.0/conde-linux-x86_64`): its request waits for the gate.
+    pub fn hold(&self, path: &str) -> Arc<Gate> {
+        let gate = Arc::new(Gate::default());
+        self.gates
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), gate.clone());
+        gate
     }
 
     /// `v<version>/<NAME>` with `bytes`, and a SHA256SUMS line for it: its true sum, or a wrong
@@ -91,9 +146,16 @@ impl Bucket {
     }
 }
 
-async fn file(State(root): State<PathBuf>, UrlPath(path): UrlPath<String>) -> impl IntoResponse {
+async fn file(State(served): State<Served>, UrlPath(path): UrlPath<String>) -> impl IntoResponse {
     if path.split('/').any(|seg| seg.is_empty() || seg == "..") {
         return Err(StatusCode::NOT_FOUND);
     }
-    std::fs::read(root.join(path)).map_err(|_| StatusCode::NOT_FOUND)
+    let gate = served.gates.lock().unwrap().get(&path).cloned();
+    if let Some(gate) = gate {
+        gate.arrived.fetch_add(1, Ordering::SeqCst);
+        while !gate.open.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    std::fs::read(served.root.join(path)).map_err(|_| StatusCode::NOT_FOUND)
 }

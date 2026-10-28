@@ -1,9 +1,13 @@
 //! `conde update`: replace this binary with a released one, from the same files install.sh
 //! reads: `<base>/latest` names the version, `<base>/v<version>/<binary>` and
-//! `<base>/v<version>/SHA256SUMS` are the release. The download is checked against its
-//! SHA256SUMS line, staged next to the running binary and renamed over it, so the binary is
-//! either the old one or the whole new one. Then the bridge service, when one is installed,
-//! restarts onto it.
+//! `<base>/v<version>/SHA256SUMS` are the release.
+//!
+//! The target is the file this process runs from, resolved before any download. The download is
+//! checked against its SHA256SUMS line, staged next to the target, and must report the wanted
+//! version. Then, under a lock file next to the target that serializes installers, the target's
+//! version is read again by running it: when another installer replaced it meanwhile, nothing is
+//! installed over it. Otherwise the staged file is renamed over the target, so the binary is
+//! either the old one or the whole new one, and the bridge service restarts onto it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,10 +21,12 @@ use crate::setup::{self, Env, Host};
 
 /// The dist bucket; the same default as install.sh. CONDE_DIST_BASE_URL overrides it.
 pub const DEFAULT_BASE: &str = "https://storage.googleapis.com/conde-cloud-dist";
+/// Next to the binary: held while one `conde update` replaces it.
+pub const LOCK_NAME: &str = ".conde-update.lock";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
-/// How long the downloaded binary may take to print its version before it counts as broken.
+/// How long a binary may take to print its version before it counts as broken.
 const PROBE_LIMIT: Duration = Duration::from_secs(10);
 
 pub struct Options {
@@ -98,6 +104,66 @@ pub fn listed_sum(sums: &str, name: &str) -> Option<String> {
     })
 }
 
+/// The file to replace: `exe` (this process's `current_exe`) resolved, and still the file this
+/// process runs from when `running` (its device and inode) is known. Linux names a replaced
+/// executable `<path> (deleted)`; that, a path that no longer resolves, and a path that now names
+/// another file are refused, so an update never writes next to or over the wrong file.
+pub fn check_target(exe: &Path, running: Option<(u64, u64)>) -> anyhow::Result<PathBuf> {
+    if exe.to_string_lossy().ends_with(" (deleted)") {
+        bail!(
+            "this conde ({}) was replaced while it ran; run conde update again",
+            exe.display()
+        );
+    }
+    let target = exe
+        .canonicalize()
+        .with_context(|| format!("resolving the running binary {}", exe.display()))?;
+    #[cfg(unix)]
+    if let Some(id) = running {
+        use std::os::unix::fs::MetadataExt;
+        let m =
+            std::fs::metadata(&target).with_context(|| format!("reading {}", target.display()))?;
+        if (m.dev(), m.ino()) != id {
+            bail!(
+                "{} is no longer the binary this conde runs from (another install replaced it); \
+                 run conde update again",
+                target.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = running;
+    Ok(target)
+}
+
+/// This process's executable as device and inode; None where the OS does not tell (macOS).
+fn running_id() -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self/exe")
+            .ok()
+            .map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+/// What the binary at `path` says it is: Err when it does not run, None without a version line.
+fn probe(host: &mut dyn Host, path: &Path) -> anyhow::Result<Option<Version>> {
+    let shown = path.to_string_lossy();
+    match host.run_bounded(&shown, &["--version"], PROBE_LIMIT) {
+        Ok(r) if r.ok => Ok(reported_version(&r.stdout)),
+        Ok(_) => bail!("{} --version failed", path.display()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The installed version: what the target says when run, not what this process was built as.
+fn installed_version(host: &mut dyn Host, target: &Path) -> anyhow::Result<Version> {
+    probe(host, target)?.with_context(|| format!("{} reports no conde version", target.display()))
+}
+
 pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     let name =
         asset_name(std::env::consts::OS, std::env::consts::ARCH, rosetta()).with_context(|| {
@@ -107,8 +173,12 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
                 std::env::consts::ARCH
             )
         })?;
+    let exe = std::env::current_exe().context("locating the conde binary")?;
+    let target = check_target(&exe, running_id())?;
+    let mut host = setup::System;
+    let installed = installed_version(&mut host, &target)?;
+
     let base = base_url();
-    let current = env!("CARGO_PKG_VERSION");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -145,15 +215,19 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
                 .with_context(|| format!("reading {base}/latest"))?
         }
     };
-    match plan(current, &wanted.to_string(), opts.version.is_some())? {
+    match plan(
+        &installed.to_string(),
+        &wanted.to_string(),
+        opts.version.is_some(),
+    )? {
         Plan::Current => {
-            writeln!(out, "conde {current} is current")?;
+            writeln!(out, "conde {installed} is current")?;
             return Ok(0);
         }
         Plan::Newer => {
             writeln!(
                 out,
-                "conde {current} is newer than the latest release {wanted}; nothing to do"
+                "conde {installed} is newer than the latest release {wanted}; nothing to do"
             )?;
             return Ok(0);
         }
@@ -162,7 +236,7 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     if opts.check {
         writeln!(
             out,
-            "conde {current} -> {wanted} is available; conde update installs it"
+            "conde {installed} -> {wanted} is available; conde update installs it"
         )?;
         return Ok(0);
     }
@@ -182,27 +256,35 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
         bail!("checksum mismatch for {name}; nothing installed");
     }
 
-    let exe = std::env::current_exe().context("locating the conde binary")?;
-    let exe = exe.canonicalize().unwrap_or(exe);
-    let staged = Staged::write(&exe, &binary)?;
-    let mut host = setup::System;
+    let staged = Staged::write(&target, &binary)?;
     clear_quarantine(&mut host, &staged.path);
-    let shown = staged.path.to_string_lossy().into_owned();
-    let reported = match host.run_bounded(&shown, &["--version"], PROBE_LIMIT) {
-        Ok(r) if r.ok => reported_version(&r.stdout),
-        _ => {
+    match probe(&mut host, &staged.path) {
+        Err(_) => {
             bail!("the downloaded binary does not run on this machine ({name}); nothing installed")
         }
-    };
-    match reported {
-        None => bail!("the downloaded {name} reports no conde version; nothing installed"),
-        Some(v) if v != wanted => {
+        Ok(None) => bail!("the downloaded {name} reports no conde version; nothing installed"),
+        Ok(Some(v)) if v != wanted => {
             bail!("the downloaded {name} reports conde {v}, not {wanted}; nothing installed")
         }
-        Some(_) => {}
+        Ok(Some(_)) => {}
     }
-    staged.replace(&exe)?;
-    writeln!(out, "conde {current} -> {wanted}")?;
+
+    let _lock = Lock::acquire(&target)?;
+    let now = installed_version(&mut host, &target)
+        .with_context(|| format!("reading {} again before the replace", target.display()))?;
+    if now != installed {
+        if now.cmp_precedence(&wanted) != std::cmp::Ordering::Less {
+            writeln!(out, "conde {now} is current")?;
+            return Ok(0);
+        }
+        bail!(
+            "{} changed to conde {now} while this update ran; nothing installed (run conde update \
+             again)",
+            target.display()
+        );
+    }
+    staged.replace(&target)?;
+    writeln!(out, "conde {installed} -> {wanted}")?;
 
     let env = Env::from_process()?;
     setup::restart_service(&env, &mut host, out)
@@ -229,6 +311,46 @@ fn clear_quarantine(host: &mut dyn Host, path: &Path) {
     }
 }
 
+/// An exclusive flock on [`LOCK_NAME`] next to the target, released when dropped. The file stays:
+/// removing a lock file others may hold open would let two installers lock different files.
+struct Lock(#[allow(dead_code)] std::fs::File);
+
+impl Lock {
+    fn acquire(target: &Path) -> anyhow::Result<Lock> {
+        let path = target.with_file_name(LOCK_NAME);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let flock = |op| loop {
+                if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
+                    return Ok(());
+                }
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(e);
+                }
+            };
+            if let Err(e) = flock(libc::LOCK_EX | libc::LOCK_NB) {
+                if e.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                    return Err(e).with_context(|| format!("locking {}", path.display()));
+                }
+                eprintln!(
+                    "conde update: waiting for another conde update of {} to finish",
+                    target.display()
+                );
+                flock(libc::LOCK_EX).with_context(|| format!("locking {}", path.display()))?;
+            }
+        }
+        Ok(Lock(file))
+    }
+}
+
 /// The new binary next to the old one, removed unless it replaced it.
 struct Staged {
     path: PathBuf,
@@ -236,8 +358,10 @@ struct Staged {
 }
 
 impl Staged {
-    fn write(exe: &Path, bytes: &[u8]) -> anyhow::Result<Staged> {
-        let dir = exe.parent().context("the conde binary has no directory")?;
+    fn write(target: &Path, bytes: &[u8]) -> anyhow::Result<Staged> {
+        let dir = target
+            .parent()
+            .context("the conde binary has no directory")?;
         let path = dir.join(format!(".conde-update.{}", std::process::id()));
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -255,8 +379,9 @@ impl Staged {
         Ok(staged)
     }
 
-    fn replace(mut self, exe: &Path) -> anyhow::Result<()> {
-        std::fs::rename(&self.path, exe).with_context(|| format!("replacing {}", exe.display()))?;
+    fn replace(mut self, target: &Path) -> anyhow::Result<()> {
+        std::fs::rename(&self.path, target)
+            .with_context(|| format!("replacing {}", target.display()))?;
         self.done = true;
         Ok(())
     }

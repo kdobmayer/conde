@@ -1266,13 +1266,109 @@ fn launchd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
     Ok(())
 }
 
-/// After the binary was replaced (`conde update`): restart the bridge service setup installed,
-/// so it runs the new build; a machine without one is told how to restart the bridge itself.
-pub fn restart_service(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+/// The program of the `ExecStart=` line [`systemd_unit`] writes, unescaped as [`systemd_word`]
+/// escaped it; None without one.
+pub fn exec_start_program(unit: &str) -> Option<String> {
+    let exec = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+    let word = match exec.strip_prefix('"') {
+        Some(quoted) => {
+            let mut word = String::new();
+            let mut chars = quoted.chars();
+            loop {
+                match chars.next()? {
+                    '\\' => word.push(chars.next()?),
+                    '"' => break,
+                    c => word.push(c),
+                }
+            }
+            word
+        }
+        None => exec.split_whitespace().next()?.to_string(),
+    };
+    let word = word.replace("%%", "%").replace("$$", "$");
+    (!word.is_empty()).then_some(word)
+}
+
+/// The first `ProgramArguments` string [`launchd_plist`] writes, unescaped; None without one.
+pub fn plist_program(plist: &str) -> Option<String> {
+    let args = &plist[plist.find("<key>ProgramArguments</key>")?..];
+    let first = &args[args.find("<string>")? + "<string>".len()..];
+    let text = &first[..first.find("</string>")?];
+    let text = text
+        .replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&");
+    (!text.is_empty()).then_some(text)
+}
+
+/// Whether `a` and `b` both exist and are one file: the same canonical path (a symlink to it
+/// counts) or the same inode (a hard link).
+fn same_existing_file(a: &Path, b: &Path) -> bool {
+    let (Ok(x), Ok(y)) = (a.canonicalize(), b.canonicalize()) else {
+        return false;
+    };
+    if x == y {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(m), Ok(n)) = (std::fs::metadata(&x), std::fs::metadata(&y)) {
+            return (m.dev(), m.ino()) == (n.dev(), n.ino());
+        }
+    }
+    false
+}
+
+/// After `conde update` replaced `updated`: restart the bridge service setup installed, only when
+/// the program its unit (systemd) or agent (launchd) names is that file. Any other program, a
+/// missing one or none leaves the bridge running and says how to point it here; a machine
+/// without a service is told how to restart the bridge itself.
+pub fn restart_service(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    updated: &Path,
+) -> anyhow::Result<()> {
     const NONE: &str = "service: no bridge service installed (conde setup installs one); restart a \
 running conde daemon yourself";
+    let (file, program): (PathBuf, fn(&str) -> Option<String>) = match env.os {
+        Os::Linux => (env.systemd_unit(), exec_start_program),
+        Os::MacOs => (env.launchd_plist(), plist_program),
+        // no Windows release exists, so conde update stops before this
+        Os::Windows => {
+            writeln!(
+                out,
+                "service: the scheduled task is not restarted on Windows"
+            )?;
+            return Ok(());
+        }
+    };
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        writeln!(out, "{NONE}")?;
+        return Ok(());
+    };
+    let Some(runs) = program(&text) else {
+        writeln!(
+            out,
+            "service: cannot tell which binary the bridge service runs ({}); run conde setup to \
+             point it here",
+            env.show(&file)
+        )?;
+        return Ok(());
+    };
+    if !same_existing_file(Path::new(&runs), updated) {
+        writeln!(
+            out,
+            "service: the bridge service runs {runs}, not the updated binary; run conde setup to \
+             point it here"
+        )?;
+        return Ok(());
+    }
     match env.os {
-        Os::Linux if !env.systemd_unit().exists() => writeln!(out, "{NONE}")?,
         Os::Linux if host.which("systemctl").is_none() => writeln!(
             out,
             "service: systemctl not found; restart a running conde daemon yourself"
@@ -1281,8 +1377,7 @@ running conde daemon yourself";
             check(host, "systemctl", &["--user", "restart", "conde.service"])?;
             writeln!(out, "service: restarted conde.service onto the new build")?;
         }
-        Os::MacOs if !env.launchd_plist().exists() => writeln!(out, "{NONE}")?,
-        Os::MacOs => {
+        _ => {
             let target = format!("gui/{}/{LAUNCHD_LABEL}", env.uid);
             if host.run("launchctl", &["print", &target])?.ok {
                 check(host, "launchctl", &["kickstart", "-k", &target])?;
@@ -1294,11 +1389,6 @@ running conde daemon yourself";
                 )?;
             }
         }
-        // no Windows release exists, so conde update stops before this
-        Os::Windows => writeln!(
-            out,
-            "service: the scheduled task is not restarted on Windows"
-        )?,
     }
     Ok(())
 }

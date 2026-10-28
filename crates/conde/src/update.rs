@@ -287,7 +287,7 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     writeln!(out, "conde {installed} -> {wanted}")?;
 
     let env = Env::from_process()?;
-    setup::restart_service(&env, &mut host, out)
+    setup::restart_service(&env, &mut host, out, &target)
         .context("the binary is updated, but restarting the bridge failed")?;
     Ok(0)
 }

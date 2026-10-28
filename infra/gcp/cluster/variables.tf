@@ -41,7 +41,8 @@ variable "argocd_repo_key_version" {
 
 # The client id of the OAuth client `iap-admin` (docs/infra-gcp-s4-iap.md); not a secret.
 variable "iap_client_id" {
-  type = string
+  type    = string
+  default = "327673226052-0uppqjn1ujh4df0alpv2oagplaa099g2.apps.googleusercontent.com"
 
   validation {
     condition     = endswith(var.iap_client_id, ".apps.googleusercontent.com")

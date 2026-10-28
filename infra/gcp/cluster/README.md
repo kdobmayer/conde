@@ -88,20 +88,13 @@ exception, and holds exactly these:
 | `argocd-initial-admin-secret` | `password` (the local admin's first password) | the server at first start; delete it once the local admin is off |
 | `argocd-redis` | `auth` (the Redis password between the Argo CD components) | the chart's `argocd-redis-secret-init` Job |
 | `repo-conde` | `sshPrivateKey` (the deploy key), `url`, `type`, `name` | the `argocd-repo-import-hook` Job, from Secret Manager |
-| `iap-admin` | `key` (the IAP OAuth client secret) | the `iap-secret-import-hook` Job, from Secret Manager |
+| `iap-admin` | `key` (the IAP OAuth client secret) | Terraform (`iap.tf`), write-only, from Secret Manager |
 
 The second exception is the IAP OAuth client secret: GCPBackendPolicy reads it only from a Kubernetes Secret in the
-backend's namespace, so `iap-admin` exists in `argocd` and in `keycloak`, written by the Job `iap-secret-import-hook`
-in each. It copies `iap-admin-client-secret` from Secret Manager the way the repository import does (its own Workload
-Identity principal with access to that one secret, a role that can create Secrets and read and patch only
-`iap-admin`, server-side apply, TTL deletion ten minutes after it finishes), as a pre-install and pre-upgrade hook of
-the Argo CD release, so the Secret exists before a policy names it. In `keycloak`, a NetworkPolicy of its own lets
-only that Job reach the API server. To rotate: add a version to `iap-admin-client-secret`, raise
-`iap_client_secret_version` by one, apply.
-
-There is no TLS material: the server runs without TLS behind the Gateway, and the repo server's internal certificate
-is generated in memory. The Helm release record (`sh.helm.release.v1.argocd.*`) holds the chart values, which carry
-no secret.
+backend's namespace, so `iap-admin` exists in `argocd` and in `keycloak`. Terraform reads `iap-admin-client-secret`
+from Secret Manager as an ephemeral value and writes it as the Secret's write-only data (`data_wo`), so the value is in
+neither the plan nor the state; the Secret object itself is the only copy outside Secret Manager. To rotate: add a
+version to `iap-admin-client-secret`, raise `iap_client_secret_version` by one, apply.
 
 ## Workspaces
 

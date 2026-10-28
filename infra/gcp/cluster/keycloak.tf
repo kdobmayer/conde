@@ -514,7 +514,6 @@ resource "kubernetes_manifest" "keycloak_admin_health_check" {
   }
 }
 
-# The Secret it names is written by the pre-install/pre-upgrade hook of the Argo CD release (iap.tf).
 resource "kubernetes_manifest" "keycloak_admin_backend" {
   manifest = {
     apiVersion = "networking.gke.io/v1"
@@ -537,7 +536,8 @@ resource "kubernetes_manifest" "keycloak_admin_backend" {
     }
   }
 
-  depends_on = [helm_release.argocd]
+  # The Secret it names (iap.tf).
+  depends_on = [kubernetes_secret_v1.iap]
 }
 
 resource "kubernetes_manifest" "keycloak_health_check" {

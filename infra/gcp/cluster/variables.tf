@@ -49,8 +49,8 @@ variable "iap_client_id" {
   }
 }
 
-# Bump after adding a new version of the iap-admin-client-secret secret: the Argo CD release upgrades and its hooks
-# re-import the secret into keycloak/iap-admin and argocd/iap-admin.
+# Bump after adding a new version of the iap-admin-client-secret secret: the apply writes it again into keycloak/iap-admin
+# and argocd/iap-admin.
 variable "iap_client_secret_version" {
   type    = number
   default = 1

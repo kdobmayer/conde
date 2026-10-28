@@ -97,8 +97,9 @@ registrar's price API and the public cloud price lists on the day; re-read at ap
 - Secrets: the GKE managed Secret Manager CSI add-on mounts secrets as files; no Kubernetes Secret objects
   carry a value, nothing in etcd or git or Terraform state. Two exceptions, both listed in
   infra/gcp/cluster/README.md: Argo CD's own credentials in its namespace (it reads only Kubernetes Secrets), and the
-  IAP OAuth client secret (S4), which GCPBackendPolicy reads only from a Kubernetes Secret in the backend's namespace,
-  `iap-admin` in `keycloak` and `argocd`, each written from Secret Manager by a hook Job scoped to that one secret. conde gets `*_FILE` variants of its secret
+  IAP OAuth client secret (S4), which GCPBackendPolicy reads only from a Kubernetes Secret in the backend's namespace:
+  `iap-admin` in `keycloak` and `argocd`, written by Terraform as write-only data from an ephemeral Secret Manager
+  read, so the value never enters the plan or the state, and the Secret object is its one copy outside Secret Manager. conde gets `*_FILE` variants of its secret
   variables (CONDE_ADMIN_KEY, OIDC client secret, CONDE_SLACK_BOT_TOKEN); DATABASE_URL carries no password.
 - Keycloak: the pinned official image as a Deployment with probes, one installation, realms `dakai` and
   `demo` managed with the keycloak/keycloak Terraform provider (bootstrap import only for the first start).

@@ -16,10 +16,11 @@ and the theme resources, with unconditional denies for `/admin` and `/realms/mas
   pages, and with them the console's own sign-in, are on that host. The other realms keep auth.conde.cloud as issuer.
 - Argo CD (`infra/gcp/cluster/argocd.tf`): its GCPBackendPolicy gets IAP and the Cloud Armor policy `conde-argocd`.
   Argo CD's own sign-in through the `infra` realm stays the application login.
-- IAP (`infra/gcp/cluster/iap.tf`): the custom OAuth client `iap-admin`, its secret copied from Secret Manager into
-  the Kubernetes Secret `iap-admin` in `keycloak` and `argocd` by the hook Job `iap-secret-import-hook` (the second
-  exception to "no Kubernetes Secret carries a value", infra/gcp/cluster/README.md), and
-  `roles/iap.httpsResourceAccessor` for user:kdobmayer.devops@gmail.com on the two backend services only.
+- IAP (`infra/gcp/cluster/iap.tf`): the custom OAuth client `iap-admin`; its secret written by Terraform into the
+  Kubernetes Secret `iap-admin` in `keycloak` and `argocd` as write-only data from an ephemeral Secret Manager read,
+  so it is in neither plan nor state (the second exception to "no Kubernetes Secret carries a value",
+  infra/gcp/cluster/README.md); and `roles/iap.httpsResourceAccessor` for user:kdobmayer.devops@gmail.com on the
+  two backend services only.
 - Cloud Armor (`infra/gcp/platform/edge.tf`): `conde-keycloak-admin` (300 requests a minute per IP) and
   `conde-argocd` (600), throttles only; IAP decides who gets in. Cloud Armor is evaluated before IAP.
 - The IAP API (`infra/gcp/foundation/main.tf`).
@@ -64,13 +65,17 @@ b) Secrets and permissions.
 
 c) Admin host, routes, policies with IAP.
    - platform: `terraform apply` (plan: 2 to add, the two Cloud Armor policies).
-   - cluster: `terraform apply`. The Argo CD release upgrades; its pre-upgrade hooks write `iap-admin` into both
-     namespaces before the policies name it; Keycloak rolls once for `KC_HOSTNAME_ADMIN` (one pod, surge 1, no gap).
+   - cluster: `terraform apply`. It writes `iap-admin` into both namespaces before the policies that name it, then
+     upgrades the Argo CD release; Keycloak rolls once for `KC_HOSTNAME_ADMIN` (one pod, surge 1, no gap). Every
+     cluster plan from now on reads `iap-admin-client-secret`, so it must exist (step a) before the first one.
      The Gateway controller creates the `keycloak-admin` backend service during this apply, so its IAP grant needs
      a second `terraform apply`; the check `iap_backend_services` warns until it has run. Argo CD is behind IAP
      from this apply on.
-   - realms: `./run.sh apply` (plan: 1 to change, the master realm's `frontendUrl`). From here the console is on
-     admin-auth.conde.cloud.
+   - realms, first the rotation of the master realm's `terraform` client secret (`terraform_client_secret_version`
+     is 2 on this branch; README.md: Rotating the terraform client secret): the targeted `./run.sh apply` of the
+     client and its secret version (the version holding the old value is destroyed), then re-export
+     `KEYCLOAK_CLIENT_SECRET` from Secret Manager. Then `./run.sh apply` (1 to change, the master realm's
+     `frontendUrl`). From here the console is on admin-auth.conde.cloud.
 
 d) Verify (every item, before step e):
    1. IAP on both backends:
@@ -106,6 +111,8 @@ e) Retire the allowlist (the commit "Retire the admin IP allowlist").
      `/realms/master/*` to everyone (rule 1002 keeps refusing encoded and dot-segment paths on auth.conde.cloud);
      `admin_cidrs` is gone.
    - cluster: `terraform apply`: the public Keycloak route loses `/admin` and `/realms/master`.
+   - Rule 1003 (Argo CD host from `admin_cidrs`) goes with them; it stopped applying at step c, when the Argo CD
+     backend moved to `conde-argocd`.
    - Check from an address that was on the allowlist and from one that was not (Cloud Shell): on auth.conde.cloud,
      `/admin/master/console/`, `/realms/master` and `/realms/demo/%2e%2e/master/` are refused (403 or 404);
      `/realms/demo/.well-known/openid-configuration` and `/realms/infra/.well-known/openid-configuration` answer 200;

@@ -161,7 +161,7 @@ locals {
         hostnames = [local.argocd_hostname]
       }
     }
-    extraObjects = concat([
+    extraObjects = [
       {
         apiVersion = "networking.gke.io/v1"
         kind       = "HealthCheckPolicy"
@@ -195,7 +195,7 @@ locals {
         }
       },
       local.argocd_repo_import_job,
-    ], local.iap_secret_import_jobs)
+    ]
   }
 }
 
@@ -231,12 +231,8 @@ resource "helm_release" "argocd" {
     kubernetes_role_binding_v1.argocd_repo_import,
     kubernetes_manifest.argocd_repo_ssh_key,
     kubernetes_config_map_v1.argocd_repo_import,
-    # The IAP secret hooks (iap.tf), and the Keycloak policy that lets its hook reach the API server.
-    google_secret_manager_secret_iam_member.iap_secret_import,
-    kubernetes_role_binding_v1.iap_secret_import,
-    kubernetes_manifest.iap_secret_import,
-    kubernetes_config_map_v1.iap_secret_import,
-    kubernetes_network_policy_v1.keycloak_iap_secret_import,
+    # The IAP client secret the server's GCPBackendPolicy names (iap.tf).
+    kubernetes_secret_v1.iap,
   ]
 }
 

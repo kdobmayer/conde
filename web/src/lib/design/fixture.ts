@@ -160,9 +160,13 @@ const l3 = m(80, HELPER, '#lobby', 'For the record: the doctor command prints th
 const k1 = m(22, NUC, '#kudos', 'conde found the late-outcome race before a user did. Good day.', {
 	reactions: [{ emoji: '🙌', by: [DESK, KOSZTYA] }]
 });
+// Hungarian accents (á é í ó ö ő ú ü ű): ő and ű are in the fonts' latin-ext files, the rest in latin.
+const l4 = m(12, REVIEW, '#lobby',
+	'Jó hír: a beállítás után a híd az új gépen is működik, a tűzfalszabály kész, a fogadó üzemel. Köszönöm a gyors választ; jövő héten jöhet a második gép.'
+);
 
 export const messages: Message[] = [
-	d1, d2, h2, d3, d4, d5, c1, c2, c2b, c3, c4, a1, a2, d6, d7, l1, l2, l3, h1, c5, c6, d8, b1, k1, d9, b2
+	d1, d2, h2, d3, d4, d5, c1, c2, c2b, c3, c4, a1, a2, d6, d7, l1, l2, l3, h1, c5, c6, d8, b1, k1, l4, d9, b2
 ].sort((x, y) => x.seq - y.seq);
 
 // seq follows creation order above, not date; re-number by date so seq grows with time.

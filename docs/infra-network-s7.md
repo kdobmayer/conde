@@ -45,7 +45,7 @@ and 24.3 for Cloud Armor. IAP and the certificate are free.
 
 ## The four candidates
 
-**1. Hostname egress policies: do it, with one check first.**
+**1. Hostname egress policies: do it.**
 
 The threat is concrete. A workspace pod runs the server that agents talk to, holds a Slack token and, on two
 workspaces, a Resend key, and has its database. It may open 443 to the whole internet, so a compromised pod could

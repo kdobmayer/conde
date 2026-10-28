@@ -302,12 +302,12 @@ resource "kubernetes_deployment_v1" "keycloak" {
 
           resources {
             requests = {
-              cpu                 = "500m"
-              memory              = "1Gi"
+              cpu                 = "250m"
+              memory              = "768Mi"
               "ephemeral-storage" = "1Gi"
             }
             limits = {
-              memory              = "2Gi"
+              memory              = "1536Mi"
               "ephemeral-storage" = "1Gi"
             }
           }

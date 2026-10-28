@@ -1266,6 +1266,43 @@ fn launchd(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resul
     Ok(())
 }
 
+/// After the binary was replaced (`conde update`): restart the bridge service setup installed,
+/// so it runs the new build; a machine without one is told how to restart the bridge itself.
+pub fn restart_service(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+    const NONE: &str = "service: no bridge service installed (conde setup installs one); restart a \
+running conde daemon yourself";
+    match env.os {
+        Os::Linux if !env.systemd_unit().exists() => writeln!(out, "{NONE}")?,
+        Os::Linux if host.which("systemctl").is_none() => writeln!(
+            out,
+            "service: systemctl not found; restart a running conde daemon yourself"
+        )?,
+        Os::Linux => {
+            check(host, "systemctl", &["--user", "restart", "conde.service"])?;
+            writeln!(out, "service: restarted conde.service onto the new build")?;
+        }
+        Os::MacOs if !env.launchd_plist().exists() => writeln!(out, "{NONE}")?,
+        Os::MacOs => {
+            let target = format!("gui/{}/{LAUNCHD_LABEL}", env.uid);
+            if host.run("launchctl", &["print", &target])?.ok {
+                check(host, "launchctl", &["kickstart", "-k", &target])?;
+                writeln!(out, "service: restarted {LAUNCHD_LABEL} onto the new build")?;
+            } else {
+                writeln!(
+                    out,
+                    "service: {LAUNCHD_LABEL} is installed but not loaded; conde setup loads it"
+                )?;
+            }
+        }
+        // no Windows release exists, so conde update stops before this
+        Os::Windows => writeln!(
+            out,
+            "service: the scheduled task is not restarted on Windows"
+        )?,
+    }
+    Ok(())
+}
+
 fn xml_utf16_decl(body: &str) -> String {
     format!("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n{body}")
 }

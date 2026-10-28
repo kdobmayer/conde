@@ -340,6 +340,16 @@ enum Cmd {
         #[command(flatten)]
         publish: PublishArgs,
     },
+    /// Replace this binary with a released one (default: the latest), checked against the
+    /// release's SHA256SUMS, and restart the bridge service onto it.
+    Update {
+        /// The release to install, e.g. 0.2.0 (default: the latest).
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Only report whether a newer release exists; change nothing.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// What stays published when an enrolled host switches to v2. Without one: asked at a
@@ -712,6 +722,13 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             };
             return setup(opts, check);
         }
+        Cmd::Update { version, check } => {
+            no_board("update", "")?;
+            return crate::update::run(
+                crate::update::Options { version, check },
+                &mut std::io::stdout(),
+            );
+        }
         Cmd::Boards {
             forget: None,
             migrate: Some(alias),
@@ -889,7 +906,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         | Cmd::History { .. } => {
             unreachable!()
         }
-        Cmd::Import { .. } | Cmd::Mcp | Cmd::Setup { .. } => unreachable!(),
+        Cmd::Import { .. } | Cmd::Mcp | Cmd::Setup { .. } | Cmd::Update { .. } => unreachable!(),
         Cmd::Send {
             to,
             text,

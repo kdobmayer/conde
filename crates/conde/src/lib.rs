@@ -33,6 +33,7 @@ pub mod setup;
 pub mod slack;
 pub mod store;
 pub mod surface;
+pub mod update;
 pub mod util;
 pub mod web_store;
 #[cfg(windows)]

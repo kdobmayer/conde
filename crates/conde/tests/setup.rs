@@ -2079,3 +2079,77 @@ fn a_bounded_probe_that_hangs_is_cut_off() {
     );
     assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
 }
+
+/// `conde update` restarts the bridge service setup installed, and only that: a machine without
+/// one is told so, a macOS agent that is not loaded is not loaded behind the human's back.
+#[test]
+fn update_restarts_the_installed_service_only() {
+    let restart = |env: &Env, host: &mut Fake| {
+        let mut out = Vec::new();
+        let r = setup::restart_service(env, host, &mut out);
+        (
+            r.map_err(|e| format!("{e:#}")),
+            String::from_utf8(out).unwrap(),
+        )
+    };
+    let install = |p: PathBuf| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "installed").unwrap();
+    };
+
+    let root = temp_root();
+    let linux = env(&root, Os::Linux);
+    let mut host = Fake::new(&linux, &["systemctl"]);
+    let (r, out) = restart(&linux, &mut host);
+    assert!(
+        r.is_ok() && out.contains("no bridge service installed"),
+        "{out}"
+    );
+    assert!(host.take_calls().is_empty());
+    install(linux.systemd_unit());
+    let (r, out) = restart(&linux, &mut host);
+    assert!(
+        r.is_ok() && out.contains("restarted conde.service"),
+        "{out}"
+    );
+    assert_eq!(
+        host.take_calls(),
+        ["systemctl --user restart conde.service"]
+    );
+    host.fail = Some("systemctl --user restart");
+    let (r, _) = restart(&linux, &mut host);
+    assert!(r.is_err(), "a failed restart is an error");
+
+    let root = temp_root();
+    let mac = env(&root, Os::MacOs);
+    let mut host = Fake::new(&mac, &[]);
+    let (r, out) = restart(&mac, &mut host);
+    assert!(
+        r.is_ok() && out.contains("no bridge service installed"),
+        "{out}"
+    );
+    assert!(host.take_calls().is_empty());
+    install(mac.launchd_plist());
+    let (r, out) = restart(&mac, &mut host);
+    assert!(
+        r.is_ok() && out.contains("installed but not loaded"),
+        "{out}"
+    );
+    assert_eq!(
+        host.take_calls(),
+        [format!("launchctl print gui/501/{}", setup::LAUNCHD_LABEL)]
+    );
+    host.launchd_loaded = true;
+    let (r, out) = restart(&mac, &mut host);
+    assert!(
+        r.is_ok() && out.contains("restarted space.nativeai.conde"),
+        "{out}"
+    );
+    assert_eq!(
+        host.take_calls(),
+        [
+            format!("launchctl print gui/501/{}", setup::LAUNCHD_LABEL),
+            format!("launchctl kickstart -k gui/501/{}", setup::LAUNCHD_LABEL),
+        ]
+    );
+}

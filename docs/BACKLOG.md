@@ -48,7 +48,10 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   docs/COST-conde-cloud.md after the cost cuts and S4 (5 rules on conde-web plus the two admin policies, 20
   secrets); add an "as built" note to docs/infra-plan-gcp.md where the code diverged (roots cluster/realms/dns,
   no dakai realm, Argo CD instead of a deploy workflow, CSI instead of ESO, Resend instead of Gmail, apex and www
-  proxied to Pages); redraw the diagram at the final revision (replicas after the cuts).
+  proxied to Pages); redraw the diagram at the final revision (replicas after the cuts).; drop KC_BOOTSTRAP_ADMIN_USERNAME, the
+  bootstrap-admin-password mount and the keycloak-bootstrap-admin secret from the cluster root (unused since D2);
+  put "Krisztián" and "Dobmayer" on keycloak_user.krisztian in the infra realm (every full realms plan wants to
+  blank them today).
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

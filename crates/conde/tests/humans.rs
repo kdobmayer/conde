@@ -203,7 +203,7 @@ fn racing_ensures_leave_one_human_name() {
     assert_eq!(humans_of(&d, "krisz").len(), 1);
     // Postgres: separate connections to one database, as two replicas
     let Some(url) = common::pg::fresh_database() else {
-        eprintln!("skipped: set CONDE_TEST_PG to race on Postgres");
+        common::pg::skip("the race on Postgres");
         return;
     };
     let open =

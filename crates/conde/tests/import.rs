@@ -1185,7 +1185,7 @@ fn symlinked_channel_and_registry_directories_are_not_followed() {
 #[test]
 fn imports_into_postgres_when_a_database_url_is_given() {
     let Some(url) = pg::fresh_database() else {
-        eprintln!("skipped: set CONDE_TEST_PG to import into Postgres");
+        pg::skip("the import into Postgres");
         return;
     };
     let tmp = TempDir::new("pg");

@@ -307,7 +307,7 @@ pub fn predates_boards(error: &str) -> bool {
 pub fn check_board_flag(board: Option<&str>) -> Result<(), String> {
     match board {
         Some(b) if !is_alias(b) => Err(format!(
-            "'{b}' is not a board alias (local, or an enrolled one such as dakai)"
+            "'{b}' is not a board alias (local, or an enrolled one such as acme)"
         )),
         _ => Ok(()),
     }
@@ -362,7 +362,7 @@ impl Out {
     }
 }
 
-/// `(dakai: unavailable)` for each board of an aggregate view that did not answer.
+/// `(acme: unavailable)` for each board of an aggregate view that did not answer.
 fn unavailable(out: &mut Out, r: &Value) {
     for part in r["boards"].as_array().into_iter().flatten() {
         if part["available"] == false {

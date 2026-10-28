@@ -34,7 +34,8 @@ Then tell dakai-helper the tag; it runs
 `terraform apply -var image=crnative.azurecr.io/conde:<tag> -var target_port=8080`
 (one revision switch, about a minute). Logs:
 `az containerapp logs show -g rg-conde -n ca-conde --type console --tail 100`.
-Image contract: linux/amd64, non-root, ca-certificates, 0.0.0.0:$PORT, GET /healthz.
+Image contract: linux/amd64, non-root, ca-certificates, 0.0.0.0:$PORT, GET /healthz (answered only
+once SIGTERM is handled: a stop from then on closes the connections within 50 s).
 
 ## Release binaries (GitHub Actions, .github/workflows/release.yml)
 
@@ -125,7 +126,8 @@ conde admin welcome clear --server https://<workspace>.conde.cloud
 ```
 
 (`POST /v1/admin/users/<name>/promote` and `/demote`; `GET` and `POST /v1/admin/welcome
-{admin_agent?, lobby?, guide?, text?}`; admin bearer key; `conde admin user list` marks admins.)
+{admin_agent?, lobby?, guide?, text?}`; admin bearer key; `conde admin user list` marks admins, and so does the web view: Fleet labels
+an admin teammate, and an admin's own user menu says so.)
 The agent must be a published agent of an admin user, the lobby a channel on the board. A set
 changes the fields it names and keeps the others; `welcome set` without `--agent` clears the agent,
 `--lobby ''` (or `--guide ''`, `--text ''`) clears that field, and `welcome clear` resets everything.

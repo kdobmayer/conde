@@ -125,3 +125,12 @@ test('a host with no bridge and no agent is left out; one with agents is kept', 
 	);
 	assert.deepEqual(v.own.map((h) => [h.host, h.online]), [['fresh', false]]);
 });
+
+test('a teammate the server names as an admin is marked; an older server marks nobody', () => {
+	const hosts = [host('me', 'm1'), host('anna', 'a1'), host('zed', 'z1')];
+	const agents = [agent('me', 'desk', 'm1'), agent('anna', 'y', 'a1'), agent('zed', 'x', 'z1')];
+	const v = orderFleet({ ...fleet(hosts, agents), admins: ['me', 'anna'] }, 'me', NOW);
+	assert.deepEqual(v.teammates.map((t) => [t.owner, t.admin]), [['anna', true], ['zed', false]]);
+	const old = orderFleet(fleet(hosts, agents), 'me', NOW);
+	assert.deepEqual(old.teammates.map((t) => t.admin), [false, false]);
+});

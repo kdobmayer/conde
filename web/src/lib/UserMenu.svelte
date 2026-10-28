@@ -23,7 +23,7 @@
 	</button>
 	{#if open && board.session}
 		<div class="panel" role="menu">
-			<p>Signed in as <strong>{board.session.user}</strong>.</p>
+			<p>Signed in as <strong>{board.session.user}</strong>{board.fleet?.admins?.includes(board.session.user) ? ', a workspace admin' : ''}.</p>
 			{#if more}<a role="menuitem" href="/keys">Keys</a>{/if}
 			<form method="post" action="/auth/logout">
 				<input type="hidden" name="csrf" value={board.session.csrf} />

@@ -197,9 +197,3 @@ resource "google_storage_bucket_iam_member" "deploy_dist" {
   role   = "roles/storage.objectAdmin"
   member = google_service_account.deploy.member
 }
-
-resource "google_project_iam_member" "deploy_gke" {
-  project = local.project
-  role    = "roles/container.developer"
-  member  = google_service_account.deploy.member
-}

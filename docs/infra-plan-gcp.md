@@ -160,3 +160,24 @@ module, plus the Keycloak realms). Local run: `GOOGLE_IMPERSONATE_SERVICE_ACCOUN
   Authenticated Origin Pull certificate) or the WAF is bypassable; decided at step 5.
 - The conde SSE streams through the Cloudflare proxy: the free plan's 100 s idle timeout versus conde's
   stream keepalive; measured at step 7, DNS-only mode is the fallback for the instance hostnames.
+
+## As built (2026-10-28)
+
+Where the code under infra/gcp, charts and deploy differs from the plan above:
+
+- Six Terraform roots instead of three: `foundation`, `platform`, `cluster` (the Gateway, Keycloak, Argo CD and
+  Identity-Aware Proxy for the admin backends), `workspaces` (only the GCP side of each workspace: the database and
+  its IAM user, the service accounts, the secrets), `realms` (the Keycloak configuration, run through a port-forward) and `dns` (the
+  Cloudflare records and the Pages project), with the shared module in `modules/workspace`.
+- No `dakai` realm. Dakai signs in directly against its Entra tenant through its existing app registration; the
+  realms are `demo` (passwords), `clearscale` (Google sign-in), `infra` (platform tools, MFA) and `master`.
+- No deploy workflow and no `deploy` access to the cluster. The release workflow commits the new image digest to
+  `deploy/image.yaml` on main, and Argo CD rolls out every workspace from `charts/conde-workspace` and
+  `deploy/tenants/<name>.yaml`.
+- Secrets reach the pods through the GKE Secret Manager CSI add-on as files; External Secrets Operator is not
+  installed (the chart keeps it only as an option for clusters outside GCP).
+- Mail goes through Resend, not a Gmail app password: Keycloak's SMTP for every realm and the conde server's invite
+  email share the `resend-api-key` secret, and the `dns` root holds the Resend DKIM, SPF and bounce records.
+- The apex `conde.cloud` and `www.conde.cloud` are proxied CNAMEs to Cloudflare Pages, which serves the landing
+  page, the documentation and install.sh; only the wildcard for the workspace and Keycloak hostnames points at the
+  Google load balancer, DNS only.

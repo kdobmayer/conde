@@ -46,7 +46,7 @@ async fn board(on_pg: bool) -> Option<Arc<Dispatcher>> {
         match blocking(pg::fresh_database).await {
             Some(url) => Some(url),
             None => {
-                eprintln!("skipped: set CONDE_TEST_PG to run the web suite on Postgres");
+                pg::skip("the web suite on Postgres");
                 return None;
             }
         }
@@ -818,7 +818,7 @@ fn revocation_closes_a_bridge_on_another_replica() {
         .build()
         .unwrap();
     let Some(url) = rt.block_on(blocking(pg::fresh_database)) else {
-        eprintln!("skipped: set CONDE_TEST_PG to run the two-replica revocation test");
+        pg::skip("the two-replica revocation test");
         return;
     };
     let replica = |url: String| {

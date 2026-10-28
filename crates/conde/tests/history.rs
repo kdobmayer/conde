@@ -410,7 +410,7 @@ fn inventory_classifies_by_message_relationships() {
 #[test]
 fn extraction_query_on_postgres_classifies_and_detects_lost_lines() {
     let Some(url) = pg::fresh_database() else {
-        eprintln!("skipped: set CONDE_TEST_PG to run the extraction query");
+        pg::skip("the extraction query");
         return;
     };
     let tmp = TempDir::new("extract");
@@ -1005,7 +1005,7 @@ fn copy_refuses_a_hash_mismatch_and_a_channel_post_writing_nothing() {
 #[test]
 fn postgres_copy_csv_reads_back_exactly() {
     let Some(url) = pg::fresh_database() else {
-        eprintln!("skipped: set CONDE_TEST_PG to read a real COPY");
+        pg::skip("reading a real COPY");
         return;
     };
     let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();

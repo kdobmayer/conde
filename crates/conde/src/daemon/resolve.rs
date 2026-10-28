@@ -1,5 +1,5 @@
 //! The resolver (DESIGN-v2.md §3): picks exactly one board per request, or the boards of an
-//! aggregate view, from `--board`, a qualified message reference (`dakai:01M...`), and the
+//! aggregate view, from `--board`, a qualified message reference (`acme:01M...`), and the
 //! host's default board. A bare reference is always local.
 
 use serde_json::Value;
@@ -58,7 +58,7 @@ fn aggregate(op: &str, body: &Value) -> bool {
     }
 }
 
-/// `dakai:01M...` -> (Some("dakai"), "01M..."); a bare id -> (None, id). `local:` is local.
+/// `acme:01M...` -> (Some("acme"), "01M..."); a bare id -> (None, id). `local:` is local.
 pub fn split_ref(reference: &str) -> (Option<&str>, &str) {
     match reference.split_once(':') {
         Some((board, id)) if !id.is_empty() && (board == LOCAL_BOARD || valid_alias(board)) => (

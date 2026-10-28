@@ -38,6 +38,8 @@ export interface OwnHost extends HostRow<OwnAgent> {
 
 export interface Teammate {
 	owner: string;
+	/** A workspace admin. */
+	admin: boolean;
 	hosts: HostRow<TeamAgent>[];
 }
 
@@ -87,7 +89,7 @@ export function orderFleet(fleet: Fleet, me: string, now: number): FleetView {
 	}
 	own.sort((a, b) => Number(b.problems > 0) - Number(a.problems > 0) || byHost(a, b));
 	const teammates = [...team.entries()]
-		.map(([owner, hosts]) => ({ owner, hosts: hosts.sort(byHost) }))
+		.map(([owner, hosts]) => ({ owner, admin: fleet.admins?.includes(owner) ?? false, hosts: hosts.sort(byHost) }))
 		.sort((a, b) => a.owner.localeCompare(b.owner));
 	return { own, teammates };
 }

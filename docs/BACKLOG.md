@@ -35,13 +35,26 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S6 (desk): delete the Azure conde resources once the Dakai cutover is a week old (2026-11-04 at the earliest;
   the resource list shown to the owner before the destroy, per his rule); the DakaiGroup/conde repository was
   deleted by the owner on 2026-10-28.
-- S9 (desk, after v0.5.0): the old board's names still in the product text: `dakai` examples in mcp.rs, cli.rs,
-  surface.rs, boards.rs and site cli.md; `boards::path("dakai")` in history.rs; the launchd label
-  `space.nativeai.conde` (a rename needs a migration of existing installs); Postgres in CI (today the postgres
-  cases pass without running when CONDE_TEST_PG is unset: make CI set it, and make an unset variable skip
-  visibly); an older daemon drops the welcome from board.info during an upgrade (harmless, prints the default
-  guide); the web view shows the admin role; `server_on_postgres_stops_cleanly_on_sigterm` is flaky: the server
-  answers /healthz before its SIGTERM handling is installed (crates/conde/src/cloud.rs), a defect with no owner yet.
+- S1b (desk, after S1): follow-ups from the S1 review: the Keycloak `conde` email theme hard-codes the demo
+  workspace name and URL (a second password realm needs a realm-aware template); every realms apply that changes
+  the demo realm drops and re-adds the `conde-admin` manage-users role for a few seconds (invites fail in that
+  window; a dependency fix in infra/gcp/realms). Done: inviting a pre-existing realm account (the realm-clear
+  admin call, bc6bfd1).
+- S2c: done 2026-10-28 (account console theme, master display name "conde admin", image 26.8.1-conde7). Open:
+  the unused Keycloak images 26.8.1-conde1 to conde6 in Artifact Registry go with the next registry cleanup
+  (owner's deletion list).
+- S8: done 2026-10-28 (master 21c25b5). Open: the Secret Manager secret `keycloak-bootstrap-admin` is out of
+  Terraform state and still in GCP (owner's deletion list); the `deploy` service account's display name still
+  says "GKE rollout" (rides the next foundation change).
+- S9 (desk, after v0.5.0): what remains of the old board's names: the launchd label `space.nativeai.conde`
+  (a rename needs a migration of existing installs), and `dakai` in the shipped skills (skills/claude,
+  skills/codex), the README and test fixtures (the product text, the CLI help, the MCP descriptions and the
+  site's CLI page now say `acme`); an older daemon drops the welcome from board.info during an upgrade
+  (harmless, prints the default guide; the fix is a direct board.info read in setup when the daemon's answer
+  has none, more than a one-line read, so left). Done on the s9 branch: CI's Postgres service and
+  CONDE_TEST_PG were already in place; a Postgres-only case now prints its skip in a plain `cargo test` and
+  fails under CI; the web view marks admins; the server and the daemon install their SIGTERM handling before
+  they answer, which fixes the flaky `server_on_postgres_stops_cleanly_on_sigterm`.
 - S7 (desk, last): the network layer revisit: FQDN egress policies, Cilium cluster-wide policies, Cloud
   Service Mesh if a pod-to-pod requirement appears, Cloudflare Tunnel plus Access as an alternative edge.
 

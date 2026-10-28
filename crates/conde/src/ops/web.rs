@@ -595,7 +595,7 @@ fn recipient_state(db: &dyn Tx, m: &MsgRow, d: &Delivery) -> OpResult<Value> {
 
 /// `fleet.list`: every bound agent with its host's bridge state, whether the bridge reports
 /// its session live (discovery), and for the caller's own agents the delivery health (held,
-/// stuck, last reached: verified reachability).
+/// stuck, last reached: verified reachability); `admins` names the workspace admins.
 pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     let now = ctx.now_ms;
     let online_after = iso_from_ms(now - ONLINE_TTL_MS);
@@ -661,8 +661,15 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
             "own": own,
         }));
     }
+    let admins: Vec<String> = ctx
+        .db
+        .users()?
+        .into_iter()
+        .filter(|u| u.admin && !u.disabled)
+        .map(|u| u.name)
+        .collect();
     Ok(json!({
         "now": iso_from_ms(now), "online_ttl_s": ONLINE_TTL_MS / 1000,
-        "hosts": hosts.into_values().collect::<Vec<_>>(), "agents": agents,
+        "hosts": hosts.into_values().collect::<Vec<_>>(), "agents": agents, "admins": admins,
     }))
 }

@@ -181,7 +181,7 @@ pub fn label(row: &mut Value, board: &str) {
     }
 }
 
-/// One board's part in an aggregate view: `"boards": [{"board":"dakai","available":false}]`.
+/// One board's part in an aggregate view: `"boards": [{"board":"acme","available":false}]`.
 /// A board that did not answer in time is listed unavailable and contributes no rows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardPart {

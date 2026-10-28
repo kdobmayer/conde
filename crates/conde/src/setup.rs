@@ -811,7 +811,10 @@ pub fn verify(
                 )?;
             }
             let skill = env.claude_skill_for(&name);
-            match file(&skill, skill_text(CLAUDE_SKILL, &name).as_bytes())? {
+            match file(
+                &skill,
+                skill_text(CLAUDE_SKILL, &name, skill_board(env).as_deref()).as_bytes(),
+            )? {
                 None => line(
                     "ok",
                     format!("claude: skill {} up to date", env.show(&skill)),
@@ -878,7 +881,10 @@ pub fn verify(
                 )?;
             }
             let skill = env.codex_skill_for(&name);
-            match file(&skill, skill_text(CODEX_SKILL, &name).as_bytes())? {
+            match file(
+                &skill,
+                skill_text(CODEX_SKILL, &name, skill_board(env).as_deref()).as_bytes(),
+            )? {
                 None => line(
                     "ok",
                     format!("codex: skill {} up to date", env.show(&skill)),
@@ -2226,10 +2232,21 @@ fn mcp_name(
     Ok((pick, displaced))
 }
 
+/// The shared board the skills name: the first enrolled alias, read before setup can change the
+/// default board, so `setup --check` agrees with what setup wrote.
+fn skill_board(env: &Env) -> Option<String> {
+    boards::enrolled_in(&env.boards_dir())
+        .ok()?
+        .into_iter()
+        .next()
+}
+
 /// The skill as written for an MCP server registered as `mcp`: under a second name it is
-/// a skill of that name (`skills/<mcp>/`), beside the other instance's `conde` skill.
-pub fn skill_text(skill: &str, mcp: &str) -> String {
+/// a skill of that name (`skills/<mcp>/`), beside the other instance's `conde` skill; its
+/// shared-board examples name `board`, or `<alias>` on a host with none enrolled.
+pub fn skill_text(skill: &str, mcp: &str, board: Option<&str>) -> String {
     skill
+        .replace("{board}", board.unwrap_or("<alias>"))
         .replacen(
             &format!("---\nname: {MCP_NAME}\n"),
             &format!("---\nname: {mcp}\n"),
@@ -2279,7 +2296,7 @@ fn claude(
         )?;
     }
     let skill = env.claude_skill_for(&name);
-    let text = skill_text(CLAUDE_SKILL, &name);
+    let text = skill_text(CLAUDE_SKILL, &name, skill_board(env).as_deref());
     writeln!(
         out,
         "claude: skill {} {}",
@@ -2466,7 +2483,7 @@ fn codex(env: &Env, out: &mut dyn Write) -> anyhow::Result<()> {
         )?;
     }
     let skill = env.codex_skill_for(&name);
-    let skill_body = skill_text(CODEX_SKILL, &name);
+    let skill_body = skill_text(CODEX_SKILL, &name, skill_board(env).as_deref());
     writeln!(
         out,
         "codex: skill {} {}",

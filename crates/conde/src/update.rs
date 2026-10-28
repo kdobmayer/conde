@@ -58,6 +58,13 @@ pub fn parse_version(raw: &str) -> anyhow::Result<Version> {
         .with_context(|| format!("not a release version: '{raw}'"))
 }
 
+/// The version a conde binary prints for `--version` (`conde 0.2.0 (<commit> <date>)`).
+pub fn reported_version(stdout: &str) -> Option<Version> {
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
+    let rest = line.trim().strip_prefix("conde ")?;
+    Version::parse(rest.split_whitespace().next()?).ok()
+}
+
 /// What `conde update` does about a release.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Plan {
@@ -181,11 +188,18 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     let mut host = setup::System;
     clear_quarantine(&mut host, &staged.path);
     let shown = staged.path.to_string_lossy().into_owned();
-    match host.run_bounded(&shown, &["--version"], PROBE_LIMIT) {
-        Ok(r) if r.ok => {}
+    let reported = match host.run_bounded(&shown, &["--version"], PROBE_LIMIT) {
+        Ok(r) if r.ok => reported_version(&r.stdout),
         _ => {
             bail!("the downloaded binary does not run on this machine ({name}); nothing installed")
         }
+    };
+    match reported {
+        None => bail!("the downloaded {name} reports no conde version; nothing installed"),
+        Some(v) if v != wanted => {
+            bail!("the downloaded {name} reports conde {v}, not {wanted}; nothing installed")
+        }
+        Some(_) => {}
     }
     staged.replace(&exe)?;
     writeln!(out, "conde {current} -> {wanted}")?;

@@ -275,3 +275,48 @@ fn prereleases_order_by_semver_precedence() {
         assert!(plan("0.2.0", bad, true).is_err(), "{bad} must not parse");
     }
 }
+
+/// The staged binary must say it is the release it was downloaded as: a checksum-valid file that
+/// reports another version, or none, is not installed.
+#[test]
+fn a_binary_that_is_not_the_wanted_release_is_refused() {
+    let m = Machine::new();
+    let b = bucket(&m);
+    let before = m.binary();
+    b.release("99.0.0", &fake_binary("98.0.0"), true);
+    b.release("97.0.0", b"#!/bin/sh\nexit 0\n", true);
+    let cases = [
+        (
+            "99.0.0",
+            format!("the downloaded {NAME} reports conde 98.0.0, not 99.0.0; nothing installed"),
+        ),
+        (
+            "97.0.0",
+            format!("the downloaded {NAME} reports no conde version; nothing installed"),
+        ),
+    ];
+    for (version, want) in cases {
+        let (out, text) = m.update(&b, &["--version", version]);
+        assert!(!out.status.success(), "{version} succeeded: {text}");
+        assert!(text.contains(&want), "{version}: want {want:?} in {text}");
+        assert_eq!(m.binary(), before, "{version} changed the binary");
+        assert!(
+            m.leftovers().is_empty(),
+            "{version} left {:?}",
+            m.leftovers()
+        );
+    }
+    use conde::update::reported_version;
+    let v = |s: &str| semver::Version::parse(s).unwrap();
+    assert_eq!(
+        reported_version("conde 0.2.0 (abc1234 2026-10-28)\n"),
+        Some(v("0.2.0"))
+    );
+    assert_eq!(
+        reported_version("conde 0.3.0-rc.1 (unknown)"),
+        Some(v("0.3.0-rc.1"))
+    );
+    for out in ["", "\n", "0.2.0", "kond 0.2.0 (x)", "conde nope (x)"] {
+        assert_eq!(reported_version(out), None, "{out:?}");
+    }
+}

@@ -52,6 +52,9 @@ default requires them from the user), so an invited user gets no "complete your 
 
 ## Replacing the bootstrap admin
 
+Done for conde-prod (steps 1 to 3 and 5; step 4 is open). `master` is in `no_password_grant`, so on a new installation
+the first apply, which signs in with the bootstrap admin's password, runs with `master` taken out of that list.
+
 1. Read the temporary password: `gcloud secrets versions access latest --secret keycloak-admin-temp-password
    --project conde-prod`. Sign in at https://admin-auth.conde.cloud/admin/master/console/ as `admin`; Keycloak asks for a
    new password and an authenticator app (OTP). Sign out, then sign in again with the new password and an OTP code.

@@ -5,8 +5,8 @@ locals {
 
   # Password and OTP for every user, enrolled at the first sign-in when missing.
   mfa_realms = ["infra", "master"]
-  # Realms without a token-endpoint password grant; master keeps it while the bootstrap admin exists (README.md).
-  no_password_grant = concat(keys(local.google_sign_in), ["infra"])
+  # Realms without a token-endpoint password grant; Terraform signs in to master with client credentials (README.md).
+  no_password_grant = concat(keys(local.google_sign_in), ["infra", "master"])
 }
 
 # The browser flow of these realms: an existing session, else straight to Google; no password form.

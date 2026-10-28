@@ -3,8 +3,6 @@ locals {
   argocd_namespace = "argocd"
   argocd_hostname  = "argocd.conde.cloud"
   argocd_repo_url  = "git@github.com:kdobmayer/conde.git"
-  # GitHub's own ranges from the "git" list of https://api.github.com/meta; github.com resolves into them from Europe.
-  github_ranges = ["192.30.252.0/22", "185.199.108.0/22", "140.82.112.0/20", "143.55.64.0/20"]
   # The "ssh_keys" of https://api.github.com/meta, matching the fingerprints GitHub documents.
   github_host_keys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
@@ -237,7 +235,7 @@ resource "helm_release" "argocd" {
 }
 
 # Deny by default. In: the namespace's own pods, and the load balancer to the server. Out: the namespace's own pods,
-# DNS, the API server, GitHub (SSH, HTTPS) and the Gateway address, through which the infra realm is reached.
+# DNS, the API server and the Gateway address, through which the infra realm is reached; GitHub is in the FQDN policy.
 resource "kubernetes_network_policy_v1" "argocd" {
   metadata {
     name      = "argocd"
@@ -307,25 +305,6 @@ resource "kubernetes_network_policy_v1" "argocd" {
             cidr = "${to.value}/32"
           }
         }
-      }
-      ports {
-        protocol = "TCP"
-        port     = "443"
-      }
-    }
-
-    egress {
-      dynamic "to" {
-        for_each = local.github_ranges
-        content {
-          ip_block {
-            cidr = to.value
-          }
-        }
-      }
-      ports {
-        protocol = "TCP"
-        port     = "22"
       }
       ports {
         protocol = "TCP"

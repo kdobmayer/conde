@@ -9,19 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
-// the fake Claude Code session's (unix only)
-#[cfg(unix)]
 use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
 use std::io::{BufRead, BufReader};
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 
-#[cfg(unix)]
 use serde_json::{Value, json};
 
 #[path = "../os/mod.rs"]
@@ -245,7 +237,6 @@ impl Drop for Host {
 }
 
 /// One received frame.
-#[cfg(unix)]
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub msg_id: String,
@@ -254,7 +245,6 @@ pub struct Frame {
     pub raw: String,
 }
 
-#[cfg(unix)]
 impl Frame {
     /// The conde message id the notification points at.
     pub fn message_id(&self) -> Option<String> {
@@ -265,37 +255,25 @@ impl Frame {
 }
 
 /// A receipt to send back: after `delay`, `status` plus extra fields.
-#[cfg(unix)]
 pub type Step = (Duration, &'static str, Value);
 
 /// One receipt list per frame of a message.
-#[cfg(unix)]
 type Plan = Vec<Vec<Step>>;
 /// Plans waiting for a new message, and the plan each seen message took.
-#[cfg(unix)]
 type Plans = (VecDeque<Plan>, HashMap<String, Plan>);
 
-/// A Claude Code session's receiving side on a socket in the host's temp dir,
-/// published in the host's sessions dir. Each new conde message takes the next
-/// queued plan; the plan's n-th entry answers that message's n-th frame.
-#[cfg(unix)]
+/// A Claude Code session's receiving side, published in the host's sessions dir as Claude Code
+/// publishes it: a unix socket in the host's temp dir, or on Windows the pipe
+/// `\\.\pipe\LOCAL\cc-msg-<hex>` with its peer-token key file, the auth line required first.
+/// Each new conde message takes the next queued plan; the plan's n-th entry answers that
+/// message's n-th frame.
 pub struct FakeClaude {
     pub frames: Arc<Mutex<Vec<Frame>>>,
     plans: Arc<Mutex<Plans>>,
 }
 
-#[cfg(unix)]
-fn proc_start() -> String {
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
-    stat[stat.rfind(')').unwrap() + 2..]
-        .split_whitespace()
-        .nth(19)
-        .unwrap()
-        .to_string()
-}
-
-#[cfg(unix)]
-fn decode_uds(addr: &str) -> PathBuf {
+/// The `uds:` address of a frame's `from`, percent-decoded.
+fn decode_uds(addr: &str) -> Vec<u8> {
     let raw = addr.strip_prefix("uds:").expect("uds address").as_bytes();
     let (mut out, mut i) = (Vec::new(), 0);
     while i < raw.len() {
@@ -309,17 +287,65 @@ fn decode_uds(addr: &str) -> PathBuf {
             i += 1;
         }
     }
-    PathBuf::from(std::ffi::OsStr::from_bytes(&out))
+    out
 }
 
-#[cfg(unix)]
+/// The receipt line for `msg_id`: `status` plus `extra`.
+fn receipt(msg_id: &str, status: &str, extra: &Value) -> String {
+    let mut receipt = json!({"type": "control", "action": "peer_message_status",
+        "status": status, "orig_msg_id": msg_id});
+    for (k, v) in extra.as_object().unwrap() {
+        receipt[k] = v.clone();
+    }
+    format!("{receipt}\n")
+}
+
 impl FakeClaude {
+    /// Records the frame in `lines` (its last line) and returns the steps its plan answers it with.
+    fn take(
+        frames: &Mutex<Vec<Frame>>,
+        plans: &Mutex<Plans>,
+        lines: &[String],
+    ) -> Option<(Frame, Vec<Step>)> {
+        let last = lines.last()?;
+        let f: Value = serde_json::from_str(last).unwrap();
+        let frame = Frame {
+            msg_id: f["msg_id"].as_str().unwrap_or_default().into(),
+            from: f["from"].as_str().unwrap_or_default().into(),
+            text: f["message"]["content"].as_str().unwrap_or_default().into(),
+            raw: lines.join("\n"),
+        };
+        let mut frames = frames.lock().unwrap();
+        let key = frame.message_id().unwrap_or_default();
+        let nth = frames
+            .iter()
+            .filter(|x| x.message_id().unwrap_or_default() == key)
+            .count();
+        frames.push(frame.clone());
+        let mut p = plans.lock().unwrap();
+        if !p.1.contains_key(&key) {
+            let next = p.0.pop_front().unwrap_or_default();
+            p.1.insert(key.clone(), next);
+        }
+        let steps = p.1[&key].get(nth).cloned().unwrap_or_default();
+        Some((frame, steps))
+    }
+
+    #[cfg(unix)]
     pub fn start(host: &Host, session_id: &str) -> FakeClaude {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
         let sock = host.root.join("cc/inbox.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let pid = std::process::id();
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let start = stat[stat.rfind(')').unwrap() + 2..]
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .to_string();
         let info = json!({"pid": pid, "sessionId": session_id, "name": session_id, "status": "idle",
-            "procStart": proc_start(), "messagingSocketPath": sock, "cwd": host.root});
+            "procStart": start, "messagingSocketPath": sock, "cwd": host.root});
         std::fs::write(
             host.root.join(format!("claude/sessions/{pid}.json")),
             info.to_string(),
@@ -336,39 +362,106 @@ impl FakeClaude {
                 conn.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 let lines: Vec<String> =
                     BufReader::new(conn).lines().map_while(Result::ok).collect();
-                let Some(last) = lines.last() else { continue };
-                let f: Value = serde_json::from_str(last).unwrap();
-                let frame = Frame {
-                    msg_id: f["msg_id"].as_str().unwrap_or_default().into(),
-                    from: f["from"].as_str().unwrap_or_default().into(),
-                    text: f["message"]["content"].as_str().unwrap_or_default().into(),
-                    raw: lines.join("\n"),
-                };
-                let steps = {
-                    let mut frames = frames.lock().unwrap();
-                    let key = frame.message_id().unwrap_or_default();
-                    let nth = frames
-                        .iter()
-                        .filter(|x| x.message_id().unwrap_or_default() == key)
-                        .count();
-                    frames.push(frame.clone());
-                    let mut p = plans.lock().unwrap();
-                    if !p.1.contains_key(&key) {
-                        let next = p.0.pop_front().unwrap_or_default();
-                        p.1.insert(key.clone(), next);
-                    }
-                    p.1[&key].get(nth).cloned().unwrap_or_default()
+                let Some((frame, steps)) = FakeClaude::take(&frames, &plans, &lines) else {
+                    continue;
                 };
                 std::thread::spawn(move || {
                     for (delay, status, extra) in steps {
                         std::thread::sleep(delay);
-                        let mut receipt = json!({"type": "control", "action": "peer_message_status",
-                            "status": status, "orig_msg_id": frame.msg_id});
-                        for (k, v) in extra.as_object().unwrap() {
-                            receipt[k] = v.clone();
+                        let to = std::ffi::OsStr::from_bytes(&decode_uds(&frame.from)).to_owned();
+                        if let Ok(mut c) = UnixStream::connect(to) {
+                            let _ = c.write_all(receipt(&frame.msg_id, status, &extra).as_bytes());
                         }
-                        if let Ok(mut c) = UnixStream::connect(decode_uds(&frame.from)) {
-                            let _ = c.write_all(format!("{receipt}\n").as_bytes());
+                    }
+                });
+            }
+        });
+        fake
+    }
+
+    #[cfg(windows)]
+    pub fn start(host: &Host, session_id: &str) -> FakeClaude {
+        use conde_transport::win;
+        use std::ffi::OsStr;
+        let sessions = host.root.join("claude").join("sessions");
+        let pipe = format!(r"\\.\pipe\LOCAL\cc-msg-{}", win::random_hex(16).unwrap());
+        let mut listener =
+            win::PipeListener::bind(OsStr::new(&pipe), win::Security::owner_only(false).unwrap())
+                .unwrap();
+        let pid = std::process::id();
+        // the peer token Claude Code publishes for its inbox; every frame must open with it
+        let token = win::random_hex(16).unwrap();
+        std::fs::write(
+            sessions.join(key_file(pid, &pipe)),
+            json!({"peerToken": token}).to_string(),
+        )
+        .unwrap();
+        let created = win::process_created(pid).expect("own creation time");
+        let info = json!({"pid": pid, "sessionId": session_id, "name": session_id, "status": "idle",
+            "procStartFt": created.to_string(), "messagingSocketPath": pipe, "cwd": host.root});
+        std::fs::write(sessions.join(format!("{pid}.json")), info.to_string()).unwrap();
+        let fake = FakeClaude {
+            frames: Arc::default(),
+            plans: Arc::default(),
+        };
+        let (frames, plans) = (fake.frames.clone(), fake.plans.clone());
+        std::thread::spawn(move || {
+            loop {
+                let Ok(conn) = listener.accept(Instant::now() + Duration::from_secs(3600)) else {
+                    return;
+                };
+                let Some(conn) = conn else { continue };
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut data = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = conn.read(&mut buf, Some(deadline)) {
+                    if n == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                }
+                let lines: Vec<String> = String::from_utf8_lossy(&data)
+                    .lines()
+                    .map(str::to_string)
+                    .collect();
+                // Claude Code on Windows drops a frame without its auth line
+                let authed = lines.first().is_some_and(|l| {
+                    serde_json::from_str::<Value>(l)
+                        .is_ok_and(|a| a["type"] == "auth" && a["token"] == token.as_str())
+                });
+                if !authed {
+                    continue;
+                }
+                let Some((frame, steps)) = FakeClaude::take(&frames, &plans, &lines) else {
+                    continue;
+                };
+                let sessions = sessions.clone();
+                std::thread::spawn(move || {
+                    let to = String::from_utf8(decode_uds(&frame.from)).unwrap();
+                    for (delay, status, extra) in steps {
+                        std::thread::sleep(delay);
+                        // the reply pipe's key, which the sender published beside ours
+                        let suffix = key_suffix(&to);
+                        let Some(key) = std::fs::read_dir(&sessions)
+                            .unwrap()
+                            .flatten()
+                            .find(|e| e.file_name().to_string_lossy().ends_with(&suffix))
+                        else {
+                            continue;
+                        };
+                        let key: Value =
+                            serde_json::from_slice(&std::fs::read(key.path()).unwrap()).unwrap();
+                        let auth = json!({"type": "auth", "token": key["peerToken"]});
+                        if let Ok(c) = win::PipeClient::connect(
+                            OsStr::new(&to),
+                            Some(Instant::now() + Duration::from_secs(5)),
+                        ) {
+                            let line =
+                                format!("{auth}\n{}", receipt(&frame.msg_id, status, &extra));
+                            let _ = c.write_all(
+                                line.as_bytes(),
+                                Some(Instant::now() + Duration::from_secs(5)),
+                            );
                         }
                     }
                 });
@@ -398,6 +491,25 @@ impl FakeClaude {
             (f.len() >= n).then_some(f)
         })
     }
+}
+
+/// Claude Code's key file name for a pipe: `<pid>.<sha256 of \\.\pipe\ + lowercased name>.key`.
+#[cfg(windows)]
+fn key_file(pid: u32, pipe: &str) -> String {
+    format!("{pid}{}", key_suffix(pipe))
+}
+
+/// The pid-free end of [`key_file`]: `.<sha256 hex>.key`.
+#[cfg(windows)]
+fn key_suffix(pipe: &str) -> String {
+    let name = pipe
+        .strip_prefix(r"\\.\pipe\")
+        .expect("a local pipe")
+        .to_ascii_lowercase();
+    format!(
+        ".{}.key",
+        conde::util::sha256_hex(format!(r"\\.\pipe\{name}").as_bytes())
+    )
 }
 
 pub fn ms(n: u64) -> Duration {

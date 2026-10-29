@@ -49,7 +49,7 @@ locals {
   # Google Front End and health-check source ranges of the global external Application Load Balancer.
   gfe_ranges        = ["35.191.0.0/16", "130.211.0.0/22"]
   cloud_sql_proxy   = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.3@sha256:f333a9c59890c3c67b8505166c5dbdcc0b29fca9173a2e09ca0446ab6997a736"
-  keycloak_image    = "${local.foundation.registry_url}/keycloak:26.8.1-conde7@sha256:a7462347e1521c59eb3324d9430307bca6fc7edc81c1419141218e7ed9786df0"
+  keycloak_image    = "${local.foundation.registry_url}/keycloak:26.8.1-conde8@sha256:b2727ee985e7aa2ac3c4eba0ecf906ca3e1c754fc1a5077e280eb06c159fb5d1"
   keycloak_hostname = "auth.conde.cloud"
   # The admin console and the master realm, behind IAP; the wildcard certificate covers one label only.
   keycloak_admin_hostname = "admin-auth.conde.cloud"

@@ -95,8 +95,10 @@ after Keycloak has stopped accepting it. The secret version holding the old valu
 - Email: every realm, master included, sends through Resend (`local.smtp` in main.tf: smtp.resend.com, SMTPS on 465,
   user `resend`, the API key from `resend-api-key` through the vault), from `no-reply@conde.cloud` with replies to the owner. Keycloak
   needs egress to TCP 465, an egress rule of its NetworkPolicy in the cluster root. "Forgot password" is on in the realms
-  that sign in with passwords (`passwords` in `local.realms`): demo. Demo's email theme `conde` (in the Keycloak image,
-  `infra/keycloak/themes`) turns the execute-actions email into the invitation with the onboarding steps.
+  that sign in with passwords (`passwords` in `local.realms`): demo. Their email theme `conde` (in the Keycloak image,
+  `infra/keycloak/themes`) turns the execute-actions email into the invitation with the onboarding steps; the workspace's
+  name and address in it, and the subject, are the realm's localization texts (`keycloak_realm_localization.invite`),
+  since Keycloak's email templates get only the realm's display name.
 - Sign-in pages: every realm, master included, uses the login theme `conde` (design B of the web app, in the Keycloak
   image, `infra/keycloak/themes/conde/login`): keycloak.v2's templates with conde's stylesheet and wording.
   The account console (`/realms/<realm>/account`) uses the account theme `conde` (`infra/keycloak/themes/conde/account`):

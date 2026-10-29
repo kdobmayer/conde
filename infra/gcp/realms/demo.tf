@@ -1,6 +1,8 @@
 # ── demo: the admin API client conde's server invites users with, and the user profile that holds the invite ────
+# Through the conde-admin client, not the realm: a pending realm change would defer this read to apply and replace the
+# role mapping below (invites fail until it is back).
 data "keycloak_openid_client" "demo_realm_management" {
-  realm_id  = keycloak_realm.this["demo"].id
+  realm_id  = keycloak_openid_client.conde_admin_demo.realm_id
   client_id = "realm-management"
 }
 

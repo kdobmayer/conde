@@ -7,7 +7,9 @@
 //! version. Then, under a lock file next to the target that serializes installers, the target's
 //! version is read again by running it: when another installer replaced it meanwhile, nothing is
 //! installed over it. Otherwise the staged file is renamed over the target, so the binary is
-//! either the old one or the whole new one, and the bridge service restarts onto it.
+//! either the old one or the whole new one, and the bridge service restarts onto it. Windows
+//! cannot replace a running executable, but can rename it: the old binary moves aside to
+//! `<name>.<ulid>.old` first (as install.ps1 does), and a later update removes it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,6 +55,7 @@ pub fn asset_name(os: &str, arch: &str, translated: bool) -> Option<&'static str
         ("macos", "aarch64") => Some("conde-darwin-arm64"),
         ("macos", "x86_64") if translated => Some("conde-darwin-arm64"),
         ("macos", "x86_64") => Some("conde-darwin-x86_64"),
+        ("windows", "x86_64") => Some("conde-windows-x86_64.exe"),
         _ => None,
     }
 }
@@ -168,13 +171,14 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     let name =
         asset_name(std::env::consts::OS, std::env::consts::ARCH, rosetta()).with_context(|| {
             format!(
-                "no conde release is built for {} {}; releases are for Linux x86_64 and macOS",
+                "no conde release is built for {} {}; releases are for Linux x86_64, macOS and Windows x64",
                 std::env::consts::OS,
                 std::env::consts::ARCH
             )
         })?;
     let exe = std::env::current_exe().context("locating the conde binary")?;
     let target = check_target(&exe, running_id())?;
+    remove_moved_aside(&target);
     let mut host = setup::System;
     let installed = installed_version(&mut host, &target)?;
 
@@ -311,7 +315,7 @@ fn clear_quarantine(host: &mut dyn Host, path: &Path) {
     }
 }
 
-/// An exclusive flock on [`LOCK_NAME`] next to the target, released when dropped. The file stays:
+/// An exclusive lock on [`LOCK_NAME`] next to the target, released when dropped. The file stays:
 /// removing a lock file others may hold open would let two installers lock different files.
 struct Lock(#[allow(dead_code)] std::fs::File);
 
@@ -324,27 +328,18 @@ impl Lock {
             .write(true)
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let flock = |op| loop {
-                if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
-                    return Ok(());
-                }
-                let e = std::io::Error::last_os_error();
-                if e.kind() != std::io::ErrorKind::Interrupted {
-                    return Err(e);
-                }
-            };
-            if let Err(e) = flock(libc::LOCK_EX | libc::LOCK_NB) {
-                if e.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                    return Err(e).with_context(|| format!("locking {}", path.display()));
-                }
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
                 eprintln!(
                     "conde update: waiting for another conde update of {} to finish",
                     target.display()
                 );
-                flock(libc::LOCK_EX).with_context(|| format!("locking {}", path.display()))?;
+                file.lock()
+                    .with_context(|| format!("locking {}", path.display()))?;
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
             }
         }
         Ok(Lock(file))
@@ -362,7 +357,12 @@ impl Staged {
         let dir = target
             .parent()
             .context("the conde binary has no directory")?;
-        let path = dir.join(format!(".conde-update.{}", std::process::id()));
+        // Windows runs only a file named .exe as a program
+        let path = dir.join(format!(
+            ".conde-update.{}{}",
+            std::process::id(),
+            std::env::consts::EXE_SUFFIX
+        ));
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -380,8 +380,18 @@ impl Staged {
     }
 
     fn replace(mut self, target: &Path) -> anyhow::Result<()> {
-        std::fs::rename(&self.path, target)
-            .with_context(|| format!("replacing {}", target.display()))?;
+        #[cfg(windows)]
+        let aside = {
+            let aside = moved_aside(target);
+            std::fs::rename(target, &aside)
+                .with_context(|| format!("moving {} aside", target.display()))?;
+            aside
+        };
+        if let Err(e) = std::fs::rename(&self.path, target) {
+            #[cfg(windows)]
+            let _ = std::fs::rename(&aside, target);
+            return Err(e).with_context(|| format!("replacing {}", target.display()));
+        }
         self.done = true;
         Ok(())
     }
@@ -392,5 +402,76 @@ impl Drop for Staged {
         if !self.done {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+}
+
+/// Where Windows moves the running binary aside: `<name>.<ulid>.old` next to it.
+#[cfg(windows)]
+fn moved_aside(target: &Path) -> PathBuf {
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    target.with_file_name(format!("{name}.{}.old", crate::util::new_ulid()))
+}
+
+/// Binaries an earlier update or install.ps1 moved aside; one a process still runs stays.
+fn remove_moved_aside(target: &Path) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        if file.starts_with(&prefix) && file.ends_with(".old") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// A running executable is replaced: moved aside, the new one in its place, and the old
+    /// one removed by the next update once it has exited.
+    #[test]
+    fn replaces_a_running_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("conde.exe");
+        let system = std::env::var_os("SystemRoot").expect("SystemRoot");
+        std::fs::copy(Path::new(&system).join(r"System32\cmd.exe"), &target).unwrap();
+        let mut running = std::process::Command::new(&target)
+            .args(["/d", "/c", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(
+            std::fs::remove_file(&target).is_err(),
+            "a running binary cannot be deleted"
+        );
+        Staged::write(&target, b"new")
+            .unwrap()
+            .replace(&target)
+            .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        let aside = |dir: &Path| {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("conde.exe.") && n.ends_with(".old"))
+                .count()
+        };
+        assert_eq!(aside(dir.path()), 1);
+        remove_moved_aside(&target);
+        assert_eq!(aside(dir.path()), 1, "still running");
+        drop(running.stdin.take());
+        running.wait().unwrap();
+        remove_moved_aside(&target);
+        assert_eq!(aside(dir.path()), 0);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
     }
 }

@@ -222,9 +222,13 @@ fn only_released_platforms_have_a_file() {
         asset_name("macos", "x86_64", true),
         Some("conde-darwin-arm64")
     );
+    assert_eq!(
+        asset_name("windows", "x86_64", false),
+        Some("conde-windows-x86_64.exe")
+    );
     for (os, arch) in [
         ("linux", "aarch64"),
-        ("windows", "x86_64"),
+        ("windows", "aarch64"),
         ("freebsd", "x86_64"),
     ] {
         assert_eq!(asset_name(os, arch, false), None, "{os} {arch}");

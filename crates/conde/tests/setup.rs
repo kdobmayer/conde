@@ -2405,6 +2405,61 @@ fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
     );
     assert!(!host.take_calls().iter().any(|c| c.contains("kickstart")));
 
+    // Windows: the task setup registered runs the updated binary; restarted (End, Run, the bridge
+    // answers) when the bridge runs, started when it does not, left alone when not registered
+    let root = temp_root();
+    let win = windows_env(&root);
+    put(&win.exe, "conde");
+    let mut host = Fake::new(&win, &[]);
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(
+        r.is_ok() && out.contains("no bridge service installed"),
+        "{out}"
+    );
+    let task = |exe: &Path| {
+        setup::utf16_file(&setup::task_xml(&Env {
+            exe: exe.to_path_buf(),
+            ..win.clone()
+        }))
+    };
+    std::fs::create_dir_all(win.windows_task().parent().unwrap()).unwrap();
+    std::fs::write(win.windows_task(), task(&win.exe)).unwrap();
+    host.alive = true;
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(
+        r.is_ok() && out.contains("restarted conde onto the new build"),
+        "{out}"
+    );
+    assert_eq!(
+        host.take_calls(),
+        [
+            "schtasks /Query /TN conde",
+            "schtasks /End /TN conde",
+            "schtasks /Run /TN conde"
+        ]
+    );
+    host.alive = false;
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(
+        r.is_ok() && out.contains("started conde on the new build"),
+        "{out}"
+    );
+    assert_eq!(
+        host.take_calls(),
+        ["schtasks /Query /TN conde", "schtasks /Run /TN conde"]
+    );
+    host.fail = Some("schtasks /Query");
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(r.is_ok() && out.contains("is not registered"), "{out}");
+    assert_eq!(host.take_calls(), ["schtasks /Query /TN conde"]);
+    host.fail = None;
+    let other = root.join("other/conde.exe");
+    put(&other, "another conde");
+    std::fs::write(win.windows_task(), task(&other)).unwrap();
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(r.is_ok() && out.contains(&runs_other(&other)), "{out}");
+    assert!(host.take_calls().is_empty());
+
     // a failed restart of the right service is an error
     let root = temp_root();
     let linux = env(&root, Os::Linux);
@@ -2433,6 +2488,12 @@ fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
         );
         assert_eq!(
             setup::plist_program(&setup::launchd_plist(&e)).as_deref(),
+            Some(odd)
+        );
+        assert_eq!(
+            setup::utf16_text(&setup::utf16_file(&setup::task_xml(&e)))
+                .and_then(|x| setup::task_program(&x))
+                .as_deref(),
             Some(odd)
         );
         assert_eq!(

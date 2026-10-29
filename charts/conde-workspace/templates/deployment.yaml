@@ -113,6 +113,14 @@ spec:
               port: 8080
             periodSeconds: 10
             failureThreshold: 3
+          {{- with .Values.preStopSleepSeconds }}
+          # The server stops accepting at SIGTERM; the load balancer keeps sending it requests until the endpoint
+          # leaves the NEG, so it keeps serving that long.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ . }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

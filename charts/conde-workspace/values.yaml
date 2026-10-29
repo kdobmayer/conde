@@ -48,6 +48,9 @@ resources:
 
 # Long-lived SSE and WebSocket streams get time to close and reconnect elsewhere.
 terminationGracePeriodSeconds: 600
+# Seconds a terminating pod keeps serving before SIGTERM, while the load balancer drops it (measured on GKE: 503s for
+# 18 s after a SIGTERM without it); counts toward the grace period. 0 turns it off.
+preStopSleepSeconds: 30
 
 # GKE Autopilot adds this toleration at admission; stating it keeps diffs empty. Empty list elsewhere.
 tolerations:

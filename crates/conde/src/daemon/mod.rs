@@ -1285,9 +1285,59 @@ impl Socket {
     }
 }
 
+/// How long a starting daemon waits for the socket to be released: a service restart can
+/// start it while the stopped daemon is still exiting (a Windows pipe outlives `schtasks /End`).
+pub(crate) const BIND_WAIT: Duration = Duration::from_secs(10);
+
+/// `attempt` until it binds (Some), retried every `poll` while the socket is busy (None), for
+/// at most `wait`; `waiting` runs once, at the first busy answer. None once `wait` passed.
+pub(crate) fn bind_waiting<T>(
+    wait: Duration,
+    poll: Duration,
+    mut attempt: impl FnMut() -> anyhow::Result<Option<T>>,
+    waiting: impl FnOnce(),
+) -> anyhow::Result<Option<T>> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut waiting = Some(waiting);
+    loop {
+        if let Some(bound) = attempt()? {
+            return Ok(Some(bound));
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        if let Some(f) = waiting.take() {
+            f();
+        }
+        std::thread::sleep(poll.min(deadline - now));
+    }
+}
+
+/// The platform bind, waiting up to [`BIND_WAIT`] for a previous daemon to let the socket go.
+fn bind_listener(path: &Path) -> anyhow::Result<ipc::Listener> {
+    #[cfg(unix)]
+    let attempt = || server::bind(path);
+    #[cfg(windows)]
+    let attempt = || ipc::bind(path);
+    let waiting = || {
+        tracing::info!(
+            "{} is busy; waiting up to {BIND_WAIT:?} for the previous conde daemon to exit",
+            path.display()
+        )
+    };
+    bind_waiting(BIND_WAIT, Duration::from_millis(250), attempt, waiting)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "another conde daemon (or another program) is listening on {}; it did not exit \
+             within {BIND_WAIT:?}",
+            path.display()
+        )
+    })
+}
+
 #[cfg(unix)]
 pub(crate) fn bind(path: &Path) -> anyhow::Result<Socket> {
-    let listener = server::bind(path)?;
+    let listener = bind_listener(path)?;
     let m = std::fs::symlink_metadata(path)?;
     Ok(Socket {
         listener: Some(listener),
@@ -1299,7 +1349,7 @@ pub(crate) fn bind(path: &Path) -> anyhow::Result<Socket> {
 #[cfg(windows)]
 pub(crate) fn bind(path: &Path) -> anyhow::Result<Socket> {
     Ok(Socket {
-        listener: Some(ipc::bind(path)?),
+        listener: Some(bind_listener(path)?),
         path: path.to_path_buf(),
         inode: (0, 0),
     })
@@ -1513,5 +1563,62 @@ impl Core {
         self.board(alias)
             .and_then(|c| c.client())
             .map(|c| c.bridge_instance().to_string())
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::bind_waiting;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    const POLL: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn a_busy_socket_is_retried_until_the_previous_daemon_lets_it_go() {
+        let (tries, waited) = (Cell::new(0), Cell::new(0));
+        let attempt = || {
+            tries.set(tries.get() + 1);
+            Ok((tries.get() == 4).then_some("bound"))
+        };
+        let got = bind_waiting(Duration::from_secs(5), POLL, attempt, || {
+            waited.set(waited.get() + 1)
+        });
+        assert_eq!(got.unwrap(), Some("bound"));
+        assert_eq!((tries.get(), waited.get()), (4, 1));
+    }
+
+    #[test]
+    fn a_socket_that_stays_busy_gives_up_after_the_bound() {
+        let started = Instant::now();
+        let got = bind_waiting(Duration::from_millis(200), POLL, || Ok(None::<()>), || ());
+        assert_eq!(got.unwrap(), None);
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(200), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn a_free_socket_binds_at_once_and_an_error_is_not_retried() {
+        let waited = Cell::new(false);
+        let got = bind_waiting(
+            Duration::from_secs(5),
+            POLL,
+            || Ok(Some(1)),
+            || waited.set(true),
+        );
+        assert_eq!((got.unwrap(), waited.get()), (Some(1), false));
+        let tries = Cell::new(0);
+        let got = bind_waiting(
+            Duration::from_secs(5),
+            POLL,
+            || -> anyhow::Result<Option<()>> {
+                tries.set(tries.get() + 1);
+                anyhow::bail!("permission denied")
+            },
+            || (),
+        );
+        assert!(got.is_err());
+        assert_eq!(tries.get(), 1);
     }
 }

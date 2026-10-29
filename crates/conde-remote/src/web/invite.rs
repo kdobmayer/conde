@@ -1,4 +1,4 @@
-//! The invite's one email. On a Google or Microsoft workspace the server sends it through the
+//! The invite's one email. On a Google, Microsoft or SSO workspace the server sends it through the
 //! Resend HTTP API, with the setup steps in it. On a password workspace the server creates the
 //! realm account through the Keycloak admin REST API (in-cluster URL, explicit endpoints) and
 //! Keycloak sends its account-setup email; conde never sets a password.
@@ -13,6 +13,8 @@ use super::ConfigError;
 pub enum SignIn {
     Google,
     Microsoft,
+    /// The company's own identity provider, brokered by the workspace's Keycloak realm.
+    Sso,
     Password,
 }
 
@@ -21,13 +23,14 @@ impl SignIn {
         match value.trim().to_ascii_lowercase().as_str() {
             "google" => Some(SignIn::Google),
             "microsoft" => Some(SignIn::Microsoft),
+            "sso" => Some(SignIn::Sso),
             "password" => Some(SignIn::Password),
             _ => None,
         }
     }
 }
 
-/// The Resend API the Google and Microsoft invites go through.
+/// The Resend API the Google, Microsoft and SSO invites go through.
 #[derive(Clone)]
 pub struct Resend {
     pub api_key: String,
@@ -56,7 +59,10 @@ pub struct InviteConfig {
     /// The workspace's name in the email (`CONDE_WORKSPACE_NAME`, else the public host's first
     /// label).
     pub workspace: String,
-    /// Google and Microsoft workspaces send through it when set.
+    /// What an SSO workspace's email tells the person to sign in with: "your <account> account"
+    /// (`CONDE_JOIN_ACCOUNT`; empty: [`DEFAULT_ACCOUNT`]).
+    pub account: String,
+    /// Google, Microsoft and SSO workspaces send through it when set.
     pub resend: Option<Resend>,
     /// Set exactly when `sign_in` is `Password`.
     pub keycloak: Option<KeycloakAdmin>,
@@ -69,6 +75,7 @@ impl std::fmt::Debug for InviteConfig {
         f.debug_struct("InviteConfig")
             .field("sign_in", &self.sign_in)
             .field("workspace", &self.workspace)
+            .field("account", &self.account)
             .field("resend", &self.resend.as_ref().map(|r| &r.base_url))
             .field(
                 "keycloak",
@@ -79,6 +86,7 @@ impl std::fmt::Debug for InviteConfig {
 }
 
 pub const DEFAULT_FROM: &str = "conde <no-reply@conde.cloud>";
+pub const DEFAULT_ACCOUNT: &str = "company";
 /// The invite's whole wait for the mail service or Keycloak; the CLI waits 90 s.
 pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 const RESEND_URL: &str = "https://api.resend.com";
@@ -114,8 +122,9 @@ fn realm_of(issuer: &str) -> Option<String> {
 }
 
 impl InviteConfig {
-    /// From `CONDE_JOIN_SIGN_IN` (google, microsoft, password; unset: no email),
-    /// `CONDE_WORKSPACE_NAME`, `RESEND_API_KEY` (or `_FILE`), `CONDE_MAIL_FROM`, `RESEND_BASE_URL`,
+    /// From `CONDE_JOIN_SIGN_IN` (google, microsoft, sso, password; unset: no email),
+    /// `CONDE_WORKSPACE_NAME`, `CONDE_JOIN_ACCOUNT`, `RESEND_API_KEY` (or `_FILE`), `CONDE_MAIL_FROM`,
+    /// `RESEND_BASE_URL`,
     /// and for password workspaces `KEYCLOAK_ADMIN_URL`, `KEYCLOAK_ADMIN_CLIENT_ID` and
     /// `KEYCLOAK_ADMIN_CLIENT_SECRET` (or `_FILE`); the realm is the issuer's.
     pub fn from_vars(
@@ -130,8 +139,17 @@ impl InviteConfig {
         let workspace = var("CONDE_WORKSPACE_NAME")
             .map(|w| w.trim().to_string())
             .unwrap_or_else(|| workspace_of(public_url));
+        let account = var("CONDE_JOIN_ACCOUNT")
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| DEFAULT_ACCOUNT.into());
         let resend = match crate::secret_from("RESEND_API_KEY", var)? {
-            Some(api_key) if matches!(sign_in, Some(SignIn::Google | SignIn::Microsoft)) => {
+            Some(api_key)
+                if matches!(
+                    sign_in,
+                    Some(SignIn::Google | SignIn::Microsoft | SignIn::Sso)
+                ) =>
+            {
                 Some(Resend {
                     api_key,
                     from: var("CONDE_MAIL_FROM").unwrap_or_else(|| DEFAULT_FROM.into()),
@@ -163,6 +181,7 @@ impl InviteConfig {
         Ok(InviteConfig {
             sign_in,
             workspace,
+            account,
             resend,
             keycloak,
             deadline: None,
@@ -218,19 +237,30 @@ struct MailHtml<'a> {
 
 const PRE: &str = "font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f0efed;border-radius:6px;padding:10px 12px;white-space:pre-wrap;word-break:break-all";
 
-/// The invite email of a Google or Microsoft workspace at `server` for `email`; an error when
-/// the HTML part cannot be rendered (never sent unescaped).
+/// The invite email of a Google, Microsoft or SSO workspace at `server` for `email`; `account`
+/// names an SSO workspace's account ("VVP USA" gives "your VVP USA account"). An error when the
+/// HTML part cannot be rendered (never sent unescaped).
 pub fn invite_mail(
     workspace: &str,
     server: &str,
     sign_in: SignIn,
+    account: &str,
     email: &str,
     inviter: Option<&str>,
 ) -> Result<Mail, String> {
     let account = match sign_in {
-        SignIn::Google => "Google account",
-        SignIn::Microsoft => "Microsoft account",
-        SignIn::Password => "account",
+        SignIn::Google => "Google account".to_string(),
+        SignIn::Microsoft => "Microsoft account".to_string(),
+        SignIn::Sso => {
+            let name = account.trim();
+            let name = if name.is_empty() {
+                DEFAULT_ACCOUNT
+            } else {
+                name
+            };
+            format!("{name} account")
+        }
+        SignIn::Password => "account".to_string(),
     };
     let lead = match inviter {
         Some(by) => format!("{by} invited you to"),
@@ -268,7 +298,7 @@ pub fn invite_mail(
         workspace,
         install: INSTALL,
         server,
-        account,
+        account: &account,
         email,
         pre: PRE,
     }
@@ -620,6 +650,7 @@ mod tests {
             "clearscale",
             "https://clearscale.conde.cloud",
             SignIn::Google,
+            "",
             "ann@clearscale.com",
             Some("Krisz <K>"),
         )
@@ -659,6 +690,7 @@ mod tests {
             "dakai",
             "https://dakai.conde.cloud",
             SignIn::Microsoft,
+            "VVP USA",
             "a@dakai.io",
             None,
         )
@@ -673,6 +705,42 @@ mod tests {
             plain
                 .text
                 .contains("sign in with your Microsoft account a@dakai.io")
+        );
+        let sso = invite_mail(
+            "vvpusa",
+            "https://vvpusa.conde.cloud",
+            SignIn::Sso,
+            "VVP USA",
+            "ann@vvpusa.example",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sso.subject, "You're invited to vvpusa on conde");
+        for part in [&sso.text, &sso.html] {
+            assert!(
+                part.contains("sign in with your VVP USA account ann@vvpusa.example"),
+                "{part}"
+            );
+            assert!(
+                part.contains("conde login --server https://vvpusa.conde.cloud"),
+                "{part}"
+            );
+        }
+        let unnamed = invite_mail(
+            "vvpusa",
+            "https://vvpusa.conde.cloud",
+            SignIn::Sso,
+            " ",
+            "ann@vvpusa.example",
+            None,
+        )
+        .unwrap();
+        assert!(
+            unnamed
+                .text
+                .contains("sign in with your company account ann@vvpusa.example"),
+            "{}",
+            unnamed.text
         );
     }
 
@@ -710,7 +778,31 @@ mod tests {
             (DEFAULT_FROM, RESEND_URL)
         );
         assert_eq!(google.workspace, "ClearScale");
+        assert_eq!(google.account, DEFAULT_ACCOUNT);
         assert!(google.keycloak.is_none());
+        let sso = InviteConfig::from_vars(
+            &vars(&[
+                ("CONDE_JOIN_SIGN_IN", "sso"),
+                ("CONDE_JOIN_ACCOUNT", " VVP USA "),
+                ("RESEND_API_KEY", "re_x"),
+            ]),
+            "https://vvpusa.conde.cloud",
+            "https://auth.conde.cloud/realms/vvpusa",
+        )
+        .unwrap();
+        assert_eq!(sso.sign_in, Some(SignIn::Sso));
+        assert_eq!(
+            (sso.workspace.as_str(), sso.account.as_str()),
+            ("vvpusa", "VVP USA")
+        );
+        assert!(
+            sso.resend.is_some(),
+            "an SSO workspace sends through Resend"
+        );
+        assert!(
+            sso.keycloak.is_none(),
+            "an SSO workspace needs no Keycloak admin client"
+        );
         let e = InviteConfig::from_vars(
             &vars(&[("CONDE_JOIN_SIGN_IN", "github")]),
             "https://x",
@@ -718,7 +810,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            e.to_string().contains("google, microsoft or password"),
+            e.to_string().contains("google, microsoft, sso or password"),
             "{e}"
         );
         let e = InviteConfig::from_vars(

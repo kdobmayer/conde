@@ -89,6 +89,10 @@ deploy/tenants/<name>.yaml):
   puts "<who> invited you" in the subject and first line. Without a key nothing is sent and the CLI
   says so. The request carries an Idempotency-Key from the user, the address and the inviter, so the
   same invite repeated within Resend's 24-hour window is answered without a second email.
+- `sso`: the company's own identity provider brokered by the workspace's realm (vvpusa: AWS IAM
+  Identity Center over SAML). The same Resend email; it says "sign in with your <account> account",
+  the account named by `CONDE_JOIN_ACCOUNT` (per tenant: `invite.account`, default `company`). The
+  realm account is created at the first sign-in, so the server needs no Keycloak admin client.
 - `password`: the server creates the realm account through the Keycloak admin REST API and Keycloak
   sends its account-setup email (verify the address, choose a password; the link lasts 7 days). conde
   never sets a password. It calls Keycloak at `KEYCLOAK_ADMIN_URL`, the in-cluster Service, since the

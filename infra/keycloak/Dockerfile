@@ -9,8 +9,8 @@ ENV KC_DB=postgres \
     KC_METRICS_ENABLED=true \
     KC_VAULT=file
 
-# The conde login and account themes (design B sign-in pages and account console) and the demo invitation email
-# theme; realms pick them by name.
+# The conde login and account themes (design B sign-in pages and account console) and the invitation email theme of
+# password realms; realms pick them by name.
 COPY themes/ /opt/keycloak/themes/
 
 RUN /opt/keycloak/bin/kc.sh build

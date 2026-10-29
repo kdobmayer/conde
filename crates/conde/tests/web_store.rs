@@ -165,6 +165,7 @@ on_both!(
     accounts_this_invite_did_not_create_are_refused,
     realm_failures_answer_502_with_the_user_created,
     a_microsoft_invite_names_the_microsoft_account,
+    an_sso_invite_names_the_company_account,
     a_password_workspace_needs_three_character_names,
     the_realm_record_is_claimed_and_recorded_once,
     the_realm_record_is_cleared_and_claimed_anew,
@@ -1675,6 +1676,7 @@ async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
         InviteConfig {
             sign_in: Some(SignIn::Google),
             workspace: "clearscale".into(),
+            account: String::new(),
             resend: Some(Resend {
                 api_key: "re_test_key".into(),
                 from: DEFAULT_FROM.into(),
@@ -1785,6 +1787,7 @@ fn demo_invite(kc_url: &str) -> InviteConfig {
     InviteConfig {
         sign_in: Some(SignIn::Password),
         workspace: "demo".into(),
+        account: String::new(),
         resend: None,
         keycloak: Some(KeycloakAdmin {
             url: kc_url.to_string(),
@@ -2274,6 +2277,41 @@ async fn a_microsoft_invite_names_the_microsoft_account(d: Arc<Dispatcher>) {
         "{keys:?}"
     );
     assert_eq!(keys[0], keys[1]);
+}
+
+/// An SSO workspace's email goes through Resend like Google's and names the company account; the
+/// realm is not called.
+async fn an_sso_invite_names_the_company_account(d: Arc<Dispatcher>) {
+    let (resend_url, resend) = start_resend().await;
+    let env = mail_env(
+        &d,
+        InviteConfig {
+            workspace: "vvpusa".into(),
+            account: "VVP USA".into(),
+            ..google_invite(resend_url, SignIn::Sso)
+        },
+    )
+    .await;
+    let (status, got) =
+        invite_req(&env, json!({"name": "ann", "email": "ann@vvpusa.example"})).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("sent")),
+        "{got}"
+    );
+    let seen = resend.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let mail = &seen[0].1;
+    assert_eq!(mail["subject"], "You're invited to vvpusa on conde");
+    let text = mail["text"].as_str().unwrap();
+    assert!(
+        text.contains("sign in with your VVP USA account ann@vvpusa.example"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Google") && !text.contains("Microsoft"),
+        "{text}"
+    );
 }
 
 /// The realm's username validator needs three characters: a shorter name is refused before

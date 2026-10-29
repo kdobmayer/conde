@@ -383,14 +383,19 @@ pub async fn start_on(
         tokio::spawn(route_events(shared.clone(), events));
     }
     if let Some(url) = shared.config.moved_to.clone() {
-        let location = HeaderValue::from_str(&url).map_err(|_| {
+        HeaderValue::from_str(&url).map_err(|_| {
             std::io::Error::other(format!("moved_to '{url}' is not a header value"))
         })?;
         let app = Router::new()
             .route("/healthz", get(healthz))
-            .fallback(move || {
-                let (url, location) = (url.clone(), location.clone());
+            // Location keeps the request's path, so a browser or `curl -L` on /install.sh or /readme lands on the
+            // same file at the new address; clients read the bare board URL from the body.
+            .fallback(move |uri: axum::http::Uri| {
+                let url = url.clone();
                 async move {
+                    let path = uri.path_and_query().map_or("/", |p| p.as_str());
+                    let location = HeaderValue::from_str(&format!("{url}{path}"))
+                        .unwrap_or_else(|_| HeaderValue::from_str(&url).expect("checked at start"));
                     let mut r = (
                         StatusCode::PERMANENT_REDIRECT,
                         Json(json!({"moved_to": url})),

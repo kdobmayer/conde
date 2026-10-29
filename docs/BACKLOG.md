@@ -35,11 +35,10 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S6 (desk): delete the Azure conde resources once the Dakai cutover is a week old (2026-11-04 at the earliest;
   the resource list shown to the owner before the destroy, per his rule); the DakaiGroup/conde repository was
   deleted by the owner on 2026-10-28.
-- S1b (desk, after S1): follow-ups from the S1 review: the Keycloak `conde` email theme hard-codes the demo
-  workspace name and URL (a second password realm needs a realm-aware template); every realms apply that changes
-  the demo realm drops and re-adds the `conde-admin` manage-users role for a few seconds (invites fail in that
-  window; a dependency fix in infra/gcp/realms). Done: inviting a pre-existing realm account (the realm-clear
-  admin call, bc6bfd1).
+- S1b: done 2026-10-29. The invitation email of a password realm takes the workspace's name, address and subject
+  from the realm's localization texts (image 26.8.1-conde8); a demo realm change no longer replaces the `conde-admin`
+  manage-users mapping (the realm-management lookup goes through the client). Done before: inviting a pre-existing
+  realm account (the realm-clear admin call, bc6bfd1).
 - S2c: done 2026-10-28 (account console theme, master display name "conde admin", image 26.8.1-conde7). Open:
   the unused Keycloak images 26.8.1-conde1 to conde6 in Artifact Registry go with the next registry cleanup
   (owner's deletion list).

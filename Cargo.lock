@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "conde"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "conde-remote"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "askama",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "conde-transport"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "libc",
  "serde_json",

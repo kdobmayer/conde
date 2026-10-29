@@ -5,10 +5,11 @@ resource "keycloak_realm" "this" {
   realm        = each.key
   display_name = each.value.display_name
   enabled      = true
-  # infra/keycloak/themes: the conde sign-in pages and account console; demo's invitation email carries the onboarding steps.
+  # infra/keycloak/themes: the conde sign-in pages and account console; a password realm's invitation email carries the
+  # onboarding steps.
   login_theme   = "conde"
   account_theme = "conde"
-  email_theme   = each.key == "demo" ? "conde" : null
+  email_theme   = contains(keys(local.password_tenants), each.key) ? "conde" : null
 
   registration_allowed     = false
   login_with_email_allowed = true
@@ -70,6 +71,20 @@ resource "keycloak_required_action" "configure_otp" {
   name           = "Configure OTP"
   enabled        = true
   default_action = each.value.require_mfa
+}
+
+# The workspace in the invitation email (the conde email theme): Keycloak's email templates get the realm's display name,
+# not its name, and the subject takes no arguments, so the realm's texts carry them.
+resource "keycloak_realm_localization" "invite" {
+  for_each = local.password_tenants
+
+  realm_id = keycloak_realm.this[each.key].id
+  locale   = "en"
+  texts = {
+    executeActionsSubject = "You''re invited to ${each.key} on conde"
+    condeWorkspace        = each.key
+    condeWorkspaceUrl     = "https://${each.value.hostname}"
+  }
 }
 
 # ── The conde client of each tenant realm; its secret goes to Keycloak and Secret Manager only ────────────────────

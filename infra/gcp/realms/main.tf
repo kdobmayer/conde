@@ -41,6 +41,8 @@ locals {
     } },
     { infra = { display_name = "conde infra", require_mfa = true, passwords = false } },
   )
+  # Tenant realms whose users get Keycloak's invitation email (the conde email theme).
+  password_tenants = { for name, tenant in local.tenants : name => tenant if local.realms[name].passwords }
 
   # Outbound mail of every realm, master included, through Resend (SMTPS). The password is a reference to Keycloak's
   # file vault, which holds the Resend API key (`resend-api-key`, mounted by the cluster root), so it is not in this state.

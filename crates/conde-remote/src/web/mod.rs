@@ -92,7 +92,7 @@ pub enum ConfigError {
     RedirectUri(String),
     #[error("OIDC_ISSUER '{0}' must be an https URL")]
     Issuer(String),
-    #[error("CONDE_JOIN_SIGN_IN '{0}' must be google, microsoft or password")]
+    #[error("CONDE_JOIN_SIGN_IN '{0}' must be google, microsoft, sso or password")]
     JoinSignIn(String),
     #[error("KEYCLOAK_ADMIN_URL '{0}' must be an http or https URL")]
     KeycloakUrl(String),

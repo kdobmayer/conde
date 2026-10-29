@@ -362,6 +362,67 @@ fn a_moved_server_start_writes_nothing() {
     rt.block_on(handle.shutdown()).unwrap();
 }
 
+/// The moved answer: 308 with the board's URL in the body for clients, and a Location that keeps the request's
+/// path and query, so a browser or `curl -L` on the old install or readme address lands on the same file.
+#[test]
+fn a_moved_server_redirects_each_path_to_the_same_path_at_the_new_address() {
+    let b = Board::new();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let moved = conde_remote::ServerConfig {
+        moved_to: Some("https://dakai.conde.cloud".into()),
+        ..Default::default()
+    };
+    let (handle, addr) = rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = conde::cloud::start_on(b.d.clone(), listener, moved)
+            .await
+            .unwrap();
+        (handle, addr)
+    });
+    rt.block_on(async {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        for (path, expected) in [
+            ("/install.sh", "https://dakai.conde.cloud/install.sh"),
+            ("/readme?x=1", "https://dakai.conde.cloud/readme?x=1"),
+            ("/", "https://dakai.conde.cloud/"),
+        ] {
+            let r = client
+                .get(format!("http://{addr}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 308, "{path}");
+            assert_eq!(
+                r.headers()["location"].to_str().unwrap(),
+                expected,
+                "{path}"
+            );
+            let body: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(body["moved_to"], "https://dakai.conde.cloud", "{path}");
+        }
+        let r = client
+            .post(format!("http://{addr}/v1/rpc"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 308);
+        assert_eq!(
+            r.headers()["location"].to_str().unwrap(),
+            "https://dakai.conde.cloud/v1/rpc"
+        );
+    });
+    rt.block_on(handle.shutdown()).unwrap();
+}
+
 #[test]
 fn nothing_binds_moves_renames_or_seats_the_human_name() {
     let (b, zed) = shared();

@@ -1733,8 +1733,9 @@ async fn an_endpoint_change_goes_out_before_an_outcome_reported_after_it() {
             .unwrap();
         let _hello = ws.next().await;
         // The big request has started to arrive: its sender is stuck until this side reads.
+        // (A peek on Windows can show less than is buffered: a few KiB is the evidence.)
         let mut buf = vec![0u8; 1 << 16];
-        while ws.get_ref().peek(&mut buf).await.unwrap() < buf.len() {
+        while ws.get_ref().peek(&mut buf).await.unwrap() < 4096 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let _ = stuck_tx.send(());

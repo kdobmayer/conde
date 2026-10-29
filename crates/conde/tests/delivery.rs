@@ -1,7 +1,7 @@
 //! Local mode end to end: `conde daemon` delivers into a fake Claude Code
 //! session over its socket, and receipts drive the notification state that
-//! `conde sent` shows.
-#![cfg(unix)] // fakes Claude Code's unix-socket inbox (tests/support FakeClaude)
+//! `conde sent` shows. On Windows the session's inbox is Claude Code's named pipe, with its
+//! key file and auth line (tests/support FakeClaude).
 
 mod support;
 
@@ -58,12 +58,31 @@ fn local_daemon_delivers_to_claude_and_follows_receipts() {
         f[0].raw
     );
     assert_eq!(f[0].msg_id.len(), 32);
-    // the reply identity lives next to the recipient's socket, named by the daemon's pid
+    // the reply identity lives next to the recipient's socket, named by the daemon's pid; on
+    // Windows a pipe of the same form, vouched for by the daemon's key file in the sessions dir
+    #[cfg(unix)]
     assert!(
         f[0].from.ends_with(&format!("/cc/{pid}.sock")),
         "{}",
         f[0].from
     );
+    #[cfg(windows)]
+    {
+        assert!(
+            f[0].from.starts_with(r"uds:\\.\pipe\LOCAL\cc-msg-"),
+            "{}",
+            f[0].from
+        );
+        let keys = std::fs::read_dir(h.root.join("claude").join("sessions"))
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with(&format!("{pid}.")) && n.ends_with(".key")
+            })
+            .count();
+        assert_eq!(keys, 1, "the daemon's reply key");
+    }
 
     // expired: retried after the backoff with a fresh attempt, then accepted (no receipt)
     carol.plan(vec![vec![(ms(0), "expired", json!({}))], vec![]]);
@@ -105,11 +124,14 @@ fn local_daemon_delivers_to_claude_and_follows_receipts() {
     assert!(doctor.contains("1 live session(s)"), "{doctor}");
 
     // SIGTERM: clean exit, the CLI socket and the Claude reply socket are gone
-    let status = h.terminate(pid);
-    assert!(status.success(), "{status:?}: {}", h.log("daemon.log"));
-    assert!(!sock.exists());
-    assert!(!h.root.join(format!("cc/{pid}.sock")).exists());
-    assert!(h.log("daemon.log").contains("SIGTERM"));
+    #[cfg(unix)]
+    {
+        let status = h.terminate(pid);
+        assert!(status.success(), "{status:?}: {}", h.log("daemon.log"));
+        assert!(!sock.exists());
+        assert!(!h.root.join(format!("cc/{pid}.sock")).exists());
+        assert!(h.log("daemon.log").contains("SIGTERM"));
+    }
 }
 
 #[test]

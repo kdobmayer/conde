@@ -1780,7 +1780,7 @@ async fn an_endpoint_change_goes_out_before_an_outcome_reported_after_it() {
 }
 
 /// A board that moved (`moved_to`): `/healthz` still answers, every other request is a 308 to
-/// the new address with `{"moved_to"}`; a bridge stops for good on it (no reconnect) and an RPC
+/// the new address (same path) with `{"moved_to"}`; a bridge stops for good on it (no reconnect) and an RPC
 /// call reports it, both as [`StopReason::Moved`].
 #[tokio::test(flavor = "multi_thread")]
 async fn a_moved_board_answers_308_everywhere_but_healthz_and_clients_stop() {
@@ -1816,7 +1816,13 @@ async fn a_moved_board_answers_308_everywhere_but_healthz_and_clients_stop() {
             .await
             .unwrap();
         assert_eq!(r.status(), 308, "{method} {path}");
-        assert_eq!(r.headers()["location"], NEW, "{method} {path}");
+        // Location keeps the path (an old install or readme link lands on the same file); the body
+        // names the bare board for clients.
+        assert_eq!(
+            r.headers()["location"],
+            format!("{NEW}{path}").as_str(),
+            "{method} {path}"
+        );
         assert_eq!(
             r.json::<Value>().await.unwrap(),
             json!({"moved_to": NEW}),

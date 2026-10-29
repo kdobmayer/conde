@@ -82,6 +82,14 @@ if [ -e "$dir/conde" ]; then
 	fi
 fi
 
+# never a downgrade by accident (a stale "latest", a second run): an older release only with CONDE_VERSION set
+newer() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ] && [ "$1" != "$2" ]; }
+have=$(printf '%s' "$previous" | sed -nE 's/^conde ([0-9]+\.[0-9]+\.[0-9]+[^ ]*).*/\1/p')
+if [ -z "${CONDE_VERSION:-}" ] && [ -n "$have" ] && newer "$have" "$version"; then
+	say "kept $dir/conde ($previous): newer than v$version; set CONDE_VERSION=$version to install it anyway"
+	exit 0
+fi
+
 mv -f "$tmp/$name" "$dir/conde"
 installed=$("$dir/conde" --version 2>/dev/null || echo "$name v$version")
 if [ "$upgrade" = 1 ]; then say "replaced $dir/conde ($previous) with $installed"; else say "installed $dir/conde ($installed)"; fi

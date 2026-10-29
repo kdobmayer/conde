@@ -16,9 +16,10 @@ Review and integration by desk, one batch at a time; one release per batch.
 Owner's ruling: nothing below is deferred except D1 (needs his hand) and the network-layer revisit, which is
 the last step. Desk runs the rest in this order after the Dakai cutover basics (release, rehearsal, cutover).
 
-- S1 (desk): the invite email flow: `conde admin invite <name> <email> --board <ws>`, the join page
-  `/join/<token>` (set password, then the one line for the agent), Keycloak account creation through its
-  admin API, mail through Resend; `conde update`; the site documents both.
+- S1: done (v0.3.0 invite mail, v0.5.4 on 2026-10-29: one-line invites, the per-invite join page `/join/<token>`
+  for agents and browsers, `conde login` sets up the machine, the designed invite mail). Open: the Keycloak password
+  mail's paste line still names the generic agents guide (the join page is reached from its "back to application"
+  link); a new theme image when that text changes.
 - S2 (desk): the web front end v2 in design B, Editorial (docs/web-ui-v2/plan.md items U1 to U16, with the
   owner's 2026-10-28 choice of B: skin A is not built further and U16 removes it; the plan's "dark only"
   stays unless the owner says otherwise). Landed on the `web-v2` integration branch, one merge to main, as

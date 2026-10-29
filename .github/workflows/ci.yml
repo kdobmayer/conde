@@ -87,6 +87,8 @@ jobs:
     env:
       # no Postgres service on this runner: the Postgres cases skip, and say so
       CONDE_TEST_NO_PG: "1"
+      # a disposable machine: the login test's setup may register the real scheduled task conde
+      CONDE_TEST_SCHEDULED_TASK: "1"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -248,6 +250,96 @@ jobs:
           } finally {
             Write-Host "--- $log"
             Get-Content -Tail 100 $log -ErrorAction SilentlyContinue | Out-Host
+            schtasks /End /TN conde 2>&1 | Out-Null
+            schtasks /Delete /TN conde /F 2>&1 | Out-Null
+            $global:LASTEXITCODE = 0
+          }
+
+      # The newcomer's path on Windows: `conde login` in code mode on a workspace (a real `conde server`
+      # behind a stand-in sign-in page), which sets the machine up with the real scheduled task; then
+      # the bridge connects to the workspace, doctor is all clear, and the MCP entry login wrote answers.
+      - name: conde login on a workspace, the bridge, doctor and the MCP server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Get-Command conde).Source
+          $srv = Join-Path $env:RUNNER_TEMP 'workspace'
+          $log = Join-Path $env:LOCALAPPDATA 'conde\data\conde.log'
+          $key = "$(conde admin key create --user krisztian --host ci-win --label ci --data $srv)".Trim()
+          if (-not $key.StartsWith('conde_')) { throw "no host key: $key" }
+          $env:CONDE_BOARD_NAME = 'vvp'
+          $server = Start-Process $exe -ArgumentList 'server', '--listen', '127.0.0.1:8770', '--data', $srv -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\server.out" -RedirectStandardError "$env:RUNNER_TEMP\server.log"
+          $front = Start-Process python -ArgumentList '.github/scripts/signin-front.py', '8771', '8770', $key, 'krisztian' -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\front.out" -RedirectStandardError "$env:RUNNER_TEMP\front.log"
+          $mcp = $null
+          try {
+            for ($i = 0; $i -lt 50; $i++) {
+              try { Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8771/healthz' | Out-Null; break } catch { Start-Sleep -Milliseconds 200 }
+            }
+            # Claude Code's config directory exists, so login writes its MCP entry
+            New-Item -ItemType Directory -Force (Join-Path $env:USERPROFILE '.claude') | Out-Null
+            $ws = 'http://127.0.0.1:8771'
+            $first = conde login --server $ws --host ci-win --no-browser 2>&1 | Out-String
+            Write-Host $first
+            if ($LASTEXITCODE -ne 3) { throw "login without a code: exit status $LASTEXITCODE" }
+            $url = [regex]::Match($first, 'http://127\.0\.0\.1:8771/auth/cli\?mode=code\S*').Value
+            $page = (Invoke-WebRequest -UseBasicParsing -Uri $url).Content
+            $code = [regex]::Match($page, '<pre id="key">([^<]+)<').Groups[1].Value
+            $out = conde login --server $ws --host ci-win --code $code 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0) { throw "login with the code: exit status $LASTEXITCODE" }
+            foreach ($want in @('signed in as krisztian', 'as board vvp (account krisztian)', 'service: registered the scheduled task conde', 'claude: ')) {
+              if (-not $out.Contains($want)) { throw "login did not print: $want" }
+            }
+            if ($out.Contains('FAILED')) { throw 'a setup part FAILED' }
+            $doctor = ''
+            for ($i = 0; $i -lt 60; $i++) {
+              $doctor = conde doctor 2>&1 | Out-String
+              if ($LASTEXITCODE -eq 0) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            Write-Host $doctor
+            if ($LASTEXITCODE -ne 0 -or -not $doctor.Contains('all clear')) { throw 'doctor is not all clear after login' }
+            $boards = conde boards | Out-String
+            Write-Host $boards
+            if (-not ($boards -match 'vvp\t.*connected')) { throw "the bridge is not connected to the workspace: $boards" }
+
+            # the MCP server as Claude Code starts it, from the entry login wrote
+            $entry = (Get-Content -Raw (Join-Path $env:USERPROFILE '.claude.json') | ConvertFrom-Json).mcpServers.conde
+            Write-Host "MCP entry: $($entry | ConvertTo-Json -Compress)"
+            $psi = [Diagnostics.ProcessStartInfo]::new($entry.command)
+            foreach ($a in $entry.args) { $psi.ArgumentList.Add($a) }
+            if ($entry.env) { foreach ($p in $entry.env.PSObject.Properties) { $psi.Environment[$p.Name] = $p.Value } }
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $mcp = [Diagnostics.Process]::Start($psi)
+            $ask = {
+              param($msg)
+              $mcp.StandardInput.WriteLine(($msg | ConvertTo-Json -Compress -Depth 10))
+              $mcp.StandardInput.Flush()
+              if (-not $msg.ContainsKey('id')) { return $null }
+              $line = $mcp.StandardOutput.ReadLineAsync()
+              if (-not $line.Wait(15000)) { throw "no MCP answer to $($msg.method)" }
+              Write-Host $line.Result
+              $line.Result | ConvertFrom-Json
+            }
+            $init = & $ask @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'claude-code'; version = '0' } } }
+            if ($init.result.serverInfo.name -ne 'conde') { throw 'initialize: not the conde server' }
+            & $ask @{ jsonrpc = '2.0'; method = 'notifications/initialized' } | Out-Null
+            $tools = & $ask @{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} }
+            if (-not ($tools.result.tools.name -contains 'whoami')) { throw 'tools/list has no whoami' }
+            $who = & $ask @{ jsonrpc = '2.0'; id = 3; method = 'tools/call'; params = @{ name = 'whoami'; arguments = @{} } }
+            if (-not $who.result.content[0].text) { throw 'whoami gave no answer' }
+          } finally {
+            if ($mcp) { $mcp.StandardInput.Close(); if (-not $mcp.WaitForExit(5000)) { $mcp.Kill() } }
+            foreach ($f in @("$env:RUNNER_TEMP\server.log", "$env:RUNNER_TEMP\front.log", $log)) {
+              Write-Host "--- $f"
+              Get-Content -Tail 60 $f -ErrorAction SilentlyContinue | Out-Host
+            }
+            Stop-Process -Id $front.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
             schtasks /End /TN conde 2>&1 | Out-Null
             schtasks /Delete /TN conde /F 2>&1 | Out-Null
             $global:LASTEXITCODE = 0

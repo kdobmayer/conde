@@ -60,10 +60,6 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   `conde setup` (`<alias>` with none), and the README's board example is `acme` at `acme.conde.cloud` (s9b
   branch); CI's Postgres service and CONDE_TEST_PG, the Postgres-only skips, admins on the web view and the
   SIGTERM ordering (s9 branch).
-  Open on Windows: the installed binary's pasted-code login with the real Task Scheduler
-  (tests/login.rs an_agent_runs_the_pasted_code_login_in_two_calls) ended with its board review not reaching the
-  test's fake bridge on the CI runner; it skips on Windows (CONDE_TEST_SCHEDULED_TASK unset in ci.yml) until that
-  is understood. The release's installer test and the library-level login tests run there.
 - S7: done 2026-10-28 (docs/infra-network-s7.md): FQDN network policy on the cluster; the workspaces, Keycloak and
   Argo CD reach only named hosts, the any-public-443 and 465 rules and the GitHub ranges are gone; cluster-wide
   policies, the mesh and the Cloudflare edge declined. Open: Autopilot had not yet restarted the nodes for the

@@ -66,9 +66,15 @@
         $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash
         if ($got -ne $want.ToUpperInvariant()) { throw "install.ps1: checksum mismatch for $name; nothing installed" }
 
+        # the download carries the mark of the web; without it SmartScreen does not stop the exe or the task
+        Unblock-File -LiteralPath $exe -ErrorAction SilentlyContinue
         $runs = $false
         try { & $exe --version | Out-Null; $runs = ($LASTEXITCODE -eq 0) } catch { }
-        if (-not $runs) { throw "install.ps1: the downloaded binary does not run on this machine ($name)" }
+        if (-not $runs) {
+            throw ("install.ps1: the downloaded binary does not run on this machine ($name). The release is not " +
+                "code-signed yet: if Windows Security blocked it (Smart App Control or SmartScreen), allow it there, " +
+                "then run this installer again")
+        }
 
         $dest = Join-Path $dir 'conde.exe'
         # binaries moved aside earlier; one a bridge still runs stays locked until it exits

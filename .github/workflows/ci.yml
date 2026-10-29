@@ -207,6 +207,12 @@ jobs:
             schtasks /Query /TN conde | Out-Host
             if ($LASTEXITCODE -ne 0) { throw 'no scheduled task conde' }
             $pipe = '\\.\pipe\conde-' + ($env:USERNAME.ToLowerInvariant() -replace '[^a-z0-9._-]', '-')
+            # the task starts the bridge; it answers on the pipe a moment later
+            for ($i = 0; $i -lt 60; $i++) {
+              conde doctor *> $null
+              if ($LASTEXITCODE -eq 0) { break }
+              Start-Sleep -Milliseconds 500
+            }
             Write-Host '--- conde setup --check'
             $check = conde setup --check 2>&1 | Out-String
             Write-Host $check

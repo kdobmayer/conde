@@ -52,6 +52,7 @@ your store). The Secret holds:
 | `extraEnv` | `[]` | extra container env entries |
 | `resources` | 250m CPU, 512Mi memory, 1Gi ephemeral storage | server container resources |
 | `terminationGracePeriodSeconds` | `600` | time for SSE and WebSocket streams to close |
+| `preStopSleepSeconds` | `30` | a terminating pod keeps serving this long before SIGTERM, while the load balancer drops it (preStop sleep, Kubernetes 1.30 or later); `0` turns it off |
 | `tolerations` | the amd64 toleration GKE Autopilot adds | pod tolerations; `[]` elsewhere |
 | `namespace.create`, `namespace.labels` | `false`, the shared-Gateway label | render the Namespace object (Argo CD does; leave false with `--create-namespace`) |
 | `route.enabled`, `route.gateway.name/namespace/sectionName` | `true`, `conde`/`gateway`/`https` | the HTTPRoute and its parent Gateway listener |

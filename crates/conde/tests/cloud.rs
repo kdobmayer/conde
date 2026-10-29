@@ -437,19 +437,14 @@ fn an_idle_connection_stays_up_through_pings() {
     let sa = a.sock();
     // The board connection drops after 1 s of silence; only pings arrive.
     cloud.join(&mut a, "daemon.log", &sa, &["--idle-timeout", "1"]);
-    // A second daemon on the same socket refuses before it ever says hello.
+    // A second daemon on the same socket waits for it, then refuses; it never says hello.
     let file = std::fs::File::create(a.root.join("second.log")).unwrap();
-    let second = a
+    let mut second = a
         .env(&mut std::process::Command::new(BIN))
         .args(["daemon"])
         .stderr(file)
-        .status();
-    assert!(!second.unwrap().success());
-    assert!(
-        a.log("second.log").contains("another conde daemon"),
-        "{}",
-        a.log("second.log")
-    );
+        .spawn()
+        .unwrap();
     std::thread::sleep(ping * 7);
     let doctor = a.ok(None, &[], &["doctor"]);
     assert!(
@@ -461,6 +456,12 @@ fn an_idle_connection_stays_up_through_pings() {
         !a.log("daemon.log").contains("connection lost"),
         "{}",
         a.log("daemon.log")
+    );
+    assert!(!second.wait().unwrap().success());
+    assert!(
+        a.log("second.log").contains("another conde daemon"),
+        "{}",
+        a.log("second.log")
     );
 }
 

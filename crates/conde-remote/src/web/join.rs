@@ -202,7 +202,9 @@ impl Invite<'_> {
                  in place of `conde`."
             ),
             format!(
-                "Sign in. Tell your human that a sign-in link for {ws} is coming and that they {how}. \
+                "Sign in, unless this machine already is: run `conde doctor` first, and if a line reads \
+                 `{board}: connected to` the workspace, the sign-in is done, skip to the next step. Otherwise \
+                 tell your human that a sign-in link for {ws} is coming and that they {how}. \
                  Then run:\n\n\
                  ```sh\n{login}\n```\n\n\
                  It prints a sign-in link, opens it in a browser when this machine has one, and waits up to \

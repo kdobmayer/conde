@@ -366,6 +366,8 @@ fn assert_fixture_classes(inv: &history::Inventory, n: &Native) {
     );
 }
 
+// kond ran on Unix: its attachment headers hold Unix paths, which the fixture spells for this host
+#[cfg(unix)]
 #[test]
 fn inventory_classifies_by_message_relationships() {
     let tmp = TempDir::new("classify");
@@ -1059,9 +1061,13 @@ fn inventory_and_prune_list_refuse_a_snapshot_with_parse_errors() {
     for c in &copies {
         fs::write(c, [0xffu8, 0xfe, b'\n']).unwrap();
     }
-    let err = format!("{:#}", import::snapshot(&kond).unwrap_err());
+    // the paths as shown, whichever separator joined them
+    let err = format!("{:#}", import::snapshot(&kond).unwrap_err()).replace('\\', "/");
     assert!(
-        err.contains("2 parse errors") && copies.iter().all(|c| err.contains(c.to_str().unwrap())),
+        err.contains("2 parse errors")
+            && copies
+                .iter()
+                .all(|c| err.contains(&c.to_str().unwrap().replace('\\', "/"))),
         "{err}"
     );
     let err = format!("{:#}", import::agent_activity(&kond).unwrap_err());

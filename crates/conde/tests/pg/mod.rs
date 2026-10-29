@@ -30,9 +30,10 @@ pub fn fresh_database() -> Option<String> {
 /// `eprintln!`, so the line shows in a plain `cargo test` run (libtest captures the macros).
 pub fn skip(what: &str) {
     use std::io::Write as _;
-    // CI runs a Postgres service; a skip there means the variable went missing
+    // CI runs a Postgres service; a skip there means the variable went missing, unless the job
+    // says it has none (CONDE_TEST_NO_PG: the Windows runner)
     assert!(
-        std::env::var_os("CI").is_none(),
+        std::env::var_os("CI").is_none() || std::env::var_os("CONDE_TEST_NO_PG").is_some(),
         "CONDE_TEST_PG is unset in CI: {what} would not run"
     );
     let test = std::thread::current().name().unwrap_or("?").to_string();

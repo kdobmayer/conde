@@ -1,10 +1,11 @@
 //! The installed binary's `conde mcp` and `conde setup`, as a harness and a
 //! teammate run them: real processes, temp HOME and socket, no real config.
-#![cfg(unix)] // drives the daemon over a unix socket
+
+mod os;
 
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -80,6 +81,8 @@ fn version_names_the_build() {
 
 struct Root {
     root: PathBuf,
+    /// A process named codex, to run the binary beneath as Codex runs a tool.
+    codex: PathBuf,
     daemon: Option<Child>,
 }
 
@@ -88,24 +91,45 @@ impl Root {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("wiring-{}", conde::util::new_ulid()));
         std::fs::create_dir_all(root.join("home")).unwrap();
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        std::os::unix::fs::symlink("/bin/sh", root.join("bin/codex")).unwrap();
-        Root { root, daemon: None }
+        let codex = os::harness(&root.join("bin"), "codex");
+        Root {
+            root,
+            codex,
+            daemon: None,
+        }
+    }
+
+    /// `rel` under the root, one component at a time, so it shows as the binary shows it.
+    fn path(&self, rel: &str) -> PathBuf {
+        rel.split('/').fold(self.root.clone(), |p, c| p.join(c))
+    }
+
+    fn sock(&self) -> PathBuf {
+        os::socket_in(&self.root)
     }
 
     /// A clean environment: temp HOME and socket, no harness markers, and a
     /// PATH without systemctl, launchctl or claude.
+    fn env<'c>(&self, c: &'c mut Command) -> &'c mut Command {
+        os::clear_env(c).env("PATH", self.root.join("emptybin"));
+        os::user_home(c, "tester", &self.root.join("home"))
+            .env("XDG_CONFIG_HOME", self.path("home/.config"))
+            .env("CONDE_DATA", self.root.join("data"))
+            .env("CONDE_SOCK", self.sock())
+            .env("CONDE_HOST", "testhost")
+            .stdin(Stdio::null())
+    }
+
     fn cmd(&self, program: &Path) -> Command {
         let mut c = Command::new(program);
-        c.env_clear()
-            .env("PATH", self.root.join("emptybin"))
-            .env("HOME", self.root.join("home"))
-            .env("USER", "tester")
-            .env("XDG_CONFIG_HOME", self.root.join("home/.config"))
-            .env("CONDE_DATA", self.root.join("data"))
-            .env("CONDE_SOCK", self.root.join("run/conde.sock"))
-            .env("CONDE_HOST", "testhost")
-            .stdin(Stdio::null());
+        self.env(&mut c);
+        c
+    }
+
+    /// The binary beneath the codex process; the arguments follow.
+    fn agent(&self) -> Command {
+        let mut c = os::under(&self.codex, BIN);
+        self.env(&mut c);
         c
     }
 
@@ -121,14 +145,15 @@ impl Root {
         // Up means answering a request, not only accepting a connection: a daemon still starting
         // (a loaded box) accepts first and misses the 2 s probe of `setup --check`.
         use conde::setup::Host as _;
-        let sock = self.root.join("run/conde.sock");
+        let sock = self.sock();
         let deadline = Instant::now() + Duration::from_secs(20);
-        while UnixStream::connect(&sock).is_err() || conde::setup::System.reach(&sock).is_err() {
+        while !os::answers(&sock) || conde::setup::System.reach(&sock).is_err() {
             assert!(Instant::now() < deadline, "daemon did not come up");
             std::thread::sleep(Duration::from_millis(20));
         }
     }
 
+    #[cfg(unix)]
     fn setup(&self, args: &[&str]) -> (bool, String) {
         let out = self
             .cmd(Path::new(BIN))
@@ -157,8 +182,8 @@ fn conde_mcp_under_codex_registers_the_calling_thread() {
     r.start_daemon();
     // `codex` (a shell) is the MCP server's parent, as when Codex spawns it
     let mut child = r
-        .cmd(&r.root.join("bin/codex"))
-        .args(["-c", "\"$0\" mcp; :", BIN])
+        .agent()
+        .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -204,6 +229,8 @@ fn conde_mcp_under_codex_registers_the_calling_thread() {
     assert!(child.wait().unwrap().success(), "conde mcp exits on EOF");
 }
 
+// setup's service part on Windows registers a real scheduled task (tests/setup.rs fakes it)
+#[cfg(unix)]
 #[test]
 fn conde_setup_runs_the_single_daemon_and_enrolls_nothing() {
     let r = Root::new();
@@ -299,6 +326,7 @@ fn conde_setup_runs_the_single_daemon_and_enrolls_nothing() {
 
 /// systemd starts the unit with only HOME and USER from the user manager plus the
 /// unit's own Environment= lines: the daemon must still find a relocated config directory.
+#[cfg(unix)]
 #[test]
 fn the_generated_unit_runs_the_daemon_with_the_relocated_config() {
     let r = Root::new();
@@ -403,9 +431,8 @@ fn lobby_auto_join_and_channel_topics() {
     // an agent shell: the binary beneath a process named codex, with its thread marker
     let agent = |thread: &str, args: &[&str]| {
         let out = r
-            .cmd(&r.root.join("bin/codex"))
+            .agent()
             .env("CODEX_THREAD_ID", thread)
-            .args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", BIN])
             .args(args)
             .output()
             .unwrap();
@@ -505,21 +532,18 @@ use fake_daemon::{Answer, FakeDaemon};
 impl Root {
     /// A shared board enrolled as `alias` (the file the daemon and `conde boards` read).
     fn enroll_file(&self, alias: &str, server: &str) {
-        let dir = self.root.join("home/.config/conde/boards");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = dir.join(format!("{alias}.json"));
-        std::fs::write(
-            &path,
-            json!({"server": server, "host_id": "testhost", "owner": "tester", "key": "k"})
-                .to_string(),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let path = self.path(&format!("home/.config/conde/boards/{alias}.json"));
+        let cfg = BoardConfig {
+            server: server.into(),
+            host_id: "testhost".into(),
+            owner: "tester".into(),
+            key: "k".into(),
+        };
+        boards::store(&path, alias, &cfg).unwrap();
     }
 
     fn fake(&self, respond: impl Fn(&Value) -> Answer + Send + Sync + 'static) -> FakeDaemon {
-        FakeDaemon::start(&self.root.join("run/conde.sock"), respond)
+        FakeDaemon::start(&self.sock(), respond)
     }
 
     /// `conde <args>`: (exit ok, stdout, stderr).
@@ -748,7 +772,7 @@ fn listings_carry_their_board_and_aggregates_name_unavailable_boards() {
 fn publish_unpublish_boards_whoami_and_doctor() {
     let r = Root::new();
     r.enroll_file("dakai", "https://conde.test");
-    std::fs::write(r.root.join("home/.config/conde/default-board"), "dakai\n").unwrap();
+    std::fs::write(r.path("home/.config/conde/default-board"), "dakai\n").unwrap();
     let d = r.fake(|req| {
         let body = &req["body"];
         Ok(match req["op"].as_str().unwrap() {
@@ -825,7 +849,7 @@ fn publish_unpublish_boards_whoami_and_doctor() {
 
     let (ok, out, err) = r.conde(&["boards"]);
     assert!(ok, "{err}");
-    let data = r.root.join("data/conde.db");
+    let data = r.path("data/conde.db");
     assert_eq!(
         out,
         format!(
@@ -939,8 +963,8 @@ fn enroll_stores_a_pinned_board_and_says_what_it_does_not_do() {
     let server = board_info_server("krisz");
     let (ok, out) = enroll(&["--server", &server]);
     assert!(ok, "{out}");
-    let path = r.root.join("home/.config/conde/boards/dakai.json");
-    assert!(out.starts_with(&format!("enrolled host box with {server} as board dakai (account krisz); credential stored at {} (mode 0600)\n", path.display())), "{out}");
+    let path = r.path("home/.config/conde/boards/dakai.json");
+    assert!(out.starts_with(&format!("enrolled host box with {server} as board dakai (account krisz); credential stored at {} ({})\n", path.display(), conde::private::PROTECTION)), "{out}");
     assert!(out.contains("Enrolling publishes nothing and uploads no history: every agent stays on this machine's local board, and teammates cannot reach one until you publish it: conde publish <name> --board dakai\n"), "{out}");
     assert!(out.contains("next: conde setup"), "{out}");
     let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -952,12 +976,14 @@ fn enroll_stores_a_pinned_board_and_says_what_it_does_not_do() {
         ),
         (Some("krisz"), Some("box"), Some("conde_k1"))
     );
+    #[cfg(unix)]
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+    conde::private::check(&path).unwrap();
     assert!(
-        !r.root.join("home/.config/conde/credentials").exists(),
+        !r.path("home/.config/conde/credentials").exists(),
         "no v1 credential is written"
     );
     assert!(!out.contains("conde_k1"), "the key is never echoed");
@@ -974,7 +1000,7 @@ fn enroll_stores_a_pinned_board_and_says_what_it_does_not_do() {
     // a second alias for the same server is a separate board file
     let (ok, out) = enroll(&["--server", &elsewhere, "--board", "team2"]);
     assert!(ok, "{out}");
-    assert!(r.root.join("home/.config/conde/boards/team2.json").exists());
+    assert!(r.path("home/.config/conde/boards/team2.json").exists());
 }
 
 /// A daemon started before the upgrade ignores the envelope's board: the CLI refuses instead
@@ -1256,9 +1282,8 @@ fn search_after_takes_a_cursor_or_a_time() {
     r.start_daemon();
     let agent = |thread: &str, args: &[&str]| {
         let out = r
-            .cmd(&r.root.join("bin/codex"))
+            .agent()
             .env("CODEX_THREAD_ID", thread)
-            .args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", BIN])
             .args(args)
             .output()
             .unwrap();
@@ -1324,9 +1349,8 @@ fn watch_prints_the_board_and_follows_it() {
     r.start_daemon();
     let agent = |thread: &str, args: &[&str]| {
         let out = r
-            .cmd(&r.root.join("bin/codex"))
+            .agent()
             .env("CODEX_THREAD_ID", thread)
-            .args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", BIN])
             .args(args)
             .output()
             .unwrap();
@@ -1893,7 +1917,7 @@ fn board_move_repoints_an_enrolled_board_after_the_new_address_answers_as_it() {
         format!("http://{}", new.local_addr()),
         format!("http://{}", old.local_addr()),
     );
-    let config = r.root.join("home/.config/conde");
+    let config = r.path("home/.config/conde");
 
     let (ok, _, err) = r.conde(&["board", "move", "shared", &new_url]);
     assert!(!ok);

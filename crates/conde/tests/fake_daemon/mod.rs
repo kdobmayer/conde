@@ -1,10 +1,8 @@
 #![allow(dead_code)]
-//! A fake `conde daemon` on a unix socket: records every request frame and answers with a
-//! scripted result per op, so the CLI and MCP surfaces are tested against the daemon
-//! contract before the daemon implements it.
+//! A fake `conde daemon` on the CLI's transport (a unix socket, or on Windows the daemon's own
+//! named pipe): records every request frame and answers with a scripted result per op, so the
+//! CLI and MCP surfaces are tested against the daemon contract before the daemon implements it.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,27 +25,10 @@ impl FakeDaemon {
         socket: &Path,
         respond: impl Fn(&Value) -> Answer + Send + Sync + 'static,
     ) -> FakeDaemon {
-        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        let _ = std::fs::remove_file(socket);
-        let listener = UnixListener::bind(socket).unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let respond: Arc<Responder> = Arc::new(respond);
-        let (log2, stop2) = (log.clone(), stop.clone());
-        // polled, so a test that removes the socket's directory first still stops it
-        listener.set_nonblocking(true).unwrap();
-        let thread = std::thread::spawn(move || {
-            while !stop2.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((conn, _)) => {
-                        conn.set_nonblocking(false).unwrap();
-                        let (log, respond) = (log2.clone(), respond.clone());
-                        std::thread::spawn(move || serve(conn, &log, &*respond));
-                    }
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
-                }
-            }
-        });
+        let thread = listen(socket, log.clone(), stop.clone(), respond);
         FakeDaemon {
             socket: socket.to_path_buf(),
             log,
@@ -67,9 +48,95 @@ impl FakeDaemon {
     }
 }
 
-fn serve(conn: UnixStream, log: &Mutex<Vec<Value>>, respond: &Responder) {
-    let mut writer = conn.try_clone().unwrap();
-    for line in BufReader::new(conn).lines() {
+#[cfg(unix)]
+fn listen(
+    socket: &Path,
+    log: Arc<Mutex<Vec<Value>>>,
+    stop: Arc<AtomicBool>,
+    respond: Arc<Responder>,
+) -> std::thread::JoinHandle<()> {
+    use std::os::unix::net::UnixListener;
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(socket);
+    let listener = UnixListener::bind(socket).unwrap();
+    // polled, so a test that removes the socket's directory first still stops it
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    let (log, respond) = (log.clone(), respond.clone());
+                    std::thread::spawn(move || {
+                        let writer = conn.try_clone().unwrap();
+                        serve(std::io::BufReader::new(conn), writer, &log, &*respond)
+                    });
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    })
+}
+
+/// The pipe is the daemon's own (`conde::ipc`, so the CLI's peer check passes); each
+/// connection is bridged to a blocking [`serve`] through in-process pipes.
+#[cfg(windows)]
+fn listen(
+    socket: &Path,
+    log: Arc<Mutex<Vec<Value>>>,
+    stop: Arc<AtomicBool>,
+    respond: Arc<Responder>,
+) -> std::thread::JoinHandle<()> {
+    let socket = socket.to_path_buf();
+    let (bound, ready) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let mut listener = conde::ipc::bind(&socket).unwrap();
+            bound.send(()).unwrap();
+            while !stop.load(Ordering::SeqCst) {
+                let accepted = tokio::time::timeout(
+                    std::time::Duration::from_millis(20),
+                    conde::ipc::accept(&mut listener),
+                )
+                .await;
+                let Ok(Ok((conn, _peer))) = accepted else {
+                    continue;
+                };
+                let (log, respond) = (log.clone(), respond.clone());
+                tokio::spawn(bridge(conn, log, respond));
+            }
+        });
+    });
+    ready.recv().unwrap();
+    thread
+}
+
+#[cfg(windows)]
+async fn bridge(conn: conde::ipc::Conn, log: Arc<Mutex<Vec<Value>>>, respond: Arc<Responder>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let (read, mut write) = tokio::io::split(conn);
+    let mut lines = tokio::io::BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let mut out = Vec::new();
+        serve(line.as_bytes(), &mut out, &log, &*respond);
+        if write.write_all(&out).await.is_err() {
+            return;
+        }
+    }
+}
+
+fn serve(
+    input: impl std::io::BufRead,
+    mut writer: impl std::io::Write,
+    log: &Mutex<Vec<Value>>,
+    respond: &Responder,
+) {
+    for line in input.lines() {
         let Ok(line) = line else { return };
         let req: Value = serde_json::from_str(&line).unwrap();
         log.lock().unwrap().push(req.clone());
@@ -94,6 +161,7 @@ impl Drop for FakeDaemon {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.socket);
     }
 }

@@ -101,7 +101,7 @@ resource "kubernetes_manifest" "keycloak_secrets" {
 # these values stay out of the realms state. One Secret Manager secret can back several files.
 locals {
   keycloak_vault = merge(
-    { for realm in ["demo", "clearscale", "infra", "master"] : "${realm}_smtp-password" => "resend-api-key" },
+    { for realm in ["demo", "clearscale", "vvpusa", "infra", "master"] : "${realm}_smtp-password" => "resend-api-key" },
     { "clearscale_google-client-secret" = "clearscale-google-oauth-client-secret" },
   )
 }
@@ -415,7 +415,7 @@ resource "kubernetes_manifest" "keycloak_route" {
       }]
       hostnames = [local.keycloak_hostname]
       rules = [{
-        matches = [for prefix in ["/realms/demo", "/realms/clearscale", "/realms/infra", "/resources"] : {
+        matches = [for prefix in ["/realms/demo", "/realms/clearscale", "/realms/vvpusa", "/realms/infra", "/resources"] : {
           path = { type = "PathPrefix", value = prefix }
         }]
         backendRefs = [{

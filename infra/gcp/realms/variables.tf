@@ -4,6 +4,7 @@ variable "require_mfa" {
   default = {
     demo       = false
     clearscale = false
+    vvpusa     = false
   }
 }
 

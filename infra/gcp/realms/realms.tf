@@ -87,6 +87,112 @@ resource "keycloak_realm_localization" "invite" {
   }
 }
 
+# Keycloak 26's default profile, plus conde_invite: with unmanaged attributes disabled, Keycloak drops an attribute the
+# profile does not declare. Admins only, so the account console neither shows nor edits it. First and last name are
+# optional, so an invited user goes from the password (or the first SSO sign-in) straight to the board.
+resource "keycloak_realm_user_profile" "this" {
+  for_each = local.profile_realms
+
+  realm_id = keycloak_realm.this[each.key].id
+
+  attribute {
+    name         = "username"
+    display_name = "$${username}"
+
+    validator {
+      name   = "length"
+      config = { min = "3", max = "255" }
+    }
+    validator {
+      name = "username-prohibited-characters"
+    }
+    validator {
+      name = "up-username-not-idn-homograph"
+    }
+
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  attribute {
+    name               = "email"
+    display_name       = "$${email}"
+    required_for_roles = ["user"]
+
+    validator {
+      name = "email"
+    }
+    validator {
+      name   = "length"
+      config = { max = "255" }
+    }
+
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  attribute {
+    name         = "firstName"
+    display_name = "$${firstName}"
+
+    validator {
+      name   = "length"
+      config = { max = "255" }
+    }
+    validator {
+      name = "person-name-prohibited-characters"
+    }
+
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  attribute {
+    name         = "lastName"
+    display_name = "$${lastName}"
+
+    validator {
+      name   = "length"
+      config = { max = "255" }
+    }
+    validator {
+      name = "person-name-prohibited-characters"
+    }
+
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  attribute {
+    name         = "conde_invite"
+    display_name = "conde invite"
+
+    permissions {
+      view = ["admin"]
+      edit = ["admin"]
+    }
+  }
+
+  group {
+    name                = "user-metadata"
+    display_header      = "User metadata"
+    display_description = "Attributes, which refer to user metadata"
+  }
+}
+
+moved {
+  from = keycloak_realm_user_profile.demo
+  to   = keycloak_realm_user_profile.this["demo"]
+}
+
 # ── The conde client of each tenant realm; its secret goes to Keycloak and Secret Manager only ────────────────────
 ephemeral "random_password" "conde_client_secret" {
   for_each = local.tenants

@@ -4,7 +4,7 @@
 {{- with .Values.oidc.issuer }}
 {{- $hosts = append $hosts (first (splitList ":" (urlParse .).host)) }}
 {{- end }}
-{{- if has .Values.invite.signIn (list "google" "microsoft") }}
+{{- if has .Values.invite.signIn (list "google" "microsoft" "sso") }}
 {{- $hosts = append $hosts "api.resend.com" }}
 {{- end }}
 {{- $hosts = concat $hosts .Values.networkPolicy.fqdn.extraHosts | uniq }}

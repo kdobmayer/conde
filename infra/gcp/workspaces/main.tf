@@ -49,6 +49,8 @@ locals {
     # Its server invites users through the realm's conde-admin client (infra/gcp/realms/demo.tf).
     demo       = { hostname = "demo.conde.cloud", extra_secrets = ["keycloak-admin-demo"] }
     clearscale = { hostname = "clearscale.conde.cloud" }
+    # Signs in through AWS IAM Identity Center, brokered by its realm (infra/gcp/realms/saml.tf).
+    vvpusa = { hostname = "vvpusa.conde.cloud" }
   }
 }
 

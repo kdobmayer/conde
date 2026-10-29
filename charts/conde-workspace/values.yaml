@@ -19,10 +19,13 @@ oidc:
   # Defaults to https://<hostname>/auth/callback.
   redirectUri: ""
 
-# How the admin API's invites reach the invited person (CONDE_JOIN_SIGN_IN): google or microsoft, one email the
+# How the admin API's invites reach the invited person (CONDE_JOIN_SIGN_IN): google, microsoft or sso, one email the
 # server sends through Resend; password, Keycloak's account-setup email; empty, no email.
 invite:
   signIn: ""
+  # sso: the account the email tells the person to sign in with, "your <account> account" (CONDE_JOIN_ACCOUNT;
+  # empty, the server's default "company").
+  account: ""
   # Password workspaces: the Keycloak admin API at its in-cluster address (the public host blocks /admin), with
   # the network policy egress to that namespace.
   keycloakAdmin:
@@ -78,7 +81,7 @@ networkPolicy:
   # Port 443 to any public address: the reach before the hostname policy, kept to put back for one workspace.
   publicHttps: false
   # GKE FQDNNetworkPolicy (the cluster's FQDN network policy feature): port 443 to slack.com, the issuer's host,
-  # api.resend.com when invite.signIn is google or microsoft, *.googleapis.com with gcp.enabled, and extraHosts.
+  # api.resend.com when invite.signIn is google, microsoft or sso, *.googleapis.com with gcp.enabled, and extraHosts.
   fqdn:
     enabled: false
     extraHosts: []

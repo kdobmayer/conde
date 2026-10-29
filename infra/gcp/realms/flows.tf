@@ -6,7 +6,7 @@ locals {
   # Password and OTP for every user, enrolled at the first sign-in when missing.
   mfa_realms = ["infra", "master"]
   # Realms without a token-endpoint password grant; Terraform signs in to master with client credentials (README.md).
-  no_password_grant = concat(keys(local.google_sign_in), ["infra", "master"])
+  no_password_grant = concat(keys(local.google_sign_in), keys(local.saml_sign_in), ["infra", "master"])
 }
 
 # The browser flow of these realms: an existing session, else straight to Google; no password form.
@@ -145,11 +145,12 @@ resource "keycloak_authentication_execution" "deny_direct_grant" {
 
 # One binding per realm: the provider's bindings resource owns all of a realm's flow bindings.
 resource "keycloak_authentication_bindings" "this" {
-  for_each = toset(concat(keys(local.google_sign_in), local.mfa_realms))
+  for_each = toset(concat(keys(local.google_sign_in), keys(local.saml_sign_in), local.mfa_realms))
 
   realm_id = local.realm_ids[each.key]
   browser_flow = merge(
     { for name, flow in keycloak_authentication_flow.google_browser : name => flow.alias },
+    { for name, flow in keycloak_authentication_flow.saml_browser : name => flow.alias },
     { for name, flow in keycloak_authentication_flow.mfa_browser : name => flow.alias },
   )[each.key]
   direct_grant_flow = try(keycloak_authentication_flow.deny_direct_grant[each.key].alias, null)
@@ -158,6 +159,7 @@ resource "keycloak_authentication_bindings" "this" {
     keycloak_authentication_execution.google_cookie,
     keycloak_authentication_execution_config.google_redirector,
     keycloak_authentication_execution.google_password,
+    keycloak_authentication_execution_config.saml_redirector,
     keycloak_authentication_execution.mfa_cookie,
     keycloak_authentication_execution.mfa_otp,
     keycloak_authentication_execution.deny_direct_grant,

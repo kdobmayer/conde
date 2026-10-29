@@ -3269,7 +3269,7 @@ mod tests {
             c.get_options(),
             Some("-c idle_in_transaction_session_timeout=15s -c statement_timeout=60s")
         );
-        let c = parse_url("host=/s dbname=c options='-c statement_timeout=5s'")
+        let c = parse_url("host=localhost dbname=c options='-c statement_timeout=5s'")
             .unwrap()
             .config;
         assert_eq!(
@@ -3286,6 +3286,8 @@ mod tests {
         assert!(err.0.contains("sslmode=verify-full"), "{err}");
         assert!(parse_url("postgres://u@db.example.com/conde?sslmode=disable").is_err());
         assert!(parse_url("postgres://u@localhost/conde?sslmode=disable").is_ok());
+        // a unix socket (Windows has none: there /tmp/pg is a host name, refused like any other)
+        #[cfg(unix)]
         assert!(parse_url("host=/tmp/pg user=u dbname=conde sslmode=disable").is_ok());
         // every effective destination counts: hostaddr is dialed in preference to host
         let err = parse_url("hostaddr=192.0.2.1 user=u dbname=conde sslmode=disable")
@@ -3328,12 +3330,16 @@ mod tests {
             u.root_cert.as_deref(),
             Some(Path::new("/etc/ssl/certs/ca-certificates.crt"))
         );
-        let pinned = tls(c, u.root_cert.as_deref());
-        assert!(
-            pinned.is_ok(),
-            "the named bundle loads: {:?}",
-            pinned.err().map(|e| e.0)
-        );
+        // the bundle the URL names is Debian's (the server image's); Windows and macOS have none
+        #[cfg(target_os = "linux")]
+        {
+            let pinned = tls(c, u.root_cert.as_deref());
+            assert!(
+                pinned.is_ok(),
+                "the named bundle loads: {:?}",
+                pinned.err().map(|e| e.0)
+            );
+        }
     }
 
     #[test]
@@ -3416,10 +3422,10 @@ mod tests {
 
     #[test]
     fn keyword_values_may_be_quoted() {
-        let u = parse_url(r"host=/tmp/pg user=u dbname=conde sslmode=disable sslrootcert='/a b/ca.pem' options='-c x=1'").unwrap();
+        let u = parse_url(r"host=localhost user=u dbname=conde sslmode=disable sslrootcert='/a b/ca.pem' options='-c x=1'").unwrap();
         assert_eq!(u.root_cert.as_deref(), Some(Path::new("/a b/ca.pem")));
         assert!(u.config.get_options().unwrap().starts_with("-c x=1"));
-        assert!(parse_url("host=/tmp/pg dbname='unterminated").is_err());
+        assert!(parse_url("host=localhost dbname='unterminated").is_err());
     }
 
     /// The Cloud SQL Auth Proxy shape: IAM database authentication, so a user and no password,

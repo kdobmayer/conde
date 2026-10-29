@@ -1,6 +1,6 @@
 name: release
 
-# On a v* tag: the Linux and macOS binaries with a SHA256SUMS file to the public dist bucket under
+# On a v* tag: the Linux, macOS and Windows binaries with a SHA256SUMS file to the public dist bucket under
 # v<version>/, the server image to Artifact Registry, and (DEPLOY_ENABLED) the image digest committed to
 # deploy/image.yaml on main for Argo CD. Manual dispatch from a branch builds and tests only, unless
 # AZURE_DEPLOY_ENABLED publishes to the legacy Azure dist container.
@@ -201,10 +201,49 @@ jobs:
           path: out/
           if-no-files-found: error
 
-  # The binaries to gs://conde-cloud-dist/v<version>/ with their SHA256SUMS, then `latest` and install.sh.
+  # The same build as ci.yml's windows-install job, which installs it with dist/install.ps1.
+  windows:
+    runs-on: windows-2025
+    needs: build-id
+    env:
+      CONDE_BUILD_COMMIT: ${{ needs.build-id.outputs.commit }}
+      CONDE_BUILD_DATE: ${{ needs.build-id.outputs.date }}
+      TARGET: x86_64-pc-windows-msvc
+      NAME: conde-windows-x86_64.exe
+      # the VC++ runtime DLL is not on every Windows machine: link the C runtime statically
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p conde --target "$TARGET"
+      - name: Package
+        shell: bash
+        run: |
+          mkdir out
+          cp "target/$TARGET/release/conde.exe" "out/$NAME"
+          (cd out && sha256sum "$NAME" > "$NAME.sha256")
+      - name: Smoke test
+        shell: bash
+        run: |
+          v=$("out/$NAME" --version)
+          echo "$v"
+          case $v in *" ($CONDE_BUILD_COMMIT $CONDE_BUILD_DATE)") ;; *) echo "not this build's id"; exit 1 ;; esac
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conde-windows-x86_64
+          path: out/
+          if-no-files-found: error
+
+  # The binaries to gs://conde-cloud-dist/v<version>/ with their SHA256SUMS, then `latest` and the installers.
   publish:
     if: github.ref_type == 'tag'
-    needs: [build-id, web, macos, linux]
+    needs: [build-id, web, macos, linux, windows]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
@@ -222,7 +261,7 @@ jobs:
           path: out
       - name: Assemble
         run: |
-          bins="conde-darwin-arm64 conde-darwin-x86_64 conde-linux-x86_64"
+          bins="conde-darwin-arm64 conde-darwin-x86_64 conde-linux-x86_64 conde-windows-x86_64.exe"
           expected=$(for b in $bins; do printf '%s\n%s.sha256\n' "$b" "$b"; done | sort)
           actual=$(cd out && find . -mindepth 1 | sed 's|^\./||' | sort)
           if [ "$actual" != "$expected" ]; then
@@ -252,11 +291,13 @@ jobs:
           echo "v$VERSION" > out/latest
           gcloud storage cp --cache-control=no-store --content-type="text/plain; charset=utf-8" out/latest "gs://$DIST_BUCKET/latest"
           gcloud storage cp --cache-control=no-store --content-type="text/plain; charset=utf-8" dist/install.sh "gs://$DIST_BUCKET/install.sh"
+          # `irm | iex` reads it as text
+          gcloud storage cp --cache-control=no-store --content-type="text/plain; charset=utf-8" dist/install.ps1 "gs://$DIST_BUCKET/install.ps1"
 
   # The server image for linux/amd64, tagged with the version and the moving `gcp` tag.
   image:
     if: github.ref_type == 'tag'
-    needs: [build-id, web, macos, linux]
+    needs: [build-id, web, macos, linux, windows]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
@@ -331,7 +372,8 @@ jobs:
           exit 1
 
   # Legacy: the Azure dist container behind https://conde.nativeai.space/dist, until the cutover. It keeps
-  # its own install.sh and install.ps1 (the flat layout); dist/install.sh is the GCP bucket's now.
+  # its own install.sh and install.ps1 (the flat layout); dist/install.sh and dist/install.ps1 are the GCP
+  # bucket's now.
   publish-azure:
     if: vars.AZURE_DEPLOY_ENABLED == 'true'
     needs: [web, macos, linux]
@@ -350,7 +392,6 @@ jobs:
       - name: Assemble
         run: |
           version="v$(sed -n 's/^version = "\(.*\)"/\1/p' crates/conde/Cargo.toml | head -n 1)"
-          cp dist/install.ps1 out/install.ps1
           echo "$version" > out/latest
           (cd out && sha256sum -c ./*.sha256)
           sums=$(cd out && find . -maxdepth 1 -type f ! -name '*.sha256' ! -name SHA256SUMS -exec basename {} \; | sort | xargs sha256sum)
@@ -364,6 +405,3 @@ jobs:
       - name: Upload to the dist container
         run: |
           az storage blob upload-batch --auth-mode login --account-name stconde -d dist -s out --overwrite
-          # `irm | iex` reads it as text; a guessed binary type is not relied on
-          az storage blob upload --auth-mode login --account-name stconde -c dist -n install.ps1 -f out/install.ps1 \
-            --content-type "text/plain; charset=utf-8" --overwrite

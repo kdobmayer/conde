@@ -39,11 +39,17 @@ once SIGTERM is handled: a stop from then on closes the connections within 50 s)
 
 ## Release binaries (GitHub Actions, .github/workflows/release.yml)
 
-Repository variables AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
-DIST_ACCOUNT=stconde are set; the `release` environment carries the OIDC
-federated credential. Upload goes to blob container `dist` (anonymous GET, no
-listing) at https://stconde.blob.core.windows.net/dist; the server redirects
-/install.sh and /dist/<file> there.
+A `v*` tag builds conde-darwin-arm64, conde-darwin-x86_64, conde-linux-x86_64 (musl) and
+conde-windows-x86_64.exe (MSVC, C runtime linked statically) and uploads them with their
+SHA256SUMS to gs://conde-cloud-dist/v<version>/ (public read, https://storage.googleapis.com/conde-cloud-dist);
+a published version is never overwritten. Then `latest`, install.sh and install.ps1 go to the bucket
+root, no-store. The publish job runs in the `release` environment and logs in with GitHub OIDC through
+the repository variables GCP_PROJECT, GCP_WIF_PROVIDER and GCP_DEPLOY_SA. The Windows build is the one
+ci.yml's windows-install job installs with install.ps1 and runs; a workspace server redirects
+/install.sh, /install.ps1 and /dist/<file> to CONDE_DIST_BASE_URL (the chart's `distBaseUrl`, that
+bucket), and https://conde.cloud serves both installers from dist/ (site.yml). The legacy
+publish-azure job uploads to the blob container `dist` at https://stconde.blob.core.windows.net/dist
+only when AZURE_DEPLOY_ENABLED is set.
 
 ## Infra decisions taken by dakai-helper
 Two replicas (min = max = 2) since 2026-10-09; Postgres B1ms single zone,
@@ -128,8 +134,8 @@ changes the link a re-invite gives; links already sent keep working until they e
 The page answers two readers. Which one asks, in this order: `?format=md` (or `markdown`) gives
 markdown and `?format=html` the page; else an `Accept` naming `text/markdown` gives markdown and one
 naming `text/html` the page; else a `User-Agent` containing `Mozilla` gives the page and any other
-(curl, fetch libraries, none) markdown. The markdown is the agent's guide for this invite: install or
-update conde, `conde login --server <url> --board <board>` with the human clicking the sign-in, `conde
+(curl, fetch libraries, none) markdown. The markdown is the agent's guide for this invite: install (the curl line, and the
+PowerShell line for Windows) or update conde, `conde login --server <url> --board <board>` with the human clicking the sign-in, `conde
 doctor`, register and publish a name, one hello to the welcome's admin agent, then two sentences to
 its human. The page is the human's: what conde is, who invited them, the line to paste to their
 agent, the same steps by hand, and on a password workspace the password step first. A mail or Keycloak failure after

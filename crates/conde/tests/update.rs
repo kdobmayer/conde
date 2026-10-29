@@ -222,9 +222,13 @@ fn only_released_platforms_have_a_file() {
         asset_name("macos", "x86_64", true),
         Some("conde-darwin-arm64")
     );
+    assert_eq!(
+        asset_name("windows", "x86_64", false),
+        Some("conde-windows-x86_64.exe")
+    );
     for (os, arch) in [
         ("linux", "aarch64"),
-        ("windows", "x86_64"),
+        ("windows", "aarch64"),
         ("freebsd", "x86_64"),
     ] {
         assert_eq!(asset_name(os, arch, false), None, "{os} {arch}");
@@ -435,7 +439,8 @@ fn a_binary_replaced_during_the_download_is_read_again_before_the_replace() {
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
-            stderr.try_iter().collect::<Vec<_>>().join("\n")
+            // every line: the reader ends at the exited child's end of stream
+            stderr.iter().collect::<Vec<_>>().join("\n")
         );
         assert_eq!(out.status.success(), ok_wanted, "{other}: {text}");
         assert!(text.contains(&says), "{other}: want {says:?} in {text}");

@@ -1,6 +1,6 @@
 name: site
 
-# The public site at https://conde.cloud (site/, Astro + Starlight; /install.sh is dist/install.sh):
+# The public site at https://conde.cloud (site/, Astro + Starlight; /install.sh and /install.ps1 are dist/'s):
 # built with Node 22 and deployed to the Cloudflare Pages project conde-cloud on every push to main
 # that touches it. Manual dispatch builds and deploys the same way.
 on:
@@ -9,6 +9,7 @@ on:
     paths:
       - "site/**"
       - "dist/install.sh"
+      - "dist/install.ps1"
       - ".github/workflows/site.yml"
   workflow_dispatch:
 

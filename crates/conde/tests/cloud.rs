@@ -2,8 +2,10 @@
 //! and hosts as real `conde daemon` processes, each with its own host id, enrolled through
 //! `conde enroll`, switched to v2 through `conde boards --migrate`, its agents published by
 //! `conde publish`. One host stays on v1 (`conde daemon --v1-bridge`) to show that v1 and
-//! v2 hosts keep exchanging messages.
-#![cfg(unix)] // drives the daemon over a unix socket
+//! v2 hosts keep exchanging messages. The cases with a Claude Code session fake its unix-socket
+//! inbox, so they run on Unix only.
+// on Windows the helpers of those cases stand unused
+#![cfg_attr(windows, allow(dead_code))]
 
 #[path = "pg/mod.rs"]
 mod pg;
@@ -113,10 +115,13 @@ impl Cloud {
             !String::from_utf8_lossy(&out.stdout).contains(&key),
             "the key is never echoed"
         );
-        assert_eq!(
-            conde::credentials::mode(&h.root.join("config/conde/boards/shared.json")),
-            Some(0o600)
-        );
+        assert!(os::owner_only(
+            &h.root
+                .join("config")
+                .join("conde")
+                .join("boards")
+                .join("shared.json")
+        ));
     }
 
     /// Start `h`'s daemon on `sock` and switch the host to v2 (nothing bound yet, so nothing
@@ -173,7 +178,7 @@ impl Cloud {
             key,
         };
         conde::credentials::store(&path, &creds).unwrap();
-        assert_eq!(conde::credentials::mode(&path), Some(0o600));
+        assert!(os::owner_only(&path));
     }
 
     /// (bridge instance, status, reason) of the message's attempts, oldest first.
@@ -232,6 +237,7 @@ fn wait_sent(h: &Host, harness: &str, env: &[(&str, &str)], id: &str, state: &st
     })
 }
 
+#[cfg(unix)]
 #[test]
 fn two_hosts_exchange_a_dm_through_the_server() {
     let cloud = Cloud::start(test_config());
@@ -337,6 +343,7 @@ fn two_hosts_exchange_a_dm_through_the_server() {
     a.ok(Some("codex"), ALICE, &["send", "alice", "still local"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_restarted_daemon_is_a_new_instance_and_resends_once() {
     let cloud = Cloud::start(test_config());
@@ -398,7 +405,7 @@ fn a_second_daemon_with_the_hosts_key_fences_only_the_board_connection() {
     cloud.join(&mut a, "daemon.log", &sa, &[]);
     a.ok(Some("codex"), ALICE, &["register", "alice"]);
     // another daemon of the same host (its own socket and board file) takes the connection over
-    let other_sock = a.root.join("run/other.sock");
+    let other_sock = a.sock_named("other");
     a.daemon("other.log", &other_sock, &[]);
     wait_for("the first connection fenced", || {
         let d = String::from_utf8_lossy(&a.conde(None, &[], &["doctor"], None).stdout).to_string();
@@ -439,8 +446,7 @@ fn an_idle_connection_stays_up_through_pings() {
         .status();
     assert!(!second.unwrap().success());
     assert!(
-        a.log("second.log")
-            .contains("another conde daemon is listening"),
+        a.log("second.log").contains("another conde daemon"),
         "{}",
         a.log("second.log")
     );
@@ -485,6 +491,7 @@ fn admin_is_human_only_and_healthz_answers() {
     assert!(body.starts_with("HTTP/1.1 200"), "{body}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_session_that_stops_gives_its_hold_back_to_the_board() {
     let cloud = Cloud::start(test_config());
@@ -542,6 +549,7 @@ fn a_session_that_stops_gives_its_hold_back_to_the_board() {
 
 /// A host that has not migrated keeps its v1 bridge (`--v1-bridge`, its names on the server)
 /// and exchanges messages with a migrated host's published agent, both ways.
+#[cfg(unix)]
 #[test]
 fn a_v1_host_and_a_v2_host_exchange_messages() {
     let cloud = Cloud::start(test_config());
@@ -602,6 +610,7 @@ fn a_v1_host_and_a_v2_host_exchange_messages() {
 /// through one reaches a host connected to the other by LISTEN/NOTIFY (the
 /// poll is far too slow to explain it), and an instance fenced through one
 /// replica is closed by the other.
+#[cfg(unix)]
 #[test]
 fn replicas_wake_and_fence_each_other() {
     let Some(db) = pg::fresh_database() else {
@@ -646,7 +655,7 @@ fn replicas_wake_and_fence_each_other() {
     wait_sent(&a, "codex", ALICE, &id, "delivered");
 
     // a second daemon of host-b on replica two; replica one closes the first instance
-    let other_sock = b.root.join("run/other.sock");
+    let other_sock = b.sock_named("other");
     let mut cfg: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(b.root.join("config/conde/boards/shared.json")).unwrap(),
     )
@@ -667,6 +676,7 @@ fn replicas_wake_and_fence_each_other() {
 
 /// `conde server` on Postgres (CONDE_TEST_PG): ready on /healthz, and SIGTERM
 /// closes it cleanly, the board's last handle dropped without a panic.
+#[cfg(unix)]
 #[test]
 fn server_on_postgres_stops_cleanly_on_sigterm() {
     let Some(db) = pg::fresh_database() else {
@@ -760,7 +770,7 @@ fn enroll_takes_the_alias_and_account_from_board_info() {
     );
     assert!(!stdout.contains(&key), "the key is never echoed");
     let path = h.root.join("config/conde/boards/shared.json");
-    assert_eq!(conde::credentials::mode(&path), Some(0o600));
+    assert!(os::owner_only(&path));
     let stored: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
@@ -777,6 +787,7 @@ fn enroll_takes_the_alias_and_account_from_board_info() {
 /// B24: the daemon forwards a human's watch of a shared board with no published name of the
 /// human's own (the server scopes it to their agents); an agent session that is not published
 /// is still refused before anything leaves the host.
+#[cfg(unix)]
 #[test]
 fn a_human_watches_a_shared_board_without_a_published_name() {
     let cloud = Cloud::start(test_config());

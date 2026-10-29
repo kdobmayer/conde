@@ -4,11 +4,11 @@
 //! code: the page shows a short code, the CLI redeems it with the run it kept on disk. The
 //! installed binary's login runs on a temp machine (its own home, PATH and socket) and ends
 //! with the machine set up as `conde setup` sets it up.
-#![cfg(unix)] // checks unix file modes
 
 mod fake_daemon;
+mod os;
 
-use conde::{boards, credentials, login, util};
+use conde::{boards, login, util};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -175,13 +175,7 @@ async fn redeem(State(b): State<Arc<Board>>, Json(req): Json<Value>) -> Response
 }
 
 fn rand_u128() -> u128 {
-    let mut b = [0u8; 16];
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")
-        .unwrap()
-        .read_exact(&mut b)
-        .unwrap();
-    u128::from_le_bytes(b)
+    rand::random()
 }
 
 /// `POST /v1/rpc` as the server answers `board.info` for a host key.
@@ -302,7 +296,7 @@ async fn login_redeems_the_code_and_stores_the_key_like_enroll() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("conde/boards/dakai.json");
     login::save(&path, "dakai", &server, &enrolled).unwrap();
-    assert_eq!(credentials::mode(&path), Some(0o600));
+    assert!(os::owner_only(&path));
     let stored = boards::load(&path).unwrap();
     assert_eq!(
         (
@@ -430,9 +424,8 @@ async fn a_pasted_code_finishes_the_login_started_on_this_host() {
         url.starts_with(&format!("{server}/auth/cli?mode=code&state=")),
         "{url}"
     );
-    assert_eq!(
-        credentials::mode(&path),
-        Some(0o600),
+    assert!(
+        os::owner_only(&path),
         "the waiting run holds the PKCE verifier"
     );
     assert!(
@@ -604,6 +597,9 @@ fn a_machine_without_a_display_is_headless() {
 /// finish; the second call carries the code the human read out and stores the key.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
+    if !Machine::available() {
+        return;
+    }
     let (server, board) = board().await;
     let machine = Machine::new();
     let config = machine.config();
@@ -658,7 +654,7 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     );
     assert!(!out.contains("next: conde setup"), "{out}");
     let path = config.join("conde/boards/dakai.json");
-    assert_eq!(credentials::mode(&path), Some(0o600));
+    assert!(os::owner_only(&path));
     let stored = boards::load(&path).unwrap();
     assert_eq!(
         (stored.host_id.as_str(), stored.key.as_str()),
@@ -725,35 +721,62 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
 }
 
 /// A bare machine for the installed binary: a temp home with Claude Code's and Codex's config
-/// directories, a PATH holding only a fake `systemctl` that logs its calls, and a socket where
-/// a fake bridge answers once `systemctl` started the service.
+/// directories, a PATH holding only a fake `systemctl` that logs its calls, and a socket where a
+/// fake bridge answers once `systemctl` started the service. Windows runs `schtasks` from its
+/// system directory whatever PATH says, so there the login's setup registers the real scheduled
+/// task `conde`: only on a disposable machine that says so (CONDE_TEST_SCHEDULED_TASK, as the CI
+/// runner does), and the fake bridge answers once setup wrote the task file.
 struct Machine {
     root: tempfile::TempDir,
+    /// Held so the fake bridge serves while the machine lives; read on Unix only.
+    #[cfg_attr(windows, allow(dead_code))]
     bridge: Arc<Mutex<Option<fake_daemon::FakeDaemon>>>,
 }
 
 impl Machine {
+    /// Whether the installed binary's setup may run here; else says why the case is skipped.
+    fn available() -> bool {
+        if cfg!(unix) || std::env::var_os("CONDE_TEST_SCHEDULED_TASK").is_some() {
+            return true;
+        }
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped: the login's setup would register the scheduled task conde on this machine \
+             (CONDE_TEST_SCHEDULED_TASK=1 allows it on a disposable one)"
+        );
+        false
+    }
+
     fn new() -> Machine {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
         for d in ["home/.claude", "home/.codex", "bin", "run"] {
             std::fs::create_dir_all(r.join(d)).unwrap();
         }
-        // builtins only: the PATH has nothing else
-        let script = format!(
-            "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$2\" in start|restart) : > '{mark}';; esac\n",
-            log = r.join("systemctl.log").display(),
-            mark = r.join("started").display()
-        );
-        std::fs::write(r.join("bin/systemctl"), script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            r.join("bin/systemctl"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        #[cfg(unix)]
+        {
+            // builtins only: the PATH has nothing else
+            let script = format!(
+                "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$2\" in start|restart) : > '{mark}';; esac\n",
+                log = r.join("systemctl.log").display(),
+                mark = r.join("started").display()
+            );
+            std::fs::write(r.join("bin/systemctl"), script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                r.join("bin/systemctl"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
         let bridge = Arc::new(Mutex::new(None));
-        let (slot, mark, socket) = (bridge.clone(), r.join("started"), r.join("run/conde.sock"));
+        #[cfg(unix)]
+        let mark = r.join("started");
+        // the task file, which setup writes before it registers and starts the task
+        #[cfg(windows)]
+        let mark = r.join("conde-task.xml");
+        let (slot, socket) = (bridge.clone(), os::socket_in(r));
         std::thread::spawn(move || {
             while !mark.exists() {
                 std::thread::sleep(Duration::from_millis(10));
@@ -771,6 +794,7 @@ impl Machine {
         self.home().join(".config")
     }
 
+    #[cfg(unix)]
     fn systemctl(&self) -> Vec<String> {
         std::fs::read_to_string(self.root.path().join("systemctl.log"))
             .unwrap_or_default()
@@ -780,6 +804,7 @@ impl Machine {
     }
 
     /// The ops the bridge was asked, since the last call.
+    #[cfg(unix)]
     fn bridge_ops(&self) -> Vec<String> {
         self.bridge
             .lock()
@@ -796,15 +821,13 @@ impl Machine {
     fn conde(&self, args: Vec<String>) -> tokio::task::JoinHandle<(Option<i32>, String, String)> {
         let r = self.root.path().to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let out = std::process::Command::new(env!("CARGO_BIN_EXE_conde"))
+            let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_conde"));
+            os::clear_env(&mut cmd).env("PATH", r.join("bin"));
+            let out = os::user_home(&mut cmd, "tester", &r.join("home"))
                 .args(&args)
-                .env_clear()
-                .env("PATH", r.join("bin"))
-                .env("HOME", r.join("home"))
-                .env("USER", "tester")
                 .env("XDG_CONFIG_HOME", r.join("home/.config"))
                 .env("CONDE_DATA", r.join("data"))
-                .env("CONDE_SOCK", r.join("run/conde.sock"))
+                .env("CONDE_SOCK", os::socket_in(&r))
                 .env("DISPLAY", ":0")
                 .stdin(std::process::Stdio::null())
                 .output()
@@ -832,6 +855,7 @@ fn fake_bridge(req: &Value) -> fake_daemon::Answer {
 }
 
 /// Both calls of a pasted-code login on `machine`; the second's (status, stdout, stderr).
+#[cfg(unix)]
 async fn pasted_login(machine: &Machine, server: &str) -> (Option<i32>, String, String) {
     let start = [
         "login",
@@ -866,6 +890,7 @@ async fn pasted_login(machine: &Machine, server: &str) -> (Option<i32>, String, 
 /// the host and sets the machine up: the bridge service is written, enabled and started, the
 /// skills name the new board, the MCP entries run this binary on this socket, the board is
 /// reviewed through the bridge, and no prompt waits. A second login changes nothing.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_login_on_a_bare_machine_sets_the_machine_up() {
     let (server, _board) = board().await;

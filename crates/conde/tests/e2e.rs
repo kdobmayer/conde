@@ -1,9 +1,9 @@
 //! The real binary: `conde daemon` on a temp socket and board, driven by the
 //! CLI under fake harness parents (a process named `codex` / `claude`).
-#![cfg(unix)] // drives the daemon over a unix socket
+
+mod os;
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -19,9 +19,8 @@ impl Daemon {
     fn root() -> PathBuf {
         let root =
             Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("e2e-{}", conde::util::new_ulid()));
-        std::fs::create_dir_all(root.join("bin")).unwrap();
         for harness in ["codex", "claude"] {
-            std::os::unix::fs::symlink("/bin/sh", root.join("bin").join(harness)).unwrap();
+            os::harness(&root.join("bin"), harness);
         }
         root
     }
@@ -41,7 +40,7 @@ impl Daemon {
             .unwrap();
         d.child = Some(child);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while UnixStream::connect(d.sock()).is_err() {
+        while !os::answers(&d.sock()) {
             assert!(
                 Instant::now() < deadline,
                 "daemon did not come up: {}",
@@ -53,16 +52,14 @@ impl Daemon {
     }
 
     fn sock(&self) -> PathBuf {
-        self.root.join("run/conde.sock")
+        os::socket_in(&self.root)
     }
 
     /// A clean environment: no inherited harness markers, temp board only.
     fn base<'c>(&self, cmd: &'c mut Command) -> &'c mut Command {
         // An empty PATH: a codex delivery must never start the real codex.
-        cmd.env_clear()
-            .env("PATH", self.root.join("nopath"))
-            .env("HOME", &self.root)
-            .env("USER", "tester")
+        os::clear_env(cmd).env("PATH", self.root.join("nopath"));
+        os::user_home(cmd, "tester", &self.root)
             .env("CONDE_DATA", self.root.join("data"))
             .env("CONDE_SOCK", self.sock())
             .env("CONDE_HOST", "testhost")
@@ -71,12 +68,7 @@ impl Daemon {
     /// Run the CLI, optionally beneath a fake harness process.
     fn conde(&self, harness: Option<&str>, env: &[(&str, &str)], args: &[&str]) -> Output {
         let mut cmd = match harness {
-            Some(h) => {
-                let mut c = Command::new(self.root.join("bin").join(h));
-                // the trailing ':' keeps the shell from exec-replacing itself
-                c.args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", BIN]);
-                c
-            }
+            Some(h) => os::under(&os::harness_file(&self.root.join("bin"), h), BIN),
             None => Command::new(BIN),
         };
         self.base(&mut cmd)
@@ -252,12 +244,15 @@ fn dm_and_channel_mention_end_to_end() {
         "attached bytes"
     );
 
-    // the board file is the server's: 0700 data dir, 0600 socket
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(
-        std::fs::metadata(d.sock()).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    // the board file is the server's: 0700 data dir, 0600 socket (on Windows the pipe's DACL)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(d.sock()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     assert!(d.root.join("data/conde.db").exists());
 }
 
@@ -317,7 +312,7 @@ fn identity_follows_the_nearest_harness() {
 #[test]
 fn malformed_and_unknown_frames_get_error_responses() {
     let d = Daemon::start();
-    let stream = UnixStream::connect(d.sock()).unwrap();
+    let stream = conde::ipc::connect(&d.sock()).unwrap();
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut w = stream;
     let mut ask = |line: &str| -> serde_json::Value {
@@ -350,7 +345,7 @@ fn second_daemon_refuses_a_live_socket_and_once_runs_a_pass() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("another conde daemon is listening"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("another conde daemon"));
 
     let fresh = Daemon {
         root: Daemon::root(),

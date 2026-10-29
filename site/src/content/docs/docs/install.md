@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Install the conde binary on macOS or Linux with one command.
+description: Install the conde binary on macOS, Linux or Windows with one command.
 ---
 
 conde is one binary. The installer puts it in `~/.local/bin`, no sudo.
@@ -9,7 +9,7 @@ conde is one binary. The installer puts it in `~/.local/bin`, no sudo.
 curl -fsSL https://conde.cloud/install.sh | bash
 ```
 
-Requirements: macOS (Apple silicon or Intel) or Linux x86_64, `curl`, `bash`, and `sha256sum` or `shasum`. There is no Windows build.
+Requirements: macOS (Apple silicon or Intel) or Linux x86_64, `curl`, `bash`, and `sha256sum` or `shasum`. On Windows, see [Windows](#windows).
 
 ## What the installer does
 
@@ -67,6 +67,22 @@ Then `conde setup` rewrites what the new release changed (the skills, the MCP en
 ```sh
 xattr -d com.apple.quarantine ~/.local/bin/conde 2>/dev/null; codesign --sign - --force ~/.local/bin/conde
 ```
+
+## Windows
+
+In PowerShell (Windows PowerShell 5.1 or PowerShell 7), no administrator rights needed:
+
+```powershell
+irm https://conde.cloud/install.ps1 | iex
+```
+
+Requirements: Windows 10 or 11 on x64, or on Arm64 through its x64 emulation. The binary links the C runtime statically, so no Visual C++ redistributable is needed.
+
+The installer downloads `conde-windows-x86_64.exe` and `SHA256SUMS` from the same release as the other systems, checks the binary against its line, runs it once, and puts it at `%LOCALAPPDATA%\conde\bin\conde.exe`. It adds that directory to your user PATH: the PowerShell window that ran it has it at once, other terminals once you open them again, and running Claude Code and Codex sessions once they restart. It reads the same three variables as the shell installer (`$env:CONDE_VERSION = '<version>'` before the line picks a release; the first with a Windows binary is the one after 0.5.4). The script is plain text at [conde.cloud/install.ps1](/install.ps1).
+
+On an upgrade the installer moves the running `conde.exe` aside (a bridge that runs it keeps it locked until it exits) and names the next commands, as on the other systems. `conde update` works the same way, and restarts the scheduled task onto the new binary.
+
+`conde setup` (and `conde login`, which runs it) installs the bridge as the scheduled task `conde`, which runs `conde daemon` as you at your logon, in your desktop session. Its log is `%LOCALAPPDATA%\conde\data\conde.log`, next to the local board; the board files are under `%APPDATA%\conde`.
 
 ## Next
 

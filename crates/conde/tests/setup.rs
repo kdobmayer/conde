@@ -199,6 +199,7 @@ fn add_call(env: &Env, name: &str) -> String {
 }
 
 /// The Codex entry setup writes for MCP server `name`.
+#[cfg(unix)]
 fn codex_entry(env: &Env, name: &str) -> String {
     format!(
         "[mcp_servers.{name}]\ncommand = \"{}\"\nargs = [\"mcp\"]\nenv = {{ CONDE_SOCK = \"{}\" }}\n",
@@ -235,6 +236,8 @@ fn files(root: &Path) -> Vec<String> {
     acc
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn linux_full_setup_then_idempotent_rerun() {
     let root = temp_root();
@@ -372,6 +375,8 @@ fn linux_full_setup_then_idempotent_rerun() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn macos_launch_agent_runs_the_single_daemon() {
     let root = temp_root();
@@ -626,6 +631,8 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn receiver_policy_unset_becomes_accept_explicit_values_stay() {
     let root = temp_root();
@@ -680,6 +687,8 @@ notifications without approval; --keep-receiver-policy leaves it)"
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn without_claude_cli_and_with_relocated_config_dirs() {
     let root = temp_root();
@@ -742,6 +751,8 @@ fn without_claude_cli_and_with_relocated_config_dirs() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn a_failing_part_is_reported_and_the_rest_still_runs() {
     let root = temp_root();
@@ -771,6 +782,8 @@ fn a_failing_part_is_reported_and_the_rest_still_runs() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn existing_codex_entry_is_updated_in_place() {
     let root = temp_root();
@@ -795,6 +808,7 @@ fn existing_codex_entry_is_updated_in_place() {
 }
 
 /// Another conde instance's binary on this machine, which its `conde` MCP entries run.
+#[cfg(unix)]
 fn other_instance(root: &Path) -> String {
     let other = root.join("other/bin/conde");
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
@@ -810,6 +824,8 @@ fn claude_servers(env: &Env, servers: Value) {
     .unwrap();
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn another_instances_conde_entry_stays_and_this_one_registers_as_conde_board() {
     let root = temp_root();
@@ -1098,6 +1114,8 @@ fn both_skills_name_the_mcp_server_in_one_rewritable_place() {
     }
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn skills_name_the_enrolled_board_or_a_placeholder() {
     for skill in [setup::CLAUDE_SKILL, setup::CODEX_SKILL] {
@@ -1211,6 +1229,8 @@ fn process_env_resolves_paths() {
     assert_eq!(e.socket, paths::socket_path());
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn services_carry_every_relocated_directory() {
     let root = temp_root();
@@ -1255,6 +1275,8 @@ fn verify(env: &Env, opts: &Options, host: &mut Fake) -> (bool, String) {
     (ok, String::from_utf8(out).unwrap())
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn check_reports_each_part_and_changes_nothing() {
     let root = temp_root();
@@ -1316,6 +1338,8 @@ fn check_reports_each_part_and_changes_nothing() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn check_skips_a_harness_that_is_not_installed_and_reads_toml_semantically() {
     let root = temp_root();
@@ -1350,6 +1374,8 @@ fn check_skips_a_harness_that_is_not_installed_and_reads_toml_semantically() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn setup_and_check_agree_on_whether_codex_is_installed() {
     let opts = Options::select(false, true, false, false);
@@ -1581,6 +1607,8 @@ fn ops(host: &Fake) -> Vec<(String, Option<String>, Value)> {
     host.daemon_calls.clone()
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
     let root = temp_root();
@@ -1964,6 +1992,8 @@ fn a_migrated_host_is_not_reviewed_and_an_empty_one_switches_with_nothing_publis
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
 #[test]
 fn check_reports_the_boards() {
     let root = temp_root();
@@ -2405,6 +2435,61 @@ fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
     );
     assert!(!host.take_calls().iter().any(|c| c.contains("kickstart")));
 
+    // Windows: the task setup registered runs the updated binary; restarted (End, Run, the bridge
+    // answers) when the bridge runs, started when it does not, left alone when not registered
+    let root = temp_root();
+    let win = windows_env(&root);
+    put(&win.exe, "conde");
+    let mut host = Fake::new(&win, &[]);
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(
+        r.is_ok() && out.contains("no bridge service installed"),
+        "{out}"
+    );
+    let task = |exe: &Path| {
+        setup::utf16_file(&setup::task_xml(&Env {
+            exe: exe.to_path_buf(),
+            ..win.clone()
+        }))
+    };
+    std::fs::create_dir_all(win.windows_task().parent().unwrap()).unwrap();
+    std::fs::write(win.windows_task(), task(&win.exe)).unwrap();
+    host.alive = true;
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(
+        r.is_ok() && out.contains("restarted conde onto the new build"),
+        "{out}"
+    );
+    assert_eq!(
+        host.take_calls(),
+        [
+            "schtasks /Query /TN conde",
+            "schtasks /End /TN conde",
+            "schtasks /Run /TN conde"
+        ]
+    );
+    host.alive = false;
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(
+        r.is_ok() && out.contains("started conde on the new build"),
+        "{out}"
+    );
+    assert_eq!(
+        host.take_calls(),
+        ["schtasks /Query /TN conde", "schtasks /Run /TN conde"]
+    );
+    host.fail = Some("schtasks /Query");
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(r.is_ok() && out.contains("is not registered"), "{out}");
+    assert_eq!(host.take_calls(), ["schtasks /Query /TN conde"]);
+    host.fail = None;
+    let other = root.join("other/conde.exe");
+    put(&other, "another conde");
+    std::fs::write(win.windows_task(), task(&other)).unwrap();
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(r.is_ok() && out.contains(&runs_other(&other)), "{out}");
+    assert!(host.take_calls().is_empty());
+
     // a failed restart of the right service is an error
     let root = temp_root();
     let linux = env(&root, Os::Linux);
@@ -2433,6 +2518,12 @@ fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
         );
         assert_eq!(
             setup::plist_program(&setup::launchd_plist(&e)).as_deref(),
+            Some(odd)
+        );
+        assert_eq!(
+            setup::utf16_text(&setup::utf16_file(&setup::task_xml(&e)))
+                .and_then(|x| setup::task_program(&x))
+                .as_deref(),
             Some(odd)
         );
         assert_eq!(

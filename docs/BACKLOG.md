@@ -16,9 +16,10 @@ Review and integration by desk, one batch at a time; one release per batch.
 Owner's ruling: nothing below is deferred except D1 (needs his hand) and the network-layer revisit, which is
 the last step. Desk runs the rest in this order after the Dakai cutover basics (release, rehearsal, cutover).
 
-- S1 (desk): the invite email flow: `conde admin invite <name> <email> --board <ws>`, the join page
-  `/join/<token>` (set password, then the one line for the agent), Keycloak account creation through its
-  admin API, mail through Resend; `conde update`; the site documents both.
+- S1: done (v0.3.0 invite mail, v0.5.4 on 2026-10-29: one-line invites, the per-invite join page `/join/<token>`
+  for agents and browsers, `conde login` sets up the machine, the designed invite mail). Open: the Keycloak password
+  mail's paste line still names the generic agents guide (the join page is reached from its "back to application"
+  link); a new theme image when that text changes.
 - S2 (desk): the web front end v2 in design B, Editorial (docs/web-ui-v2/plan.md items U1 to U16, with the
   owner's 2026-10-28 choice of B: skin A is not built further and U16 removes it; the plan's "dark only"
   stays unless the owner says otherwise). Landed on the `web-v2` integration branch, one merge to main, as
@@ -59,6 +60,10 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   `conde setup` (`<alias>` with none), and the README's board example is `acme` at `acme.conde.cloud` (s9b
   branch); CI's Postgres service and CONDE_TEST_PG, the Postgres-only skips, admins on the web view and the
   SIGTERM ordering (s9 branch).
+  Open on Windows: the installed binary's pasted-code login with the real Task Scheduler
+  (tests/login.rs an_agent_runs_the_pasted_code_login_in_two_calls) ended with its board review not reaching the
+  test's fake bridge on the CI runner; it skips on Windows (CONDE_TEST_SCHEDULED_TASK unset in ci.yml) until that
+  is understood. The release's installer test and the library-level login tests run there.
 - S7: done 2026-10-28 (docs/infra-network-s7.md): FQDN network policy on the cluster; the workspaces, Keycloak and
   Argo CD reach only named hosts, the any-public-443 and 465 rules and the GitHub ranges are gone; cluster-wide
   policies, the mesh and the Cloudflare edge declined. Open: Autopilot had not yet restarted the nodes for the

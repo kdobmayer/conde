@@ -98,7 +98,7 @@ struct Run {
 impl Run {
     fn new() -> anyhow::Result<Run> {
         let mut bytes = [0u8; 64];
-        getrandom(&mut bytes)?;
+        crate::util::random_bytes(&mut bytes)?;
         let state: String = bytes[..32].iter().map(|b| format!("{b:02x}")).collect();
         let verifier = URL_SAFE_NO_PAD.encode(&bytes[32..]);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -108,13 +108,6 @@ impl Run {
             challenge,
         })
     }
-}
-
-fn getrandom(buf: &mut [u8]) -> anyhow::Result<()> {
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")?
-        .read_exact(buf)
-        .context("reading /dev/urandom")
 }
 
 /// Signs in through the browser and redeems the code. `open` is handed the sign-in URL.
@@ -390,6 +383,8 @@ pub fn start_code(server: &str, path: &std::path::Path) -> anyhow::Result<String
     let mut f = crate::private::create_file(&tmp)?;
     std::io::Write::write_all(&mut f, serde_json::to_string(&pending)?.as_bytes())?;
     f.sync_all()?;
+    // Windows renames no file that is still open
+    drop(f);
     std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     Ok(format!(
         "{origin}/auth/cli?mode=code&state={}&challenge={}",

@@ -1,8 +1,10 @@
-//! The Windows installer keeps its names, paths and integrity contract, and the release
-//! workflow publishes it; the release builds no Windows binary (dropped 2026-10-14).
+//! The Windows installer keeps its names, paths and integrity contract, reads the bucket layout
+//! install.sh reads, and the release workflow builds its binary as CI does and publishes both.
 
 const INSTALL_PS1: &str = include_str!("../../../dist/install.ps1");
+const INSTALL_SH: &str = include_str!("../../../dist/install.sh");
 const RELEASE: &str = include_str!("../../../.github/workflows/release.yml");
+const CI: &str = include_str!("../../../.github/workflows/ci.yml");
 const WINDOWS_BINARY: &str = "conde-windows-x86_64.exe";
 
 #[test]
@@ -12,8 +14,16 @@ fn install_ps1_installs_the_released_binary_for_this_user() {
     assert!(INSTALL_PS1.contains(&format!("$name = '{WINDOWS_BINARY}'")));
     assert!(INSTALL_PS1.contains(r"Join-Path $env:LOCALAPPDATA 'conde\bin'"));
     assert!(INSTALL_PS1.contains("Join-Path $dir 'conde.exe'"));
+    // the bucket layout install.sh and `conde update` read, from the same default base
+    assert!(INSTALL_PS1.contains(&format!(
+        "if ($env:CONDE_DIST_BASE_URL) {{ $env:CONDE_DIST_BASE_URL.TrimEnd('/') }} else {{ '{}' }}",
+        conde::update::DEFAULT_BASE
+    )));
+    assert!(INSTALL_PS1.contains("\"$base/latest\""));
+    assert!(INSTALL_PS1.contains("$url = \"$base/v$version\""));
     // install.sh's contract: this file's SHA256SUMS line, else nothing installed
-    assert!(INSTALL_PS1.contains("-Uri \"$base/SHA256SUMS\""));
+    assert!(INSTALL_PS1.contains("-Uri \"$url/$name\""));
+    assert!(INSTALL_PS1.contains("-Uri \"$url/SHA256SUMS\""));
     assert!(INSTALL_PS1.contains("Get-FileHash -Algorithm SHA256"));
     assert!(INSTALL_PS1.contains("checksum mismatch for $name; nothing installed"));
     assert!(INSTALL_PS1.contains("SHA256SUMS has no line for $name; nothing installed"));
@@ -39,21 +49,71 @@ fn install_ps1_installs_the_released_binary_for_this_user() {
     );
 }
 
+/// What install.sh tells a new user and an upgrading one to run next, install.ps1 says in the
+/// same words.
 #[test]
-fn the_release_publishes_the_installer_but_builds_no_windows_binary() {
+fn install_ps1_prints_install_sh_next_lines() {
+    let said: Vec<&str> = INSTALL_SH
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("say \"")?.strip_suffix('"'))
+        .filter(|l| {
+            l.starts_with("Next") || l.starts_with("  conde ") || l.starts_with("(No workspace")
+        })
+        .collect();
+    assert_eq!(said.len(), 6, "install.sh's Next: lines: {said:?}");
+    for line in said {
+        assert!(
+            INSTALL_PS1.contains(&format!("Write-Host \"{line}\"")),
+            "install.ps1 does not print {line:?}"
+        );
+    }
+}
+
+/// The steps from `- name: Toolchain` through the Build step's run line of one job, its target
+/// and flags; a build cache changes no output and is left out.
+fn build_steps<'a>(workflow: &'a str, job: &str) -> Vec<&'a str> {
+    let body: Vec<&str> = workflow
+        .lines()
+        .skip_while(|l| *l != format!("  {job}:"))
+        .skip(1)
+        .take_while(|l| l.is_empty() || l.starts_with("    "))
+        .collect();
+    let env: Vec<&str> = body
+        .iter()
+        .copied()
+        .filter(|l| {
+            l.trim_start().starts_with("TARGET:") || l.trim_start().starts_with("RUSTFLAGS:")
+        })
+        .collect();
+    let steps = body
+        .iter()
+        .copied()
+        .skip_while(|l| l.trim() != "- name: Toolchain")
+        .take_while(|l| !l.trim_start().starts_with("run: cargo build"))
+        .filter(|l| !l.contains("Swatinem/rust-cache"));
+    let run = body
+        .iter()
+        .copied()
+        .find(|l| l.trim_start().starts_with("run: cargo build"));
+    env.into_iter().chain(steps).chain(run).collect()
+}
+
+#[test]
+fn the_release_builds_and_publishes_the_windows_binary_as_ci_tests_it() {
     for needle in [
-        "needs: [web, macos, linux]",
-        "cp dist/install.ps1 out/install.ps1",
-        "-n install.ps1 -f out/install.ps1",
+        "needs: [build-id, web, macos, linux, windows]",
+        "conde-linux-x86_64 conde-windows-x86_64.exe\"",
+        "dist/install.ps1 \"gs://$DIST_BUCKET/install.ps1\"",
     ] {
         assert!(RELEASE.contains(needle), "release.yml lacks {needle:?}");
     }
-    for needle in ["windows-latest", "x86_64-pc-windows-msvc", "conde-windows-"] {
-        assert!(
-            !RELEASE.contains(needle),
-            "release.yml still has {needle:?}"
-        );
-    }
+    let release = build_steps(RELEASE, "windows");
+    assert!(
+        release.len() > 5,
+        "release.yml's windows build: {release:?}"
+    );
+    assert!(release.iter().any(|l| l.contains("+crt-static")));
+    assert_eq!(build_steps(CI, "windows-install"), release);
 }
 
 /// install.sh against a local release (CONDE_DIST_BASE_URL on file://, the bucket's v<version>/

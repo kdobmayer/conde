@@ -1,9 +1,9 @@
 //! `conde mcp` driven by a fake MCP client over pipes, against a real
 //! `conde daemon` on a temp socket and board.
-#![cfg(unix)] // drives the daemon over a unix socket
+
+mod os;
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -25,13 +25,11 @@ impl Daemon {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-{}", util::new_ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let log = std::fs::File::create(root.join("daemon.log")).unwrap();
-        let child = Command::new(BIN)
-            .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", &root)
-            .env("USER", "tester")
+        let mut cmd = Command::new(BIN);
+        os::clear_env(&mut cmd).env("PATH", std::env::var("PATH").unwrap_or_default());
+        let child = os::user_home(&mut cmd, "tester", &root)
             .env("CONDE_DATA", root.join("data"))
-            .env("CONDE_SOCK", root.join("run/conde.sock"))
+            .env("CONDE_SOCK", os::socket_in(&root))
             .env("CONDE_HOST", "testhost")
             .args(["daemon", "--interval", "0.1"])
             .stdout(Stdio::null())
@@ -40,7 +38,7 @@ impl Daemon {
             .unwrap();
         let d = Daemon { root, child };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while UnixStream::connect(d.sock()).is_err() {
+        while !os::answers(&d.sock()) {
             assert!(Instant::now() < deadline, "daemon did not come up");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -48,7 +46,7 @@ impl Daemon {
     }
 
     fn sock(&self) -> PathBuf {
-        self.root.join("run/conde.sock")
+        os::socket_in(&self.root)
     }
 }
 
@@ -397,7 +395,7 @@ const BOARD_TOOLS: [&str; 9] = [
 fn board_argument_on_the_board_tools_and_never_an_identity() {
     let root =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
-    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |_| Ok(json!({})));
+    let d = fake_daemon::FakeDaemon::start(&os::socket_in(&root), |_| Ok(json!({})));
     let mut p = claude_peer_at(d.socket.clone(), "s-tools");
     let meta = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}});
     let r = p.rpc("tools/list", meta);
@@ -450,7 +448,7 @@ fn board_argument_on_the_board_tools_and_never_an_identity() {
 fn board_rules_through_mcp_match_the_cli() {
     let root =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
-    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+    let d = fake_daemon::FakeDaemon::start(&os::socket_in(&root), |req| {
         Ok(match req["op"].as_str().unwrap() {
             "message.send" => {
                 json!({"message_id": "01MS", "to": "tester/reviewer", "board": req["board"].as_str().unwrap_or("dakai")})
@@ -569,7 +567,7 @@ fn board_rules_through_mcp_match_the_cli() {
 fn publish_and_unpublish_mirror_the_cli() {
     let root =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
-    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+    let d = fake_daemon::FakeDaemon::start(&os::socket_in(&root), |req| {
         let body = &req["body"];
         Ok(match req["op"].as_str().unwrap() {
             "mailbox.publish" if body["agent"] == "slow" => {
@@ -683,7 +681,7 @@ fn claude_peer_at(sock: PathBuf, session: &str) -> Peer {
 fn mcp_refuses_a_board_to_a_daemon_that_predates_boards() {
     let root =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
-    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+    let d = fake_daemon::FakeDaemon::start(&os::socket_in(&root), |req| {
         match req["op"].as_str().unwrap() {
             "board.list" => Err(("bad_request", "unknown op 'board.list'".into())),
             _ => Ok(json!({"items": []})),
@@ -705,7 +703,7 @@ fn mcp_refuses_a_board_to_a_daemon_that_predates_boards() {
 fn mcp_renders_unconfirmed_reads_and_per_board_paging_with_its_own_arguments() {
     let root =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
-    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+    let d = fake_daemon::FakeDaemon::start(&os::socket_in(&root), |req| {
         Ok(match req["op"].as_str().unwrap() {
             "message.read" => json!({"more": false, "messages": [
                 {"board": "dakai", "place": "dm", "message_id": "dakai:01MU", "from": "b/r", "date": "d",
@@ -739,7 +737,7 @@ fn mcp_renders_unconfirmed_reads_and_per_board_paging_with_its_own_arguments() {
 fn mcp_sent_names_each_boards_continuation() {
     let root =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
-    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |_| {
+    let d = fake_daemon::FakeDaemon::start(&os::socket_in(&root), |_| {
         Ok(
             json!({"receipts": [], "boards": [{"board": "local", "available": true}, {"board": "dakai", "available": true, "next_cursor": 200}]}),
         )
@@ -846,7 +844,7 @@ fn search_after_takes_a_cursor_or_a_time() {
 fn the_page_tool_pages_the_sessions_own_human() {
     let root =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mcp-fake-{}", util::new_ulid()));
-    let d = fake_daemon::FakeDaemon::start(&root.join("conde.sock"), |req| {
+    let d = fake_daemon::FakeDaemon::start(&os::socket_in(&root), |req| {
         Ok(match req["body"]["kind"].as_str() {
             Some("done") => {
                 json!({"to": "tester/human", "status": "not paged", "reason": "done pages are off", "board": "dakai"})

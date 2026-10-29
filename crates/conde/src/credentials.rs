@@ -80,6 +80,8 @@ pub fn store(path: &Path, creds: &Credentials) -> anyhow::Result<()> {
     f.write_all(serde_json::to_string_pretty(creds)?.as_bytes())?;
     f.write_all(b"\n")?;
     f.sync_all()?;
+    // Windows renames no file that is still open
+    drop(f);
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

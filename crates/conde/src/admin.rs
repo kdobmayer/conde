@@ -2,7 +2,6 @@
 //! (run on the board directly) and `conde admin slack` and `conde admin user` (through the
 //! server's admin API), by the human only.
 
-use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,7 +61,7 @@ pub fn server(listen: Option<&str>, data: Option<PathBuf>) -> anyhow::Result<()>
 /// A new host key: 32 random bytes, hex, with a recognizable prefix.
 fn new_key() -> anyhow::Result<String> {
     let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    crate::util::random_bytes(&mut bytes)?;
     Ok(format!(
         "conde_{}",
         bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -573,6 +572,7 @@ pub fn enrolled_text(
     next: bool,
 ) -> String {
     let (host, server, owner, path) = (&cfg.host_id, &cfg.server, &cfg.owner, path.display());
+    let protection = crate::private::PROTECTION;
     let head = if reenrolled {
         let what = match replaced {
             Some(true) => ", previous key revoked",
@@ -581,11 +581,11 @@ pub fn enrolled_text(
         };
         format!(
             "re-enrolled host {host}{what}\n\
-             board {alias} at {server} (account {owner}); credential stored at {path} (mode 0600)\n"
+             board {alias} at {server} (account {owner}); credential stored at {path} ({protection})\n"
         )
     } else {
         format!(
-            "enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} (mode 0600)\n"
+            "enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} ({protection})\n"
         )
     };
     let next = if next {

@@ -101,7 +101,12 @@ async fn readme_is_served_raw_and_rendered() {
         body.contains("<table>") && body.contains("<th>Message</th>"),
         "the doctor table renders"
     );
-    assert!(body.contains("<pre><code class=\"language-sh\">curl -fsSL https://conde.nativeai.space/install.sh | sh"), "code blocks render");
+    assert!(
+        body.contains(
+            "<pre><code class=\"language-sh\">curl -fsSL https://conde.cloud/install.sh | bash"
+        ),
+        "code blocks render"
+    );
     assert!(
         body.contains("<!-- You found the comment."),
         "the hidden comment stays a comment"

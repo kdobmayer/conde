@@ -1437,16 +1437,13 @@ running conde daemon yourself";
     let (file, program): (PathBuf, fn(&str) -> Option<String>) = match env.os {
         Os::Linux => (env.systemd_unit(), exec_start_program),
         Os::MacOs => (env.launchd_plist(), plist_program),
-        // no Windows release exists, so conde update stops before this
-        Os::Windows => {
-            writeln!(
-                out,
-                "service: the scheduled task is not restarted on Windows"
-            )?;
-            return Ok(());
-        }
+        Os::Windows => (env.windows_task(), task_program),
     };
-    let Ok(text) = std::fs::read_to_string(&file) else {
+    let text = match env.os {
+        Os::Windows => std::fs::read(&file).ok().and_then(|b| utf16_text(&b)),
+        _ => std::fs::read_to_string(&file).ok(),
+    };
+    let Some(text) = text else {
         writeln!(out, "{NONE}")?;
         return Ok(());
     };
@@ -1504,7 +1501,21 @@ running conde daemon yourself";
                 }
             }
         }
-        _ => {
+        Os::Windows => {
+            if !host.run("schtasks", &["/Query", "/TN", TASK_NAME])?.ok {
+                writeln!(
+                    out,
+                    "service: the scheduled task {TASK_NAME} is not registered; conde setup registers it"
+                )?;
+            } else if host.reach(&env.socket).is_ok() {
+                restart_task(env, host)?;
+                writeln!(out, "service: restarted {TASK_NAME} onto the new build")?;
+            } else {
+                check(host, "schtasks", &["/Run", "/TN", TASK_NAME])?;
+                writeln!(out, "service: started {TASK_NAME} on the new build")?;
+            }
+        }
+        Os::MacOs => {
             let target = format!("gui/{}/{LAUNCHD_LABEL}", env.uid);
             let print = host.run("launchctl", &["print", &target])?;
             if !print.ok {
@@ -1579,6 +1590,31 @@ pub fn task_xml(env: &Env) -> String {
 </Task>
 "#
     ))
+}
+
+/// The program a task definition runs: its `<Command>`, unescaped.
+pub fn task_program(xml: &str) -> Option<String> {
+    let start = xml.find("<Command>")? + "<Command>".len();
+    let text = &xml[start..start + xml[start..].find("</Command>")?];
+    let text = text
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&");
+    (!text.is_empty()).then_some(text)
+}
+
+/// The text of a file [`utf16_file`] wrote: UTF-16LE after its byte order mark.
+pub fn utf16_text(bytes: &[u8]) -> Option<String> {
+    let body = bytes.strip_prefix(&[0xFF, 0xFE])?;
+    let units: Vec<u16> = body
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    String::from_utf16(&units).ok()
 }
 
 /// UTF-16LE with a byte order mark and CRLF line ends, as Task Scheduler writes its files.

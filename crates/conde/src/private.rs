@@ -62,6 +62,13 @@ fn foreign(path: &Path) -> io::Result<Vec<String>> {
     conde_transport::win::foreign_grants(path, &allowed)
 }
 
+/// How a stored secret is protected, as the CLI says it: `mode 0600`, or on Windows `owner only`.
+pub const PROTECTION: &str = if cfg!(windows) {
+    "owner only"
+} else {
+    "mode 0600"
+};
+
 /// Refuse a secret file other users could read.
 pub fn check(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]

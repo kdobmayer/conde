@@ -6,6 +6,7 @@
 
 #[path = "support/fake_board.rs"]
 mod fake_board;
+mod os;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -238,10 +239,13 @@ impl Host {
     }
 
     fn tuned(user: &str, host: &str, tuning: Tuning) -> Host {
-        let dir = tempfile::Builder::new()
-            .prefix("v2d")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("v2d");
+        // a unix socket path holds at most 107 bytes: /tmp keeps it short
+        #[cfg(unix)]
+        let dir = builder.tempdir_in("/tmp").unwrap();
+        #[cfg(windows)]
+        let dir = builder.tempdir().unwrap();
         Host {
             dir,
             user: user.into(),
@@ -257,6 +261,9 @@ impl Host {
     }
 
     fn sock(&self) -> PathBuf {
+        #[cfg(windows)]
+        return os::socket_in(self.dir.path());
+        #[cfg(unix)]
         self.dir.path().join("s.sock")
     }
 

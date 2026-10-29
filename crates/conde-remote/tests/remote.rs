@@ -1663,14 +1663,19 @@ async fn a_full_work_queue_closes_the_connection_instead_of_pausing_it() {
     wait_until("hello snapshot", || !source.state().writes.is_empty()).await;
 
     // One outcome records slowly; the 64 behind it fill the queue and the next one is refused.
+    // Windows resets a connection closed with frames unread: a send after the close fails, and
+    // the reset may overtake the close frame, so there the stream may end without it.
     for i in 0..70 {
-        send_json(&mut ws, outcome_frame(&format!("slow-{i}"))).await;
+        let frame = Message::text(outcome_frame(&format!("slow-{i}")).to_string());
+        if ws.send(frame).await.is_err() {
+            break;
+        }
     }
     let t = tokio::time::Instant::now();
-    assert_eq!(
-        recv_close(&mut ws).await,
-        Some((1011, "work queue full".into()))
-    );
+    let closed = recv_close(&mut ws).await;
+    if !(cfg!(windows) && closed.is_none()) {
+        assert_eq!(closed, Some((1011, "work queue full".into())));
+    }
     assert!(
         t.elapsed() < Duration::from_secs(1),
         "closed after {:?}",
@@ -1726,8 +1731,9 @@ async fn an_endpoint_change_goes_out_before_an_outcome_reported_after_it() {
             .unwrap();
         let _hello = ws.next().await;
         // The big request has started to arrive: its sender is stuck until this side reads.
+        // (A peek on Windows can show less than is buffered: a few KiB is the evidence.)
         let mut buf = vec![0u8; 1 << 16];
-        while ws.get_ref().peek(&mut buf).await.unwrap() < buf.len() {
+        while ws.get_ref().peek(&mut buf).await.unwrap() < 4096 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let _ = stuck_tx.send(());

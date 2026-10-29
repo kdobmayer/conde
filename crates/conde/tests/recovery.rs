@@ -507,6 +507,8 @@ fn a_write_lock_delays_a_remote_outcome_but_never_rejects_it() {
     );
     release.join().unwrap();
     assert_eq!(b.status_of(&mid, "bob"), "delivered");
+    // the board's connections close first: Windows deletes no open file
+    drop((remote, bridge, b));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -555,6 +557,7 @@ fn an_outcome_the_store_could_not_take_is_answered_retry_for_the_resend() {
         remote.record_outcome("box", bridge.instance(), &foreign),
         Recorded::Rejected(_)
     ));
+    drop((remote, bridge, b, lock));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

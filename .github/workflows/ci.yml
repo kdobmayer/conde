@@ -6,6 +6,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -78,6 +79,179 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+
+  # The Windows port: the workspace tests on SQLite (no Postgres service on this runner, so the
+  # Postgres cases skip as they do without CONDE_TEST_PG).
+  windows:
+    runs-on: windows-2025
+    env:
+      # no Postgres service on this runner: the Postgres cases skip, and say so
+      CONDE_TEST_NO_PG: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web app
+        working-directory: web
+        shell: bash
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Test
+        shell: bash
+        run: cargo test --workspace --locked --no-fail-fast
+
+  # The Windows release binary, built as release.yml builds it, installed by dist/install.ps1 from a
+  # local copy of the bucket layout, then run as a new user would run it.
+  windows-install:
+    runs-on: windows-2025
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      NAME: conde-windows-x86_64.exe
+      # the VC++ runtime DLL is not on every Windows machine: link the C runtime statically
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p conde --target "$TARGET"
+      - name: Bucket layout, served on 127.0.0.1:8765
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/conde/Cargo.toml | head -n 1)
+          root="$RUNNER_TEMP/bucket"
+          mkdir -p "$root/v$version"
+          cp "target/$TARGET/release/conde.exe" "$root/v$version/$NAME"
+          (cd "$root/v$version" && sha256sum "$NAME" > SHA256SUMS)
+          echo "v$version" > "$root/latest"
+          cp dist/install.ps1 "$root/install.ps1"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # the bucket serves install.ps1 and latest as text, as the release uploads them
+          cat > "$RUNNER_TEMP/serve.py" <<'PY'
+          import functools, http.server, sys
+          H = http.server.SimpleHTTPRequestHandler
+          H.extensions_map.update({".ps1": "text/plain; charset=utf-8", "": "text/plain; charset=utf-8"})
+          http.server.test(HandlerClass=functools.partial(H, directory=sys.argv[1]), port=8765, bind="127.0.0.1")
+          PY
+          nohup python "$RUNNER_TEMP/serve.py" "$root" > "$RUNNER_TEMP/serve.log" 2>&1 &
+          for _ in $(seq 50); do curl -fsS http://127.0.0.1:8765/latest && break; sleep 0.2; done
+      - name: Install with Windows PowerShell 5.1, upgrade with PowerShell 7
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'conde\bin'
+          $run = 'irm http://127.0.0.1:8765/install.ps1 | iex'
+          $env:CONDE_DIST_BASE_URL = 'http://127.0.0.1:8765'
+          $out = powershell -NoProfile -Command $run | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed: $LASTEXITCODE" }
+          foreach ($want in @("installed $dir\conde.exe (conde $env:VERSION ", 'Next:', 'conde login --server https://<workspace>.conde.cloud', "added $dir to your user PATH")) {
+            if (-not $out.Contains($want)) { throw "install.ps1 did not print: $want" }
+          }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (-not (($userPath -split ';') -contains $dir)) { throw "user PATH lacks ${dir}: $userPath" }
+          $up = pwsh -NoProfile -Command $run | Out-String
+          Write-Host $up
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 upgrade failed: $LASTEXITCODE" }
+          foreach ($want in @("replaced $dir\conde.exe (conde $env:VERSION ", 'Next (an upgrade;', 'conde setup')) {
+            if (-not $up.Contains($want)) { throw "install.ps1 upgrade did not print: $want" }
+          }
+          if ($up.Contains('conde login')) { throw 'the upgrade names the sign-in' }
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+      - name: Run the installed conde
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'conde\bin'
+          if ((Get-Command conde).Source -ne "$dir\conde.exe") { throw "conde resolves to $((Get-Command conde).Source)" }
+          $v = conde --version
+          Write-Host $v
+          if (-not "$v".StartsWith("conde $env:VERSION (")) { throw "version: $v" }
+          Write-Host '--- conde setup --check'
+          $check = conde setup --check 2>&1 | Out-String
+          Write-Host $check
+          Write-Host "--- exit status $LASTEXITCODE"
+          if (-not $check.Contains("conde $env:VERSION")) { throw 'setup --check did not run' }
+          Write-Host '--- conde doctor'
+          $doctor = conde doctor 2>&1 | Out-String
+          Write-Host $doctor
+          Write-Host "--- exit status $LASTEXITCODE"
+          $global:LASTEXITCODE = 0
+      # the real Task Scheduler: setup registers the task conde and starts the bridge on the pipe
+      - name: conde setup, then setup --check and doctor all clear
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:LOCALAPPDATA 'conde\data\conde.log'
+          try {
+            Write-Host '--- conde setup'
+            conde setup 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "conde setup: exit status $LASTEXITCODE" }
+            schtasks /Query /TN conde | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'no scheduled task conde' }
+            $pipe = '\\.\pipe\conde-' + ($env:USERNAME.ToLowerInvariant() -replace '[^a-z0-9._-]', '-')
+            # the task starts the bridge; it answers on the pipe a moment later
+            for ($i = 0; $i -lt 60; $i++) {
+              conde doctor *> $null
+              if ($LASTEXITCODE -eq 0) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            Write-Host '--- conde setup --check'
+            $check = conde setup --check 2>&1 | Out-String
+            Write-Host $check
+            if ($LASTEXITCODE -ne 0) { throw "setup --check: exit status $LASTEXITCODE" }
+            foreach ($want in @("service: the bridge answers on $pipe", "service: the bridge runs this build ($env:VERSION", 'all clear')) {
+              if (-not $check.Contains($want)) { throw "setup --check did not print: $want" }
+            }
+            Write-Host '--- conde doctor'
+            $doctor = conde doctor 2>&1 | Out-String
+            Write-Host $doctor
+            if ($LASTEXITCODE -ne 0) { throw "doctor: exit status $LASTEXITCODE" }
+            foreach ($want in @("ok      daemon: reachable at $pipe", "ok      bridge: running this build ($env:VERSION", 'all clear')) {
+              if (-not $doctor.Contains($want)) { throw "doctor did not print: $want" }
+            }
+            # a bare runner: no harness above this shell, so it acts as the human
+            conde register ci.smoke | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'register failed' }
+            $user = $env:USERNAME.ToLowerInvariant()
+            $who = ((conde whoami) | Select-Object -First 1).Split(' ')[0]
+            if ($who -ne "$user/ci.smoke") { throw "whoami: $who" }
+            $env:CONDE_DIST_BASE_URL = 'http://127.0.0.1:8765'
+            $update = conde update --check 2>&1 | Out-String
+            Write-Host $update
+            if (-not $update.Contains("conde $env:VERSION is current")) { throw "update --check: $update" }
+            # an upgrade while the bridge runs conde.exe: the locked binary moves aside, the bridge keeps answering
+            $up = pwsh -NoProfile -Command 'irm http://127.0.0.1:8765/install.ps1 | iex' | Out-String
+            Write-Host $up
+            if (-not $up.Contains('replaced ')) { throw "install.ps1 over a running bridge: $up" }
+            $dir = Join-Path $env:LOCALAPPDATA 'conde\bin'
+            Get-ChildItem $dir | Out-Host
+            conde doctor | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "doctor after the upgrade: exit status $LASTEXITCODE" }
+          } finally {
+            Write-Host "--- $log"
+            Get-Content -Tail 100 $log -ErrorAction SilentlyContinue | Out-Host
+            schtasks /End /TN conde 2>&1 | Out-Null
+            schtasks /Delete /TN conde /F 2>&1 | Out-Null
+            $global:LASTEXITCODE = 0
+          }
 
   terraform:
     runs-on: ubuntu-24.04

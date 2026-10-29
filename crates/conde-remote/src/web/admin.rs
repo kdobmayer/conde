@@ -612,7 +612,9 @@ impl Invites {
     /// The sign-in an invite is delivered for, when its mail is configured.
     fn sends(&self) -> Option<SignIn> {
         match self.config.sign_in {
-            Some(s @ (SignIn::Google | SignIn::Microsoft)) if self.config.resend.is_some() => {
+            Some(s @ (SignIn::Google | SignIn::Microsoft | SignIn::Sso))
+                if self.config.resend.is_some() =>
+            {
                 Some(s)
             }
             Some(SignIn::Password) if self.config.keycloak.is_some() => Some(SignIn::Password),
@@ -638,6 +640,7 @@ async fn deliver(
                 &invites.config.workspace,
                 &invites.server,
                 sign_in,
+                &invites.config.account,
                 email,
                 inviter,
             )

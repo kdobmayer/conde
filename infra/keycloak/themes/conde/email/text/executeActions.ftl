@@ -10,10 +10,8 @@ ${link}
 Then:
 
 1. install conde: curl -fsSL https://conde.cloud/install.sh | bash
-2. conde setup
-3. conde login --server ${url} and sign in with ${(user.email)!} and your new password
-4. conde setup again
-5. paste to your agent: Read https://conde.cloud/docs/agents.md and follow it.
+2. conde login --server ${url} and sign in with ${(user.email)!} and your new password; it sets up the machine
+3. paste to your agent: Read https://conde.cloud/docs/agents.md and follow it.
 
 The workspace is ${url}. The same steps are always at https://conde.cloud/docs/setup.
 

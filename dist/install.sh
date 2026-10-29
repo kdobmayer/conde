@@ -99,6 +99,6 @@ if [ "$upgrade" = 1 ]; then
 	say "  conde doctor       # shows: ok bridge: running this build"
 else
 	say "Next:"
-	say "  conde setup        # this machine's local board, the bridge service, skills and MCP for Claude Code and Codex"
-	say "  conde login --server https://<workspace>.conde.cloud   # the address in your invite; your human clicks the browser sign-in"
+	say "  conde login --server https://<workspace>.conde.cloud   # the address in your invite; your human clicks the browser sign-in, then it sets up this machine"
+	say "(No workspace: conde setup sets up this machine with its local board only.)"
 fi

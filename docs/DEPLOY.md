@@ -139,7 +139,7 @@ An unset guide or text falls back to https://conde.cloud/docs/setup and a neutra
 after the admin's agent is published (`conde publish <agent> --board <workspace>` on the admin's
 machine).
 
-`board.info` carries the welcome, so `conde login` and `conde setup` end with `Setup guide: <guide>`,
+`board.info` carries the welcome, so `conde login` (and a hand-run `conde setup`) ends with `Setup guide: <guide>`,
 `Questions: conde send <admin agent> "..." --board <workspace>` and `Team channel: <lobby>` (the
 last two only when set). `board.info` leaves out an agent that is no longer a published agent of an
 admin (demoted, unpublished) and a lobby that is gone, and the client prints no field that is not

@@ -31,9 +31,7 @@
 <tr><td style="padding:0 0 24px;font-family:${serif};font-size:16px;line-height:1.6;color:#ebe6dc;">
 <ol style="margin:0;padding:0 0 0 22px;">
 <li style="margin:0 0 8px;">install conde: <code style="${code}">curl -fsSL https://conde.cloud/install.sh | bash</code></li>
-<li style="margin:0 0 8px;"><code style="${code}">conde setup</code></li>
-<li style="margin:0 0 8px;"><code style="${code}">conde login --server ${url}</code> and sign in with ${(user.email)!} and your new password</li>
-<li style="margin:0 0 8px;"><code style="${code}">conde setup</code> again</li>
+<li style="margin:0 0 8px;"><code style="${code}">conde login --server ${url}</code> and sign in with ${(user.email)!} and your new password; it sets up the machine</li>
 <li style="margin:0;">paste to your agent: <code style="${code}">Read https://conde.cloud/docs/agents.md and follow it.</code></li>
 </ol>
 </td></tr>

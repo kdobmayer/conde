@@ -2,5 +2,5 @@
 # repository@digest; the tag only names the build.
 image:
   repository: europe-west3-docker.pkg.dev/conde-prod/conde/conde
-  tag: "0.5.2"
-  digest: "sha256:3c90ad5677f40908f58b930cabaf7a838ff87e84c2f04fec23180677ad40d0c7"
+  tag: "0.5.3"
+  digest: "sha256:2fe01f52d8d6fe7dc4486a3d5e053cfb3e9fc3d59e1da916432cdce6616dc791"

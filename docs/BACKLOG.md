@@ -55,7 +55,9 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   Trusted Signing or CA certificate, owner's account decision); the daemon's reply pipe is write-only and relies on
   the client reopening it that way (a read-write reply pipe removes the dependence); a standard, non-admin user
   creating the scheduled task is untested (CI runs as administrator); a crashed bridge stays down until the next
-  logon; the skills' and docs' Windows coverage is minimal.
+  logon (fixed in v0.5.9: the task re-runs it every minute); the skills' and docs' Windows coverage is minimal.
+  Codex on Windows (v0.5.11): the bridge runs the npm shim's vendored codex.exe, because CreateProcess does not start
+  `codex.cmd` by its bare name; CI's windows job has no Codex delivery test yet (the Claude pipe test is the model).
 - S9 (desk, after v0.5.0): what remains of the old board's names: the launchd label `space.nativeai.conde`
   (a rename needs a migration of existing installs), and the README's install, dist and readme URLs at
   `conde.nativeai.space` (the served README's test pins them; the invite page already says

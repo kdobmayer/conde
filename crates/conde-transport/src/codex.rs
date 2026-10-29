@@ -123,8 +123,71 @@ pub fn codex_notify_with_id(
     }
 }
 
+/// The codex program the daemon and queue commands run. Unix: `codex` from PATH, as a shell
+/// finds it. Windows: an npm install puts a `codex.cmd` shim on PATH, which CreateProcess does
+/// not start by its bare name and cmd.exe cannot be handed a multi-line message through, so the
+/// shim's vendored codex.exe runs directly; a native codex.exe on PATH wins; `%APPDATA%\npm` is
+/// searched too, because a scheduled task's PATH may lack it.
+pub(crate) fn codex_program() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default();
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(p) = resolve_codex(dirs, cfg!(target_arch = "aarch64")) {
+            return p;
+        }
+    }
+    PathBuf::from("codex")
+}
+
+/// Windows: the first `codex.exe` in `dirs`; else the vendored exe behind the first `codex.cmd`
+/// shim (`node_modules/@openai/codex-win32-<arch>/vendor/<triple>/bin/codex.exe`, as the shim
+/// resolves it, the main package's own vendor dir second; the host's CPU first, the other one
+/// for a conde running under emulation); else that shim itself.
+#[cfg(any(windows, test))]
+fn resolve_codex(dirs: impl IntoIterator<Item = PathBuf>, arm64: bool) -> Option<PathBuf> {
+    let mut shim = None;
+    for dir in dirs {
+        let exe = dir.join("codex.exe");
+        if exe.is_file() {
+            return Some(exe);
+        }
+        let cmd = dir.join("codex.cmd");
+        if shim.is_none() && cmd.is_file() {
+            shim = Some(cmd);
+        }
+    }
+    let shim = shim?;
+    let modules = shim.parent()?.join("node_modules").join("@openai");
+    let mut arches = [
+        ("x64", "x86_64-pc-windows-msvc"),
+        ("arm64", "aarch64-pc-windows-msvc"),
+    ];
+    if arm64 {
+        arches.reverse();
+    }
+    for (arch, triple) in arches {
+        for package in [format!("codex-win32-{arch}"), "codex".to_string()] {
+            let exe = modules
+                .join(package)
+                .join("vendor")
+                .join(triple)
+                .join("bin")
+                .join("codex.exe");
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    Some(shim)
+}
+
 pub(crate) fn daemon_command() -> Command {
-    let mut cmd = Command::new("codex");
+    let mut cmd = Command::new(codex_program());
     cmd.args(["app-server", "daemon", "start"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -136,7 +199,7 @@ pub(crate) fn daemon_command() -> Command {
 }
 
 pub(crate) fn queue_command(thread_id: &str, text: &str) -> Command {
-    let mut cmd = Command::new("codex");
+    let mut cmd = Command::new(codex_program());
     cmd.args(["queue", "--thread", thread_id, "--message", text])
         .stdin(Stdio::null());
     cmd
@@ -285,6 +348,64 @@ mod tests {
         );
         assert_eq!(initialize_params()["capabilities"]["experimentalApi"], true);
         assert_eq!(initialize_params()["clientInfo"]["name"], "conde");
+    }
+
+    #[test]
+    fn windows_codex_resolves_the_exe_behind_the_npm_shim() {
+        let root = tempfile::tempdir().unwrap();
+        let (npm, native) = (root.path().join("npm"), root.path().join("native"));
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        let touch = |p: &Path| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+        };
+        let dirs = || vec![npm.clone(), native.clone()];
+        assert_eq!(resolve_codex(dirs(), false), None, "nothing installed");
+        touch(&npm.join("codex.cmd"));
+        assert_eq!(
+            resolve_codex(dirs(), false),
+            Some(npm.join("codex.cmd")),
+            "a shim without its vendored exe is run as is"
+        );
+        let vendored = |pkg: &str, triple: &str| {
+            npm.join("node_modules")
+                .join("@openai")
+                .join(pkg)
+                .join("vendor")
+                .join(triple)
+                .join("bin")
+                .join("codex.exe")
+        };
+        touch(&vendored("codex", "x86_64-pc-windows-msvc"));
+        assert_eq!(
+            resolve_codex(dirs(), false),
+            Some(vendored("codex", "x86_64-pc-windows-msvc")),
+            "the main package's own vendor dir"
+        );
+        touch(&vendored("codex-win32-x64", "x86_64-pc-windows-msvc"));
+        assert_eq!(
+            resolve_codex(dirs(), false),
+            Some(vendored("codex-win32-x64", "x86_64-pc-windows-msvc")),
+            "the platform package first"
+        );
+        assert_eq!(
+            resolve_codex(dirs(), true),
+            Some(vendored("codex-win32-x64", "x86_64-pc-windows-msvc")),
+            "an arm64 host without the arm64 package takes the x64 exe"
+        );
+        touch(&vendored("codex-win32-arm64", "aarch64-pc-windows-msvc"));
+        assert_eq!(
+            resolve_codex(dirs(), true),
+            Some(vendored("codex-win32-arm64", "aarch64-pc-windows-msvc")),
+            "an arm64 host prefers its own package"
+        );
+        touch(&native.join("codex.exe"));
+        assert_eq!(
+            resolve_codex(dirs(), false),
+            Some(native.join("codex.exe")),
+            "a native codex.exe anywhere on PATH wins over the shim"
+        );
     }
 
     #[test]

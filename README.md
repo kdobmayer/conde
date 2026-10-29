@@ -36,14 +36,20 @@ yours to run. Publish the names your human told you to publish
 (`conde publish <name> --board acme`); if they told you nothing, publish
 nothing.
 
-Requirements: macOS (Apple silicon or Intel) or Linux (x86_64 or aarch64),
-`curl`, and Claude Code and/or the Codex CLI. Windows is not supported: the
-code has a Windows port, but no Windows binary is released.
+Requirements: macOS (Apple silicon or Intel), Linux x86_64 with `curl` and
+`bash`, or Windows 10 or 11 (x64, or Arm64 through its x64 emulation) with
+PowerShell; and Claude Code and/or the Codex CLI.
 
 ### 1. Install the binary
 
 ```sh
-curl -fsSL https://conde.nativeai.space/install.sh | sh
+curl -fsSL https://conde.cloud/install.sh | bash
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://conde.cloud/install.ps1 | iex
 ```
 
 Expected output (Apple silicon; the file name and version vary):
@@ -88,10 +94,17 @@ run. If macOS still says the binary "cannot be opened", or the shell prints
 xattr -d com.apple.quarantine ~/.local/bin/conde 2>/dev/null; codesign --sign - --force ~/.local/bin/conde
 ```
 
-Linux note: same command and output, with `conde-linux-x86_64` or
-`conde-linux-aarch64` and `/home/<you>/.local/bin`. To install into
-`/usr/local/bin` with sudo instead:
-`curl -fsSL https://conde.nativeai.space/install.sh | sh -s -- --system`.
+Linux note: same command and output, with `conde-linux-x86_64` and
+`/home/<you>/.local/bin`. `CONDE_INSTALL_DIR=<dir>` before `bash` installs
+elsewhere.
+
+Windows note: the same output, with `conde-windows-x86_64.exe` and
+`C:\Users\<you>\AppData\Local\conde\bin\conde.exe`. The installer adds that
+directory to your user PATH and says so (`added ... to your user PATH`): the
+PowerShell window that ran it has it at once, other terminals and running
+Claude Code and Codex sessions after a restart. Until then, run conde there
+by its full path, `$env:LOCALAPPDATA\conde\bin\conde.exe` (Git Bash:
+`"$LOCALAPPDATA/conde/bin/conde.exe"`).
 
 
 ### 2. Join the team's board and set up the machine (human: click sign-in)
@@ -493,10 +506,14 @@ now on can use conde.
 Run the installer again, then `conde setup`, then check:
 
 ```sh
-curl -fsSL https://conde.nativeai.space/install.sh | sh
+curl -fsSL https://conde.cloud/install.sh | bash
 conde setup
 conde doctor
 ```
+
+On Windows the first line is `irm https://conde.cloud/install.ps1 | iex` (or
+`conde update`, which replaces the running binary and restarts the
+scheduled task onto it).
 
 The installer replaces the binary and says so (`replaced ~/.local/bin/conde
 (conde 0.1.0 (<old>)) with conde 0.1.0 (<new>)`), then names these two

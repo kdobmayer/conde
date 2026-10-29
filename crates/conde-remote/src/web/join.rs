@@ -27,6 +27,7 @@ use super::{DEFAULT_GUIDE, WebState, Welcome, pages, welcome_url};
 /// How long a join link works after its latest invite (the account-setup link's 7 days).
 pub const JOIN_TTL: i64 = 7 * 86_400;
 const INSTALL: &str = "curl -fsSL https://conde.cloud/install.sh | bash";
+const INSTALL_PS1: &str = "irm https://conde.cloud/install.ps1 | iex";
 const HOME: &str = "https://conde.cloud";
 
 /// What the store keeps under a join token's digest.
@@ -188,11 +189,15 @@ impl Invite<'_> {
         let mut steps = vec![
             format!(
                 "Run `conde --version`. If conde is installed, run `conde update` to bring it to the current \
-                 release. If the command is not found, install it:\n\n\
+                 release. If the command is not found, install it. On macOS or Linux:\n\n\
                  ```sh\n{INSTALL}\n```\n\n\
                  If the installer says `~/.local/bin` is not on your PATH, run \
                  `export PATH=\"$HOME/.local/bin:$PATH\"` and tell your human to add that line to their shell \
-                 startup file."
+                 startup file. On Windows, in PowerShell:\n\n\
+                 ```powershell\n{INSTALL_PS1}\n```\n\n\
+                 It puts conde on the user PATH; a shell started before the install still lacks it, so there \
+                 run `$env:LOCALAPPDATA\\conde\\bin\\conde.exe` (Git Bash: `\"$LOCALAPPDATA/conde/bin/conde.exe\"`) \
+                 in place of `conde`."
             ),
             format!(
                 "Sign in. Tell your human that a sign-in link for {ws} is coming and that they {how}. \
@@ -260,6 +265,7 @@ impl Invite<'_> {
             sign_in: self.sign_in_human(),
             line: self.line(),
             install: INSTALL,
+            install_ps1: INSTALL_PS1,
             login: self.login(),
             guide: (self.welcome.guide.as_deref())
                 .filter(|g| welcome_url(g))
@@ -302,7 +308,7 @@ fn indent(step: &str) -> String {
 <h2>By hand</h2>
 <p>No agent at hand? Run these on your machine.</p>
 <ol>
-<li>Install conde:<pre>{{ install }}</pre></li>
+<li>Install conde. On macOS or Linux:<pre>{{ install }}</pre>On Windows, in PowerShell:<pre>{{ install_ps1 }}</pre></li>
 <li>Sign in; a browser opens, {{ sign_in }} there:<pre>{{ login }}</pre></li>
 <li>Paste the line above to your agent. It registers itself and joins the team.</li>
 </ol>
@@ -317,6 +323,7 @@ struct JoinBody<'a> {
     sign_in: String,
     line: String,
     install: &'a str,
+    install_ps1: &'a str,
     login: String,
     guide: &'a str,
     home: &'a str,

@@ -51,6 +51,7 @@ build() {
 build x86_64-unknown-linux-musl conde-linux-x86_64 musl-gcc
 
 cp "$root/dist/install.sh" "$root/dist/out/install.sh"
+cp "$root/dist/install.ps1" "$root/dist/out/install.ps1"
 echo "v$version" >"$root/dist/out/latest"
 sums=$(cd "$out" && find . -maxdepth 1 -type f -name 'conde-*' -exec basename {} \; | sort | xargs sha256sum)
 printf '%s\n' "$sums" >"$out/SHA256SUMS"
@@ -62,4 +63,4 @@ if [ "$built" = 0 ]; then
 	echo "release.sh: nothing built" >&2
 	exit 1
 fi
-echo "dist/out ready for v$version (Linux only; the release workflow publishes all three binaries)"
+echo "dist/out ready for v$version (Linux only; the release workflow builds and publishes every binary)"

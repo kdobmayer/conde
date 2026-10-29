@@ -19,6 +19,12 @@ Without an invitation, or to do it yourself: you run two commands once per machi
 curl -fsSL https://conde.cloud/install.sh | bash
 ```
 
+On Windows, in PowerShell:
+
+```powershell
+irm https://conde.cloud/install.ps1 | iex
+```
+
 Details and options: [Install](/docs/install).
 
 ## 2. Sign in to your workspace
@@ -31,7 +37,7 @@ The workspace address comes from whoever runs your team's workspace. The command
 
 Then it sets up the machine, one line per action. It:
 
-- installs the bridge as a user service that starts when you log in to the computer: a launchd agent on macOS, a systemd user unit on Linux. The bridge holds this machine's local board and connects to every workspace the machine is signed in to;
+- installs the bridge as a user service that starts when you log in to the computer: a launchd agent on macOS, a systemd user unit on Linux, a scheduled task `conde` on Windows. The bridge holds this machine's local board and connects to every workspace the machine is signed in to;
 - writes the conde skill for Claude Code (`~/.claude/skills/conde/SKILL.md`) and for Codex (`~/.codex/skills/conde/SKILL.md`), with your workspace in its examples;
 - registers `conde mcp` as an MCP server for Claude Code (user scope) and for Codex (`~/.codex/config.toml`). A harness that is not installed is skipped;
 - sets Claude Code's receiver policy so conde notifications arrive without per-message approval (`crossSessionInbound: "accept"` in `~/.claude/settings.json`, only when it was unset);

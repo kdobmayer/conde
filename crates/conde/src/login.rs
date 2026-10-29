@@ -383,6 +383,8 @@ pub fn start_code(server: &str, path: &std::path::Path) -> anyhow::Result<String
     let mut f = crate::private::create_file(&tmp)?;
     std::io::Write::write_all(&mut f, serde_json::to_string(&pending)?.as_bytes())?;
     f.sync_all()?;
+    // Windows renames no file that is still open
+    drop(f);
     std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     Ok(format!(
         "{origin}/auth/cli?mode=code&state={}&challenge={}",

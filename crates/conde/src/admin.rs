@@ -572,6 +572,7 @@ pub fn enrolled_text(
     next: bool,
 ) -> String {
     let (host, server, owner, path) = (&cfg.host_id, &cfg.server, &cfg.owner, path.display());
+    let protection = crate::private::PROTECTION;
     let head = if reenrolled {
         let what = match replaced {
             Some(true) => ", previous key revoked",
@@ -580,11 +581,11 @@ pub fn enrolled_text(
         };
         format!(
             "re-enrolled host {host}{what}\n\
-             board {alias} at {server} (account {owner}); credential stored at {path} (mode 0600)\n"
+             board {alias} at {server} (account {owner}); credential stored at {path} ({protection})\n"
         )
     } else {
         format!(
-            "enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} (mode 0600)\n"
+            "enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} ({protection})\n"
         )
     };
     let next = if next {

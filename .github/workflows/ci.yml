@@ -247,6 +247,51 @@ jobs:
             Get-ChildItem $dir | Out-Host
             conde doctor | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "doctor after the upgrade: exit status $LASTEXITCODE" }
+
+            # restarts back to back: each leaves the task running a bridge that answers and stays up
+            $running = {
+              param($what, $seconds)
+              $doctor = ''
+              for ($i = 0; $i -lt 2 * $seconds; $i++) {
+                $doctor = conde doctor 2>&1 | Out-String
+                if ($LASTEXITCODE -eq 0) { break }
+                Start-Sleep -Milliseconds 500
+              }
+              # a new bridge that cannot take the pipe exits within moments: look again after them
+              Start-Sleep -Seconds 3
+              $state = (Get-ScheduledTask -TaskName conde).State
+              $last = (Get-ScheduledTaskInfo -TaskName conde).LastTaskResult
+              Write-Host "${what}: task $state, last result $last"
+              if ("$state" -ne 'Running' -or $last -ne 267009) { throw "${what}: the task is $state, last result $last" }
+              $doctor = conde doctor 2>&1 | Out-String
+              if ($LASTEXITCODE -ne 0 -or -not $doctor.Contains('all clear')) { Write-Host $doctor; throw "${what}: doctor is not all clear" }
+            }
+            # setup's restart (as update runs it): a changed task file makes setup re-register and restart
+            $taskFile = Join-Path $env:LOCALAPPDATA 'conde\conde-task.xml'
+            foreach ($round in 1, 2) {
+              [IO.File]::WriteAllText($taskFile, 'stale', [Text.Encoding]::Unicode)
+              $out = conde setup --service 2>&1 | Out-String
+              Write-Host $out
+              if ($LASTEXITCODE -ne 0 -or -not $out.Contains('service: restarted conde')) { throw "setup restart ${round}: exit status $LASTEXITCODE" }
+              & $running "setup restart $round" 30
+            }
+            # an older conde's restart: Run right after End, while the stopped bridge may still hold the pipe
+            foreach ($round in 1, 2) {
+              schtasks /End /TN conde | Out-Host
+              schtasks /Run /TN conde | Out-Host
+              & $running "End then Run $round" 30
+            }
+            $waits = @(Select-String -Path $log -Pattern 'busy; waiting up to').Count
+            Write-Host "bridges that waited for the previous one to release the pipe: $waits"
+            # a bridge that dies comes back with the task's one-minute trigger
+            $daemon = Get-CimInstance Win32_Process -Filter "Name = 'conde.exe'" | Where-Object { $_.CommandLine -match ' daemon' }
+            if (@($daemon).Count -ne 1) { throw "expected one bridge process: $(@($daemon).Count)" }
+            Stop-Process -Id $daemon.ProcessId -Force
+            Start-Sleep -Seconds 2
+            $state = (Get-ScheduledTask -TaskName conde).State
+            Write-Host "after the kill: task $state, last result $((Get-ScheduledTaskInfo -TaskName conde).LastTaskResult)"
+            if ("$state" -eq 'Running') { throw 'the task still runs after its bridge was killed' }
+            & $running 'after a kill' 90
           } finally {
             Write-Host "--- $log"
             Get-Content -Tail 100 $log -ErrorAction SilentlyContinue | Out-Host

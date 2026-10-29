@@ -3111,7 +3111,7 @@ async fn an_sso_invite_opens_its_join_page_for_agents_and_browsers(d: Arc<Dispat
             "On Windows, in PowerShell:",
             "```powershell\n   irm https://conde.cloud/install.ps1 | iex\n   ```",
             "run `$env:LOCALAPPDATA\\conde\\bin\\conde.exe` (Git Bash: `\"$LOCALAPPDATA/conde/bin/conde.exe\"`) in place of `conde`.",
-            "2. Sign in.",
+            "2. Sign in, unless this machine already is",
             "they sign in there with their VVP USA account. Then run:",
             &format!("conde login --server {server} --board vvpusa\n"),
             "3. Run `conde doctor`.",
@@ -3320,5 +3320,8 @@ async fn a_join_link_expires_and_an_unknown_one_says_so(d: Arc<Dispatcher>) {
             r#"<a href="https://conde.cloud/docs/setup">"#,
         ],
     );
-    assert!(!html.contains("<script"), "{html}");
+    assert!(
+        !html.contains("<script nonce="),
+        "no copy button on the expired page: {html}"
+    );
 }

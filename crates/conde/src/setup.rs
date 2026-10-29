@@ -376,6 +376,9 @@ pub trait Host {
     /// Whether a daemon answers on `socket`: connect and one request frame,
     /// bounded by a short timeout. Err carries why not.
     fn reach(&mut self, socket: &Path) -> Result<(), String>;
+    /// Whether anything still holds `socket`: a Windows pipe that exists (also one a dying
+    /// daemon still holds), a Unix socket that accepts a connection.
+    fn held(&mut self, socket: &Path) -> bool;
     /// Whether a person is at a terminal (stdin is one); false in an agent's shell or a script.
     fn terminal(&self) -> bool;
     /// A line the human typed after `prompt`; None without a terminal or at end of input.
@@ -422,6 +425,16 @@ impl Host for System {
                 .map_err(|e| format!("unreadable answer: {e}")),
             Err(e) => Err(format!("no answer within {PROBE_TIMEOUT:?}: {e}")),
         }
+    }
+
+    #[cfg(unix)]
+    fn held(&mut self, socket: &Path) -> bool {
+        std::os::unix::net::UnixStream::connect(socket).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn held(&mut self, socket: &Path) -> bool {
+        conde_transport::win::pipe_exists(socket.as_os_str())
     }
 
     #[cfg(unix)]
@@ -608,6 +621,9 @@ impl Host for Unattended<'_> {
     fn reach(&mut self, socket: &Path) -> Result<(), String> {
         self.0.reach(socket)
     }
+    fn held(&mut self, socket: &Path) -> bool {
+        self.0.held(socket)
+    }
     fn terminal(&self) -> bool {
         false
     }
@@ -630,6 +646,9 @@ impl Host for Unattended<'_> {
 
 /// How long setup waits for the daemon it just (re)started to answer.
 const DAEMON_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a restart waits for the stopped daemon to release its socket before starting anew.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
@@ -1511,7 +1530,7 @@ running conde daemon yourself";
                 restart_task(env, host)?;
                 writeln!(out, "service: restarted {TASK_NAME} onto the new build")?;
             } else {
-                check(host, "schtasks", &["/Run", "/TN", TASK_NAME])?;
+                run_task(env, host)?;
                 writeln!(out, "service: started {TASK_NAME} on the new build")?;
             }
         }
@@ -1546,7 +1565,9 @@ fn xml_utf16_decl(body: &str) -> String {
 
 /// The task definition: `conde daemon` at this user's logon, as this user in the
 /// interactive session (where Claude Code's session-local pipes are), no time limit,
-/// also on battery, one instance.
+/// also on battery, one instance. RestartOnFailure covers only a launch that fails, not a
+/// daemon that exits with an error; the trigger every minute (ignored while an instance
+/// runs) brings an exited bridge back while the user is logged on.
 pub fn task_xml(env: &Env) -> String {
     let user = xml(env.windows.as_ref().map_or("", |w| w.user_sid.as_str()));
     let exe = xml(&env.exe.to_string_lossy());
@@ -1561,6 +1582,14 @@ pub fn task_xml(env: &Env) -> String {
       <Enabled>true</Enabled>
       <UserId>{user}</UserId>
     </LogonTrigger>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2020-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -1625,36 +1654,110 @@ pub fn utf16_file(text: &str) -> Vec<u8> {
     out
 }
 
-/// `/End` then `/Run`, done only when both succeeded and the bridge answers again; else
-/// Err naming each step that failed. End is a hard stop; the local board's SQLite survives it.
-fn restart_task(env: &Env, host: &mut dyn Host) -> anyhow::Result<()> {
-    let mut failed = Vec::new();
-    for verb in ["/End", "/Run"] {
-        let r = host.run("schtasks", &[verb, "/TN", TASK_NAME])?;
-        if !r.ok {
-            failed.push(format!(
-                "`schtasks {verb} /TN {TASK_NAME}` failed: {}",
-                r.stderr.trim()
-            ));
-        }
-    }
-    if failed.is_empty() {
-        let deadline = std::time::Instant::now() + DAEMON_WAIT;
-        while let Err(why) = host.reach(&env.socket) {
-            if std::time::Instant::now() >= deadline {
-                failed.push(format!(
-                    "the bridge does not answer on {} afterwards ({why})",
-                    env.show(&env.socket)
-                ));
-                break;
+/// What `schtasks` reports as a task's last result while an instance runs (0x41301).
+pub const TASK_RUNNING: i64 = 0x41301;
+
+/// The task's last result: the `Last Result` column of `schtasks /Query /FO CSV /V /NH`, whose
+/// columns are fixed while their header and the status words are in the system's language.
+pub fn task_last_result(csv: &str) -> Option<i64> {
+    let line = csv.lines().find(|l| l.starts_with('"'))?;
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut field)),
+            c => field.push(c),
         }
     }
-    if !failed.is_empty() {
-        bail!("restart of {TASK_NAME} incomplete: {}", failed.join("; "));
+    fields.push(field);
+    fields.get(6)?.trim().parse().ok()
+}
+
+fn query_last_result(host: &mut dyn Host) -> anyhow::Result<Option<i64>> {
+    let r = host.run(
+        "schtasks",
+        &["/Query", "/TN", TASK_NAME, "/FO", "CSV", "/V", "/NH"],
+    )?;
+    Ok(r.ok.then(|| task_last_result(&r.stdout)).flatten())
+}
+
+fn show_result(r: Option<i64>) -> String {
+    r.map_or("unknown".into(), |r| format!("{r} ({:#x})", r as u32))
+}
+
+/// `/End`, then (once the stopped daemon released the pipe) [`run_task`]. End is a hard stop
+/// that returns before the process is gone; the local board's SQLite survives it.
+fn restart_task(env: &Env, host: &mut dyn Host) -> anyhow::Result<()> {
+    let end = host.run("schtasks", &["/End", "/TN", TASK_NAME])?;
+    let ended = if end.ok {
+        // a daemon started on a held pipe waits for it too; this only spares it the wait
+        let deadline = std::time::Instant::now() + RELEASE_WAIT;
+        while host.held(&env.socket) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        None
+    } else {
+        Some(format!(
+            "`schtasks /End /TN {TASK_NAME}` failed: {}",
+            end.stderr.trim()
+        ))
+    };
+    match (ended, run_task(env, host)) {
+        (None, Ok(())) => Ok(()),
+        (ended, run) => {
+            let failed: Vec<String> = ended
+                .into_iter()
+                .chain(run.err().map(|e| e.to_string()))
+                .collect();
+            bail!("restart of {TASK_NAME} incomplete: {}", failed.join("; "))
+        }
     }
-    Ok(())
+}
+
+/// `/Run`; done only when the task runs and the bridge answers. Else Err naming the task's
+/// last result when the new daemon exited (a daemon on a held pipe waits for it first).
+fn run_task(env: &Env, host: &mut dyn Host) -> anyhow::Result<()> {
+    let before = query_last_result(host)?;
+    let run = host.run("schtasks", &["/Run", "/TN", TASK_NAME])?;
+    if !run.ok {
+        bail!(
+            "`schtasks /Run /TN {TASK_NAME}` failed: {}",
+            run.stderr.trim()
+        );
+    }
+    let deadline = std::time::Instant::now() + DAEMON_WAIT + crate::daemon::BIND_WAIT;
+    loop {
+        let last = query_last_result(host)?;
+        let reached = host.reach(&env.socket);
+        if last == Some(TASK_RUNNING) && reached.is_ok() {
+            return Ok(());
+        }
+        if last.is_some() && last != before && last != Some(TASK_RUNNING) {
+            bail!(
+                "the bridge exited, task last result {}; see {}",
+                show_result(last),
+                env.show(&env.windows_log())
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            let why = reached.err().unwrap_or_else(|| "it answers".into());
+            bail!(
+                "the task is not running with an answering bridge on {} (task last result {}; \
+                 {why}); see {}",
+                env.show(&env.socket),
+                show_result(last),
+                env.show(&env.windows_log())
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
@@ -1681,7 +1784,7 @@ fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resu
     } else if running {
         writeln!(out, "service: {TASK_NAME} already running")?;
     } else {
-        check(host, "schtasks", &["/Run", "/TN", TASK_NAME])?;
+        run_task(env, host)?;
         writeln!(out, "service: started {TASK_NAME}")?;
     }
     let inherited: Vec<&str> = env

@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(unix)]
-use anyhow::{Context, bail};
+use anyhow::Context;
 #[cfg(unix)]
 use tokio::io::BufReader;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
@@ -27,9 +27,9 @@ use crate::protocol::{ErrorCode, MAX_FRAME, Request};
 use crate::util::{own_euid, same_user};
 
 /// Bind the socket (mode 0600, parent 0700), replacing a stale one but never
-/// a live daemon's.
+/// a live daemon's: None while a daemon answers on it.
 #[cfg(unix)]
-pub fn bind(path: &Path) -> anyhow::Result<UnixListener> {
+pub fn bind(path: &Path) -> anyhow::Result<Option<UnixListener>> {
     if let Some(dir) = path.parent() {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -39,14 +39,14 @@ pub fn bind(path: &Path) -> anyhow::Result<UnixListener> {
     }
     if path.exists() {
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
-            bail!("another conde daemon is listening on {}", path.display());
+            return Ok(None);
         }
         std::fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?;
     }
     let listener =
         UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
+    Ok(Some(listener))
 }
 
 #[cfg(unix)]

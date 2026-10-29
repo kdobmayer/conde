@@ -169,6 +169,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             name: conde-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            name: conde-linux-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain
@@ -261,7 +263,7 @@ jobs:
           path: out
       - name: Assemble
         run: |
-          bins="conde-darwin-arm64 conde-darwin-x86_64 conde-linux-x86_64 conde-windows-x86_64.exe"
+          bins="conde-darwin-arm64 conde-darwin-x86_64 conde-linux-x86_64 conde-linux-arm64 conde-windows-x86_64.exe"
           expected=$(for b in $bins; do printf '%s\n%s.sha256\n' "$b" "$b"; done | sort)
           actual=$(cd out && find . -mindepth 1 | sed 's|^\./||' | sort)
           if [ "$actual" != "$expected" ]; then

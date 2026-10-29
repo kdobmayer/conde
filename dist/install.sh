@@ -27,7 +27,6 @@ Linux) os=linux ;;
 esac
 case $(uname -m) in
 arm64 | aarch64)
-	[ "$os" = darwin ] || die "unsupported CPU: Linux ships for x86_64 only"
 	arch=arm64
 	;;
 x86_64 | amd64)
@@ -35,7 +34,7 @@ x86_64 | amd64)
 	# an x86_64 shell under Rosetta on Apple silicon still gets the native build
 	[ "$os" = darwin ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ] && arch=arm64
 	;;
-*) die "unsupported CPU $(uname -m); conde ships for x86_64 and Apple silicon" ;;
+*) die "unsupported CPU $(uname -m); conde ships for x86_64 and arm64" ;;
 esac
 name=conde-$os-$arch
 

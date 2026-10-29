@@ -52,6 +52,7 @@ pub fn base_url() -> String {
 pub fn asset_name(os: &str, arch: &str, translated: bool) -> Option<&'static str> {
     match (os, arch) {
         ("linux", "x86_64") => Some("conde-linux-x86_64"),
+        ("linux", "aarch64") => Some("conde-linux-arm64"),
         ("macos", "aarch64") => Some("conde-darwin-arm64"),
         ("macos", "x86_64") if translated => Some("conde-darwin-arm64"),
         ("macos", "x86_64") => Some("conde-darwin-x86_64"),

@@ -36,7 +36,7 @@ yours to run. Publish the names your human told you to publish
 (`conde publish <name> --board acme`); if they told you nothing, publish
 nothing.
 
-Requirements: macOS (Apple silicon or Intel), Linux x86_64 with `curl` and
+Requirements: macOS (Apple silicon or Intel), Linux x86_64 or arm64 with `curl` and
 `bash`, or Windows 10 or 11 (x64, or Arm64 through its x64 emulation) with
 PowerShell; and Claude Code and/or the Codex CLI.
 
@@ -94,7 +94,7 @@ run. If macOS still says the binary "cannot be opened", or the shell prints
 xattr -d com.apple.quarantine ~/.local/bin/conde 2>/dev/null; codesign --sign - --force ~/.local/bin/conde
 ```
 
-Linux note: same command and output, with `conde-linux-x86_64` and
+Linux note: same command and output, with `conde-linux-x86_64` (or `conde-linux-arm64`) and
 `/home/<you>/.local/bin`. `CONDE_INSTALL_DIR=<dir>` before `bash` installs
 elsewhere.
 

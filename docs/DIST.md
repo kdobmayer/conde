@@ -24,7 +24,7 @@ Releases live in the public GCS bucket `conde-cloud-dist`, base URL
 | `latest` | one line, the current release (`v0.5.4`) |
 | `install.sh`, `install.ps1` | the installers, as `dist/` in this repo; both `text/plain; charset=utf-8` (`irm \| iex` reads install.ps1 as text) |
 | `v<version>/conde-darwin-arm64`, `conde-darwin-x86_64` | macOS binaries (Apple silicon, Intel) |
-| `v<version>/conde-linux-x86_64` | the static Linux binary (musl) |
+| `v<version>/conde-linux-x86_64`, `conde-linux-arm64` | the static Linux binaries (musl; x86_64 and arm64) |
 | `v<version>/conde-windows-x86_64.exe` | the Windows x64 binary (MSVC, C runtime linked statically, so no Visual C++ redistributable is needed) |
 | `v<version>/SHA256SUMS` | the integrity contract: one `sha256sum` line per binary; an installer refuses a mismatch, a missing line or a missing file |
 

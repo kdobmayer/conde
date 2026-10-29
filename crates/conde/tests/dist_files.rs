@@ -102,7 +102,7 @@ fn build_steps<'a>(workflow: &'a str, job: &str) -> Vec<&'a str> {
 fn the_release_builds_and_publishes_the_windows_binary_as_ci_tests_it() {
     for needle in [
         "needs: [build-id, web, macos, linux, windows]",
-        "conde-linux-x86_64 conde-windows-x86_64.exe\"",
+        "conde-linux-x86_64 conde-linux-arm64 conde-windows-x86_64.exe\"",
         "dist/install.ps1 \"gs://$DIST_BUCKET/install.ps1\"",
     ] {
         assert!(RELEASE.contains(needle), "release.yml lacks {needle:?}");

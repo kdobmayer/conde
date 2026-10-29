@@ -211,6 +211,10 @@ fn only_released_platforms_have_a_file() {
         Some("conde-linux-x86_64")
     );
     assert_eq!(
+        asset_name("linux", "aarch64", false),
+        Some("conde-linux-arm64")
+    );
+    assert_eq!(
         asset_name("macos", "aarch64", false),
         Some("conde-darwin-arm64")
     );
@@ -227,7 +231,7 @@ fn only_released_platforms_have_a_file() {
         Some("conde-windows-x86_64.exe")
     );
     for (os, arch) in [
-        ("linux", "aarch64"),
+        ("linux", "riscv64"),
         ("windows", "aarch64"),
         ("freebsd", "x86_64"),
     ] {

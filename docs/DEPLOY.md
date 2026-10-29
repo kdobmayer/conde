@@ -39,7 +39,7 @@ once SIGTERM is handled: a stop from then on closes the connections within 50 s)
 
 ## Release binaries (GitHub Actions, .github/workflows/release.yml)
 
-A `v*` tag builds conde-darwin-arm64, conde-darwin-x86_64, conde-linux-x86_64 (musl) and
+A `v*` tag builds conde-darwin-arm64, conde-darwin-x86_64, conde-linux-x86_64, conde-linux-arm64 (musl) and
 conde-windows-x86_64.exe (MSVC, C runtime linked statically) and uploads them with their
 SHA256SUMS to gs://conde-cloud-dist/v<version>/ (public read, https://storage.googleapis.com/conde-cloud-dist);
 a published version is never overwritten. Then `latest`, install.sh and install.ps1 go to the bucket

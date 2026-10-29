@@ -4,13 +4,16 @@
 //! code: the page shows a short code, the CLI redeems it with the run it kept on disk. The
 //! installed binary's login runs on a temp machine (its own home, PATH and socket) and ends
 //! with the machine set up as `conde setup` sets it up.
-#![cfg(unix)] // checks unix file modes
 
+// the installed binary's login ends in `conde setup`, which these tests let drive a fake systemd;
+// on Windows it would register a real scheduled task (tests/setup.rs fakes that one)
+#[cfg(unix)]
 mod fake_daemon;
 
-use conde::{boards, credentials, login, util};
+use conde::{boards, login, util};
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +26,14 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+/// A secret file only its owner can read: mode 0600, or on Windows a DACL naming only this user.
+fn owner_only(path: &Path) -> bool {
+    #[cfg(unix)]
+    return conde::credentials::mode(path) == Some(0o600);
+    #[cfg(windows)]
+    return conde::private::check(path).is_ok() && path.is_file();
+}
 
 const KEY: &str = "conde_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -175,13 +186,7 @@ async fn redeem(State(b): State<Arc<Board>>, Json(req): Json<Value>) -> Response
 }
 
 fn rand_u128() -> u128 {
-    let mut b = [0u8; 16];
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")
-        .unwrap()
-        .read_exact(&mut b)
-        .unwrap();
-    u128::from_le_bytes(b)
+    rand::random()
 }
 
 /// `POST /v1/rpc` as the server answers `board.info` for a host key.
@@ -302,7 +307,7 @@ async fn login_redeems_the_code_and_stores_the_key_like_enroll() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("conde/boards/dakai.json");
     login::save(&path, "dakai", &server, &enrolled).unwrap();
-    assert_eq!(credentials::mode(&path), Some(0o600));
+    assert!(owner_only(&path));
     let stored = boards::load(&path).unwrap();
     assert_eq!(
         (
@@ -430,11 +435,7 @@ async fn a_pasted_code_finishes_the_login_started_on_this_host() {
         url.starts_with(&format!("{server}/auth/cli?mode=code&state=")),
         "{url}"
     );
-    assert_eq!(
-        credentials::mode(&path),
-        Some(0o600),
-        "the waiting run holds the PKCE verifier"
-    );
+    assert!(owner_only(&path), "the waiting run holds the PKCE verifier");
     assert!(
         !url.contains(
             &std::fs::read_to_string(&path)
@@ -602,6 +603,7 @@ fn a_machine_without_a_display_is_headless() {
 
 /// `conde login` as an agent runs it: no terminal, so the first call prints the URL and how to
 /// finish; the second call carries the code the human read out and stores the key.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     let (server, board) = board().await;
@@ -658,7 +660,7 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     );
     assert!(!out.contains("next: conde setup"), "{out}");
     let path = config.join("conde/boards/dakai.json");
-    assert_eq!(credentials::mode(&path), Some(0o600));
+    assert!(owner_only(&path));
     let stored = boards::load(&path).unwrap();
     assert_eq!(
         (stored.host_id.as_str(), stored.key.as_str()),
@@ -727,11 +729,13 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
 /// A bare machine for the installed binary: a temp home with Claude Code's and Codex's config
 /// directories, a PATH holding only a fake `systemctl` that logs its calls, and a socket where
 /// a fake bridge answers once `systemctl` started the service.
+#[cfg(unix)]
 struct Machine {
     root: tempfile::TempDir,
     bridge: Arc<Mutex<Option<fake_daemon::FakeDaemon>>>,
 }
 
+#[cfg(unix)]
 impl Machine {
     fn new() -> Machine {
         let root = tempfile::tempdir().unwrap();
@@ -819,6 +823,7 @@ impl Machine {
 }
 
 /// The bridge the service runs, as setup and login ask it: dakai is open, the host is on v2.
+#[cfg(unix)]
 fn fake_bridge(req: &Value) -> fake_daemon::Answer {
     match req["op"].as_str().unwrap_or_default() {
         "board.reload" => Ok(json!({"state": "opened"})),
@@ -832,6 +837,7 @@ fn fake_bridge(req: &Value) -> fake_daemon::Answer {
 }
 
 /// Both calls of a pasted-code login on `machine`; the second's (status, stdout, stderr).
+#[cfg(unix)]
 async fn pasted_login(machine: &Machine, server: &str) -> (Option<i32>, String, String) {
     let start = [
         "login",
@@ -866,6 +872,7 @@ async fn pasted_login(machine: &Machine, server: &str) -> (Option<i32>, String, 
 /// the host and sets the machine up: the bridge service is written, enabled and started, the
 /// skills name the new board, the MCP entries run this binary on this socket, the board is
 /// reviewed through the bridge, and no prompt waits. A second login changes nothing.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_login_on_a_bare_machine_sets_the_machine_up() {
     let (server, _board) = board().await;

@@ -2,7 +2,6 @@
 //! (run on the board directly) and `conde admin slack` and `conde admin user` (through the
 //! server's admin API), by the human only.
 
-use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,7 +61,7 @@ pub fn server(listen: Option<&str>, data: Option<PathBuf>) -> anyhow::Result<()>
 /// A new host key: 32 random bytes, hex, with a recognizable prefix.
 fn new_key() -> anyhow::Result<String> {
     let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    crate::util::random_bytes(&mut bytes)?;
     Ok(format!(
         "conde_{}",
         bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()

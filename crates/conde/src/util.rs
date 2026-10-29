@@ -201,6 +201,15 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(m <= 2), m as u32, d as u32)
 }
 
+/// Fill `buf` from the operating system's CSPRNG (ring's, the TLS provider's: getrandom on Linux,
+/// BCryptGenRandom on Windows).
+pub fn random_bytes(buf: &mut [u8]) -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(buf)
+        .map_err(|_| anyhow::anyhow!("the system random number generator failed"))
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     Sha256::digest(data)
         .iter()

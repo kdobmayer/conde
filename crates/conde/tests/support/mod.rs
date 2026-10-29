@@ -228,6 +228,29 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
+        // a failed case shows what the daemons and the Claude sessions dir said
+        if std::thread::panicking() {
+            let sessions = self.root.join("claude").join("sessions");
+            let found = conde_transport::discover_claude(Some(&self.root.join("claude")));
+            eprintln!("--- claude sessions the transport discovers: {found:?}");
+            for e in std::fs::read_dir(&sessions).into_iter().flatten().flatten() {
+                eprintln!("--- {}", e.path().display());
+            }
+            for e in std::fs::read_dir(&self.root)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let path = e.path();
+                if path.extension().is_some_and(|x| x == "log") {
+                    eprintln!(
+                        "--- {}\n{}",
+                        path.display(),
+                        std::fs::read_to_string(&path).unwrap_or_default()
+                    );
+                }
+            }
+        }
         for c in &mut self.daemons {
             let _ = c.kill();
             let _ = c.wait();
@@ -379,15 +402,13 @@ impl FakeClaude {
         fake
     }
 
+    /// Claude Code's inbox on Windows is a duplex pipe its runtime serves; its receipts open the
+    /// sender's pipe as libuv does, read-write, else write-only (the sender's is inbound-only).
     #[cfg(windows)]
     pub fn start(host: &Host, session_id: &str) -> FakeClaude {
         use conde_transport::win;
-        use std::ffi::OsStr;
         let sessions = host.root.join("claude").join("sessions");
         let pipe = format!(r"\\.\pipe\LOCAL\cc-msg-{}", win::random_hex(16).unwrap());
-        let mut listener =
-            win::PipeListener::bind(OsStr::new(&pipe), win::Security::owner_only(false).unwrap())
-                .unwrap();
         let pid = std::process::id();
         // the peer token Claude Code publishes for its inbox; every frame must open with it
         let token = win::random_hex(16).unwrap();
@@ -396,77 +417,94 @@ impl FakeClaude {
             json!({"peerToken": token}).to_string(),
         )
         .unwrap();
-        let created = win::process_created(pid).expect("own creation time");
-        let info = json!({"pid": pid, "sessionId": session_id, "name": session_id, "status": "idle",
-            "procStartFt": created.to_string(), "messagingSocketPath": pipe, "cwd": host.root});
-        std::fs::write(sessions.join(format!("{pid}.json")), info.to_string()).unwrap();
         let fake = FakeClaude {
             frames: Arc::default(),
             plans: Arc::default(),
         };
         let (frames, plans) = (fake.frames.clone(), fake.plans.clone());
+        let (bound, ready) = std::sync::mpsc::channel();
+        let name = pipe.clone();
         std::thread::spawn(move || {
-            loop {
-                let Ok(conn) = listener.accept(Instant::now() + Duration::from_secs(3600)) else {
-                    return;
-                };
-                let Some(conn) = conn else { continue };
-                let deadline = Instant::now() + Duration::from_secs(2);
-                let mut data = Vec::new();
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = conn.read(&mut buf, Some(deadline)) {
-                    if n == 0 {
-                        break;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                use tokio::io::AsyncReadExt;
+                use tokio::net::windows::named_pipe::ServerOptions;
+                let mut server = ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&name)
+                    .unwrap();
+                bound.send(()).unwrap();
+                loop {
+                    if server.connect().await.is_err() {
+                        return;
                     }
-                    data.extend_from_slice(&buf[..n]);
-                }
-                let lines: Vec<String> = String::from_utf8_lossy(&data)
-                    .lines()
-                    .map(str::to_string)
-                    .collect();
-                // Claude Code on Windows drops a frame without its auth line
-                let authed = lines.first().is_some_and(|l| {
-                    serde_json::from_str::<Value>(l)
-                        .is_ok_and(|a| a["type"] == "auth" && a["token"] == token.as_str())
-                });
-                if !authed {
-                    continue;
-                }
-                let Some((frame, steps)) = FakeClaude::take(&frames, &plans, &lines) else {
-                    continue;
-                };
-                let sessions = sessions.clone();
-                std::thread::spawn(move || {
-                    let to = String::from_utf8(decode_uds(&frame.from)).unwrap();
-                    for (delay, status, extra) in steps {
-                        std::thread::sleep(delay);
-                        // the reply pipe's key, which the sender published beside ours
-                        let suffix = key_suffix(&to);
-                        let Some(key) = std::fs::read_dir(&sessions)
-                            .unwrap()
-                            .flatten()
-                            .find(|e| e.file_name().to_string_lossy().ends_with(&suffix))
-                        else {
-                            continue;
-                        };
-                        let key: Value =
-                            serde_json::from_slice(&std::fs::read(key.path()).unwrap()).unwrap();
-                        let auth = json!({"type": "auth", "token": key["peerToken"]});
-                        if let Ok(c) = win::PipeClient::connect(
-                            OsStr::new(&to),
-                            Some(Instant::now() + Duration::from_secs(5)),
-                        ) {
+                    let mut conn =
+                        std::mem::replace(&mut server, ServerOptions::new().create(&name).unwrap());
+                    let mut data = Vec::new();
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), conn.read_to_end(&mut data))
+                            .await;
+                    let lines: Vec<String> = String::from_utf8_lossy(&data)
+                        .lines()
+                        .map(str::to_string)
+                        .collect();
+                    // Claude Code on Windows drops a frame without its auth line
+                    let authed = lines.first().is_some_and(|l| {
+                        serde_json::from_str::<Value>(l)
+                            .is_ok_and(|a| a["type"] == "auth" && a["token"] == token.as_str())
+                    });
+                    if !authed {
+                        continue;
+                    }
+                    let Some((frame, steps)) = FakeClaude::take(&frames, &plans, &lines) else {
+                        continue;
+                    };
+                    let sessions = sessions.clone();
+                    std::thread::spawn(move || {
+                        let to = String::from_utf8(decode_uds(&frame.from)).unwrap();
+                        for (delay, status, extra) in steps {
+                            std::thread::sleep(delay);
+                            // the reply pipe's key, which the sender published beside ours
+                            let suffix = key_suffix(&to);
+                            let Some(key) = std::fs::read_dir(&sessions)
+                                .unwrap()
+                                .flatten()
+                                .find(|e| e.file_name().to_string_lossy().ends_with(&suffix))
+                            else {
+                                continue;
+                            };
+                            let key: Value =
+                                serde_json::from_slice(&std::fs::read(key.path()).unwrap())
+                                    .unwrap();
+                            let auth = json!({"type": "auth", "token": key["peerToken"]});
                             let line =
                                 format!("{auth}\n{}", receipt(&frame.msg_id, status, &extra));
-                            let _ = c.write_all(
-                                line.as_bytes(),
-                                Some(Instant::now() + Duration::from_secs(5)),
-                            );
+                            let open = |read: bool| {
+                                std::fs::OpenOptions::new().read(read).write(true).open(&to)
+                            };
+                            if let Ok(mut c) = open(true).or_else(|_| open(false)) {
+                                let _ = c.write_all(line.as_bytes());
+                            }
                         }
-                    }
-                });
-            }
+                    });
+                }
+            });
         });
+        ready.recv().unwrap();
+        let created = win::process_created(pid).expect("own creation time");
+        let info = json!({"pid": pid, "sessionId": session_id, "name": session_id, "status": "idle",
+            "procStartFt": created.to_string(), "messagingSocketPath": pipe, "cwd": host.root});
+        std::fs::write(
+            host.root
+                .join("claude")
+                .join("sessions")
+                .join(format!("{pid}.json")),
+            info.to_string(),
+        )
+        .unwrap();
         fake
     }
 

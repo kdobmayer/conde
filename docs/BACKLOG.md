@@ -50,6 +50,12 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   Keycloak; invites in `sso` mode. Open: the first real sign-in proves the signed-assertion setting (if it fails on the
   signature, set want_assertions_signed false, keep signature validation); single logout is off until the Identity
   Center application gets Keycloak's logout address; the unused Keycloak image 26.8.1-conde7 joins the deletion list.
+- Windows (2026-10-29, v0.5.5 to v0.5.7): released, CI-proven (install, login with the real scheduled task, MCP
+  over stdio, push delivery to a Claude Code session's named pipe). Open: the exe is unsigned (code signing needs a
+  Trusted Signing or CA certificate, owner's account decision); the daemon's reply pipe is write-only and relies on
+  the client reopening it that way (a read-write reply pipe removes the dependence); a standard, non-admin user
+  creating the scheduled task is untested (CI runs as administrator); a crashed bridge stays down until the next
+  logon; the skills' and docs' Windows coverage is minimal.
 - S9 (desk, after v0.5.0): what remains of the old board's names: the launchd label `space.nativeai.conde`
   (a rename needs a migration of existing installs), and the README's install, dist and readme URLs at
   `conde.nativeai.space` (the served README's test pins them; the invite page already says

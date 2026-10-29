@@ -597,6 +597,9 @@ fn a_machine_without_a_display_is_headless() {
 /// finish; the second call carries the code the human read out and stores the key.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
+    if !Machine::available() {
+        return;
+    }
     let (server, board) = board().await;
     let machine = Machine::new();
     let config = machine.config();
@@ -718,9 +721,11 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
 }
 
 /// A bare machine for the installed binary: a temp home with Claude Code's and Codex's config
-/// directories, a PATH holding only a fake service manager that logs its calls (`systemctl`, on
-/// Windows `schtasks`, so no real scheduled task is registered), and a socket where a fake bridge
-/// answers once that manager started the service.
+/// directories, a PATH holding only a fake `systemctl` that logs its calls, and a socket where a
+/// fake bridge answers once `systemctl` started the service. Windows runs `schtasks` from its
+/// system directory whatever PATH says, so there the login's setup registers the real scheduled
+/// task `conde`: only on a disposable machine that says so (CONDE_TEST_SCHEDULED_TASK, as the CI
+/// runner does), and the fake bridge answers once setup wrote the task file.
 struct Machine {
     root: tempfile::TempDir,
     /// Held so the fake bridge serves while the machine lives; read on Unix only.
@@ -729,6 +734,20 @@ struct Machine {
 }
 
 impl Machine {
+    /// Whether the installed binary's setup may run here; else says why the case is skipped.
+    fn available() -> bool {
+        if cfg!(unix) || std::env::var_os("CONDE_TEST_SCHEDULED_TASK").is_some() {
+            return true;
+        }
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped: the login's setup would register the scheduled task conde on this machine \
+             (CONDE_TEST_SCHEDULED_TASK=1 allows it on a disposable one)"
+        );
+        false
+    }
+
     fn new() -> Machine {
         let root = tempfile::tempdir().unwrap();
         let r = root.path();
@@ -751,10 +770,13 @@ impl Machine {
             )
             .unwrap();
         }
-        #[cfg(windows)]
-        os::example_as(&r.join("bin"), "fake_schtasks", "schtasks");
         let bridge = Arc::new(Mutex::new(None));
-        let (slot, mark, socket) = (bridge.clone(), r.join("started"), os::socket_in(r));
+        #[cfg(unix)]
+        let mark = r.join("started");
+        // the task file, which setup writes before it registers and starts the task
+        #[cfg(windows)]
+        let mark = r.join("conde-task.xml");
+        let (slot, socket) = (bridge.clone(), os::socket_in(r));
         std::thread::spawn(move || {
             while !mark.exists() {
                 std::thread::sleep(Duration::from_millis(10));

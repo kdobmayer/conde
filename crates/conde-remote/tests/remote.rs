@@ -1664,18 +1664,16 @@ async fn a_full_work_queue_closes_the_connection_instead_of_pausing_it() {
 
     // One outcome records slowly; the 64 behind it fill the queue and the next one is refused.
     // Windows resets a connection closed with frames unread: a send after the close fails, and
-    // the reset may overtake the close frame.
-    let mut reset = false;
+    // the reset may overtake the close frame, so there the stream may end without it.
     for i in 0..70 {
         let frame = Message::text(outcome_frame(&format!("slow-{i}")).to_string());
         if ws.send(frame).await.is_err() {
-            reset = true;
             break;
         }
     }
     let t = tokio::time::Instant::now();
     let closed = recv_close(&mut ws).await;
-    if !(cfg!(windows) && reset && closed.is_none()) {
+    if !(cfg!(windows) && closed.is_none()) {
         assert_eq!(closed, Some((1011, "work queue full".into())));
     }
     assert!(

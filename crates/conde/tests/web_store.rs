@@ -177,6 +177,9 @@ on_both!(
     a_conde_login_enrollment_is_greeted,
     two_concurrent_first_mints_greet_once,
     an_unshared_board_sends_no_welcome,
+    an_sso_invite_opens_its_join_page_for_agents_and_browsers,
+    a_password_invite_opens_its_join_page_with_the_password_step_first,
+    a_join_link_expires_and_an_unknown_one_says_so,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -1468,6 +1471,8 @@ struct KcStub {
     lose_next_create: std::sync::atomic::AtomicBool,
     token_fails: std::sync::atomic::AtomicBool,
     tokens: Mutex<Vec<HashMap<String, String>>>,
+    /// The (client_id, redirect_uri) of each account-setup email.
+    redirects: Mutex<Vec<(String, String)>>,
     creates: Mutex<Vec<Value>>,
     /// (account id, lifespan, body) of each execute-actions-email.
     actions: Mutex<Vec<(String, String, Value)>>,
@@ -1621,10 +1626,15 @@ async fn kc_actions(
         )
             .into_response();
     }
+    let param = |k: &str| q.get(k).cloned().unwrap_or_default();
+    kc.redirects
+        .lock()
+        .unwrap()
+        .push((param("client_id"), param("redirect_uri")));
     kc.actions
         .lock()
         .unwrap()
-        .push((id, q.get("lifespan").cloned().unwrap_or_default(), body));
+        .push((id, param("lifespan"), body));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1666,7 +1676,8 @@ async fn realm_record(d: &Arc<Dispatcher>, name: &str) -> (Option<String>, Optio
     .await
 }
 
-/// A Google workspace: the invite sends one email through Resend with the setup steps; a failed
+/// A Google workspace: the invite sends one email through Resend with the line for the person's
+/// agent, the invite's join page (the `join` of the answer); a failed
 /// send answers 502 with the user created; a user who signed in already gets nothing; without
 /// mail the invite says so.
 async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
@@ -1697,6 +1708,8 @@ async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
         (StatusCode::OK, Some("sent"), Some("invited")),
         "{got}"
     );
+    let join = got["join"].as_str().unwrap().to_string();
+    assert!(join.starts_with(&env.url("/join/")), "{join}");
     {
         let seen = resend.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
@@ -1706,21 +1719,17 @@ async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
         assert_eq!(mail["to"], json!(["ann@clearscale.example"]));
         assert_eq!(mail["subject"], "Krisz invited you to clearscale on conde");
         let text = mail["text"].as_str().unwrap();
-        for step in [
-            "curl -fsSL https://conde.cloud/install.sh | bash",
-            &format!("conde login --server {}", env.base),
-            "sign in with your Google account ann@clearscale.example",
-            &format!("The workspace is {}.", env.base),
+        let line = format!("Read {join} and follow it.");
+        for part in [
+            "with your Google account ann@clearscale.example",
+            &line,
             "https://conde.cloud/docs/setup",
         ] {
-            assert!(text.contains(step), "{step}: {text}");
+            assert!(text.contains(part), "{part}: {text}");
         }
-        assert!(
-            mail["html"]
-                .as_str()
-                .unwrap()
-                .contains("sign in with your Google account ann@clearscale.example")
-        );
+        let html = mail["html"].as_str().unwrap();
+        assert!(html.contains(&format!("Read <a href=\"{join}\"")), "{html}");
+        assert!(html.contains("with your Google account"), "{html}");
     }
 
     resend.status.store(500, Ordering::SeqCst);
@@ -2249,8 +2258,8 @@ async fn realm_failures_answer_502_with_the_user_created(d: Arc<Dispatcher>) {
     assert!(users.iter().any(|u| u.name == "ann"));
 }
 
-/// A Microsoft workspace's email names the Microsoft account; its Idempotency-Key is stable for
-/// the same user and email.
+/// A Microsoft workspace's email names the Microsoft account; the same user and email get the same
+/// email again (the same join page) under the same Idempotency-Key.
 async fn a_microsoft_invite_names_the_microsoft_account(d: Arc<Dispatcher>) {
     let (resend_url, resend) = start_resend().await;
     let env = mail_env(&d, google_invite(resend_url, SignIn::Microsoft)).await;
@@ -2266,11 +2275,16 @@ async fn a_microsoft_invite_names_the_microsoft_account(d: Arc<Dispatcher>) {
         .unwrap()
         .to_string();
     assert!(
-        text.contains("sign in with your Microsoft account ann@dakai.example"),
+        text.contains("with your Microsoft account ann@dakai.example"),
         "{text}"
     );
     assert!(!text.contains("Google"), "{text}");
     invite_req(&env, body).await;
+    {
+        let seen = resend.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].1, seen[1].1, "the same email again");
+    }
     let keys = resend.keys.lock().unwrap().clone();
     assert!(
         keys[0].as_deref().is_some_and(|k| !k.contains("ann@")),
@@ -2286,7 +2300,7 @@ async fn an_sso_invite_names_the_company_account(d: Arc<Dispatcher>) {
     let env = mail_env(
         &d,
         InviteConfig {
-            workspace: "vvpusa".into(),
+            workspace: "VVP USA".into(),
             account: "VVP USA".into(),
             ..google_invite(resend_url, SignIn::Sso)
         },
@@ -2302,10 +2316,15 @@ async fn an_sso_invite_names_the_company_account(d: Arc<Dispatcher>) {
     let seen = resend.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
     let mail = &seen[0].1;
-    assert_eq!(mail["subject"], "You're invited to vvpusa on conde");
+    assert_eq!(mail["subject"], "You're invited to VVP USA on conde");
     let text = mail["text"].as_str().unwrap();
     assert!(
-        text.contains("sign in with your VVP USA account ann@vvpusa.example"),
+        text.contains("with your VVP USA account ann@vvpusa.example"),
+        "{text}"
+    );
+    let join = got["join"].as_str().unwrap();
+    assert!(
+        text.contains(&format!("Read {join} and follow it.")),
         "{text}"
     );
     assert!(
@@ -2968,4 +2987,334 @@ async fn an_unshared_board_sends_no_welcome(d: Arc<Dispatcher>) {
     mint(&env, "ann", "laptop").await;
     assert!(dms(&d, "boss", "helper").await.is_empty());
     assert!(dms(&d, "ann", "human").await.is_empty());
+}
+
+// --- the join page --------------------------------------------------------------------------
+
+const CHROME: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+const BROWSER_ACCEPT: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+/// One GET with these headers (none: reqwest's `*/*` and no User-Agent, as a fetch library
+/// sends): (status, content type, Vary, body).
+async fn fetch(
+    url: &str,
+    accept: Option<&str>,
+    ua: Option<&str>,
+) -> (StatusCode, String, String, String) {
+    let mut req = reqwest::Client::new().get(url);
+    if let Some(a) = accept {
+        req = req.header(header::ACCEPT, a);
+    }
+    if let Some(ua) = ua {
+        req = req.header(header::USER_AGENT, ua);
+    }
+    let r = req.send().await.unwrap();
+    let h = |name| {
+        r.headers()
+            .get(name)
+            .map(|v: &header::HeaderValue| v.to_str().unwrap().to_string())
+            .unwrap_or_default()
+    };
+    let (status, ctype, vary) = (r.status(), h(header::CONTENT_TYPE), h(header::VARY));
+    assert_eq!(h(header::CACHE_CONTROL), "no-store");
+    (status, ctype, vary, r.text().await.unwrap())
+}
+
+/// The board shared as `board` with `boss/helper` as the welcome's admin agent and `#general`
+/// as its lobby.
+async fn join_welcome(d: &Arc<Dispatcher>, env: &Env<WebBoard>, board: &str) {
+    d.share(board);
+    let k = Some(ADMIN_KEY);
+    mint(env, "boss", "box").await;
+    let helper = published(d, "boss", "helper", "box").await;
+    admin(env, "/v1/admin/users/boss/promote", Some(json!({})), k).await;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            Ok(t.insert_channel(&conde::store::Channel {
+                id: conde::util::new_ulid(),
+                name: "general".into(),
+                created_by: helper,
+                topic: None,
+            })?)
+        })
+        .unwrap()
+    })
+    .await;
+    let w = json!({"admin_agent": "boss/helper", "lobby": "#general"});
+    let (status, got) = admin(env, "/v1/admin/welcome", Some(w), k).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+}
+
+fn in_order(text: &str, parts: &[&str]) {
+    let mut at = 0;
+    for part in parts {
+        let found = text[at..]
+            .find(part)
+            .unwrap_or_else(|| panic!("{part:?} missing after byte {at}: {text}"));
+        at += found + part.len();
+    }
+}
+
+/// An SSO invite issues a join link (the same invite again, the same link). An agent fetching
+/// it gets the markdown guide for this workspace, a browser the human page with the line to
+/// paste; `?format=md` and an Accept naming markdown decide over a browser's User-Agent.
+async fn an_sso_invite_opens_its_join_page_for_agents_and_browsers(d: Arc<Dispatcher>) {
+    let (resend_url, _resend) = start_resend().await;
+    let env = mail_env(
+        &d,
+        InviteConfig {
+            workspace: "VVP USA".into(),
+            account: "VVP USA".into(),
+            ..google_invite(resend_url, SignIn::Sso)
+        },
+    )
+    .await;
+    join_welcome(&d, &env, "vvpusa").await;
+    let ask = json!({"name": "ann", "email": "ann@vvpusa.example", "inviter": "Krisz & Co"});
+    let (status, got) = invite_req(&env, ask.clone()).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("sent")),
+        "{got}"
+    );
+    let join = got["join"].as_str().unwrap().to_string();
+    assert!(join.starts_with(&env.url("/join/")), "{join}");
+    assert_eq!(join.len(), env.url("/join/").len() + 64, "{join}");
+    // the same invite again, twice at once: the same link, refreshed
+    let ((s1, a1), (s2, a2)) = tokio::join!(invite_req(&env, ask.clone()), invite_req(&env, ask));
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK), "{a1} {a2}");
+    for again in [a1, a2] {
+        assert_eq!(
+            again["join"],
+            join.as_str(),
+            "the same invite, the same link"
+        );
+    }
+
+    let (status, ctype, vary, md) = fetch(&join, None, None).await;
+    assert_eq!(
+        (status, ctype.as_str()),
+        (StatusCode::OK, "text/markdown; charset=utf-8")
+    );
+    assert_eq!(vary, "Accept, User-Agent");
+    let server = env.base.clone();
+    in_order(
+        &md,
+        &[
+            "# Join the VVP USA workspace on conde",
+            "Krisz & Co invited them as `ann`.",
+            &format!("The workspace is {server}, and its board name is `vvpusa`."),
+            "Your human signs in with their VVP USA account.",
+            "1. Run `conde --version`.",
+            "curl -fsSL https://conde.cloud/install.sh | bash",
+            "2. Sign in.",
+            "they sign in there with their VVP USA account. Then run:",
+            &format!("conde login --server {server} --board vvpusa\n"),
+            "3. Run `conde doctor`.",
+            "4. Run `conde whoami`.",
+            "conde register <name>",
+            "conde publish <name> --board vvpusa",
+            "5. Say hello to the workspace admin's agent, once:",
+            "conde send boss/helper \"Hello: <name> joined vvpusa for ann, on <this machine's hostname>.\" --board vvpusa",
+            "6. Tell your human, in two sentences:",
+            "`conde send <owner>/<agent> \"<message>\" --board vvpusa`",
+            "questions go to `boss/helper`, and the team channel is #general.",
+        ],
+    );
+    assert!(md.lines().count() <= 60, "{} lines", md.lines().count());
+    for absent in ["password", "Google", "Microsoft", "<!doctype", "&amp;"] {
+        assert!(!md.contains(absent), "{absent}: {md}");
+    }
+    println!("--- the join guide of an sso invite ---\n{md}--- end ---");
+
+    let (status, ctype, _, html) = fetch(&join, Some(BROWSER_ACCEPT), Some(CHROME)).await;
+    assert_eq!(
+        (status, ctype.as_str()),
+        (StatusCode::OK, "text/html; charset=utf-8")
+    );
+    in_order(
+        &html,
+        &[
+            "<title>Join VVP USA · conde</title>",
+            "Krisz &#38; Co invited you to the VVP USA workspace on conde, as <code>ann</code>.",
+            r#"<a href="https://conde.cloud">conde.cloud</a>"#,
+            "<h2>Hand the setup to your agent</h2>",
+            "sign in with your VVP USA account.",
+            &format!(r#"<pre id="key">Read {join} and follow it.</pre>"#),
+            r#"<button type="button" id="copy">"#,
+            "<h2>By hand</h2>",
+            "curl -fsSL https://conde.cloud/install.sh | bash",
+            &format!("conde login --server {server} --board vvpusa"),
+            "Paste the line above to your agent.",
+            r#"<a href="https://conde.cloud/docs/setup">"#,
+            &format!(r#"<a href="{join}?format=md">this page as text</a>"#),
+            "<script nonce=",
+        ],
+    );
+    assert!(!html.contains("Set your password"), "{html}");
+    assert!(!html.contains("Krisz & Co"), "escaped: {html}");
+
+    // the query and an Accept naming markdown decide over a browser's User-Agent
+    for (url, accept) in [
+        (format!("{join}?format=md"), BROWSER_ACCEPT),
+        (join.clone(), "text/markdown, text/html;q=0.9"),
+    ] {
+        let (_, ctype, _, body) = fetch(&url, Some(accept), Some(CHROME)).await;
+        assert!(
+            ctype.starts_with("text/markdown"),
+            "{url} {accept}: {ctype}"
+        );
+        assert_eq!(body, md);
+    }
+    let (_, ctype, _, _) = fetch(&format!("{join}?format=html"), None, Some("curl/8.11.1")).await;
+    assert!(ctype.starts_with("text/html"), "{ctype}");
+    let (_, ctype, _, _) = fetch(&join, Some("*/*"), Some("curl/8.11.1")).await;
+    assert!(ctype.starts_with("text/markdown"), "curl: {ctype}");
+}
+
+/// A password invite's account-setup email links on to its join page, which puts the password
+/// step first: the agent asks its human to set the password from that email, the page shows it
+/// as step 1; without an admin agent the guide has no hello step.
+async fn a_password_invite_opens_its_join_page_with_the_password_step_first(d: Arc<Dispatcher>) {
+    let (kc_url, kc) = start_keycloak().await;
+    let env = mail_env(&d, demo_invite(&kc_url)).await;
+    d.share("demo");
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("keycloak")),
+        "{got}"
+    );
+    let join = got["join"].as_str().unwrap().to_string();
+    // the account-setup email's page links on to the join page, a redirect of the sign-in client
+    assert_eq!(
+        kc.redirects.lock().unwrap().clone(),
+        [(CLIENT_ID.to_string(), join.clone())]
+    );
+    let (status, _, _, md) = fetch(&join, None, Some("curl/8.11.1")).await;
+    assert_eq!(status, StatusCode::OK, "{md}");
+    in_order(
+        &md,
+        &[
+            "# Join the demo workspace on conde",
+            "They are invited as `ann`.",
+            "Your human signs in with a password for this workspace.",
+            "account-setup email",
+            "ask them to do that before step 2.",
+            "they sign in there with the password they set. Then run:",
+            &format!("conde login --server {} --board demo", env.base),
+            "5. Tell your human, in two sentences:",
+            "lists them).",
+        ],
+    );
+    assert!(!md.contains("6. ") && !md.contains("Say hello"), "{md}");
+    assert!(
+        !md.contains("questions go to") && !md.contains("team channel"),
+        "{md}"
+    );
+
+    let (status, _, _, html) = fetch(&join, Some(BROWSER_ACCEPT), Some(CHROME)).await;
+    assert_eq!(status, StatusCode::OK);
+    in_order(
+        &html,
+        &[
+            "You are invited to the demo workspace on conde, as <code>ann</code>.",
+            "<h2>1. Set your password</h2>",
+            "a separate email with a link to set your password",
+            "<h2>2. Hand the rest to your agent</h2>",
+            &format!("Read {join} and follow it."),
+            "<h2>By hand</h2>",
+            &format!("conde login --server {} --board demo", env.base),
+        ],
+    );
+}
+
+/// A join link works for JOIN_TTL after the invite, then says it expired (410); an unknown or
+/// malformed token, or a disabled user's link, says the link is not valid (404). Both answer
+/// in the reader's format and point to the setup guide. A workspace without mail still issues
+/// the link.
+async fn a_join_link_expires_and_an_unknown_one_says_so(d: Arc<Dispatcher>) {
+    let env = mail_env(
+        &d,
+        InviteConfig {
+            sign_in: Some(SignIn::Google),
+            workspace: "clearscale".into(),
+            ..InviteConfig::default()
+        },
+    )
+    .await;
+    shared(&d);
+    let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@cs.example"})).await;
+    assert_eq!(
+        (status, got["mail"].as_str()),
+        (StatusCode::OK, Some("unconfigured")),
+        "{got}"
+    );
+    let join = got["join"].as_str().unwrap().to_string();
+    let (_, bob) = invite_req(&env, json!({"name": "bob", "email": "bob@cs.example"})).await;
+    let bob = bob["join"].as_str().unwrap().to_string();
+    let k = Some(ADMIN_KEY);
+    admin(&env, "/v1/admin/users/bob/disable", Some(json!({})), k).await;
+
+    let token = join.rsplit('/').next().unwrap();
+    let flipped = format!(
+        "{}{}",
+        &token[..63],
+        if token.ends_with('0') { '1' } else { '0' }
+    );
+    for url in [
+        env.url(&format!("/join/{flipped}")),
+        env.url("/join/abc"),
+        env.url(&format!("/join/{}", token.to_uppercase())),
+        bob.clone(),
+    ] {
+        let (status, ctype, _, md) = fetch(&url, None, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{url}: {md}");
+        assert!(ctype.starts_with("text/markdown"), "{ctype}");
+        in_order(
+            &md,
+            &[
+                "# This invitation link is not valid",
+                "Tell your human to ask whoever invited them for a new invitation.",
+                "https://conde.cloud/docs/setup",
+            ],
+        );
+        let (status, _, _, html) = fetch(&url, Some(BROWSER_ACCEPT), Some(CHROME)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            html.contains("<h1>This invitation link is not valid</h1>"),
+            "{html}"
+        );
+    }
+
+    env.advance(web::JOIN_TTL);
+    assert_eq!(
+        fetch(&join, None, None).await.0,
+        StatusCode::OK,
+        "valid to the second"
+    );
+    env.advance(1);
+    let (status, _, _, md) = fetch(&join, None, None).await;
+    assert_eq!(status, StatusCode::GONE, "{md}");
+    in_order(
+        &md,
+        &[
+            "# This invitation has expired",
+            "An invitation link works for 7 days after the invite.",
+            "Tell your human to ask whoever invited them for a new invitation.",
+            "https://conde.cloud/docs/setup",
+        ],
+    );
+    let (status, _, _, html) = fetch(&join, Some(BROWSER_ACCEPT), Some(CHROME)).await;
+    assert_eq!(status, StatusCode::GONE);
+    in_order(
+        &html,
+        &[
+            "<h1>This invitation has expired</h1>",
+            "Ask whoever invited you for a new invitation.",
+            r#"<a href="https://conde.cloud/docs/setup">"#,
+        ],
+    );
+    assert!(!html.contains("<script"), "{html}");
 }

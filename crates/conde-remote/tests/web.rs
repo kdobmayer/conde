@@ -72,6 +72,7 @@ struct Mem {
     /// When each pasted-code login was first confirmed (kept past its record, as on the stores).
     cli_logins: HashMap<String, i64>,
     displays: HashMap<String, KeyDisplay>,
+    joins: HashMap<String, web::JoinRecord>,
     hosts: HashMap<String, i64>,
     creds: Vec<Cred>,
     /// A pause for a `conde login` record: in `take_cli_code` after the take (outside
@@ -434,6 +435,13 @@ impl WebStore for MemStore {
                 }
             }
         }
+    }
+    fn put_join(&self, token_digest: &str, join: &web::JoinRecord) -> WebResult<()> {
+        self.m().joins.insert(token_digest.into(), join.clone());
+        Ok(())
+    }
+    fn join(&self, token_digest: &str) -> WebResult<Option<web::JoinRecord>> {
+        Ok(self.m().joins.get(token_digest).cloned())
     }
     fn invite_user(&self, name: &str, email: &str) -> WebResult<Invited> {
         let mut m = self.m();
@@ -2113,11 +2121,27 @@ async fn the_admin_invites_lists_and_binds_by_issuer_and_subject() {
     let post = |body: Value| admin(&env, "/v1/admin/users", Some(body), k);
     let (status, got) = post(json!({"name": "Ann", "email": " ann@dakai.example "})).await;
     assert_eq!(status, StatusCode::OK, "{got}");
+    let join = got["join"].as_str().unwrap().to_string();
+    assert!(join.starts_with(&env.url("/join/")), "{join}");
     assert_eq!(
         got,
         json!({"user": "ann", "email": "ann@dakai.example", "status": "invited", "disabled": false,
-               "mail": "unconfigured"})
+               "mail": "unconfigured", "join": join})
     );
+    let (status, ctype, page) = {
+        let r = reqwest::get(&join).await.unwrap();
+        let ctype = r.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        (r.status(), ctype, r.text().await.unwrap())
+    };
+    assert_eq!(
+        (status, ctype.as_str()),
+        (StatusCode::OK, "text/markdown; charset=utf-8"),
+        "{page}"
+    );
+    assert!(page.contains("They are invited as `ann`."), "{page}");
     let long = "x".repeat(81);
     let (status, got) =
         post(json!({"name": "ann", "email": "ann@dakai.example", "inviter": long})).await;

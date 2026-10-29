@@ -57,7 +57,7 @@ fn the_release_publishes_the_installer_but_builds_no_windows_binary() {
 }
 
 /// install.sh against a local release (CONDE_DIST_BASE_URL on file://, the bucket's v<version>/
-/// layout): a first install names the setup and the sign-in; installing again over a conde says
+/// layout): a first install names the sign-in, which sets the machine up; installing again over a conde says
 /// what it replaced and names the upgrade's two commands (setup rewrites what changed, doctor
 /// shows the bridge's build).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -152,7 +152,8 @@ fn install_sh_says_what_it_replaced_and_how_to_finish_an_upgrade() {
         "{first}"
     );
     assert!(
-        first.contains("\nNext:\n  conde setup") && first.contains("conde login --server"),
+        first.contains("\nNext:\n  conde login --server https://<workspace>.conde.cloud ")
+            && !first.contains("\n  conde setup"),
         "{first}"
     );
     assert!(

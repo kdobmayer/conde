@@ -228,6 +228,9 @@ pub fn invite(
         Some("keycloak") => {
             format!("invited {user} {email}, account-setup email sent by the sign-in server")
         }
+        Some("unconfigured") if answer["join"].is_string() => {
+            format!("invited {user} {email}, no mail configured: send them their join page")
+        }
         Some("unconfigured") => format!(
             "invited {user} {email}, no mail configured: tell them the steps at https://conde.cloud/docs/setup"
         ),
@@ -242,6 +245,9 @@ pub fn invite(
     };
     if by.is_some() && answer["mail"] == "keycloak" {
         line.push_str("\ninviter not shown: the sign-in server sends this email");
+    }
+    if let Some(join) = answer["join"].as_str() {
+        line.push_str(&format!("\njoin page: {join}"));
     }
     Ok(line)
 }
@@ -518,7 +524,7 @@ pub fn enroll(
     let bridge = reload_bridge(&paths::socket_path(), &alias);
     print!(
         "{}",
-        enrolled_text(&alias, &cfg, &path, false, None, &bridge)
+        enrolled_text(&alias, &cfg, &path, false, None, &bridge, true)
     );
     print!("{}", crate::welcome::lines(&alias, info.welcome.as_ref()));
     Ok(0)
@@ -555,7 +561,8 @@ pub fn reload_bridge(socket: &std::path::Path, alias: &str) -> String {
 
 /// What `conde enroll` and `conde login` print once the board file is stored; `reenrolled`:
 /// the server said the host existed; `replaced`: whether that mint revoked a live key of it
-/// (None: the server did not say); `bridge`: the [`reload_bridge`] line.
+/// (None: the server did not say); `bridge`: the [`reload_bridge`] line; `next`: name
+/// `conde setup` as the next step (`conde login` runs it itself).
 pub fn enrolled_text(
     alias: &str,
     cfg: &BoardConfig,
@@ -563,6 +570,7 @@ pub fn enrolled_text(
     reenrolled: bool,
     replaced: Option<bool>,
     bridge: &str,
+    next: bool,
 ) -> String {
     let (host, server, owner, path) = (&cfg.host_id, &cfg.server, &cfg.owner, path.display());
     let head = if reenrolled {
@@ -580,10 +588,15 @@ pub fn enrolled_text(
             "enrolled host {host} with {server} as board {alias} (account {owner}); credential stored at {path} (mode 0600)\n"
         )
     };
+    let next = if next {
+        format!(
+            "next: conde setup (the default board, and the review of this host's earlier names on {alias})\n"
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{head}{}: conde publish <name> --board {alias}\n\
-         {bridge}\n\
-         next: conde setup (the default board, and the review of this host's earlier names on {alias})\n",
+        "{head}{}: conde publish <name> --board {alias}\n{bridge}\n{next}",
         crate::setup::ENROLL_SCOPE
     )
 }

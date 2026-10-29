@@ -1,8 +1,12 @@
 //! `conde login` against a fake board: the browser (reqwest following redirects) lands on the
 //! CLI's loopback listener; the CLI redeems the code and stores the key as `conde enroll` does,
 //! as a board file pinned to its server and account; `board.info` names the board. The pasted
-//! code: the page shows a short code, the CLI redeems it with the run it kept on disk.
+//! code: the page shows a short code, the CLI redeems it with the run it kept on disk. The
+//! installed binary's login runs on a temp machine (its own home, PATH and socket) and ends
+//! with the machine set up as `conde setup` sets it up.
 #![cfg(unix)] // checks unix file modes
+
+mod fake_daemon;
 
 use conde::{boards, credentials, login, util};
 
@@ -601,26 +605,9 @@ fn a_machine_without_a_display_is_headless() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     let (server, board) = board().await;
-    let config = tempfile::tempdir().unwrap();
-    let conde = |args: Vec<String>| {
-        let config = config.path().to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let out = std::process::Command::new(env!("CARGO_BIN_EXE_conde"))
-                .args(&args)
-                .env("XDG_CONFIG_HOME", &config)
-                // no bridge runs on this socket
-                .env("CONDE_SOCK", config.join("conde.sock"))
-                .env("DISPLAY", ":0")
-                .stdin(std::process::Stdio::null())
-                .output()
-                .unwrap();
-            (
-                out.status.code(),
-                String::from_utf8_lossy(&out.stdout).into_owned(),
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            )
-        })
-    };
+    let machine = Machine::new();
+    let config = machine.config();
+    let conde = |args: Vec<String>| machine.conde(args);
     let start = vec![
         "login".into(),
         "--server".into(),
@@ -666,10 +653,11 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     );
     assert!(!out.contains("re-enrolled"), "{out}");
     assert!(
-        out.contains("\nbridge: not running; it reads the new key at start\nnext: conde setup"),
+        out.contains("\nbridge: not running; it reads the new key at start\nservice: wrote "),
         "{out}"
     );
-    let path = config.path().join("conde/boards/dakai.json");
+    assert!(!out.contains("next: conde setup"), "{out}");
+    let path = config.join("conde/boards/dakai.json");
     assert_eq!(credentials::mode(&path), Some(0o600));
     let stored = boards::load(&path).unwrap();
     assert_eq!(
@@ -677,7 +665,7 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
         ("box-9", KEY)
     );
     assert_eq!(
-        std::fs::read_dir(config.path().join("conde/login"))
+        std::fs::read_dir(config.join("conde/login"))
             .unwrap()
             .count(),
         0,
@@ -734,6 +722,269 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
             "{out}"
         );
     }
+}
+
+/// A bare machine for the installed binary: a temp home with Claude Code's and Codex's config
+/// directories, a PATH holding only a fake `systemctl` that logs its calls, and a socket where
+/// a fake bridge answers once `systemctl` started the service.
+struct Machine {
+    root: tempfile::TempDir,
+    bridge: Arc<Mutex<Option<fake_daemon::FakeDaemon>>>,
+}
+
+impl Machine {
+    fn new() -> Machine {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        for d in ["home/.claude", "home/.codex", "bin", "run"] {
+            std::fs::create_dir_all(r.join(d)).unwrap();
+        }
+        // builtins only: the PATH has nothing else
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$2\" in start|restart) : > '{mark}';; esac\n",
+            log = r.join("systemctl.log").display(),
+            mark = r.join("started").display()
+        );
+        std::fs::write(r.join("bin/systemctl"), script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            r.join("bin/systemctl"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let bridge = Arc::new(Mutex::new(None));
+        let (slot, mark, socket) = (bridge.clone(), r.join("started"), r.join("run/conde.sock"));
+        std::thread::spawn(move || {
+            while !mark.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            *slot.lock().unwrap() = Some(fake_daemon::FakeDaemon::start(&socket, fake_bridge));
+        });
+        Machine { root, bridge }
+    }
+
+    fn home(&self) -> std::path::PathBuf {
+        self.root.path().join("home")
+    }
+
+    fn config(&self) -> std::path::PathBuf {
+        self.home().join(".config")
+    }
+
+    fn systemctl(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.path().join("systemctl.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    /// The ops the bridge was asked, since the last call.
+    fn bridge_ops(&self) -> Vec<String> {
+        self.bridge
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|d| d.take())
+            .unwrap_or_default()
+            .iter()
+            .map(|r| r["op"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// `conde <args>` here: (exit status, stdout, stderr).
+    fn conde(&self, args: Vec<String>) -> tokio::task::JoinHandle<(Option<i32>, String, String)> {
+        let r = self.root.path().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let out = std::process::Command::new(env!("CARGO_BIN_EXE_conde"))
+                .args(&args)
+                .env_clear()
+                .env("PATH", r.join("bin"))
+                .env("HOME", r.join("home"))
+                .env("USER", "tester")
+                .env("XDG_CONFIG_HOME", r.join("home/.config"))
+                .env("CONDE_DATA", r.join("data"))
+                .env("CONDE_SOCK", r.join("run/conde.sock"))
+                .env("DISPLAY", ":0")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        })
+    }
+}
+
+/// The bridge the service runs, as setup and login ask it: dakai is open, the host is on v2.
+fn fake_bridge(req: &Value) -> fake_daemon::Answer {
+    match req["op"].as_str().unwrap_or_default() {
+        "board.reload" => Ok(json!({"state": "opened"})),
+        "board.list" => Ok(json!({"boards": [{"board": "local"}, {"board": "dakai"}]})),
+        "doctor" => Ok(json!({"build": conde::VERSION})),
+        "board.info" => Ok(
+            json!({"name": "dakai", "owner": "krisztian", "host": "box-9", "mailbox_only": true}),
+        ),
+        op => Err(("unknown_op", format!("unknown op {op}"))),
+    }
+}
+
+/// Both calls of a pasted-code login on `machine`; the second's (status, stdout, stderr).
+async fn pasted_login(machine: &Machine, server: &str) -> (Option<i32>, String, String) {
+    let start = [
+        "login",
+        "--server",
+        server,
+        "--host",
+        "box-9",
+        "--no-browser",
+    ];
+    let (status, _, err) = machine
+        .conde(start.iter().map(|a| a.to_string()).collect())
+        .await
+        .unwrap();
+    assert_eq!(status, Some(3), "{err}");
+    let url = err
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with(&format!("{server}/auth/cli?mode=code")))
+        .unwrap()
+        .to_string();
+    let shown = shown_code(&url).await;
+    let finish = [
+        "login", "--server", server, "--host", "box-9", "--code", &shown,
+    ];
+    machine
+        .conde(finish.iter().map(|a| a.to_string()).collect())
+        .await
+        .unwrap()
+}
+
+/// A newcomer's machine: the install, then `conde login`, and nothing else. The login enrolls
+/// the host and sets the machine up: the bridge service is written, enabled and started, the
+/// skills name the new board, the MCP entries run this binary on this socket, the board is
+/// reviewed through the bridge, and no prompt waits. A second login changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_on_a_bare_machine_sets_the_machine_up() {
+    let (server, _board) = board().await;
+    let machine = Machine::new();
+    let home = machine.home();
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_conde"))
+        .canonicalize()
+        .unwrap();
+    let sock = machine.root.path().join("run/conde.sock");
+
+    let (status, out, err) = pasted_login(&machine, &server).await;
+    println!("{out}");
+    assert_eq!(status, Some(0), "{out}{err}");
+    let path = machine.config().join("conde/boards/dakai.json");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[..12],
+        [
+            "signed in as krisztian".to_string(),
+            format!(
+                "enrolled host box-9 with {server} as board dakai (account krisztian); credential stored at {} (mode 0600)",
+                path.display()
+            ),
+            "Enrolling publishes nothing and uploads no history: every agent stays on this machine's local board, and \
+             teammates cannot reach one until you publish it: conde publish <name> --board dakai"
+                .into(),
+            "bridge: not running; it reads the new key at start".into(),
+            "service: wrote ~/.config/systemd/user/conde.service".into(),
+            "service: enabled and started conde.service".into(),
+            "service: without a desktop login session, also run: loginctl enable-linger \"$USER\"".into(),
+            "claude: skill wrote ~/.claude/skills/conde/SKILL.md".into(),
+            "claude: claude CLI not found; wrote the user-scope MCP entry conde into ~/.claude.json directly".into(),
+            "claude: set crossSessionInbound to \"accept\" in ~/.claude/settings.json (bypass-mode sessions receive \
+             conde notifications without approval; --keep-receiver-policy leaves it)"
+                .into(),
+            "codex: skill wrote ~/.codex/skills/conde/SKILL.md".into(),
+            "codex: added MCP server conde to ~/.codex/config.toml".into(),
+        ],
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "\nboards: dakai: host box-9 (account krisztian) is on v2; publish names with: conde publish <name> --board dakai\n\
+             boards: default board for names and channels: local (to change it: conde setup --default-board <alias>)\n\
+             \nSetup guide: https://conde.cloud/docs/setup\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        !out.contains("FAILED") && !out.contains("next: conde setup") && !out.contains("[local]"),
+        "no part failed, no setup step is left, no prompt was shown: {out}"
+    );
+    assert_eq!(out.matches("Setup guide:").count(), 1, "{out}");
+    assert_eq!(
+        machine.systemctl(),
+        [
+            "--user daemon-reload",
+            "--user enable conde.service",
+            "--user start conde.service"
+        ]
+    );
+    let unit =
+        std::fs::read_to_string(machine.config().join("systemd/user/conde.service")).unwrap();
+    assert!(
+        unit.contains(&format!("ExecStart={} daemon\n", exe.display())),
+        "{unit}"
+    );
+    for skill in [
+        ".claude/skills/conde/SKILL.md",
+        ".codex/skills/conde/SKILL.md",
+    ] {
+        let text = std::fs::read_to_string(home.join(skill)).unwrap();
+        assert!(
+            text.contains("--board dakai")
+                && text.contains("alias `dakai`")
+                && !text.contains("{board}"),
+            "{skill} names the new board: {text}"
+        );
+    }
+    let claude: Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(
+        claude["mcpServers"]["conde"],
+        json!({"type": "stdio", "command": exe.to_string_lossy(), "args": ["mcp"],
+               "env": {"CONDE_SOCK": sock.to_string_lossy()}})
+    );
+    let codex = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(
+        codex.contains(&format!(
+            "[mcp_servers.conde]\ncommand = \"{}\"\nargs = [\"mcp\"]\nenv = {{ CONDE_SOCK = \"{}\" }}\n",
+            exe.display(),
+            sock.display()
+        )),
+        "{codex}"
+    );
+    assert!(
+        machine.bridge_ops().contains(&"board.info".to_string()),
+        "the board was reviewed through the bridge"
+    );
+
+    // already set up: a second login re-enrolls, the bridge loads the key, and nothing else changes
+    let (status, out, err) = pasted_login(&machine, &server).await;
+    assert_eq!(status, Some(0), "{out}{err}");
+    assert!(out.contains("\nbridge: dakai loaded\n"), "{out}");
+    for line in [
+        "service: unchanged ~/.config/systemd/user/conde.service",
+        "claude: skill unchanged ~/.claude/skills/conde/SKILL.md",
+        "claude: MCP server conde unchanged (user scope)",
+        "claude: crossSessionInbound already \"accept\"",
+        "codex: skill unchanged ~/.codex/skills/conde/SKILL.md",
+        "codex: MCP server conde unchanged in ~/.codex/config.toml",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    assert!(!out.contains("wrote") && !out.contains("restart"), "{out}");
+    assert_eq!(
+        machine.systemctl()[3..],
+        ["--user enable conde.service", "--user start conde.service"]
+    );
 }
 
 /// A rate-limited redeem is a retry, like a wrong code: the CLI shows the server's wait and the

@@ -45,6 +45,10 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
 - S8: done 2026-10-28 (master 21c25b5). Open: the Secret Manager secret `keycloak-bootstrap-admin` is out of
   Terraform state and still in GCP (owner's deletion list); the `deploy` service account's display name still
   says "GKE rollout" (rides the next foundation change).
+- vvpusa (2026-10-29): the fourth workspace, VVP USA, signs in through AWS IAM Identity Center over SAML brokered by
+  Keycloak; invites in `sso` mode. Open: the first real sign-in proves the signed-assertion setting (if it fails on the
+  signature, set want_assertions_signed false, keep signature validation); single logout is off until the Identity
+  Center application gets Keycloak's logout address; the unused Keycloak image 26.8.1-conde7 joins the deletion list.
 - S9 (desk, after v0.5.0): what remains of the old board's names: the launchd label `space.nativeai.conde`
   (a rename needs a migration of existing installs), and the README's install, dist and readme URLs at
   `conde.nativeai.space` (the served README's test pins them; the invite page already says

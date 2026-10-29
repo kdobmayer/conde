@@ -50,6 +50,15 @@ code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;bac
 code{padding:1px 4px}
 pre{padding:10px 12px;white-space:pre-wrap;word-break:break-all}
 .notice{border-left:2px solid var(--accent);padding:10px 14px;background:var(--panel)}
+.join>p,.join>ol,.join>pre{max-width:660px}
+.join{overflow-wrap:anywhere}
+.join>p{font:17px/1.55 var(--serif)}
+.join>p.muted{font:15px/1.55 var(--sans)}
+.join h2{font:600 22px/1.25 var(--serif);margin:36px 0 10px}
+.join ol{padding-left:22px;font:17px/1.55 var(--serif)}
+.join li{margin:0 0 16px}
+.join li pre{margin:8px 0 0;font-size:13px}
+.join #key{font-size:14px;padding:14px 16px;border:1px solid var(--line)}
 @media (max-width:720px){
 header{flex-wrap:wrap;gap:12px;padding:14px 16px}
 .brand{font-size:22px}
@@ -235,7 +244,7 @@ struct ErrorBody<'a> {
     message: &'a str,
 }
 
-fn render(t: &impl Template) -> String {
+pub(crate) fn render(t: &impl Template) -> String {
     t.render().unwrap_or_else(|e| {
         tracing::error!(error = %e, "template failed");
         String::from("<p>The page could not be rendered.</p>")
@@ -371,6 +380,11 @@ pub(crate) fn cli_code(header: Header<'_>, code: &str, minutes: u64, idp: &str) 
         true,
         &[idp],
     )
+}
+
+/// A public page (no header) in the keys page's style; `copy`: with the copy button's script.
+pub(crate) fn public(status: StatusCode, title: &str, body: &str, copy: bool) -> Response {
+    page(status, title, None, body, copy, &[])
 }
 
 /// A public document page (no header, no script) in the keys page's style.

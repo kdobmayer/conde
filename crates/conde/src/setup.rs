@@ -3,8 +3,9 @@
 //! macOS, a scheduled task at logon on Windows) running the single daemon with the local board, the skills, and the MCP
 //! registration for both harnesses; offers the Claude receiver setting; then the
 //! host's boards (DESIGN-v2 §7, §9): the default board, and for an enrolled host
-//! the one review of which earlier names stay published. Enrolling a shared board
-//! is a separate step (`conde login`). Idempotent: a second run reports "unchanged".
+//! the one review of which earlier names stay published. `conde login` enrolls a shared
+//! board and then runs all of this unattended ([`Unattended`]: no prompts, their defaults).
+//! Idempotent: a second run reports "unchanged".
 //!
 //! Everything the run reads from the machine (OS, home, config dirs, the
 //! binary's path) arrives in [`Env`], and every external command goes through
@@ -282,6 +283,8 @@ pub struct Options {
     /// What stays published when an enrolled host switches to v2; None: asked at a terminal,
     /// nothing decided without one.
     pub publish: Option<Publish>,
+    /// End without the workspace's welcome (`conde login` prints the one its sign-in fetched).
+    pub skip_welcome: bool,
 }
 
 /// Which of an enrolled host's v1 names stay published at its switch to v2 (`--publish*`).
@@ -583,6 +586,48 @@ impl Host for System {
     }
 }
 
+/// A host with nobody at the terminal: every prompt takes its default, as in an agent's shell.
+/// `conde login` runs setup through it, so its questions never hold a fresh login up.
+pub struct Unattended<'a>(pub &'a mut dyn Host);
+
+impl Host for Unattended<'_> {
+    fn which(&self, prog: &str) -> Option<PathBuf> {
+        self.0.which(prog)
+    }
+    fn run(&mut self, prog: &str, args: &[&str]) -> anyhow::Result<CmdOut> {
+        self.0.run(prog, args)
+    }
+    fn run_bounded(
+        &mut self,
+        prog: &str,
+        args: &[&str],
+        limit: std::time::Duration,
+    ) -> anyhow::Result<CmdOut> {
+        self.0.run_bounded(prog, args, limit)
+    }
+    fn reach(&mut self, socket: &Path) -> Result<(), String> {
+        self.0.reach(socket)
+    }
+    fn terminal(&self) -> bool {
+        false
+    }
+    fn ask(&mut self, _prompt: &str) -> Option<String> {
+        None
+    }
+    fn daemon(
+        &mut self,
+        socket: &Path,
+        op: &str,
+        board: Option<&str>,
+        body: Value,
+    ) -> Result<Value, String> {
+        self.0.daemon(socket, op, board, body)
+    }
+    fn board_info(&mut self, server: &str, key: &str) -> anyhow::Result<BoardInfo> {
+        self.0.board_info(server, key)
+    }
+}
+
 /// How long setup waits for the daemon it just (re)started to answer.
 const DAEMON_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -699,6 +744,9 @@ pub fn run(
     if opts.boards {
         let r = boards_part(env, opts, host, out, &mut welcomes);
         part("boards", r, out)?;
+    }
+    if opts.skip_welcome {
+        return Ok(ok);
     }
     writeln!(out)?;
     if welcomes.is_empty() {

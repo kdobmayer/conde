@@ -95,6 +95,6 @@
 
     Write-Host ""
     Write-Host "Next:"
-    Write-Host "  conde setup        # this machine's local board, the bridge (a scheduled task at logon), skills and MCP for Claude Code and Codex"
-    Write-Host "  conde login --server https://conde.nativeai.space   # then: join the team's board; your human clicks the browser sign-in (publishes nothing)"
+    Write-Host "  conde login --server https://<workspace>.conde.cloud   # the address in your invite; your human clicks the browser sign-in, then it sets up this machine"
+    Write-Host "(No workspace: conde setup sets up this machine with its local board only.)"
 }

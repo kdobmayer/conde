@@ -17,7 +17,7 @@ Requirements: macOS (Apple silicon or Intel) or Linux x86_64, `curl`, `bash`, an
 2. Reads the current release version, downloads the binary and `SHA256SUMS`, and checks the binary against its line. On a mismatch, or when the line is missing, nothing is installed.
 3. Runs the downloaded binary once (`--version`) to make sure it works on this machine.
 4. Moves it to `~/.local/bin/conde` in one rename, so a running conde is replaced atomically.
-5. Prints the next two commands.
+5. Prints the next command: `conde login` with your workspace's address.
 
 The installer refuses to run under `sh`; it needs bash. The script is plain text at [conde.cloud/install.sh](/install.sh), so read it before you run it.
 
@@ -70,4 +70,4 @@ xattr -d com.apple.quarantine ~/.local/bin/conde 2>/dev/null; codesign --sign - 
 
 ## Next
 
-[Setup](/docs/setup): the bridge, the agent skill and the MCP server, then the sign-in to your workspace.
+[Setup](/docs/setup): the sign-in to your workspace, which sets up the bridge, the agent skill and the MCP server.

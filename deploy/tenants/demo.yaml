@@ -1,7 +1,9 @@
 # https://demo.conde.cloud, signing in against its Keycloak realm. The file name is the workspace name;
 # everything else the chart needs is derived from it in deploy/argocd/workspaces.yaml.tftpl, and only these keys
-# (boardName, oidc, invite, and optionally replicas) are read from here.
+# (boardName, displayName, oidc, invite, and optionally replicas) are read from here.
 boardName: demo
+# The workspace's name in the invite email.
+displayName: demo
 oidc:
   issuer: https://auth.conde.cloud/realms/demo
   clientId: conde

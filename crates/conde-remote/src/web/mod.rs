@@ -6,7 +6,8 @@
 //! Routes: `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /auth/cli`
 //! (loopback, or `mode=code` for the pasted code's confirm page), `POST /auth/cli` (that
 //! page's button: the code), `POST /auth/cli/redeem`, `GET /keys`, `POST /keys`, `GET /keys/created`,
-//! `POST /keys/{host}/revoke`, `POST /keys/apps/{grant_id}/revoke`, the remote MCP's OAuth
+//! `POST /keys/{host}/revoke`, `POST /keys/apps/{grant_id}/revoke`, the invite's join page
+//! `GET /join/{token}` ([`join`]), the remote MCP's OAuth
 //! authorization server ([`oauth`]: metadata, `/oauth/authorize`, `/oauth/token`); with
 //! `CONDE_ADMIN_KEY` also the admin API under `/v1/admin`. The server adds the web app
 //! ([`app`]): `/`, `/app/*` and the browser API under `/v1`, and the MCP endpoint ([`mcp`]).
@@ -15,6 +16,7 @@ mod admin;
 pub(crate) mod app;
 mod auth;
 pub mod invite;
+pub mod join;
 mod keys;
 mod pages;
 mod ratelimit;
@@ -37,6 +39,7 @@ pub use app::embedded as app_embedded;
 pub const BROWSER_HOST: &str = "web";
 pub use auth::{Oidc, RedeemResponse};
 pub use invite::{InviteConfig, KeycloakAdmin, Resend, SignIn};
+pub use join::{JOIN_TTL, JoinRecord};
 pub use keys::new_host_key;
 pub use ratelimit::RateLimits;
 
@@ -690,6 +693,24 @@ pub trait WebStore: Send + Sync {
     fn welcome(&self) -> WebResult<Welcome> {
         Ok(Welcome::default())
     }
+    /// The welcome as the join page names it: the stored one without an admin agent or lobby that
+    /// no longer qualifies. Default: the stored one.
+    fn published_welcome(&self) -> WebResult<Welcome> {
+        self.welcome()
+    }
+    /// The board's name, as its board.info advertises it; None: the public host's first label.
+    fn board_name(&self) -> Option<String> {
+        None
+    }
+    /// Stores an invite's join record under its token's digest, replacing one stored under it.
+    /// Default: refused (a store without invites).
+    fn put_join(&self, _token_digest: &str, _join: &JoinRecord) -> WebResult<()> {
+        Err(WebStoreError("this board has no invites".into()))
+    }
+    /// The join record stored under the digest. Default: none.
+    fn join(&self, _token_digest: &str) -> WebResult<Option<JoinRecord>> {
+        Ok(None)
+    }
     /// Applies the change to the stored welcome, in one transaction, after checking that the
     /// admin agent it sets is a published agent of an admin user and the lobby it sets a channel
     /// on the board. Default: refused.
@@ -918,5 +939,6 @@ pub fn router(state: WebState) -> Router {
         .route("/keys", get(keys::page).post(keys::create))
         .route("/keys/created", get(keys::created))
         .route("/keys/{host}/revoke", post(keys::revoke))
+        .route("/join/{token}", get(join::page))
         .with_state(state)
 }

@@ -16,7 +16,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::auth::{base_name, http_client};
-use super::invite::{DEADLINE, InviteConfig, Realm, RealmError, SignIn, invite_mail, send_resend};
+use super::invite::{
+    DEADLINE, InviteConfig, Realm, RealmError, SignIn, invite_mail, join_url, send_resend,
+};
 use super::keys::{MintError, host_slug, mint};
 use super::session::digest;
 use super::{
@@ -37,6 +39,8 @@ struct Issuer {
 struct Invites {
     config: InviteConfig,
     server: String,
+    /// The workspace's sign-in client, whose redirects the account-setup email may link on to.
+    client_id: String,
     issuer: String,
     http: reqwest::Client,
 }
@@ -66,6 +70,7 @@ impl AdminState {
             invites: sign_in.map(|c| Invites {
                 config: c.invite.clone(),
                 server: c.public_url.clone(),
+                client_id: c.client_id.clone(),
                 issuer: c.issuer.clone(),
                 http: http_client(std::time::Duration::from_secs(15)),
             }),
@@ -492,8 +497,9 @@ async fn create_user(
     }
 }
 
-/// The invite form of `POST /v1/admin/users`: `{name, email, inviter?}`. Creates the user, then
-/// sends the invite email per the workspace's sign-in ([`super::invite`]).
+/// The invite form of `POST /v1/admin/users`: `{name, email, inviter?}`. Creates the user, issues
+/// the invite's join page (`join` in the answer, on a workspace with sign-in), then sends the
+/// invite email per the workspace's sign-in ([`super::invite`]).
 async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
     let (Some(name), Some(email)) = (req.name.as_deref(), req.email.as_deref()) else {
         return bad_request("an invite is {name, email}");
@@ -541,9 +547,21 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
         Err(e) => return store_failed(e),
     };
     tracing::info!(user = %user.name, outcome, "admin invited a user");
+    let join = match invites {
+        Some(invites) if !user.disabled => {
+            match issue_join(&state, invites, &user, &email, inviter.as_deref()).await {
+                Ok(url) => Some(url),
+                Err(e) => return store_failed(e),
+            }
+        }
+        _ => None,
+    };
     let answer = |status: StatusCode, mail: &str, extra: Value| {
         let mut body = json!({"user": user.name, "email": email, "status": outcome,
                               "disabled": user.disabled, "mail": mail});
+        if let (Some(b), Some(url)) = (body.as_object_mut(), &join) {
+            b.insert("join".into(), url.as_str().into());
+        }
         if let (Some(b), Value::Object(extra)) = (body.as_object_mut(), extra) {
             b.extend(extra);
         }
@@ -579,8 +597,23 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
     if issuers.contains(&invites.issuer) {
         return answer(StatusCode::OK, "none", json!({"reason": "signed in"}));
     }
+    let Some(join) = join.as_deref() else {
+        return failed(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "no join page was issued",
+        );
+    };
     let deadline = invites.config.deadline.unwrap_or(DEADLINE);
-    let delivery = deliver(&state, invites, sign_in, &user, &email, inviter.as_deref());
+    let delivery = deliver(
+        &state,
+        invites,
+        sign_in,
+        &user,
+        &email,
+        inviter.as_deref(),
+        join,
+    );
     match tokio::time::timeout(deadline, delivery).await {
         Err(_) => failed(
             StatusCode::BAD_GATEWAY,
@@ -596,6 +629,30 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
         Ok(Err(RealmError::Conflict(why))) => failed(StatusCode::CONFLICT, "conflict", &why),
         Ok(Err(RealmError::Failed(why))) => failed(StatusCode::BAD_GATEWAY, "mail_failed", &why),
     }
+}
+
+/// Stores the invite's join record (or refreshes it: the same invite gives the same token) and
+/// returns its page, `<server>/join/<token>`.
+async fn issue_join(
+    state: &AdminState,
+    invites: &Invites,
+    user: &WebUser,
+    email: &str,
+    inviter: Option<&str>,
+) -> Result<String, super::WebStoreError> {
+    let token = super::join::token(&state.0.key_digest, user.user_id, email, inviter);
+    let record = super::JoinRecord {
+        user_id: user.user_id,
+        user_name: user.name.clone(),
+        inviter: inviter.map(String::from),
+        created_at: state.core().now(),
+    };
+    let key = super::join::token_digest(&token);
+    state
+        .core()
+        .store(move |s| s.put_join(&key, &record))
+        .await?;
+    Ok(join_url(&invites.server, &token))
 }
 
 /// What an invite's delivery did.
@@ -630,15 +687,16 @@ async fn deliver(
     user: &WebUser,
     email: &str,
     inviter: Option<&str>,
+    join: &str,
 ) -> Result<Delivered, RealmError> {
     match (&invites.config.resend, &invites.config.keycloak) {
         (_, Some(kc)) if sign_in == SignIn::Password => {
-            realm_invite(state, invites, kc, user.user_id, &user.name, email).await
+            realm_invite(state, invites, kc, user, email, join).await
         }
         (Some(resend), _) => {
             let mail = invite_mail(
                 &invites.config.workspace,
-                &invites.server,
+                join,
                 sign_in,
                 &invites.config.account,
                 email,
@@ -659,15 +717,16 @@ async fn deliver(
 
 /// A password workspace's invite: the realm account (the recorded one, else a new one marked with
 /// the correlation value every concurrent invite of the user shares), then Keycloak's
-/// account-setup email for the actions still pending.
+/// account-setup email for the actions still pending, linking on to the join page.
 async fn realm_invite(
     state: &AdminState,
     invites: &Invites,
     kc: &super::KeycloakAdmin,
-    user_id: i64,
-    name: &str,
+    user: &WebUser,
     email: &str,
+    join: &str,
 ) -> Result<Delivered, RealmError> {
+    let (user_id, name) = (user.user_id, user.name.as_str());
     let store_error = |e: super::WebStoreError| {
         tracing::error!(error = %e, "admin store call failed");
         RealmError::Failed("the board's store failed".into())
@@ -710,7 +769,9 @@ async fn realm_invite(
     if found.pending.is_empty() {
         return Ok(Delivered::SetUp);
     }
-    realm.send_setup_email(&found.id, &found.pending).await?;
+    realm
+        .send_setup_email(&found.id, &found.pending, &invites.client_id, join)
+        .await?;
     Ok(Delivered::Keycloak)
 }
 

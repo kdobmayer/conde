@@ -850,7 +850,7 @@ fn fake_bridge(req: &Value) -> fake_daemon::Answer {
         "board.info" => Ok(
             json!({"name": "dakai", "owner": "krisztian", "host": "box-9", "mailbox_only": true}),
         ),
-        op => Err(("unknown_op", format!("unknown op {op}"))),
+        op => Err(("bad_request", format!("unknown op {op}"))),
     }
 }
 

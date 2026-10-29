@@ -1,9 +1,9 @@
-# Install the conde binary for this Windows user.
+# Install the conde binary for this Windows user, in %LOCALAPPDATA%\conde\bin (no admin).
 #
-#   irm https://conde.nativeai.space/install.ps1 | iex
+#   irm https://conde.cloud/install.ps1 | iex
 #
-# Puts conde.exe in %LOCALAPPDATA%\conde\bin and adds that directory to the user PATH.
-# CONDE_DIST_URL overrides the download base; CONDE_INSTALL_DIR the target dir.
+# CONDE_VERSION picks a release (default: the one in `latest`); CONDE_DIST_BASE_URL overrides the
+# download base, CONDE_INSTALL_DIR the target directory. Adds the directory to the user PATH.
 # Runs in Windows PowerShell 5.1 and PowerShell 7; never exits the calling shell.
 
 & {
@@ -11,7 +11,7 @@
     $ProgressPreference = 'SilentlyContinue'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    $base = if ($env:CONDE_DIST_URL) { $env:CONDE_DIST_URL.TrimEnd('/') } else { 'https://conde.nativeai.space/dist' }
+    $base = if ($env:CONDE_DIST_BASE_URL) { $env:CONDE_DIST_BASE_URL.TrimEnd('/') } else { 'https://storage.googleapis.com/conde-cloud-dist' }
     $dir = if ($env:CONDE_INSTALL_DIR) { $env:CONDE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'conde\bin' }
 
     # x64 Windows, or Arm64 Windows 11 running it under x64 emulation; a 32-bit shell on either
@@ -21,28 +21,40 @@
     }
     $name = 'conde-windows-x86_64.exe'
 
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('conde-' + [guid]::NewGuid().ToString('N'))
+    # a blob without a text content type arrives as bytes
+    function Read-Text($uri) {
+        $body = (Invoke-WebRequest -UseBasicParsing -Uri $uri).Content
+        if ($body -is [byte[]]) { $body = [Text.Encoding]::UTF8.GetString($body) }
+        [string]$body
+    }
+
+    $version = $env:CONDE_VERSION
+    if (-not $version) {
+        try { $version = ((Read-Text "$base/latest") -split "`n")[0].Trim() } catch { throw "install.ps1: cannot read $base/latest" }
+    }
+    $version = $version.Trim() -replace '^v', ''
+    if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$') {
+        throw "install.ps1: not a release version: '$version'"
+    }
+    $url = "$base/v$version"
+
+    # staged next to the target, so the final rename stays on one volume
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $tmp = Join-Path $dir ('.conde-install.' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        $version = ''
-        try {
-            # a blob without a text content type arrives as bytes
-            $body = (Invoke-WebRequest -UseBasicParsing -Uri "$base/latest").Content
-            if ($body -is [byte[]]) { $body = [Text.Encoding]::UTF8.GetString($body) }
-            $version = ([string]$body -split "`n")[0].Trim()
-        } catch { }
-        Write-Host "downloading $name $version from $base"
+        Write-Host "downloading $name v$version from $base"
         $exe = Join-Path $tmp $name
         $sums = Join-Path $tmp 'SHA256SUMS'
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile $exe
+            Invoke-WebRequest -UseBasicParsing -Uri "$url/$name" -OutFile $exe
         } catch {
-            throw "install.ps1: download failed: $base/$name"
+            throw "install.ps1: download failed: $url/$name"
         }
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS" -OutFile $sums
+            Invoke-WebRequest -UseBasicParsing -Uri "$url/SHA256SUMS" -OutFile $sums
         } catch {
-            throw "install.ps1: download failed: $base/SHA256SUMS; nothing installed"
+            throw "install.ps1: download failed: $url/SHA256SUMS; nothing installed"
         }
 
         # SHA256SUMS is the contract: this file's line ("<hash>  <name>") only
@@ -58,17 +70,35 @@
         try { & $exe --version | Out-Null; $runs = ($LASTEXITCODE -eq 0) } catch { }
         if (-not $runs) { throw "install.ps1: the downloaded binary does not run on this machine ($name)" }
 
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $dest = Join-Path $dir 'conde.exe'
         # binaries moved aside earlier; one a bridge still runs stays locked until it exits
         Get-ChildItem -LiteralPath $dir -Filter 'conde.exe*.old' -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $dest) {
+        # an upgrade: what the old conde says it is, given at most 5 s (an old binary that hangs must not stop it)
+        $upgrade = Test-Path -LiteralPath $dest
+        $previous = 'unknown version'
+        if ($upgrade) {
+            $probe = New-Object Diagnostics.Process
+            $probe.StartInfo.FileName = $dest
+            $probe.StartInfo.Arguments = '--version'
+            $probe.StartInfo.UseShellExecute = $false
+            $probe.StartInfo.RedirectStandardOutput = $true
+            $probe.StartInfo.CreateNoWindow = $true
+            try {
+                [void]$probe.Start()
+                $read = $probe.StandardOutput.ReadLineAsync()
+                if ($probe.WaitForExit(5000) -and $probe.ExitCode -eq 0 -and $read.Wait(1000) -and $read.Result) {
+                    $previous = $read.Result.Trim()
+                } elseif (-not $probe.HasExited) {
+                    $probe.Kill()
+                }
+            } catch { }
             # a running bridge locks conde.exe; a locked file can still be renamed, to a fresh name
             Move-Item -LiteralPath $dest -Destination ("$dest." + [guid]::NewGuid().ToString('N') + '.old') -Force
         }
         Move-Item -LiteralPath $exe -Destination $dest -Force
-        Write-Host "installed $dest ($(& $dest --version))"
+        $installed = "$(& $dest --version)"
+        if ($upgrade) { Write-Host "replaced $dest ($previous) with $installed" } else { Write-Host "installed $dest ($installed)" }
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -94,7 +124,13 @@
     }
 
     Write-Host ""
-    Write-Host "Next:"
-    Write-Host "  conde login --server https://<workspace>.conde.cloud   # the address in your invite; your human clicks the browser sign-in, then it sets up this machine"
-    Write-Host "(No workspace: conde setup sets up this machine with its local board only.)"
+    if ($upgrade) {
+        Write-Host "Next (an upgrade; your enrollment and names stay as they are, no sign-in):"
+        Write-Host "  conde setup        # rewrites what this release changed (skills, MCP entries, the service) and restarts the bridge onto it"
+        Write-Host "  conde doctor       # shows: ok bridge: running this build"
+    } else {
+        Write-Host "Next:"
+        Write-Host "  conde login --server https://<workspace>.conde.cloud   # the address in your invite; your human clicks the browser sign-in, then it sets up this machine"
+        Write-Host "(No workspace: conde setup sets up this machine with its local board only.)"
+    }
 }

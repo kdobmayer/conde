@@ -1,11 +1,12 @@
 # Keycloak realms of conde on GCP
 
-The configuration of the Keycloak at https://auth.conde.cloud: the realms `demo` (local users with passwords) and
-`clearscale` (Google sign-in only, for clearscale.com accounts), one conde workspace each, while `dakai` signs in
+The configuration of the Keycloak at https://auth.conde.cloud: the realms `demo` (local users with passwords),
+`clearscale` (Google sign-in only, for clearscale.com accounts) and `vvpusa` (VVP USA's AWS IAM Identity Center over
+SAML only, `saml.tf`), one conde workspace each, while `dakai` signs in
 directly against its Entra tenant; the realm `infra` for platform tools (Argo CD, group `infra-admins`, MFA
 required); and in the master realm the permanent admin `admin` and the client `terraform`. The realms `infra` and
 `master` sign in with password and OTP for every user (the `mfa-browser` flow; a user without OTP enrols at the first
-sign-in); `clearscale` and `infra` refuse the password grant at the token endpoint (flows.tf).
+sign-in); `clearscale`, `vvpusa` and `infra` refuse the password grant at the token endpoint (flows.tf).
 Apply after the cluster and workspaces roots. The provider calls `/admin` and `/realms/master`, which the public
 host does not serve, so `run.sh` reaches Keycloak through a port-forward to its Service: it starts `kubectl
 port-forward -n keycloak svc/keycloak 18080:8080 --address=127.0.0.1` over the cluster's DNS endpoint as
@@ -37,7 +38,7 @@ Every generated value is write-only: it is in Keycloak and in Secret Manager, no
 
 | secret | value |
 |---|---|
-| `demo-oidc-client-secret`, `clearscale-oidc-client-secret` | the secret of the realm's `conde` client (a new version of the secret the workspaces root created) |
+| `demo-oidc-client-secret`, `clearscale-oidc-client-secret`, `vvpusa-oidc-client-secret` | the secret of the realm's `conde` client (a new version of the secret the workspaces root created) |
 | `keycloak-admin-temp-password` | the temporary password of `admin` in the master realm |
 | `infra-krisztian-temp-password` | the temporary password of `krisztian` in the realm `infra` |
 | `keycloak-terraform-client-secret` | the secret of the master realm's `terraform` client |
@@ -49,8 +50,9 @@ deployment/conde`. Two secrets this root never reads: `resend-api-key` (the SMTP
 references instead (`${vault.smtp-password}`, `${vault.google-client-secret}`), and Keycloak reads the values from its
 file vault: the cluster root mounts them at `/vault` as `<realm>_<key>` (`local.keycloak_vault` there).
 
-Demo's user profile (`demo.tf`) deviates from Keycloak's default on purpose: first and last name are optional (the
-default requires them from the user), so an invited user gets no "complete your profile" form at first sign-in.
+The user profile of demo and vvpusa (`realms.tf`) deviates from Keycloak's default on purpose: first and last name are
+optional (the default requires them from the user), so an invited user gets no "complete your profile" form at first
+sign-in.
 
 ## Replacing the bootstrap admin
 
@@ -127,6 +129,21 @@ database and the empty secret `<name>-oidc-client-secret`. How its people sign i
    straight to Google and Keycloak refuses accounts of other domains. In the cluster root, the realm's vault files in
    `local.keycloak_vault` (`<name>_smtp-password` and `<name>_google-client-secret`) and an apply there first. Then
    `terraform apply` here; it writes the realm's `conde` client secret into `<name>-oidc-client-secret`.
+
+**A company on a SAML identity provider** (vvpusa: AWS IAM Identity Center) gets a realm here that signs in only
+through that provider:
+
+1. The workspace, without `oidc_issuer`, and `/realms/<name>` in the Keycloak HTTPRoute and `<name>_smtp-password` in
+   `local.keycloak_vault` of the cluster root.
+2. At the provider, a SAML application with the ACS URL `https://auth.conde.cloud/realms/<name>/broker/<alias>/endpoint`,
+   the audience `https://auth.conde.cloud/realms/<name>`, the email as the NameID (format emailAddress) and the
+   attributes `email`, `firstName` and `lastName`. Its metadata file goes next to this root (vvpusa:
+   `vvpusa-aws-metadata.xml`, public: endpoints and signing certificate).
+3. Here, one entry in each of `local.tenants`, `var.require_mfa` (false) and `local.saml_sign_in` (alias, display name,
+   the metadata file), then `./run.sh apply`. The realm gets the identity provider, the `saml-browser` flow (an
+   existing session, else straight to the provider) and the `saml-first-login` flow (the first sign-in creates the
+   account, or links the one with the same email, without a confirmation page), and no password form. The tenant file
+   sets `invite.signIn: sso` and `invite.account`.
 
 **A company on Microsoft Entra** gets no realm: its workspace signs in directly against its tenant, as dakai does.
 

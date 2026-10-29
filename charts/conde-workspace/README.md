@@ -44,7 +44,8 @@ your store). The Secret holds:
 | `oidc.issuer` | required | OIDC issuer the server signs in against |
 | `oidc.clientId` | `conde` | OIDC client id |
 | `oidc.redirectUri` | `https://<hostname>/auth/callback` | OIDC redirect URI |
-| `invite.signIn` | `""` | `CONDE_JOIN_SIGN_IN`: `google` or `microsoft` (the server emails the invite through Resend), `password` (Keycloak sends its account-setup email), empty (no email) |
+| `invite.signIn` | `""` | `CONDE_JOIN_SIGN_IN`: `google`, `microsoft` or `sso` (the server emails the invite through Resend), `password` (Keycloak sends its account-setup email), empty (no email) |
+| `invite.account` | `""` | `CONDE_JOIN_ACCOUNT`: with `sso`, the email says "sign in with your <account> account" (empty: "company") |
 | `invite.keycloakAdmin.url`, `.clientId`, `.namespace` | in-cluster Keycloak, `conde-admin`, `keycloak` | password workspaces: the Keycloak admin API and the egress to its namespace on 8080 |
 | `logLevel` | `info` | `RUST_LOG` |
 | `distBaseUrl` | the conde.cloud dist bucket | where `conde update` downloads binaries |

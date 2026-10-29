@@ -170,7 +170,8 @@ Where the code under infra/gcp, charts and deploy differs from the plan above:
   its IAM user, the service accounts, the secrets), `realms` (the Keycloak configuration, run through a port-forward) and `dns` (the
   Cloudflare records and the Pages project), with the shared module in `modules/workspace`.
 - No `dakai` realm. Dakai signs in directly against its Entra tenant through its existing app registration; the
-  realms are `demo` (passwords), `clearscale` (Google sign-in), `infra` (platform tools, MFA) and `master`.
+  realms are `demo` (passwords), `clearscale` (Google sign-in), `vvpusa` (VVP USA's AWS IAM Identity Center over
+  SAML, 2026-10-29), `infra` (platform tools, MFA) and `master`.
 - No deploy workflow and no `deploy` access to the cluster. The release workflow commits the new image digest to
   `deploy/image.yaml` on main, and Argo CD rolls out every workspace from `charts/conde-workspace` and
   `deploy/tenants/<name>.yaml`.

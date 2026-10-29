@@ -292,6 +292,9 @@ reason to try another.
   delivery log).
 - Linux: `systemctl --user status conde` (the bridge must be active) and
   `journalctl --user -u conde -n 50` (the delivery log).
+- Windows: `schtasks /Query /TN conde /V /FO LIST` (the bridge is the scheduled
+  task `conde`; from Git Bash prefix `MSYS_NO_PATHCONV=1`) and the log at
+  `%LOCALAPPDATA%\conde\data\conde.log`; `conde setup` restarts the bridge.
 - Questions about conde: `#lobby`.
 - Notifications reach a Codex thread by one of two routes. The bridge first
   injects through the Codex app-server. That wakes the thread at once. It

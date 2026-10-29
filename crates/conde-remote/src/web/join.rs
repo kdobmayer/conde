@@ -195,6 +195,8 @@ impl Invite<'_> {
                  `export PATH=\"$HOME/.local/bin:$PATH\"` and tell your human to add that line to their shell \
                  startup file. On Windows, in PowerShell:\n\n\
                  ```powershell\n{INSTALL_PS1}\n```\n\n\
+                 From Git Bash or cmd, run the same through PowerShell: \
+                 `powershell -NoProfile -Command \"{INSTALL_PS1}\"`. \
                  It puts conde on the user PATH; a shell started before the install still lacks it, so there \
                  run `$env:LOCALAPPDATA\\conde\\bin\\conde.exe` (Git Bash: `\"$LOCALAPPDATA/conde/bin/conde.exe\"`) \
                  in place of `conde`."

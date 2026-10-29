@@ -4,16 +4,28 @@
 //! codex delivery can never start the real codex), and a fake Claude Code
 //! session that records frames and answers with scripted receipts.
 
-use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+// the fake Claude Code session's (unix only)
+#[cfg(unix)]
+use std::collections::{HashMap, VecDeque};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
+
+#[cfg(unix)]
 use serde_json::{Value, json};
+
+#[path = "../os/mod.rs"]
+pub mod os;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_conde");
 pub const WAIT: Duration = Duration::from_secs(15);
@@ -54,7 +66,7 @@ impl Host {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         for harness in ["codex", "claude"] {
-            std::os::unix::fs::symlink("/bin/sh", root.join("bin").join(harness)).unwrap();
+            os::harness(&root.join("bin"), harness);
         }
         Host {
             root,
@@ -65,14 +77,17 @@ impl Host {
     }
 
     pub fn sock(&self) -> PathBuf {
-        self.root.join("run/conde.sock")
+        os::socket_in(&self.root)
+    }
+
+    /// Another daemon's address on this machine.
+    pub fn sock_named(&self, name: &str) -> PathBuf {
+        os::named_socket_in(&self.root, name)
     }
 
     pub fn env<'c>(&self, cmd: &'c mut Command) -> &'c mut Command {
-        cmd.env_clear()
-            .env("PATH", self.root.join("nopath"))
-            .env("HOME", &self.root)
-            .env("USER", &self.user)
+        os::clear_env(cmd).env("PATH", self.root.join("nopath"));
+        os::user_home(cmd, &self.user, &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("claude"))
             .env("CODEX_HOME", self.root.join("codex"))
@@ -96,7 +111,7 @@ impl Host {
         let pid = child.id();
         self.daemons.push(child);
         let deadline = Instant::now() + WAIT;
-        while UnixStream::connect(sock).is_err() {
+        while !os::answers(sock) {
             assert!(
                 Instant::now() < deadline,
                 "daemon did not come up: {}",
@@ -127,6 +142,7 @@ impl Host {
         wait_for("daemon exit", || child.try_wait().unwrap())
     }
 
+    #[cfg(unix)]
     pub fn terminate(&mut self, pid: u32) -> ExitStatus {
         assert!(
             self.daemons.iter().any(|c| c.id() == pid),
@@ -145,12 +161,7 @@ impl Host {
         stdin: Option<&str>,
     ) -> Output {
         let mut cmd = match harness {
-            Some(h) => {
-                let mut c = Command::new(self.root.join("bin").join(h));
-                // the trailing ':' keeps the shell from exec-replacing itself
-                c.args(["-c", "\"$0\" \"$@\"; rc=$?; :; exit $rc", BIN]);
-                c
-            }
+            Some(h) => os::under(&os::harness_file(&self.root.join("bin"), h), BIN),
             None => Command::new(BIN),
         };
         self.env(&mut cmd).envs(env.iter().copied()).args(args);
@@ -234,6 +245,7 @@ impl Drop for Host {
 }
 
 /// One received frame.
+#[cfg(unix)]
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub msg_id: String,
@@ -242,6 +254,7 @@ pub struct Frame {
     pub raw: String,
 }
 
+#[cfg(unix)]
 impl Frame {
     /// The conde message id the notification points at.
     pub fn message_id(&self) -> Option<String> {
@@ -252,21 +265,26 @@ impl Frame {
 }
 
 /// A receipt to send back: after `delay`, `status` plus extra fields.
+#[cfg(unix)]
 pub type Step = (Duration, &'static str, Value);
 
 /// One receipt list per frame of a message.
+#[cfg(unix)]
 type Plan = Vec<Vec<Step>>;
 /// Plans waiting for a new message, and the plan each seen message took.
+#[cfg(unix)]
 type Plans = (VecDeque<Plan>, HashMap<String, Plan>);
 
 /// A Claude Code session's receiving side on a socket in the host's temp dir,
 /// published in the host's sessions dir. Each new conde message takes the next
 /// queued plan; the plan's n-th entry answers that message's n-th frame.
+#[cfg(unix)]
 pub struct FakeClaude {
     pub frames: Arc<Mutex<Vec<Frame>>>,
     plans: Arc<Mutex<Plans>>,
 }
 
+#[cfg(unix)]
 fn proc_start() -> String {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     stat[stat.rfind(')').unwrap() + 2..]
@@ -276,6 +294,7 @@ fn proc_start() -> String {
         .to_string()
 }
 
+#[cfg(unix)]
 fn decode_uds(addr: &str) -> PathBuf {
     let raw = addr.strip_prefix("uds:").expect("uds address").as_bytes();
     let (mut out, mut i) = (Vec::new(), 0);
@@ -293,6 +312,7 @@ fn decode_uds(addr: &str) -> PathBuf {
     PathBuf::from(std::ffi::OsStr::from_bytes(&out))
 }
 
+#[cfg(unix)]
 impl FakeClaude {
     pub fn start(host: &Host, session_id: &str) -> FakeClaude {
         let sock = host.root.join("cc/inbox.sock");

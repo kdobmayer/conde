@@ -5,15 +5,12 @@
 //! installed binary's login runs on a temp machine (its own home, PATH and socket) and ends
 //! with the machine set up as `conde setup` sets it up.
 
-// the installed binary's login ends in `conde setup`, which these tests let drive a fake systemd;
-// on Windows it would register a real scheduled task (tests/setup.rs fakes that one)
-#[cfg(unix)]
 mod fake_daemon;
+mod os;
 
 use conde::{boards, login, util};
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,14 +23,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-
-/// A secret file only its owner can read: mode 0600, or on Windows a DACL naming only this user.
-fn owner_only(path: &Path) -> bool {
-    #[cfg(unix)]
-    return conde::credentials::mode(path) == Some(0o600);
-    #[cfg(windows)]
-    return conde::private::check(path).is_ok() && path.is_file();
-}
 
 const KEY: &str = "conde_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -307,7 +296,7 @@ async fn login_redeems_the_code_and_stores_the_key_like_enroll() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("conde/boards/dakai.json");
     login::save(&path, "dakai", &server, &enrolled).unwrap();
-    assert!(owner_only(&path));
+    assert!(os::owner_only(&path));
     let stored = boards::load(&path).unwrap();
     assert_eq!(
         (
@@ -435,7 +424,10 @@ async fn a_pasted_code_finishes_the_login_started_on_this_host() {
         url.starts_with(&format!("{server}/auth/cli?mode=code&state=")),
         "{url}"
     );
-    assert!(owner_only(&path), "the waiting run holds the PKCE verifier");
+    assert!(
+        os::owner_only(&path),
+        "the waiting run holds the PKCE verifier"
+    );
     assert!(
         !url.contains(
             &std::fs::read_to_string(&path)
@@ -603,7 +595,6 @@ fn a_machine_without_a_display_is_headless() {
 
 /// `conde login` as an agent runs it: no terminal, so the first call prints the URL and how to
 /// finish; the second call carries the code the human read out and stores the key.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     let (server, board) = board().await;
@@ -660,7 +651,7 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
     );
     assert!(!out.contains("next: conde setup"), "{out}");
     let path = config.join("conde/boards/dakai.json");
-    assert!(owner_only(&path));
+    assert!(os::owner_only(&path));
     let stored = boards::load(&path).unwrap();
     assert_eq!(
         (stored.host_id.as_str(), stored.key.as_str()),
@@ -727,15 +718,16 @@ async fn an_agent_runs_the_pasted_code_login_in_two_calls() {
 }
 
 /// A bare machine for the installed binary: a temp home with Claude Code's and Codex's config
-/// directories, a PATH holding only a fake `systemctl` that logs its calls, and a socket where
-/// a fake bridge answers once `systemctl` started the service.
-#[cfg(unix)]
+/// directories, a PATH holding only a fake service manager that logs its calls (`systemctl`, on
+/// Windows `schtasks`, so no real scheduled task is registered), and a socket where a fake bridge
+/// answers once that manager started the service.
 struct Machine {
     root: tempfile::TempDir,
+    /// Held so the fake bridge serves while the machine lives; read on Unix only.
+    #[cfg_attr(windows, allow(dead_code))]
     bridge: Arc<Mutex<Option<fake_daemon::FakeDaemon>>>,
 }
 
-#[cfg(unix)]
 impl Machine {
     fn new() -> Machine {
         let root = tempfile::tempdir().unwrap();
@@ -743,21 +735,26 @@ impl Machine {
         for d in ["home/.claude", "home/.codex", "bin", "run"] {
             std::fs::create_dir_all(r.join(d)).unwrap();
         }
-        // builtins only: the PATH has nothing else
-        let script = format!(
-            "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$2\" in start|restart) : > '{mark}';; esac\n",
-            log = r.join("systemctl.log").display(),
-            mark = r.join("started").display()
-        );
-        std::fs::write(r.join("bin/systemctl"), script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            r.join("bin/systemctl"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        #[cfg(unix)]
+        {
+            // builtins only: the PATH has nothing else
+            let script = format!(
+                "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$2\" in start|restart) : > '{mark}';; esac\n",
+                log = r.join("systemctl.log").display(),
+                mark = r.join("started").display()
+            );
+            std::fs::write(r.join("bin/systemctl"), script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                r.join("bin/systemctl"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        #[cfg(windows)]
+        os::example_as(&r.join("bin"), "fake_schtasks", "schtasks");
         let bridge = Arc::new(Mutex::new(None));
-        let (slot, mark, socket) = (bridge.clone(), r.join("started"), r.join("run/conde.sock"));
+        let (slot, mark, socket) = (bridge.clone(), r.join("started"), os::socket_in(r));
         std::thread::spawn(move || {
             while !mark.exists() {
                 std::thread::sleep(Duration::from_millis(10));
@@ -775,6 +772,7 @@ impl Machine {
         self.home().join(".config")
     }
 
+    #[cfg(unix)]
     fn systemctl(&self) -> Vec<String> {
         std::fs::read_to_string(self.root.path().join("systemctl.log"))
             .unwrap_or_default()
@@ -784,6 +782,7 @@ impl Machine {
     }
 
     /// The ops the bridge was asked, since the last call.
+    #[cfg(unix)]
     fn bridge_ops(&self) -> Vec<String> {
         self.bridge
             .lock()
@@ -800,15 +799,13 @@ impl Machine {
     fn conde(&self, args: Vec<String>) -> tokio::task::JoinHandle<(Option<i32>, String, String)> {
         let r = self.root.path().to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let out = std::process::Command::new(env!("CARGO_BIN_EXE_conde"))
+            let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_conde"));
+            os::clear_env(&mut cmd).env("PATH", r.join("bin"));
+            let out = os::user_home(&mut cmd, "tester", &r.join("home"))
                 .args(&args)
-                .env_clear()
-                .env("PATH", r.join("bin"))
-                .env("HOME", r.join("home"))
-                .env("USER", "tester")
                 .env("XDG_CONFIG_HOME", r.join("home/.config"))
                 .env("CONDE_DATA", r.join("data"))
-                .env("CONDE_SOCK", r.join("run/conde.sock"))
+                .env("CONDE_SOCK", os::socket_in(&r))
                 .env("DISPLAY", ":0")
                 .stdin(std::process::Stdio::null())
                 .output()
@@ -823,7 +820,6 @@ impl Machine {
 }
 
 /// The bridge the service runs, as setup and login ask it: dakai is open, the host is on v2.
-#[cfg(unix)]
 fn fake_bridge(req: &Value) -> fake_daemon::Answer {
     match req["op"].as_str().unwrap_or_default() {
         "board.reload" => Ok(json!({"state": "opened"})),

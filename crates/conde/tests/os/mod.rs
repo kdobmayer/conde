@@ -35,31 +35,40 @@ pub fn user_home<'c>(c: &'c mut Command, user: &str, home: &Path) -> &'c mut Com
 /// `<name>.exe` (Windows, where cmd.exe would mangle arguments).
 pub fn harness(dir: &Path, name: &str) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
+    let path = harness_file(dir, name);
     #[cfg(unix)]
-    {
-        let path = dir.join(name);
-        std::os::unix::fs::symlink("/bin/sh", &path).unwrap();
-        path
-    }
+    std::os::unix::fs::symlink("/bin/sh", &path).unwrap();
     #[cfg(windows)]
-    {
-        // tests run from target/<profile>/deps; `cargo test` builds the examples beside them
-        let exe = std::env::current_exe().unwrap();
-        let built = exe
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join(r"examples\fake_harness.exe");
-        assert!(
-            built.exists(),
-            "{} is missing: build it with cargo build -p conde --example fake_harness",
-            built.display()
-        );
-        let path = dir.join(format!("{name}.exe"));
-        std::fs::copy(&built, &path).unwrap();
-        path
-    }
+    example_as(dir, "fake_harness", name);
+    path
+}
+
+/// An example program (`examples/<example>.rs`) copied to `dir` as `<name>.exe`: `cargo test`
+/// builds the examples beside the tests, in target/<profile>/examples.
+#[cfg(windows)]
+pub fn example_as(dir: &Path, example: &str, name: &str) -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let built = exe
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join(format!("{example}.exe"));
+    assert!(
+        built.exists(),
+        "{} is missing: build it with cargo build -p conde --example {example}",
+        built.display()
+    );
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(format!("{name}.exe"));
+    std::fs::copy(&built, &path).unwrap();
+    path
+}
+
+/// Where [`harness`] puts the process named `name` in `dir`.
+pub fn harness_file(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// `harness` running `program` and the arguments added after this call, which stays its child
@@ -76,13 +85,26 @@ pub fn under(harness: &Path, program: &str) -> Command {
 /// A daemon address for a test root: `root/run/conde.sock`, or on Windows a pipe of its own,
 /// since a pipe is not a file.
 pub fn socket_in(root: &Path) -> PathBuf {
+    named_socket_in(root, "conde")
+}
+
+/// Another daemon address for the same root: `root/run/<name>.sock`, or its own pipe.
+pub fn named_socket_in(root: &Path, name: &str) -> PathBuf {
     #[cfg(unix)]
-    return root.join("run/conde.sock");
+    return root.join("run").join(format!("{name}.sock"));
     #[cfg(windows)]
     return PathBuf::from(format!(
-        r"\\.\pipe\conde-test-{}",
+        r"\\.\pipe\{name}-test-{}",
         &conde::util::sha256_hex(root.to_string_lossy().as_bytes())[..16]
     ));
+}
+
+/// A secret file only its owner can read: mode 0600, or on Windows a DACL naming only this user.
+pub fn owner_only(path: &Path) -> bool {
+    #[cfg(unix)]
+    return conde::credentials::mode(path) == Some(0o600);
+    #[cfg(windows)]
+    return path.is_file() && conde::private::check(path).is_ok();
 }
 
 /// Whether a daemon answers at `socket` (connects; on Windows the pipe also passes the peer

@@ -11,6 +11,9 @@ use conde::protocol::v2::BoardInfo;
 use conde::setup::{self, CmdOut, Env, Host, Options, Os, Publish, WindowsEnv};
 use conde::{paths, util};
 
+/// The query whose `Last Result` column says whether the task runs.
+const QUERY_CSV: &str = "schtasks /Query /TN conde /FO CSV /V /NH";
+
 struct Fake {
     on_path: HashSet<&'static str>,
     calls: Vec<String>,
@@ -18,6 +21,14 @@ struct Fake {
     claude_json: PathBuf,
     fail: Option<&'static str>,
     alive: bool,
+    /// The bridge a `schtasks /Run` starts exits at once (its last result 1).
+    run_exits: bool,
+    /// How many pipe checks after End still find the stopped bridge holding the pipe.
+    lingers: u32,
+    /// A `schtasks /Run` came while the pipe was still held.
+    run_while_held: bool,
+    /// The task's last result while it does not run: 267014 after End, 1 after a Run that exited.
+    ended: i64,
     print_out: String,
     show_out: String,
     /// What the human types at each prompt; empty: there is no terminal.
@@ -41,6 +52,10 @@ impl Fake {
             claude_json: env.claude_json(),
             fail: None,
             alive: false,
+            run_exits: false,
+            lingers: 0,
+            run_while_held: false,
+            ended: 267011,
             print_out: String::new(),
             show_out: String::new(),
             answers: VecDeque::new(),
@@ -112,6 +127,23 @@ impl Host for Fake {
                 Some(v) => stdout = format!("{v}\n"),
                 None => ok = false,
             },
+            // the task: End stops the bridge, Run starts it; the CSV query's 7th column is the
+            // last result, 0x41301 while it runs
+            ("schtasks", ["/End", ..]) if ok => {
+                self.alive = false;
+                self.ended = 267014;
+            }
+            ("schtasks", ["/Run", ..]) if ok => {
+                self.run_while_held |= self.lingers > 0;
+                self.alive = !self.run_exits;
+                self.ended = 1;
+            }
+            ("schtasks", ["/Query", _, _, "/FO", "CSV", "/V", "/NH"]) => {
+                let last = if self.alive { 267009 } else { self.ended };
+                stdout = format!(
+                    "\"HOST\",\"\\conde\",\"N/A\",\"Running\",\"Interactive only\",\"10/29/2026 9:00:00 AM\",\"{last}\",\"krisz\"\r\n"
+                );
+            }
             ("launchctl", ["bootstrap", ..]) => self.launchd_loaded = true,
             ("launchctl", ["bootout", _]) => self.launchd_loaded = false,
             _ => {}
@@ -121,6 +153,14 @@ impl Host for Fake {
             stdout,
             stderr: if ok { String::new() } else { "boom".into() },
         })
+    }
+
+    fn held(&mut self, _socket: &Path) -> bool {
+        if self.lingers > 0 {
+            self.lingers -= 1;
+            return true;
+        }
+        self.alive
     }
 
     fn reach(&mut self, _socket: &Path) -> Result<(), String> {
@@ -492,11 +532,13 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
     let create = format!("schtasks /Create /TN conde /XML {} /F", task.display());
     let calls = host.take_calls();
     assert_eq!(
-        calls[..3],
+        calls[..5],
         [
             "schtasks /Query /TN conde".to_string(),
             create.clone(),
-            "schtasks /Run /TN conde".into()
+            QUERY_CSV.into(),
+            "schtasks /Run /TN conde".into(),
+            QUERY_CSV.into()
         ]
     );
     assert!(calls.contains(&add_call(&env, "conde")), "{calls:?}");
@@ -587,7 +629,9 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
             "schtasks /Query /TN conde".to_string(),
             create,
             "schtasks /End /TN conde".into(),
-            "schtasks /Run /TN conde".into()
+            QUERY_CSV.into(),
+            "schtasks /Run /TN conde".into(),
+            QUERY_CSV.into()
         ]
     );
     assert!(out.contains("service: restarted conde"), "{out}");
@@ -2049,7 +2093,9 @@ fn a_running_bridge_of_another_build_is_reported_and_restarted() {
                     .contains(&"launchctl kickstart -k gui/501/space.nativeai.conde".to_string()),
                 Os::Windows => calls.ends_with(&[
                     "schtasks /End /TN conde".to_string(),
+                    QUERY_CSV.into(),
                     "schtasks /Run /TN conde".to_string(),
+                    QUERY_CSV.into(),
                 ]),
             }
         };
@@ -2193,7 +2239,9 @@ fn a_running_bridge_that_predates_boards_is_restarted() {
             }
             Os::Windows => calls.ends_with(&[
                 "schtasks /End /TN conde".to_string(),
+                QUERY_CSV.into(),
                 "schtasks /Run /TN conde".to_string(),
+                QUERY_CSV.into(),
             ]),
         };
         assert!(restarted, "{calls:?}");
@@ -2465,9 +2513,28 @@ fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
         [
             "schtasks /Query /TN conde",
             "schtasks /End /TN conde",
-            "schtasks /Run /TN conde"
+            QUERY_CSV,
+            "schtasks /Run /TN conde",
+            QUERY_CSV
         ]
     );
+    // the stopped bridge holds the pipe a moment after End: Run waits until it is released
+    host.lingers = 3;
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    assert!(r.is_ok() && out.contains("restarted conde"), "{out}");
+    assert_eq!((host.lingers, host.run_while_held), (0, false));
+    host.take_calls();
+    // the new bridge exits (the pipe still held, say): its last result is said, no restart claimed
+    host.run_exits = true;
+    let (r, out) = restart(&win, &mut host, &win.exe);
+    let err = format!("{:#}", r.unwrap_err());
+    assert!(
+        err.contains("restart of conde incomplete: the bridge exited, task last result 1 (0x1)"),
+        "{err}"
+    );
+    assert!(!out.contains("restarted"), "{out}");
+    host.take_calls();
+    host.run_exits = false;
     host.alive = false;
     let (r, out) = restart(&win, &mut host, &win.exe);
     assert!(
@@ -2476,7 +2543,12 @@ fn update_restarts_the_service_only_when_it_runs_the_updated_binary() {
     );
     assert_eq!(
         host.take_calls(),
-        ["schtasks /Query /TN conde", "schtasks /Run /TN conde"]
+        [
+            "schtasks /Query /TN conde",
+            QUERY_CSV,
+            "schtasks /Run /TN conde",
+            QUERY_CSV
+        ]
     );
     host.fail = Some("schtasks /Query");
     let (r, out) = restart(&win, &mut host, &win.exe);
@@ -2648,4 +2720,28 @@ fn a_welcome_field_that_fails_its_form_is_not_printed() {
             "{agent:?} {lobby:?} {guide:?}"
         );
     }
+}
+
+/// The last result is the 7th CSV column whatever the system language; quoted commas and an
+/// HRESULT printed negative are read.
+#[test]
+fn the_task_last_result_is_read_from_the_csv_column() {
+    let row = |last: &str| {
+        format!(
+            "\r\n\"PC\",\"\\\\conde\",\"N/A\",\"Wird ausgef\u{fc}hrt\",\"Nur interaktiv\",\"29.10.2026, 09:00:00\",\"{last}\",\"krisz\"\r\n"
+        )
+    };
+    assert_eq!(
+        setup::task_last_result(&row("267009")),
+        Some(setup::TASK_RUNNING)
+    );
+    assert_eq!(setup::task_last_result(&row("1")), Some(1));
+    assert_eq!(
+        setup::task_last_result(&row("-2147024894")),
+        Some(-2147024894)
+    );
+    assert_eq!(
+        setup::task_last_result("ERROR: The system cannot find the file specified.\r\n"),
+        None
+    );
 }

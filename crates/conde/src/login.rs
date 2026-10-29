@@ -547,13 +547,16 @@ fn code_login(
 /// Opens `url` in the desktop browser; the URL is printed first for headless use.
 fn open_browser(url: &str) {
     eprintln!("Opening the browser to sign in. If it does not open, visit:\n\n  {url}\n");
-    let opener = if cfg!(target_os = "macos") {
-        "open"
+    // Windows: rundll32 hands the URL to the default browser unchanged (`cmd /c start` would split it at `&`).
+    let (opener, args): (&str, Vec<&str>) = if cfg!(windows) {
+        ("rundll32", vec!["url.dll,FileProtocolHandler", url])
+    } else if cfg!(target_os = "macos") {
+        ("open", vec![url])
     } else {
-        "xdg-open"
+        ("xdg-open", vec![url])
     };
     let spawned = std::process::Command::new(opener)
-        .arg(url)
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

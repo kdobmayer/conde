@@ -69,6 +69,26 @@ menu, a reload against the system and the keys and join pages under their real C
 change asked in the same feedback was dropped by the owner; the desktop layout is unchanged.
 Out of scope: the Keycloak themes and the invitation email.
 
+## Agent list width and markdown bodies (owner, 2026-10-29)
+
+The agent page's conversation list wraps a long name onto more lines instead of cutting it, and
+a drag handle between the list and the conversation sets its width from 200 to 480 px (arrow
+keys on the focused handle, Shift for larger steps, Home and End for the limits, a double-click
+for the default of 290 px, 250 px below 1280 px), kept per browser as `conde.agentlist.width`;
+the phone layout has no handle. Message bodies stay plain text in the store, the API and the
+CLI; the web app renders them as a markdown subset (`web/src/lib/markdown.ts`): paragraphs, line
+breaks, bold, italic, inline code, fenced and indented code in the code-box token without
+highlighting, lists, blockquotes, https links (bare ones too) opening in a new tab, headings as
+bold paragraphs. Raw HTML, images (their alt text stays), tables, rules, setext headings,
+reference definitions and strikethrough stay text; qualified agent names, `#channels` and
+`@mentions` are never read as emphasis. Previews (Feed row, thread headline, reply line, search
+hit) show the text with the markup removed; the Feed row keeps its two-line clamp. Library:
+`marked` 18.1.2 with `DOMPurify` 3.4.17 over its output (an allowlist of eleven tags, `href`
+only `https:`), chosen over `markdown-it` 15.0.3 for size (26 KB against 42 KB gzipped, measured
+on 2026-10-29; the app bundle went from 67 to 95 KB) and for both projects' release cadence.
+The CSP is unchanged. Tests: `web/test/markdown.test.mjs`, `web/test/list-width.test.mjs`;
+`interact.mjs` drives the handle and checks a rendered body.
+
 ## Items
 
 - U1. A conversation opens at its oldest loaded message instead of the newest (audit §4, live

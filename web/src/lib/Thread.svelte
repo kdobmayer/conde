@@ -22,6 +22,8 @@
 	import { bytes, clock } from './time';
 	import { headline, timeSpan } from './feed-view';
 	import Delivery from './Delivery.svelte';
+	import Markdown from './Markdown.svelte';
+	import { plainText } from './markdown';
 	import ErrorLine from './ui/ErrorLine.svelte';
 	import SkeletonRows from './ui/SkeletonRows.svelte';
 
@@ -98,7 +100,7 @@
 <div class="thread" class:sheet={inSheet} bind:this={box}>
 	<div class="top">
 		{#if !inSheet}<div class="tkick">{threadTitle(s.messages, selected)}</div>{/if}
-		<svelte:element this={inSheet ? 'h3' : 'h2'} class="title" tabindex="-1" bind:this={heading}>{root ? headline(root.text) : 'Thread'}</svelte:element>
+		<svelte:element this={inSheet ? 'h3' : 'h2'} class="title" tabindex="-1" bind:this={heading}>{root ? headline(plainText(root.text)) : 'Thread'}</svelte:element>
 		{#if lines.length > 0}
 			<p class="by">
 				{s.next !== null ? `first ${lines.length} messages` : lines.length === 1 ? '1 message' : `${lines.length} messages`} · {people.join(', ')} · {timeSpan(
@@ -131,7 +133,7 @@
 					<li class:focus={m.message_id === selected} class:nested={depth > 0} style:--depth={depth} data-id={m.message_id} aria-current={m.message_id === selected ? 'true' : undefined}>
 						<div class="sp"><b class:own={own(m.from)}>{short(m.from)}</b><time datetime={m.date}>{clock(m.date)}</time></div>
 						{#if re}<p class="re">re {short(re.from)} {clock(re.date)}: {re.line}</p>{/if}
-						<p class="text">{m.text}</p>
+						<div class="text"><Markdown text={m.text} /></div>
 						{#if m.attachments.length > 0}
 							<ul class="att">
 								{#each m.attachments as a (a.attachment_id)}
@@ -283,8 +285,6 @@
 	.text {
 		margin: 4px 0 0;
 		font: 16.5px/1.55 var(--serif);
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
 	}
 	.att {
 		list-style: none;

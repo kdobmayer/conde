@@ -4,7 +4,8 @@
 //                "width"?: px, "height"?: px (override the size's viewport),
 //                "wait"?: "css selector", "click"?: "css selector",
 //                "storage"?: { key: value } (localStorage before the page loads),
-//                "fill"?: ["css selector", "text"] (typed after load, before "wait") }]
+//                "fill"?: ["css selector", "text"] (typed after load, before "wait"),
+//                "scroll"?: "css selector" (scrolled to the middle of its scroller after "wait") }]
 // Needs playwright-core 1.64.0 (npm i --no-save) and a Chromium headless shell under
 // ~/.cache/ms-playwright (CHROME overrides the path). The clock is fixed to the fixture's NOW
 // in Europe/Budapest so relative times and day labels are stable.
@@ -43,6 +44,7 @@ for (const s of shots) {
 	if (s.click) await page.click(s.click);
 	if (s.fill) await page.fill(s.fill[0], s.fill[1]);
 	if (s.wait) await page.waitForSelector(s.wait);
+	if (s.scroll) await page.locator(s.scroll).evaluate((el) => el.scrollIntoView({ block: 'center' }));
 	await page.waitForTimeout(400);
 	await page.screenshot({ path: s.out });
 	console.log(`wrote ${s.out}`);

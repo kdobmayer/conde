@@ -32,6 +32,8 @@ The app talks only to its own origin, as the signed-in owner, and writes nothing
   `fleet`), never what; the app refetches what it shows and polls every 15 s while it is down.
 
 Versions are pinned exactly in package.json (checked on npm 2026-10-09).
+Message bodies are rendered with `marked` and sanitised with `DOMPurify` (added 2026-10-29,
+`src/lib/markdown.ts`); `jsdom` gives DOMPurify a DOM in the node tests only.
 
 Fonts: Source Serif 4 (400, 600, 400 italic) and Inter (400, 600), the woff2 files of
 `@fontsource/source-serif-4` 5.3.1 and `@fontsource/inter` 5.3.0 copied unmodified into

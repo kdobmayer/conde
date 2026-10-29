@@ -8,6 +8,7 @@
 	import { day } from './time';
 	import type { History, Message as Msg } from './types';
 	import Message from './Message.svelte';
+	import { plainText } from './markdown';
 	import Announcer from './ui/Announcer.svelte';
 	import EmptyState from './ui/EmptyState.svelte';
 	import ErrorLine from './ui/ErrorLine.svelte';
@@ -178,7 +179,7 @@
 		const id = replyContext(messages, i);
 		if (!id) return null;
 		const p = messages.find((m) => m.message_id === id);
-		return p ? { from: speaker(p.from), line: firstLine(p.text, 60) } : 'earlier';
+		return p ? { from: speaker(p.from), line: firstLine(plainText(p.text), 60) } : 'earlier';
 	}
 
 	const self = $derived(short(agent));

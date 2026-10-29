@@ -6,6 +6,7 @@
 	import { board, short } from './board.svelte';
 	import { clock } from './time';
 	import { DIRECTION_WORD } from './feed-view';
+	import { plainText } from './markdown';
 	import StateWord from './ui/StateWord.svelte';
 
 	let {
@@ -41,7 +42,7 @@
 		>
 		<span class="place">{dm ? 'Direct' : m.place}</span>
 	</span>
-	<span class="text">{m.text}</span>
+	<span class="text">{plainText(m.text)}</span>
 	<span class="meta">
 		<StateWord message={m} />
 		{#if m.reply_to}<span>reply</span>{/if}

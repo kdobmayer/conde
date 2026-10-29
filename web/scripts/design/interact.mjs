@@ -590,6 +590,77 @@ for (const hash of ['#/agents', '#/channels']) {
 	await context.close();
 }
 
+// ---- the theme: system by default, a choice in the user menu, kept per browser ----
+{
+	where = 'theme 1440';
+	const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+	const page = await context.newPage();
+	const state = () =>
+		page.evaluate(() => ({
+			theme: document.documentElement.dataset.theme,
+			bg: getComputedStyle(document.body).backgroundColor,
+			stored: localStorage.getItem('conde.theme')
+		}));
+	const LIGHT = 'rgb(246, 243, 237)';
+	const DARK = 'rgb(19, 21, 24)';
+	await check('theme: the inline script runs in the head before any stylesheet', async () => {
+		const html = await (await page.request.get(FEED)).text();
+		const script = html.indexOf("localStorage.getItem('conde.theme')");
+		const sheet = html.search(/<link[^>]+rel="stylesheet"/);
+		expect(script > 0 && sheet > script && script < html.indexOf('</head>'), `script at ${script}, stylesheet at ${sheet}`);
+	});
+	await check('theme: system follows the browser, also when it changes', async () => {
+		await page.goto(FEED, { waitUntil: 'networkidle' });
+		let s = await state();
+		expect(s.theme === 'dark' && s.bg === DARK, JSON.stringify(s));
+		await page.emulateMedia({ colorScheme: 'light' });
+		await page.waitForFunction(() => document.documentElement.dataset.theme === 'light', null, { timeout: 2000 }).catch(() => {});
+		s = await state();
+		expect(s.theme === 'light' && s.bg === LIGHT, JSON.stringify(s));
+		await page.emulateMedia({ colorScheme: 'dark' });
+		await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark', null, { timeout: 2000 }).catch(() => {});
+	});
+	await check('theme: the user menu offers System, Light and Dark; Light applies at once and is stored', async () => {
+		await page.locator('.mast .who').click();
+		const items = await page.locator('[role=menu] [role=menuitemradio]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
+		expect(items.join(' ') === 'System:true Light:false Dark:false', items.join(' '));
+		await page.locator('[data-theme-choice=light]').click();
+		const s = await state();
+		expect(s.theme === 'light' && s.bg === LIGHT && s.stored === 'light', JSON.stringify(s));
+		expect((await page.locator('[data-theme-choice=light]').getAttribute('aria-checked')) === 'true', 'Light not checked');
+	});
+	await check('theme: a reload keeps the choice against the system, before the app starts', async () => {
+		await page.addInitScript(() =>
+			document.addEventListener('readystatechange', () => document.readyState === 'interactive' && (window.__themeAtParse = document.documentElement.dataset.theme), { once: true })
+		);
+		await page.reload({ waitUntil: 'networkidle' });
+		const s = await state();
+		const atParse = await page.evaluate(() => window.__themeAtParse);
+		expect(atParse === 'light' && s.theme === 'light' && s.bg === LIGHT, JSON.stringify({ atParse, ...s }));
+	});
+	for (const [name, path] of [
+		['keys', 'keys'],
+		['join', 'join/mock']
+	])
+		await check(`theme: the ${name} page follows the stored choice`, async () => {
+			await page.goto(`${FEED}${path}`, { waitUntil: 'networkidle' });
+			const s = await state();
+			expect(s.theme === 'light' && s.bg === LIGHT, JSON.stringify(s));
+		});
+	await check('theme: Dark overrides a light system; System clears the choice', async () => {
+		await page.emulateMedia({ colorScheme: 'light' });
+		await page.goto(FEED, { waitUntil: 'networkidle' });
+		await page.locator('.mast .who').click();
+		await page.locator('[data-theme-choice=dark]').click();
+		let s = await state();
+		expect(s.theme === 'dark' && s.bg === DARK && s.stored === 'dark', JSON.stringify(s));
+		await page.locator('[data-theme-choice=system]').click();
+		s = await state();
+		expect(s.theme === 'light' && s.bg === LIGHT && s.stored === null, JSON.stringify(s));
+	});
+	await context.close();
+}
+
 await browser.close();
 mock.kill();
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');

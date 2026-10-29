@@ -1,6 +1,7 @@
 // Design-only: headless screenshots of pages on a local server, one at a time.
 // Usage: node scripts/design/shoot.mjs <shots.json>
 // shots.json: [{ "url": "...", "out": "path.png", "size": "desktop" | "tablet" | "phone", "scheme": "light" | "dark",
+//                "width"?: px, "height"?: px (override the size's viewport),
 //                "wait"?: "css selector", "click"?: "css selector",
 //                "storage"?: { key: value } (localStorage before the page loads),
 //                "fill"?: ["css selector", "text"] (typed after load, before "wait") }]
@@ -25,8 +26,10 @@ const sizes = {
 
 const browser = await chromium.launch({ executablePath, args: ['--disable-gpu', '--font-render-hinting=none'] });
 for (const s of shots) {
+	const size = sizes[s.size];
 	const context = await browser.newContext({
-		...sizes[s.size],
+		...size,
+		viewport: { width: s.width ?? size.viewport.width, height: s.height ?? size.viewport.height },
 		colorScheme: s.scheme,
 		locale: 'en-GB',
 		timezoneId: 'Europe/Budapest',

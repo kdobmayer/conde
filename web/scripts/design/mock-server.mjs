@@ -3,8 +3,9 @@
 // Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
 // owner.search, fleet.list, channel.list; the feed, thread and search ops per docs/web-ui-v2/ia.md
 // "Server contract"),
-// /v1/events (a WebSocket that sends the hello frame) and /keys (the server's keys page
-// template from crates/conde-remote/src/web/pages.rs, filled with fixture rows).
+// /v1/events (a WebSocket that sends the hello frame), /keys (the server's keys page template
+// from crates/conde-remote/src/web/pages.rs, filled with fixture rows) and /join/<anything> (the
+// join page's template from crates/conde-remote/src/web/join.rs in the same shell, signed out).
 
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
@@ -186,6 +187,9 @@ function answer(raw, res) {
 // The keys page: the server's own template and stylesheet, filled with fixture rows.
 const pagesRs = readFileSync(join(here, '../../../crates/conde-remote/src/web/pages.rs'), 'utf8');
 const css = pagesRs.match(/const CSS: &str = r#"([\s\S]*?)"#;/)[1];
+const themeJs = pagesRs.match(/const THEME_JS: &str = r#"([\s\S]*?)"#;/)[1];
+// The pages' CSP as pages.rs sends it, so the browser checks the theme script's hash.
+const pagesCsp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${createHash('sha256').update(themeJs).digest('base64')}'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
 const mark = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" class="mark" aria-hidden="true" focusable="false"><path style="fill:var(--muted)" d="M8 3h6v6H8Z"/><path fill="currentColor" d="M2 2h3v9h9v3H2Z"/></svg>';
 const server = 'https://conde.nativeai.space';
 function keysPage() {
@@ -230,6 +234,8 @@ ${apps}</tbody>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Host keys · conde</title>
+<meta name="color-scheme" content="dark light">
+<script>${themeJs}</script>
 <style>${css}</style>
 </head>
 <body>
@@ -246,13 +252,62 @@ ${body}
 </html>`;
 }
 
+// The join page: join.rs's template, its two branches and fields filled for an invited teammate.
+const joinRs = readFileSync(join(here, '../../../crates/conde-remote/src/web/join.rs'), 'utf8');
+const joinTemplate = joinRs.match(/source = r#"(<div class="join">[\s\S]*?)"#/)[1];
+const joinConst = (name) => joinRs.match(new RegExp(`const ${name}: &str = "([^"]*)";`))[1];
+function joinPage() {
+	const server = 'https://conde.nativeai.space';
+	const url = `${server}/join/mock`;
+	const fields = {
+		workspace: 'nativeai',
+		user: 'anna',
+		by: 'Krisztián',
+		sign_in: 'sign in with your Google account',
+		line: `Read ${url} and follow it.`,
+		install: joinConst('INSTALL'),
+		install_ps1: joinConst('INSTALL_PS1'),
+		login: `conde login --server ${server} --board nativeai`,
+		guide: 'https://conde.cloud/guide',
+		home: joinConst('HOME'),
+		text_url: `${url}?format=md`
+	};
+	const body = joinTemplate
+		.replace(/\{% if let Some\(by\) = inviter %\}([\s\S]*?)\{% else %\}[\s\S]*?\{% endif %\}/, '$1')
+		.replace(/\{% if password %\}[\s\S]*?\{% else %\}([\s\S]*?)\{% endif %\}/, '$1')
+		.replace(/\{\{ (\w+) \}\}/g, (_, k) => fields[k]);
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join nativeai · conde</title>
+<meta name="color-scheme" content="dark light">
+<script>${themeJs}</script>
+<style>${css}</style>
+</head>
+<body>
+<header>
+<a class="brand" href="/">${mark}conde</a>
+</header>
+<main>
+${body}
+</main>
+</body>
+</html>`;
+}
+
 const http = createServer((req, res) => {
 	const url = new URL(req.url, 'http://x');
 	if (url.pathname === '/v1/session') return json(res, 200, fx.session);
 	if (url.pathname === '/v1/rpc' && req.method === 'POST') return rpc(req, res);
 	if (url.pathname === '/keys') {
-		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp });
 		return res.end(keysPage());
+	}
+	if (url.pathname.startsWith('/join/')) {
+		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp });
+		return res.end(joinPage());
 	}
 	let file = join(root, url.pathname === '/' ? 'index.html' : url.pathname);
 	if (!file.startsWith(root) || !existsSync(file) || statSync(file).isDirectory()) file = join(root, 'index.html');

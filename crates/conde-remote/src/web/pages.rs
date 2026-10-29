@@ -1,17 +1,23 @@
-//! Server-rendered pages: askama templates (auto-escaped), one stylesheet, and one script
-//! (the copy button) allowed by a per-response CSP nonce. The favicons and the header mark come
-//! from the embedded web app.
+//! Server-rendered pages: askama templates (auto-escaped), one stylesheet, the theme script
+//! allowed by its CSP hash, and the copy button's script allowed by a per-response CSP nonce.
+//! The favicons and the header mark come from the embedded web app.
+
+use std::sync::LazyLock;
 
 use askama::Template;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 
 use super::HostKey;
 use super::session::random_token;
 
 /// Design B's tokens and type from web/src/app.css, inlined (the CSP allows no stylesheet or
-/// font source, so the fonts are the app's stacks without its bundled files). Dark only.
+/// font source, so the fonts are the app's stacks without its bundled files). Dark, and light
+/// under `data-theme`, which `THEME_JS` sets.
 const CSS: &str = r#":root{--bg:#131518;--panel:#191c20;--soft:#20242a;--line:#2a2e34;--fg:#ebe6dc;--muted:#b8b2a7;--faint:#8e887e;--accent:#d4886b;--on-accent:#131518;--danger:#d4886b;--serif:'Source Serif 4','Source Serif Pro',Georgia,'Times New Roman',serif;--sans:Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color-scheme:dark}
+:root[data-theme=light]{--bg:#f6f3ed;--panel:#fcfaf6;--soft:#ebe6dd;--line:#dcd5ca;--fg:#1d1b18;--muted:#4f4a43;--faint:#666056;--accent:#8f3e22;--on-accent:#fcfaf6;--danger:#8f3e22;color-scheme:light}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 var(--sans);-webkit-text-size-adjust:100%}
 a{color:var(--accent)}
@@ -80,6 +86,22 @@ td:last-child{justify-content:flex-end;padding-top:10px}
 button.danger{padding:6px 14px}
 }"#;
 
+/// The app's theme choice (web/src/lib/theme.ts), applied before the first paint: the inline
+/// script of web/src/app.html, byte for byte (a web test compares them); allowed by its hash.
+const THEME_JS: &str = r#"(function(){var r=document.documentElement,m=matchMedia('(prefers-color-scheme: light)');function a(){var t=null;try{t=localStorage.getItem('conde.theme')}catch(e){}r.dataset.theme=t==='light'||t==='dark'?t:m.matches?'light':'dark'}a();m.addEventListener('change',a);addEventListener('storage',a)})()"#;
+
+/// `THEME_JS`'s CSP source.
+fn theme_hash() -> &'static str {
+    static HASH: LazyLock<String> = LazyLock::new(|| {
+        let digest = Sha256::digest(THEME_JS.as_bytes());
+        format!(
+            "'sha256-{}'",
+            base64::engine::general_purpose::STANDARD.encode(digest)
+        )
+    });
+    &HASH
+}
+
 const COPY_JS: &str = "document.getElementById('copy').addEventListener('click',function(){var b=this;\
 navigator.clipboard.writeText(document.getElementById('key').textContent.trim()).then(function(){b.textContent='Copied'})});";
 
@@ -98,6 +120,8 @@ pub(crate) struct Header<'a> {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} · conde</title>
+<meta name="color-scheme" content="dark light">
+<script>{{ theme|safe }}</script>
 <link rel="icon" href="/app/favicon-light-32.png" sizes="32x32" type="image/png" media="(prefers-color-scheme: light)">
 <link rel="icon" href="/app/favicon-dark-32.png" sizes="32x32" type="image/png" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="/app/favicon.svg" type="image/svg+xml">
@@ -120,6 +144,7 @@ pub(crate) struct Header<'a> {
 )]
 struct Layout<'a> {
     title: &'a str,
+    theme: &'a str,
     css: &'a str,
     mark: &'a str,
     header: Option<Header<'a>>,
@@ -264,6 +289,7 @@ fn page(
     let nonce = with_script.then(random_token);
     let html = render(&Layout {
         title,
+        theme: THEME_JS,
         css: CSS,
         mark: super::app::mark_svg(),
         header,
@@ -271,10 +297,10 @@ fn page(
         nonce: nonce.as_deref(),
         js: COPY_JS,
     });
-    let script = nonce
-        .as_deref()
-        .map(|n| format!("'nonce-{n}'"))
-        .unwrap_or_else(|| "'none'".into());
+    let mut script = String::from(theme_hash());
+    if let Some(n) = &nonce {
+        script.push_str(&format!(" 'nonce-{n}'"));
+    }
     let mut forms = String::from("'self'");
     for origin in form_targets {
         forms.push(' ');
@@ -440,6 +466,7 @@ mod tests {
         });
         render(&Layout {
             title: "Host keys",
+            theme: THEME_JS,
             css: CSS,
             mark: "",
             header,
@@ -470,6 +497,7 @@ mod tests {
         }
         let public = render(&Layout {
             title: "Not found",
+            theme: THEME_JS,
             css: CSS,
             mark: "",
             header: None,
@@ -519,12 +547,42 @@ mod tests {
     }
 
     #[test]
-    fn the_stylesheet_is_dark_only_and_inline_safe() {
+    fn the_stylesheet_has_both_themes_and_is_inline_safe() {
         assert!(CSS.contains("--bg:#131518") && CSS.contains("--accent:#d4886b"));
-        assert!(CSS.contains("color-scheme:dark") && !CSS.contains("prefers-color-scheme"));
+        assert!(CSS.contains(":root[data-theme=light]{--bg:#f6f3ed"));
+        assert!(CSS.contains("color-scheme:dark") && CSS.contains("color-scheme:light"));
         assert!(
             !CSS.contains("@font-face") && !CSS.contains("url("),
             "the CSP allows no font or image source in CSS"
         );
+    }
+
+    #[test]
+    fn every_page_runs_the_theme_script_by_hash_before_its_styles() {
+        for (with_script, nonce) in [(false, false), (true, true)] {
+            let response = page(StatusCode::OK, "t", None, "", with_script, &[]);
+            let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .to_string();
+            // the hash the app shell's CSP carries (web/vite.config.ts) for the same script
+            assert!(
+                csp.contains("script-src 'sha256-Hof4aQPFx2uDmN649sesR+jaKFXfTdz8GmXIkxB5pDI='"),
+                "{csp}"
+            );
+            assert_eq!(csp.contains("'nonce-"), nonce, "{csp}");
+        }
+        let html = render(&Layout {
+            title: "t",
+            theme: THEME_JS,
+            css: CSS,
+            mark: "",
+            header: None,
+            body: "",
+            nonce: None,
+            js: COPY_JS,
+        });
+        let script = html.find(&format!("<script>{THEME_JS}</script>")).unwrap();
+        assert!(script < html.find("<style>").unwrap(), "{html}");
     }
 }

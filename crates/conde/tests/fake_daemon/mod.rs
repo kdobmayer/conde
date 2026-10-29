@@ -96,7 +96,9 @@ fn listen(
             .build()
             .unwrap();
         rt.block_on(async move {
-            let mut listener = conde::ipc::bind(&socket).unwrap();
+            let mut listener = conde::ipc::bind(&socket)
+                .unwrap()
+                .expect("the pipe is free");
             bound.send(()).unwrap();
             while !stop.load(Ordering::SeqCst) {
                 let accepted = tokio::time::timeout(

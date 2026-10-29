@@ -166,10 +166,10 @@ fn create(
     }
 }
 
-/// Create the pipe at `path` (owner-only), refusing to run beside a live daemon.
-/// Needs a tokio runtime context.
+/// Create the pipe at `path` (owner-only), refusing to run beside a live daemon: None
+/// while the pipe exists. Needs a tokio runtime context.
 #[cfg(windows)]
-pub fn bind(path: &Path) -> anyhow::Result<Listener> {
+pub fn bind(path: &Path) -> anyhow::Result<Option<Listener>> {
     use anyhow::Context;
     use conde_transport::win;
     let security =
@@ -178,20 +178,15 @@ pub fn bind(path: &Path) -> anyhow::Result<Listener> {
     let next = match create(&name, &security, true) {
         Ok(p) => p,
         // a first instance of an existing pipe is refused with ERROR_ACCESS_DENIED
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-            anyhow::bail!(
-                "another conde daemon (or another program) is listening on {}",
-                path.display()
-            )
-        }
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("creating the pipe {}", path.display())),
     };
-    Ok(Listener {
+    Ok(Some(Listener {
         name,
         next,
         security,
         own_sid: win::own_user_sid()?,
-    })
+    }))
 }
 
 /// The next connection, and Err(why) when its peer is another user.

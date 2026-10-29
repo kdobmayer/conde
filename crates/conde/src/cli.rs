@@ -249,7 +249,9 @@ enum Cmd {
     },
     /// Enroll this host with a shared board by signing in in the browser: the server mints the
     /// host key and the CLI stores it as `conde enroll` does (under --board <alias>). The key
-    /// never appears in a URL. Publishes nothing. On a machine without a desktop (or with
+    /// never appears in a URL. Publishes nothing. Then sets this machine up as `conde setup`
+    /// does, without its prompts (the bridge service, skills and MCP entries for Claude Code
+    /// and Codex naming the board, the host's boards). On a machine without a desktop (or with
     /// --code / --no-browser) it prints the URL to open on any device; the page then shows a
     /// one-time code to type at the prompt, or to pass back with --code <CODE>.
     Login {

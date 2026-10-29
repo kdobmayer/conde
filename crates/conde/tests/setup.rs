@@ -1662,6 +1662,43 @@ fn an_enrolled_v1_host_moves_its_credential_and_the_human_reviews_its_names() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `conde login` runs setup unattended: at a terminal too, no question is asked, the default
+/// board stays as it is and an earlier host's names stay unpublished, as in an agent's shell.
+#[test]
+fn unattended_setup_asks_nothing_at_a_terminal() {
+    let root = temp_root();
+    let env = env(&root, Os::Linux);
+    enrolled(&env);
+    let mut host = Fake::new(&env, &[]);
+    host.daemon.insert("board.info", Ok(board_info(false)));
+    host.daemon.insert("host.migrate_preview", Ok(preview()));
+    host.daemon
+        .insert("host.migrate_v2", Ok(manifest(&["desk"])));
+    host.answers = ["candidates", "y", "dakai"].map(String::from).into();
+    let mut out = Vec::new();
+    let ok = setup::run(
+        &env,
+        &Options::select(false, false, false, false),
+        &mut setup::Unattended(&mut host),
+        &mut out,
+    )
+    .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(ok, "{out}");
+    assert!(host.prompts.is_empty(), "{:?}", host.prompts);
+    assert_eq!(host.answers.len(), 3);
+    assert!(
+        out.contains("boards: default board for names and channels: local (to change it: conde setup --default-board <alias>)\n"),
+        "{out}"
+    );
+    assert!(
+        !ops(&host).iter().any(|(op, _, _)| op == "host.migrate_v2"),
+        "nothing applied"
+    );
+    assert!(!env.default_board().exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// An agent runs setup from its shell: without a --publish flag nothing is published and the
 /// board stays not migrated; setup finishes its other parts and names the four flags.
 #[test]

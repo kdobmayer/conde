@@ -1,7 +1,9 @@
 //! `conde login --server <url>`: enrolls this host through a browser sign-in. A loopback
 //! listener on 127.0.0.1 receives a one-time code bound to this run (state + PKCE S256);
 //! the code is redeemed over TLS for the host key, which never appears in a URL. The key is
-//! stored exactly as `conde enroll` stores it (`boards/<alias>.json`, mode 0600).
+//! stored exactly as `conde enroll` stores it (`boards/<alias>.json`, mode 0600). Then the
+//! machine is set up as `conde setup` sets it up, unattended: the bridge service, the skills
+//! and MCP entries naming the new board, the boards part.
 //!
 //! A headless host (`--code`, `--no-browser`, or no display) uses the pasted code instead: the
 //! human opens the printed URL on any device, signs in, and the page shows a short one-time
@@ -642,12 +644,38 @@ pub fn run(
             &path,
             enrolled.reenrolled,
             enrolled.replaced,
-            &bridge
+            &bridge,
+            false
         )
     );
+    let ok = set_up(&mut std::io::stdout()).unwrap_or_else(|e| {
+        println!("setup: FAILED: {e:#}");
+        false
+    });
     let welcome = info.and_then(|i| i.welcome);
-    print!("{}", crate::welcome::lines(&alias, welcome.as_ref()));
+    print!("\n{}", crate::welcome::lines(&alias, welcome.as_ref()));
+    if !ok {
+        println!("{alias} is enrolled; fix what FAILED above, then run: conde setup");
+        return Ok(1);
+    }
     Ok(0)
+}
+
+/// The machine setup that follows an enrollment: every part of `conde setup`, unattended (no
+/// prompt waits: the default board stays as it is, an earlier host's names stay unpublished
+/// until a review). Ok(false) when a part failed (each is reported).
+fn set_up(out: &mut dyn std::io::Write) -> anyhow::Result<bool> {
+    use crate::setup::{Env, Options, System, Unattended};
+    let opts = Options {
+        skip_welcome: true,
+        ..Options::select(false, false, false, true)
+    };
+    crate::setup::run(
+        &Env::from_process()?,
+        &opts,
+        &mut Unattended(&mut System),
+        out,
+    )
 }
 
 /// Stores the key as the board file `alias` (account: the signed-in user), refusing to

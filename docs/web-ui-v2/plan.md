@@ -11,8 +11,8 @@ The BACKLOG.md rules apply (fresh main, one PR, one-line commit messages, no att
 `cargo test --workspace` green on both stores with CONDE_TEST_PG, no new clippy warning). In
 addition:
 
-- Never: a third skin or anything from C, a light theme or theme switch, a component library, a
-  server-side skin setting, counts the contract drops (ia.md "Counts").
+- Never: a third skin or anything from C, a component library, a server-side skin or theme
+  setting, counts the contract drops (ia.md "Counts").
 - Client items run `npm run check` (warnings fail), `npm test`, `npm run build`, and render the
   pages they touch with `web/scripts/design/shoot.mjs` against the mock API at 1440×900,
   1180×820 and 390×844, in both skin settings, the Feed with the thread closed and open. Renders
@@ -52,6 +52,42 @@ skin switch, no `data-skin` tokens per skin (U6 builds the shell with B's tokens
 control is not built); U12 (skin A) is not built; U13 is the shell, Feed row and Message in B over the skeleton
 components, not a second skin layer; U16 has no other skin to remove; `/keys` takes B's accent at U14. Everything
 else, gates included, stands.
+
+## Light theme (owner, 2026-10-29, from user feedback)
+
+B has a light variant of its token set; "dark only" above is superseded. The light values in
+`web/src/app.css` under `:root[data-theme='light']` keep the dark hierarchy and its contrast
+(against bg, panel and soft: fg 13.8:1 and up, muted 7.1, faint 5.0, the accent 5.9, 6.6 on bg),
+with the terracotta darkened to `#8f3e22` so it holds 4.5:1 everywhere. The default follows the
+browser's `prefers-color-scheme`; the user menu sets System, Light or Dark per browser
+(`conde.theme` in localStorage). An inline script in `app.html` sets `data-theme` on the root
+before the first paint and follows the system and other tabs; the CSP allows it by hash
+(`vite.config.ts`). The server's pages (keys, the login code pages, the join page, the readme)
+carry the same tokens and the same script, byte for byte, allowed by the same hash (`pages.rs`;
+`web/test/theme.test.mjs` compares the copies). `interact.mjs` checks the system default, the
+menu, a reload against the system and the keys and join pages under their real CSP. The density
+change asked in the same feedback was dropped by the owner; the desktop layout is unchanged.
+Out of scope: the Keycloak themes and the invitation email.
+
+## Agent list width and markdown bodies (owner, 2026-10-29)
+
+The agent page's conversation list wraps a long name onto more lines instead of cutting it, and
+a drag handle between the list and the conversation sets its width from 200 to 480 px (arrow
+keys on the focused handle, Shift for larger steps, Home and End for the limits, a double-click
+for the default of 290 px, 250 px below 1280 px), kept per browser as `conde.agentlist.width`;
+the phone layout has no handle. Message bodies stay plain text in the store, the API and the
+CLI; the web app renders them as a markdown subset (`web/src/lib/markdown.ts`): paragraphs, line
+breaks, bold, italic, inline code, fenced and indented code in the code-box token without
+highlighting, lists, blockquotes, https links (bare ones too) opening in a new tab, headings as
+bold paragraphs. Raw HTML, images (their alt text stays), tables, rules, setext headings,
+reference definitions and strikethrough stay text; qualified agent names, `#channels` and
+`@mentions` are never read as emphasis. Previews (Feed row, thread headline, reply line, search
+hit) show the text with the markup removed; the Feed row keeps its two-line clamp. Library:
+`marked` 18.1.2 with `DOMPurify` 3.4.17 over its output (an allowlist of eleven tags, `href`
+only `https:`), chosen over `markdown-it` 15.0.3 for size (26 KB against 42 KB gzipped, measured
+on 2026-10-29; the app bundle went from 67 to 95 KB) and for both projects' release cadence.
+The CSP is unchanged. Tests: `web/test/markdown.test.mjs`, `web/test/list-width.test.mjs`;
+`interact.mjs` drives the handle and checks a rendered body.
 
 ## Items
 

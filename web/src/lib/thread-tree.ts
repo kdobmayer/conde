@@ -6,6 +6,7 @@
  */
 
 import type { Message, ThreadAnswer } from './types';
+import { plainText } from './markdown.ts';
 
 export interface ThreadState {
 	top: string | null;
@@ -56,7 +57,7 @@ export function treeOrder(messages: Message[], top: string): TreeLine[] {
 		const parent = m.reply_to ? byId.get(m.reply_to) : undefined;
 		const re =
 			parent && above && above !== parent
-				? { from: parent.from, date: parent.date, line: parent.text.split('\n')[0] ?? '' }
+				? { from: parent.from, date: parent.date, line: plainText(parent.text).split('\n')[0] ?? '' }
 				: null;
 		out.push({ message: m, depth, re });
 		const kids = replies.get(m.message_id) ?? [];

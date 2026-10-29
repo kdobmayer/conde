@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { board } from './board.svelte';
+	import { CHOICES, LABELS } from './theme';
+	import { choose, theme } from './theme.svelte';
 
 	/** The owner's menu. It sits at the bottom of the screen in both places (the masthead's foot,
 	 * the phone's "More" tab), so it opens upward; `more` adds the Keys link the phone tab bar has
@@ -24,6 +26,14 @@
 	{#if open && board.session}
 		<div class="panel" role="menu">
 			<p>Signed in as <strong>{board.session.user}</strong>{board.fleet?.admins?.includes(board.session.user) ? ', a workspace admin' : ''}.</p>
+			<div class="theme" role="group" aria-label="Theme">
+				<span class="kick" aria-hidden="true">Theme</span>
+				<div class="seg">
+					{#each CHOICES as c (c)}
+						<button class="quiet" role="menuitemradio" aria-checked={theme.choice === c} data-theme-choice={c} onclick={() => choose(c)}>{LABELS[c]}</button>
+					{/each}
+				</div>
+			</div>
 			{#if more}<a role="menuitem" href="/keys">Keys</a>{/if}
 			<form method="post" action="/auth/logout">
 				<input type="hidden" name="csrf" value={board.session.csrf} />
@@ -85,6 +95,47 @@
 	}
 	.panel a {
 		color: var(--fg);
+	}
+	.theme {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.kick {
+		font: 400 10.5px/1.4 var(--sans);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--faint);
+	}
+	.seg {
+		display: flex;
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		overflow: hidden;
+	}
+	.seg button {
+		flex: 1;
+		min-width: 0;
+		padding: 6px 0 7px;
+		border: none;
+		border-radius: 0;
+		font-size: 12.5px;
+		color: var(--muted);
+	}
+	.seg button + button {
+		border-left: 1px solid var(--line);
+	}
+	/* The selection reads like the Feed's filter tabs: the text tone and an accent underline. */
+	.seg button[aria-checked='true'] {
+		background: var(--soft);
+		color: var(--fg);
+		text-decoration: underline;
+		text-decoration-color: var(--accent);
+		text-decoration-thickness: 2px;
+		text-underline-offset: 5px;
+	}
+	.seg button:focus-visible {
+		outline-offset: -2px;
 	}
 	form {
 		margin: 0;

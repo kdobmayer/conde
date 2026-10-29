@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { acceptEarlier, acceptNewest, emptyThread } from '../src/lib/thread.ts';
 import { channelAgent, deliveryWord, firstLine, latestOf, replyContext } from '../src/lib/conversation.ts';
 import { stateWord } from '../src/lib/ui/state.ts';
+import { plainText } from '../src/lib/markdown.ts';
 import { clock, countdown } from '../src/lib/time.ts';
 
 const msg = (seq, reply_to = null) => ({ seq, message_id: `m${seq}`, reply_to, from: `k/a${seq}`, text: `text ${seq}\nmore` });
@@ -37,6 +38,7 @@ function component(rpc) {
 		sameOwner: () => true,
 		KIND: {},
 		firstLine,
+		plainText,
 		replyContext,
 		day: () => 'Today',
 		acceptNewest,

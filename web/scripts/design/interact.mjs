@@ -1,5 +1,6 @@
 // Drives the app's Feed and Fleet pages headless on the mock API: the filter menu, the thread
-// beside the Feed and in the sheet, the disclosure, the error line and the live announcer, by
+// beside the Feed and in the sheet, the disclosure, the error line, the live announcer, the
+// agent list's resize handle and markdown in message bodies, by
 // keyboard at 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844. Exits
 // non-zero when a check fails. Serves the built app through mock-server.mjs.
 // Usage: node scripts/design/interact.mjs [build-dir]
@@ -76,6 +77,11 @@ async function openFeed(size, hash = '#/', { fixed = true, label = 'feed', wait 
 	});
 	const page = await context.newPage();
 	if (fixed) await page.clock.setFixedTime(NOW);
+	// CSP violations, for the checks that render message bodies
+	await page.addInitScript(() => {
+		window.__csp = [];
+		document.addEventListener('securitypolicyviolation', (e) => window.__csp.push(e.violatedDirective));
+	});
 	page.on('pageerror', (e) => {
 		failed++;
 		console.log(`not ok  page error: ${e.message}`);
@@ -586,6 +592,198 @@ for (const hash of ['#/agents', '#/channels']) {
 		await page.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
 		const w = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
 		expect(w[0] <= w[1], `scrollWidth ${w[0]} > clientWidth ${w[1]}`);
+	});
+	await context.close();
+}
+
+// ---- the agent page's list: long names wrap; the handle resizes it, kept per browser ----
+{
+	const LONG = 'david/infrastructure-cost-report-reviewer';
+	const { context, page } = await openFeed({ width: 1440, height: 900 }, `#/a/desk/dm/${LONG}`, { label: 'agent list', wait: '.msg' });
+	const listWidth = () => page.evaluate(() => Math.round(document.querySelector('.agent-page .list').getBoundingClientRect().width));
+	const stored = () => page.evaluate(() => localStorage.getItem('conde.agentlist.width'));
+	const handle = page.locator('.agent-page [role=separator]');
+	await check('agent list: a long name wraps onto a second line, uncut, its time on the first line', async () => {
+		const r = await page.evaluate((long) => {
+			const a = [...document.querySelectorAll('.agent-page .list a')].find((x) => x.textContent.includes(long));
+			const span = a.querySelector('span');
+			const time = a.querySelector('time');
+			const line = parseFloat(getComputedStyle(span).lineHeight);
+			return {
+				text: span.textContent,
+				lines: Math.round(span.getBoundingClientRect().height / line),
+				cut: span.scrollWidth > span.clientWidth || getComputedStyle(span).textOverflow === 'ellipsis',
+				first: Math.abs(time.getBoundingClientRect().bottom - span.getBoundingClientRect().top - line) < line / 2 + 2,
+				timeFits: time.scrollWidth <= time.clientWidth + 1
+			};
+		}, LONG);
+		expect(r.text === LONG && r.lines >= 2 && !r.cut, JSON.stringify(r));
+		expect(r.first && r.timeFits, `time not on the first line or cut: ${JSON.stringify(r)}`);
+	});
+	await check('agent list: the default is 290 px; dragging the handle stops at 200 and 480 px', async () => {
+		expect((await listWidth()) === 290, `${await listWidth()}`);
+		const b = await box(page, '.agent-page [role=separator]');
+		const y = b.y + 300;
+		const cx = b.x + b.width / 2;
+		await page.mouse.move(cx, y);
+		await page.mouse.down();
+		await page.mouse.move(cx - 60, y, { steps: 4 });
+		expect((await listWidth()) === 230, `mid-drag ${await listWidth()}`);
+		await page.mouse.move(cx - 400, y, { steps: 4 });
+		await page.mouse.up();
+		expect((await listWidth()) === 200 && (await stored()) === '200', `narrow: ${await listWidth()}, stored ${await stored()}`);
+		const c = await box(page, '.agent-page [role=separator]');
+		await page.mouse.move(c.x + c.width / 2, y);
+		await page.mouse.down();
+		await page.mouse.move(c.x + 600, y, { steps: 6 });
+		await page.mouse.up();
+		expect((await listWidth()) === 480 && (await stored()) === '480', `wide: ${await listWidth()}, stored ${await stored()}`);
+	});
+	await check('agent list: the width survives a reload', async () => {
+		await page.reload({ waitUntil: 'networkidle' });
+		await page.waitForSelector('.msg');
+		expect((await listWidth()) === 480, `${await listWidth()}`);
+	});
+	await check('agent list: the handle is a focusable separator; arrows resize, Home goes to 200, aria-valuenow follows', async () => {
+		await handle.focus();
+		const f = await focus(page);
+		expect(f.role === 'separator', JSON.stringify(f));
+		await page.keyboard.press('ArrowLeft');
+		expect((await listWidth()) === 464 && (await handle.getAttribute('aria-valuenow')) === '464', `${await listWidth()} / ${await handle.getAttribute('aria-valuenow')}`);
+		await page.keyboard.press('Shift+ArrowLeft');
+		expect((await listWidth()) === 416, `${await listWidth()}`);
+		await page.keyboard.press('ArrowRight');
+		expect((await listWidth()) === 432 && (await stored()) === '432', `${await listWidth()}, stored ${await stored()}`);
+		await page.keyboard.press('Home');
+		expect((await listWidth()) === 200, `${await listWidth()}`);
+		await page.keyboard.press('ArrowLeft');
+		expect((await listWidth()) === 200, 'went below 200');
+	});
+	await check('agent list: a double-click on the handle resets the default and forgets the width', async () => {
+		await handle.dblclick();
+		expect((await listWidth()) === 290 && (await stored()) === null, `${await listWidth()}, stored ${await stored()}`);
+	});
+	await context.close();
+	const phone = await openFeed({ width: 390, height: 844 }, '#/a/desk', { label: 'agent list', wait: '.agent-page .list a' });
+	await check('agent list on the phone: no handle, the list full width', async () => {
+		expect(!(await phone.page.locator('.agent-page [role=separator]').isVisible()), 'handle visible');
+		const w = await phone.page.evaluate(() => [document.querySelector('.agent-page .list').getBoundingClientRect().width, document.documentElement.scrollWidth]);
+		expect(w[0] === 390 && w[1] <= 390, JSON.stringify(w));
+	});
+	await phone.context.close();
+}
+
+// ---- message bodies render the markdown subset; previews stay plain ----
+{
+	const id = await import('../../src/lib/design/fixture.ts').then((fx) => fx.ids.markdown);
+	const { context, page } = await openFeed({ width: 1440, height: 900 }, `#/t/${id}`, { label: 'markdown', wait: 'aside.side .thread ol li .md' });
+	const body = page.locator(`aside.side li[data-id="${id}"] .md`);
+	await check('markdown: the thread shows bold, a list, inline code, a code box that scrolls sideways, a quote and a safe link', async () => {
+		const r = await body.evaluate((md) => {
+			const pre = md.querySelector('pre');
+			const a = md.querySelector('a');
+			return {
+				strong: md.querySelector('strong')?.textContent,
+				items: md.querySelectorAll('ol > li').length,
+				code: md.querySelector('li code')?.textContent,
+				pre: pre && { scrolls: pre.scrollWidth > pre.clientWidth, overflow: getComputedStyle(pre).overflowX, font: getComputedStyle(pre.querySelector('code')).fontFamily },
+				quote: md.querySelector('blockquote')?.textContent.trim(),
+				link: a && { href: a.getAttribute('href'), target: a.target, rel: a.rel },
+				heading: md.querySelectorAll('h1, h2, h3, h4, h5, h6, img, table, script').length,
+				name: md.textContent.includes('kdobmayer/desk:')
+			};
+		});
+		expect(r.strong === 'October cost report' && r.items === 3 && r.code === 'nightly-e2e' && r.name, JSON.stringify(r));
+		expect(r.pre?.scrolls && r.pre.overflow === 'auto' && /monospace/.test(r.pre.font), `code box: ${JSON.stringify(r.pre)}`);
+		expect(r.quote === 'Numbers are from the billing export, not estimates.', `quote: ${r.quote}`);
+		expect(r.link?.href === 'https://example.com/reports/2026-10' && r.link.target === '_blank' && /noopener/.test(r.link.rel), `link: ${JSON.stringify(r.link)}`);
+		expect(r.heading === 0, 'a heading, image, table or script element');
+		const csp = await page.evaluate(() => window.__csp);
+		expect(csp.length === 0, `CSP violations: ${csp.join(', ')}`);
+	});
+	await check('markdown: the Feed row and the thread headline are plain text, no markup characters', async () => {
+		const row = (await page.locator(`.col a.row[data-id="${id}"] .text`).textContent()).replace(/\s+/g, ' ').trim();
+		expect(row.startsWith('October cost report is ready. Three items need a decision from kdobmayer/desk: 1. Move the nightly-e2e runner'), row.slice(0, 120));
+		expect(!/[*`>]|```/.test(row), `markup in the row: ${row}`);
+		const title = (await page.locator('aside.side .title').textContent()).trim();
+		expect(title === 'October cost report is ready.', title);
+	});
+	await check('markdown: the conversation renders the same body; a plain message stays one paragraph', async () => {
+		await page.goto(`${FEED}#/a/desk/dm/david/infrastructure-cost-report-reviewer`, { waitUntil: 'networkidle' });
+		await page.waitForSelector('.msg .md pre');
+		const plain = await page.locator('.msg').last().locator('.md').evaluate((md) => md.innerHTML);
+		expect(plain === '<p>Agreed on 1 and 2. The GPU pool stays until #conde-dev has the November numbers.</p>', plain);
+	});
+	await context.close();
+}
+
+// ---- the theme: system by default, a choice in the user menu, kept per browser ----
+{
+	where = 'theme 1440';
+	const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+	const page = await context.newPage();
+	const state = () =>
+		page.evaluate(() => ({
+			theme: document.documentElement.dataset.theme,
+			bg: getComputedStyle(document.body).backgroundColor,
+			stored: localStorage.getItem('conde.theme')
+		}));
+	const LIGHT = 'rgb(246, 243, 237)';
+	const DARK = 'rgb(19, 21, 24)';
+	await check('theme: the inline script runs in the head before any stylesheet', async () => {
+		const html = await (await page.request.get(FEED)).text();
+		const script = html.indexOf("localStorage.getItem('conde.theme')");
+		const sheet = html.search(/<link[^>]+rel="stylesheet"/);
+		expect(script > 0 && sheet > script && script < html.indexOf('</head>'), `script at ${script}, stylesheet at ${sheet}`);
+	});
+	await check('theme: system follows the browser, also when it changes', async () => {
+		await page.goto(FEED, { waitUntil: 'networkidle' });
+		let s = await state();
+		expect(s.theme === 'dark' && s.bg === DARK, JSON.stringify(s));
+		await page.emulateMedia({ colorScheme: 'light' });
+		await page.waitForFunction(() => document.documentElement.dataset.theme === 'light', null, { timeout: 2000 }).catch(() => {});
+		s = await state();
+		expect(s.theme === 'light' && s.bg === LIGHT, JSON.stringify(s));
+		await page.emulateMedia({ colorScheme: 'dark' });
+		await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark', null, { timeout: 2000 }).catch(() => {});
+	});
+	await check('theme: the user menu offers System, Light and Dark; Light applies at once and is stored', async () => {
+		await page.locator('.mast .who').click();
+		const items = await page.locator('[role=menu] [role=menuitemradio]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
+		expect(items.join(' ') === 'System:true Light:false Dark:false', items.join(' '));
+		await page.locator('[data-theme-choice=light]').click();
+		const s = await state();
+		expect(s.theme === 'light' && s.bg === LIGHT && s.stored === 'light', JSON.stringify(s));
+		expect((await page.locator('[data-theme-choice=light]').getAttribute('aria-checked')) === 'true', 'Light not checked');
+	});
+	await check('theme: a reload keeps the choice against the system, before the app starts', async () => {
+		await page.addInitScript(() =>
+			document.addEventListener('readystatechange', () => document.readyState === 'interactive' && (window.__themeAtParse = document.documentElement.dataset.theme), { once: true })
+		);
+		await page.reload({ waitUntil: 'networkidle' });
+		const s = await state();
+		const atParse = await page.evaluate(() => window.__themeAtParse);
+		expect(atParse === 'light' && s.theme === 'light' && s.bg === LIGHT, JSON.stringify({ atParse, ...s }));
+	});
+	for (const [name, path] of [
+		['keys', 'keys'],
+		['join', 'join/mock']
+	])
+		await check(`theme: the ${name} page follows the stored choice`, async () => {
+			await page.goto(`${FEED}${path}`, { waitUntil: 'networkidle' });
+			const s = await state();
+			expect(s.theme === 'light' && s.bg === LIGHT, JSON.stringify(s));
+		});
+	await check('theme: Dark overrides a light system; System clears the choice', async () => {
+		await page.emulateMedia({ colorScheme: 'light' });
+		await page.goto(FEED, { waitUntil: 'networkidle' });
+		await page.locator('.mast .who').click();
+		await page.locator('[data-theme-choice=dark]').click();
+		let s = await state();
+		expect(s.theme === 'dark' && s.bg === DARK && s.stored === 'dark', JSON.stringify(s));
+		await page.locator('[data-theme-choice=system]').click();
+		s = await state();
+		expect(s.theme === 'light' && s.bg === LIGHT && s.stored === null, JSON.stringify(s));
 	});
 	await context.close();
 }

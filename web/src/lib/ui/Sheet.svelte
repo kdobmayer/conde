@@ -149,7 +149,7 @@
 		border-radius: 0;
 	}
 	.sheet::backdrop {
-		background: #0009;
+		background: var(--scrim);
 	}
 	.handle {
 		align-self: center;

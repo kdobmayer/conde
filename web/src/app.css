@@ -1,6 +1,10 @@
 /* Design B, Editorial (docs/web-ui-v2/options/README.md): warm off-white on ink, one terracotta
-   accent for own agents and anything that needs attention, grey status. Dark only. Source Serif 4
-   and Inter are bundled (lib/fonts.css); the fallback stacks cover the time before they load. */
+   accent for own agents and anything that needs attention, grey status. Source Serif 4 and Inter
+   are bundled (lib/fonts.css); the fallback stacks cover the time before they load.
+   Two themes on one token set: dark here, light under [data-theme='light'], which the inline
+   script in app.html sets from the user's choice or the system (lib/theme.ts). The light
+   values keep the dark hierarchy and its contrast against bg, panel and soft: fg 13.8:1 and up,
+   muted 7.1, faint 5.0, the accent 5.9 (6.6 on bg); its copy is in the server's pages.rs. */
 @import './lib/fonts.css';
 :root {
 	--bg: #131518;
@@ -16,9 +20,27 @@
 	--ok: #b8b2a7;
 	--warn: #d4886b;
 	--danger: #d4886b;
+	--scrim: #0009;
 	--serif: 'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
 	--sans: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 	color-scheme: dark;
+}
+:root[data-theme='light'] {
+	--bg: #f6f3ed;
+	--panel: #fcfaf6;
+	--soft: #ebe6dd;
+	--line: #dcd5ca;
+	--fg: #1d1b18;
+	--muted: #4f4a43;
+	--faint: #666056;
+	--accent: #8f3e22;
+	--on-accent: #fcfaf6;
+	--mine: #8f3e2214;
+	--ok: #4f4a43;
+	--warn: #8f3e22;
+	--danger: #8f3e22;
+	--scrim: #1d1b1866;
+	color-scheme: light;
 }
 * {
 	box-sizing: border-box;

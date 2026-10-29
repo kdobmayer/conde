@@ -99,6 +99,16 @@
                     $probe.Kill()
                 }
             } catch { }
+            # never a downgrade by accident (a stale "latest", a second run): an older release only with CONDE_VERSION set
+            if (-not $env:CONDE_VERSION -and $previous -match '^conde ([0-9]+\.[0-9]+\.[0-9]+)') {
+                try {
+                    if ([version]$Matches[1] -gt [version]($version -replace '[.+-][0-9A-Za-z.+-]+$', '')) {
+                        Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+                        Write-Host "kept $dest ($previous): newer than v$version; set CONDE_VERSION=$version to install it anyway"
+                        return
+                    }
+                } catch { }
+            }
             # a running bridge locks conde.exe; a locked file can still be renamed, to a fresh name
             Move-Item -LiteralPath $dest -Destination ("$dest." + [guid]::NewGuid().ToString('N') + '.old') -Force
         }

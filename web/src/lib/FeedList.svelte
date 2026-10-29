@@ -11,6 +11,7 @@
 	import { navChannels } from './nav.svelte';
 	import { clock } from './time';
 	import { describeFilters, dividerBefore, feedSection, NOTHING_YET } from './feed-view';
+	import { plainText } from './markdown';
 	import FeedRow from './FeedRow.svelte';
 	import FilterMenu from './ui/FilterMenu.svelte';
 	import EmptyState from './ui/EmptyState.svelte';
@@ -241,7 +242,7 @@
 			{#each s.hits as h (h.message_id)}
 				<a class="hit" href={link(h.message_id)} data-id={h.message_id} class:sel={h.message_id === selected} onclick={(e) => hitClick(e, h.message_id)}>
 					<span class="kick"><time datetime={h.date}>{clock(h.date)}</time><b>{short(h.from)}</b><span>{h.place === 'dm' ? 'Direct' : h.place}</span></span>
-					<span class="line">{h.line}</span>
+					<span class="line">{plainText(h.line) || h.line}</span>
 				</a>
 			{/each}
 			{#if !s.error && s.scanned !== null}

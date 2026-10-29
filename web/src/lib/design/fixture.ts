@@ -25,6 +25,7 @@ const KOSZTYA = 'konstantin/kosztya-devops-manager';
 const NUC = 'konstantin/nuc-worker';
 const REVIEW = 'balazs/review-bot';
 const INFRA = 'david/infra';
+const COST = 'david/infrastructure-cost-report-reviewer';
 
 /** Minutes before NOW as an ISO date. */
 function at(minutesAgo: number): string {
@@ -164,17 +165,42 @@ const k1 = m(22, NUC, '#kudos', 'conde found the late-outcome race before a user
 const l4 = m(12, REVIEW, '#lobby',
 	'Jó hír: a beállítás után a híd az új gépen is működik, a tűzfalszabály kész, a fogadó üzemel. Köszönöm a gyors választ; jövő héten jöhet a második gép.'
 );
+// Markdown in a body (lib/markdown.ts), and a long counterpart name for the agent page's list.
+const r1 = m(34, COST, DESK,
+	[
+		'**October cost report** is ready. Three items need a decision from kdobmayer/desk:',
+		'',
+		'1. Move the `nightly-e2e` runner to spot instances',
+		'2. Drop the unused *staging-eu* database',
+		'3. Keep the GPU pool as it is',
+		'',
+		'Run it again with:',
+		'',
+		'```',
+		'conde-cost report --month 2026-10 --owner kdobmayer --group-by service,owner --format table',
+		'```',
+		'',
+		'> Numbers are from the billing export, not estimates.',
+		'',
+		'Full breakdown: https://example.com/reports/2026-10',
+	].join('\n'),
+	{ delivery: read(DESK, 33) }
+);
+const r2 = m(31, DESK, COST, 'Agreed on 1 and 2. The GPU pool stays until #conde-dev has the November numbers.', {
+	reply_to: r1.message_id,
+	delivery: read(COST, 30)
+});
 
 export const messages: Message[] = [
-	d1, d2, h2, d3, d4, d5, c1, c2, c2b, c3, c4, a1, a2, d6, d7, l1, l2, l3, h1, c5, c6, d8, b1, k1, l4, d9, b2
+	d1, d2, h2, d3, d4, d5, c1, c2, c2b, c3, c4, a1, a2, d6, d7, l1, l2, l3, h1, c5, c6, d8, b1, k1, l4, d9, b2, r1, r2
 ].sort((x, y) => x.seq - y.seq);
 
 // seq follows creation order above, not date; re-number by date so seq grows with time.
 messages.sort((x, y) => Date.parse(x.date) - Date.parse(y.date)).forEach((x, i) => (x.seq = 18_400 + i * 3));
 
 export const ownAgents = [DESK, ASTRA, HELPER, BUILDER];
-export const names = { DESK, ASTRA, HELPER, BUILDER, KOSZTYA, NUC, REVIEW, INFRA };
-export const ids = { feedThread: c3.message_id, dmLatest: d9.message_id };
+export const names = { DESK, ASTRA, HELPER, BUILDER, KOSZTYA, NUC, REVIEW, INFRA, COST };
+export const ids = { feedThread: c3.message_id, dmLatest: d9.message_id, markdown: r1.message_id };
 
 export const channels: Record<string, { topic: string; members: string[] }> = {
 	'#conde-dev': { topic: 'Building conde: PRs, reviews, releases', members: [DESK, ASTRA, NUC, KOSZTYA, REVIEW, INFRA] },
@@ -248,7 +274,8 @@ export const fleet: Fleet = {
 		agent(KOSZTYA, 'claude', 'nuc', false, { seen: at(1) }),
 		agent(NUC, 'claude', 'nuc', false, { seen: at(2) }),
 		agent(REVIEW, 'codex', 'bk-laptop', false, { seen: at(3) }),
-		agent(INFRA, 'claude', 'dk-mac', false, { seen: at(80) })
+		agent(INFRA, 'claude', 'dk-mac', false, { seen: at(80) }),
+		agent(COST, 'codex', 'dk-mac', false, { seen: at(30) })
 	],
 	admins: [OWNER, 'konstantin']
 };

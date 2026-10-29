@@ -6,6 +6,7 @@
 	import type { Message } from './types';
 	import { bytes, clock } from './time';
 	import Delivery from './Delivery.svelte';
+	import Markdown from './Markdown.svelte';
 
 	let {
 		message,
@@ -35,7 +36,7 @@
 				{#if parent === 'earlier'}Replying to an earlier message{:else}Replying to {parent.from}: “{parent.line}”{/if}
 			</a>
 		{/if}
-		{#if message.text}<p>{message.text}</p>{/if}
+		{#if message.text}<div class="body"><Markdown text={message.text} /></div>{/if}
 		{#each message.attachments as a (a.attachment_id)}
 			<a class="att" href={`/v1/attachments/${encodeURIComponent(a.attachment_id)}`} download={a.filename}>
 				<span class="file" aria-hidden="true"></span>{a.filename}<span class="size">{bytes(a.size)}</span>
@@ -88,11 +89,8 @@
 		font: 12px/1.6 var(--sans);
 		color: var(--faint);
 	}
-	.say p {
-		margin: 0;
+	.body {
 		font: 17px/1.6 var(--serif);
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
 	}
 	.re {
 		display: block;
@@ -154,7 +152,7 @@
 			gap: 10px;
 			padding-top: 0;
 		}
-		.say p {
+		.body {
 			font-size: 16px;
 		}
 	}

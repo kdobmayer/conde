@@ -86,8 +86,8 @@ async fn readme_is_served_raw_and_rendered() {
     );
     assert!(head.contains("\r\ncache-control: no-store"), "{head}");
     assert!(
-        head.contains("script-src 'none'"),
-        "no script on a public page: {head}"
+        head.contains("script-src 'sha256-") && !head.contains("'nonce-"),
+        "no script on a public page but the theme's, by its hash: {head}"
     );
     assert!(
         body.contains("<title>conde setup · conde</title>"),

@@ -16,6 +16,9 @@
 {{- with .Values.invite.account }}
 {{- $_ := set $env "CONDE_JOIN_ACCOUNT" . }}
 {{- end }}
+{{- with .Values.displayName }}
+{{- $_ := set $env "CONDE_WORKSPACE_NAME" . }}
+{{- end }}
 {{- if eq .Values.invite.signIn "password" }}
 {{- $_ := set $env "KEYCLOAK_ADMIN_URL" (required "invite.keycloakAdmin.url is required" .Values.invite.keycloakAdmin.url) }}
 {{- $_ := set $env "KEYCLOAK_ADMIN_CLIENT_ID" .Values.invite.keycloakAdmin.clientId }}

@@ -28,8 +28,8 @@ spec:
         path: charts/conde-workspace
         helm:
           releaseName: conde
-          # The tenant file is not a values file: only its boardName, oidc, replicas and invite keys reach the chart, as
-          # parameters below.
+          # The tenant file is not a values file: only its boardName, displayName, oidc, replicas and invite keys reach
+          # the chart, as parameters below.
           valueFiles:
             - ../../deploy/image.yaml
           valuesObject: ${platform_values}
@@ -42,6 +42,8 @@ spec:
               value: '{{ trimSuffix ".yaml" .path.filename }}.${domain}'
             - name: boardName
               value: '{{ dig "boardName" (trimSuffix ".yaml" .path.filename) . }}'
+            - name: displayName
+              value: '{{ dig "displayName" "" . }}'
             - name: oidc.issuer
               value: '{{ .oidc.issuer }}'
             - name: oidc.clientId

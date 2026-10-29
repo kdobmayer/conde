@@ -84,18 +84,23 @@ deploy/tenants/<name>.yaml):
 
 - `google`, `microsoft`: the server sends it through Resend (`RESEND_API_KEY` or `_FILE`, the shared
   Secret Manager secret `resend-api-key`; sender `CONDE_MAIL_FROM`, default `conde <no-reply@conde.cloud>`).
-  It carries the steps of https://conde.cloud/docs/setup with the workspace's address and the invited
-  email; `CONDE_WORKSPACE_NAME` names the workspace (default: the public host's first label). `--by`
-  puts "<who> invited you" in the subject and first line. Without a key nothing is sent and the CLI
-  says so. The request carries an Idempotency-Key from the user, the address and the inviter, so the
-  same invite repeated within Resend's 24-hour window is answered without a second email.
+  Its one instruction is the line the person pastes to their agent, `Read <server>/join/<token> and
+  follow it.`, the invite's join page (below); it links the hand-run steps at
+  https://conde.cloud/docs/setup and https://conde.cloud. `CONDE_WORKSPACE_NAME` names the workspace
+  in the email and on the join page (per tenant: `displayName`, "VVP USA"; default: the public host's
+  first label, the slug); the address stays the slug's. `--by` puts "<who> invited you" in the subject
+  and first line. Without a key nothing is sent and the CLI says so. The request carries an
+  Idempotency-Key from the user, the address and the inviter, so the same invite repeated within
+  Resend's 24-hour window is answered without a second email.
 - `sso`: the company's own identity provider brokered by the workspace's realm (vvpusa: AWS IAM
-  Identity Center over SAML). The same Resend email; it says "sign in with your <account> account",
+  Identity Center over SAML). The same Resend email; it names the account to sign in with, "your <account> account",
   the account named by `CONDE_JOIN_ACCOUNT` (per tenant: `invite.account`, default `company`). The
   realm account is created at the first sign-in, so the server needs no Keycloak admin client.
 - `password`: the server creates the realm account through the Keycloak admin REST API and Keycloak
-  sends its account-setup email (verify the address, choose a password; the link lasts 7 days). conde
-  never sets a password. It calls Keycloak at `KEYCLOAK_ADMIN_URL`, the in-cluster Service, since the
+  sends its account-setup email (verify the address, choose a password; the link lasts 7 days). Its
+  page then links on to the invite's join page (the request's `redirect_uri`, with `client_id` the
+  workspace's sign-in client, whose valid redirect URIs include `https://<host>/join/*`,
+  infra/gcp/realms/realms.tf). conde never sets a password. It calls Keycloak at `KEYCLOAK_ADMIN_URL`, the in-cluster Service, since the
   public host blocks `/admin`. It signs in as the realm's service-account client
   `KEYCLOAK_ADMIN_CLIENT_ID` (default `conde-admin`, infra/gcp/realms/demo.tf) with the secret in
   `KEYCLOAK_ADMIN_CLIENT_SECRET` or `_FILE` (Secret Manager `keycloak-admin-<name>`); the realm is the
@@ -107,7 +112,27 @@ deploy/tenants/<name>.yaml):
   characters there (the realm's username rule).
 - unset: no email.
 
-A user who has signed in already, or is disabled, gets no email. A mail or Keycloak failure after
+A user who has signed in already, or is disabled, gets no email.
+
+### The join page
+
+Every invite on a workspace with sign-in issues a join page, `https://<host>/join/<token>`, whatever
+the mail: the invite's answer carries it as `join`, and the CLI prints `join page: <url>`, the link to
+hand over when no mail is configured. The token is derived from the admin key and the invite (user,
+address, inviter), so the same invite gives the same link; the board keeps only its digest, with the
+user and the inviter, for 7 days after the latest invite. It identifies the invite and grants
+nothing: the sign-in still needs the invited account. An expired link answers 410, an unknown one or
+a disabled user's 404, both pointing to https://conde.cloud/docs/setup. Rotating the admin key
+changes the link a re-invite gives; links already sent keep working until they expire.
+
+The page answers two readers. Which one asks, in this order: `?format=md` (or `markdown`) gives
+markdown and `?format=html` the page; else an `Accept` naming `text/markdown` gives markdown and one
+naming `text/html` the page; else a `User-Agent` containing `Mozilla` gives the page and any other
+(curl, fetch libraries, none) markdown. The markdown is the agent's guide for this invite: install or
+update conde, `conde login --server <url> --board <board>` with the human clicking the sign-in, `conde
+doctor`, register and publish a name, one hello to the welcome's admin agent, then two sentences to
+its human. The page is the human's: what conde is, who invited them, the line to paste to their
+agent, the same steps by hand, and on a password workspace the password step first. A mail or Keycloak failure after
 the user was created answers 502 with the user in place; run the invite again once it is fixed.
 
 When a user's realm account was deleted in Keycloak, a re-invite answers "the recorded sign-in account

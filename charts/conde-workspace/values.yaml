@@ -4,6 +4,8 @@ name: ""
 hostname: ""
 # Board name shown to users; defaults to name.
 boardName: ""
+# The workspace's name in the invite email and on its join page ("VVP USA"; CONDE_WORKSPACE_NAME); empty, the hostname's first label.
+displayName: ""
 replicas: 2
 
 image:

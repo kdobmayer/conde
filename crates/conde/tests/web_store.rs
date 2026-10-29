@@ -1471,6 +1471,8 @@ struct KcStub {
     lose_next_create: std::sync::atomic::AtomicBool,
     token_fails: std::sync::atomic::AtomicBool,
     tokens: Mutex<Vec<HashMap<String, String>>>,
+    /// The (client_id, redirect_uri) of each account-setup email.
+    redirects: Mutex<Vec<(String, String)>>,
     creates: Mutex<Vec<Value>>,
     /// (account id, lifespan, body) of each execute-actions-email.
     actions: Mutex<Vec<(String, String, Value)>>,
@@ -1624,10 +1626,15 @@ async fn kc_actions(
         )
             .into_response();
     }
+    let param = |k: &str| q.get(k).cloned().unwrap_or_default();
+    kc.redirects
+        .lock()
+        .unwrap()
+        .push((param("client_id"), param("redirect_uri")));
     kc.actions
         .lock()
         .unwrap()
-        .push((id, q.get("lifespan").cloned().unwrap_or_default(), body));
+        .push((id, param("lifespan"), body));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1669,7 +1676,8 @@ async fn realm_record(d: &Arc<Dispatcher>, name: &str) -> (Option<String>, Optio
     .await
 }
 
-/// A Google workspace: the invite sends one email through Resend with the setup steps; a failed
+/// A Google workspace: the invite sends one email through Resend with the line for the person's
+/// agent, the invite's join page (the `join` of the answer); a failed
 /// send answers 502 with the user created; a user who signed in already gets nothing; without
 /// mail the invite says so.
 async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
@@ -1700,6 +1708,8 @@ async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
         (StatusCode::OK, Some("sent"), Some("invited")),
         "{got}"
     );
+    let join = got["join"].as_str().unwrap().to_string();
+    assert!(join.starts_with(&env.url("/join/")), "{join}");
     {
         let seen = resend.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
@@ -1709,21 +1719,17 @@ async fn an_invite_sends_one_email_with_the_steps(d: Arc<Dispatcher>) {
         assert_eq!(mail["to"], json!(["ann@clearscale.example"]));
         assert_eq!(mail["subject"], "Krisz invited you to clearscale on conde");
         let text = mail["text"].as_str().unwrap();
-        for step in [
-            "curl -fsSL https://conde.cloud/install.sh | bash",
-            &format!("conde login --server {}", env.base),
-            "sign in with your Google account ann@clearscale.example",
-            &format!("The workspace is {}.", env.base),
+        let line = format!("Read {join} and follow it.");
+        for part in [
+            "with your Google account ann@clearscale.example",
+            &line,
             "https://conde.cloud/docs/setup",
         ] {
-            assert!(text.contains(step), "{step}: {text}");
+            assert!(text.contains(part), "{part}: {text}");
         }
-        assert!(
-            mail["html"]
-                .as_str()
-                .unwrap()
-                .contains("sign in with your Google account ann@clearscale.example")
-        );
+        let html = mail["html"].as_str().unwrap();
+        assert!(html.contains(&format!("Read <a href=\"{join}\"")), "{html}");
+        assert!(html.contains("with your Google account"), "{html}");
     }
 
     resend.status.store(500, Ordering::SeqCst);
@@ -2252,8 +2258,8 @@ async fn realm_failures_answer_502_with_the_user_created(d: Arc<Dispatcher>) {
     assert!(users.iter().any(|u| u.name == "ann"));
 }
 
-/// A Microsoft workspace's email names the Microsoft account; its Idempotency-Key is stable for
-/// the same user and email.
+/// A Microsoft workspace's email names the Microsoft account; the same user and email get the same
+/// email again (the same join page) under the same Idempotency-Key.
 async fn a_microsoft_invite_names_the_microsoft_account(d: Arc<Dispatcher>) {
     let (resend_url, resend) = start_resend().await;
     let env = mail_env(&d, google_invite(resend_url, SignIn::Microsoft)).await;
@@ -2269,11 +2275,16 @@ async fn a_microsoft_invite_names_the_microsoft_account(d: Arc<Dispatcher>) {
         .unwrap()
         .to_string();
     assert!(
-        text.contains("sign in with your Microsoft account ann@dakai.example"),
+        text.contains("with your Microsoft account ann@dakai.example"),
         "{text}"
     );
     assert!(!text.contains("Google"), "{text}");
     invite_req(&env, body).await;
+    {
+        let seen = resend.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].1, seen[1].1, "the same email again");
+    }
     let keys = resend.keys.lock().unwrap().clone();
     assert!(
         keys[0].as_deref().is_some_and(|k| !k.contains("ann@")),
@@ -2289,7 +2300,7 @@ async fn an_sso_invite_names_the_company_account(d: Arc<Dispatcher>) {
     let env = mail_env(
         &d,
         InviteConfig {
-            workspace: "vvpusa".into(),
+            workspace: "VVP USA".into(),
             account: "VVP USA".into(),
             ..google_invite(resend_url, SignIn::Sso)
         },
@@ -2305,10 +2316,15 @@ async fn an_sso_invite_names_the_company_account(d: Arc<Dispatcher>) {
     let seen = resend.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
     let mail = &seen[0].1;
-    assert_eq!(mail["subject"], "You're invited to vvpusa on conde");
+    assert_eq!(mail["subject"], "You're invited to VVP USA on conde");
     let text = mail["text"].as_str().unwrap();
     assert!(
-        text.contains("sign in with your VVP USA account ann@vvpusa.example"),
+        text.contains("with your VVP USA account ann@vvpusa.example"),
+        "{text}"
+    );
+    let join = got["join"].as_str().unwrap();
+    assert!(
+        text.contains(&format!("Read {join} and follow it.")),
         "{text}"
     );
     assert!(
@@ -3157,11 +3173,11 @@ async fn an_sso_invite_opens_its_join_page_for_agents_and_browsers(d: Arc<Dispat
     assert!(ctype.starts_with("text/markdown"), "curl: {ctype}");
 }
 
-/// A password invite's join page puts the password step first: the agent asks its human to set
-/// the password from the account-setup email, the page shows it as step 1; without an admin
-/// agent the guide has no hello step.
+/// A password invite's account-setup email links on to its join page, which puts the password
+/// step first: the agent asks its human to set the password from that email, the page shows it
+/// as step 1; without an admin agent the guide has no hello step.
 async fn a_password_invite_opens_its_join_page_with_the_password_step_first(d: Arc<Dispatcher>) {
-    let (kc_url, _kc) = start_keycloak().await;
+    let (kc_url, kc) = start_keycloak().await;
     let env = mail_env(&d, demo_invite(&kc_url)).await;
     d.share("demo");
     let (status, got) = invite_req(&env, json!({"name": "ann", "email": "ann@demo.example"})).await;
@@ -3171,6 +3187,11 @@ async fn a_password_invite_opens_its_join_page_with_the_password_step_first(d: A
         "{got}"
     );
     let join = got["join"].as_str().unwrap().to_string();
+    // the account-setup email's page links on to the join page, a redirect of the sign-in client
+    assert_eq!(
+        kc.redirects.lock().unwrap().clone(),
+        [(CLIENT_ID.to_string(), join.clone())]
+    );
     let (status, _, _, md) = fetch(&join, None, Some("curl/8.11.1")).await;
     assert_eq!(status, StatusCode::OK, "{md}");
     in_order(

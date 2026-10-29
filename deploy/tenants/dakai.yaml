@@ -1,7 +1,9 @@
 # https://dakai.conde.cloud, signing in directly against the Dakai Entra tenant. The file name is the workspace name;
 # everything else the chart needs is derived from it in deploy/argocd/workspaces.yaml.tftpl, and only these keys
-# (boardName, oidc, invite, and optionally replicas) are read from here.
+# (boardName, displayName, oidc, invite, and optionally replicas) are read from here.
 boardName: dakai
+# The workspace's name in the invite email.
+displayName: Dakai
 oidc:
   issuer: https://login.microsoftonline.com/2e51b484-b008-4fc0-8f70-555c1317b555/v2.0
   clientId: d87a5254-3121-4d3b-bd1e-b902b3bcbba0

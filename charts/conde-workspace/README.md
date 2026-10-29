@@ -37,6 +37,7 @@ your store). The Secret holds:
 | `name` | required | workspace name: the `conde.cloud/workspace` label, the default board and database name |
 | `hostname` | required | public hostname; the OIDC redirect is `https://<hostname>/auth/callback` |
 | `boardName` | `name` | board name shown to users |
+| `displayName` | `""` | `CONDE_WORKSPACE_NAME`: the workspace's name in the invite email and on its join page, "VVP USA" (empty: the hostname's first label) |
 | `replicas` | `2` | server replicas |
 | `image.repository`, `image.tag` | the conde Artifact Registry image, `gcp` | server image |
 | `image.digest` | `""` | when set, the image is `repository@digest` and the tag is ignored; on conde.cloud the release workflow sets it in `deploy/image.yaml` |

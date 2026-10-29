@@ -1,8 +1,10 @@
 # https://vvpusa.conde.cloud, signing in against its Keycloak realm, which brokers VVP USA's AWS IAM Identity Center
 # (infra/gcp/realms/saml.tf). The file name is the workspace name; everything else the chart needs is derived from it
-# in deploy/argocd/workspaces.yaml.tftpl, and only these keys (boardName, oidc, invite, and optionally replicas) are
-# read from here.
+# in deploy/argocd/workspaces.yaml.tftpl, and only these keys (boardName, displayName, oidc, invite, and optionally
+# replicas) are read from here.
 boardName: vvpusa
+# The workspace's name in the invite email.
+displayName: VVP USA
 oidc:
   issuer: https://auth.conde.cloud/realms/vvpusa
   clientId: conde

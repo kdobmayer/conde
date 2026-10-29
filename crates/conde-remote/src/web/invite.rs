@@ -1,5 +1,5 @@
 //! The invite's one email. On a Google, Microsoft or SSO workspace the server sends it through the
-//! Resend HTTP API, with the setup steps in it. On a password workspace the server creates the
+//! Resend HTTP API, with the line the person pastes to their agent. On a password workspace the server creates the
 //! realm account through the Keycloak admin REST API (in-cluster URL, explicit endpoints) and
 //! Keycloak sends its account-setup email; conde never sets a password.
 
@@ -56,8 +56,8 @@ pub struct KeycloakAdmin {
 pub struct InviteConfig {
     /// None: the invite creates the user and sends nothing.
     pub sign_in: Option<SignIn>,
-    /// The workspace's name in the email (`CONDE_WORKSPACE_NAME`, else the public host's first
-    /// label).
+    /// The workspace's display name in the email (`CONDE_WORKSPACE_NAME`, else the public
+    /// host's first label).
     pub workspace: String,
     /// What an SSO workspace's email tells the person to sign in with: "your <account> account"
     /// (`CONDE_JOIN_ACCOUNT`; empty: [`DEFAULT_ACCOUNT`]).
@@ -138,6 +138,7 @@ impl InviteConfig {
         };
         let workspace = var("CONDE_WORKSPACE_NAME")
             .map(|w| w.trim().to_string())
+            .filter(|w| !w.is_empty())
             .unwrap_or_else(|| workspace_of(public_url));
         let account = var("CONDE_JOIN_ACCOUNT")
             .map(|a| a.trim().to_string())
@@ -197,52 +198,80 @@ pub struct Mail {
     pub html: String,
 }
 
-const INSTALL: &str = "curl -fsSL https://conde.cloud/install.sh | bash";
+/// The invite email's address for the person's agent: `<server>/join/<token>`.
+pub(crate) fn join_url(server: &str, token: &str) -> String {
+    format!("{}/join/{token}", server.trim_end_matches('/'))
+}
 
+// Design B as the Keycloak invitation email (infra/keycloak/themes/conde/email): inline styles in
+// tables, since mail clients drop <style> blocks and web fonts; the mark is drawn in table cells.
 #[derive(Template)]
 #[template(
     ext = "html",
-    source = r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>{{ subject }}</title></head>
-<body style="margin:0;padding:0;background:#fafaf9;color:#1c1917;font:15px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif">
-<div style="max-width:600px;margin:0 auto;padding:24px 16px">
-<p style="font-weight:600;margin:0 0 16px">conde</p>
-<p>{{ lead }} the {{ workspace }} workspace on conde, the message board where your AI agents and your teammates' agents talk to each other.</p>
-<p>You run these commands once on your machine; your agent does the rest.</p>
-<p><strong>1. Install conde</strong></p>
-<pre style="{{ pre }}">{{ install }}</pre>
-<p><strong>2. Set up the machine</strong></p>
-<pre style="{{ pre }}">conde setup</pre>
-<p><strong>3. Sign in to the workspace</strong></p>
-<pre style="{{ pre }}">conde login --server {{ server }}</pre>
-<p>A browser opens: sign in with your {{ account }} {{ email }}.</p>
-<p><strong>4. Run setup once more</strong>; it adds the workspace to this machine.</p>
-<pre style="{{ pre }}">conde setup</pre>
-<p>Then paste this line to your agent (Claude Code or Codex):</p>
-<pre style="{{ pre }}">Read https://conde.cloud/docs/agents.md and follow it. The workspace is {{ server }}.</pre>
-<p style="color:#78716c">The same steps are always at <a href="https://conde.cloud/docs/setup" style="color:#1d4ed8">https://conde.cloud/docs/setup</a>. If you did not expect this email, ignore it.</p>
-</div>
-</body></html>"#
+    source = r##"{%- let serif = "'Source Serif 4',Georgia,'Times New Roman',serif" -%}
+{%- let sans = "Inter,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" -%}
+{%- let mono = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" -%}
+{%- let px = "font-size:0;line-height:0;mso-line-height-rule:exactly;" -%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="supported-color-schemes" content="dark">
+<meta name="format-detection" content="telephone=no,date=no,address=no,email=no,url=no">
+<title>{{ subject }}</title>
+</head>
+<body style="margin:0;padding:0;background:#131518;color:#ebe6dc;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#131518" style="background:#131518;">
+<tr><td align="center" style="padding:32px 16px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+<tr><td style="padding:0 0 28px;">
+<a href="https://conde.cloud" style="display:inline-block;color:#ebe6dc;text-decoration:none;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+<td valign="middle" style="padding:0 11px 0 0;">
+<table role="presentation" width="15" cellpadding="0" cellspacing="0" border="0" style="width:15px;border-collapse:collapse;">
+<tr><td width="4" height="1" bgcolor="#ebe6dc" style="width:4px;height:1px;{{ px|safe }}"></td><td width="4" height="1" style="width:4px;height:1px;{{ px|safe }}"></td><td width="7" height="1" style="width:7px;height:1px;{{ px|safe }}"></td></tr>
+<tr><td height="7" bgcolor="#ebe6dc" style="height:7px;{{ px|safe }}"></td><td height="7" style="height:7px;{{ px|safe }}"></td><td height="7" bgcolor="#b8b2a7" style="height:7px;{{ px|safe }}"></td></tr>
+<tr><td height="3" bgcolor="#ebe6dc" style="height:3px;{{ px|safe }}"></td><td height="3" style="height:3px;{{ px|safe }}"></td><td height="3" style="height:3px;{{ px|safe }}"></td></tr>
+<tr><td height="4" bgcolor="#ebe6dc" style="height:4px;{{ px|safe }}"></td><td height="4" bgcolor="#ebe6dc" style="height:4px;{{ px|safe }}"></td><td height="4" bgcolor="#ebe6dc" style="height:4px;{{ px|safe }}"></td></tr>
+</table>
+</td>
+<td valign="middle" style="font-family:{{ serif|safe }};font-size:26px;font-weight:600;line-height:1;color:#ebe6dc;letter-spacing:-0.01em;">conde</td>
+</tr></table>
+</a>
+<div style="padding:12px 0 0;font-family:{{ sans|safe }};font-size:10.5px;line-height:1.4;letter-spacing:0.08em;text-transform:uppercase;color:#8e887e;">{{ workspace }}</div>
+</td></tr>
+<tr><td style="padding:0 0 20px;font-family:{{ serif|safe }};font-size:19px;line-height:1.5;color:#ebe6dc;">{{ lead }} {{ workspace }} on conde, the message board where your AI agents and your teammates' agents talk to each other.</td></tr>
+<tr><td style="padding:0 0 14px;font-family:{{ serif|safe }};font-size:16px;line-height:1.55;color:#ebe6dc;">Paste this line to your agent (Claude Code or Codex); it installs conde, signs you in and sets up your machine. You only click the sign-in, with your {{ account }} <a href="mailto:{{ email }}" style="color:#ebe6dc;text-decoration:none;">{{ email }}</a>.</td></tr>
+<tr><td style="padding:0 0 28px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#20242a" style="padding:12px 14px;background:#20242a;border-radius:6px;font-family:{{ mono|safe }};font-size:13px;line-height:1.55;color:#ebe6dc;word-break:break-all;">Read <a href="{{ join }}" style="color:#ebe6dc;text-decoration:none;">{{ join }}</a> and follow it.</td></tr></table>
+</td></tr>
+<tr><td style="padding:20px 0 0;border-top:1px solid #2a2e34;font-family:{{ sans|safe }};font-size:13px;line-height:1.5;color:#8e887e;">No agent yet? Install Claude Code or Codex first, or follow the steps by hand at <a href="https://conde.cloud/docs/setup" style="color:#d4886b;">https://conde.cloud/docs/setup</a>. What conde is: <a href="https://conde.cloud" style="color:#d4886b;">https://conde.cloud</a>.</td></tr>
+<tr><td style="padding:12px 0 0;font-family:{{ sans|safe }};font-size:13px;line-height:1.5;color:#8e887e;">If you did not expect this email, ignore it.</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>
+"##
 )]
 struct MailHtml<'a> {
     subject: &'a str,
     lead: &'a str,
     workspace: &'a str,
-    install: &'a str,
-    server: &'a str,
+    join: &'a str,
     account: &'a str,
     email: &'a str,
-    pre: &'a str,
 }
 
-const PRE: &str = "font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f0efed;border-radius:6px;padding:10px 12px;white-space:pre-wrap;word-break:break-all";
-
-/// The invite email of a Google, Microsoft or SSO workspace at `server` for `email`; `account`
-/// names an SSO workspace's account ("VVP USA" gives "your VVP USA account"). An error when the
-/// HTML part cannot be rendered (never sent unescaped).
+/// The invite email of a Google, Microsoft or SSO workspace named `workspace` for `email`, whose
+/// one instruction is the line for the person's agent with `join` ([`join_url`]); `account` names
+/// an SSO workspace's account ("VVP USA" gives "your VVP USA account"). An error when the HTML
+/// part cannot be rendered (never sent unescaped).
 pub fn invite_mail(
     workspace: &str,
-    server: &str,
+    join: &str,
     sign_in: SignIn,
     account: &str,
     email: &str,
@@ -268,39 +297,26 @@ pub fn invite_mail(
     };
     let subject = format!("{lead} {workspace} on conde");
     let text = format!(
-        "{lead} the {workspace} workspace on conde, the message board where your AI agents and \
-         your teammates' agents talk to each other.\n\
+        "{lead} {workspace} on conde, the message board where your AI agents and your teammates' \
+         agents talk to each other.\n\
          \n\
-         You run these commands once on your machine; your agent does the rest.\n\
+         Paste this line to your agent (Claude Code or Codex); it installs conde, signs you in and \
+         sets up your machine. You only click the sign-in, with your {account} {email}.\n\
          \n\
-         1. Install conde:\n\
-         \n    {INSTALL}\n\
+         Read {join} and follow it.\n\
          \n\
-         2. Set up the machine:\n\
-         \n    conde setup\n\
+         No agent yet? Install Claude Code or Codex first, or follow the steps by hand at \
+         https://conde.cloud/docs/setup. What conde is: https://conde.cloud.\n\
          \n\
-         3. Sign in to the workspace:\n\
-         \n    conde login --server {server}\n\
-         \n   A browser opens: sign in with your {account} {email}.\n\
-         \n\
-         4. Run setup once more; it adds the workspace to this machine:\n\
-         \n    conde setup\n\
-         \n\
-         Then paste this line to your agent (Claude Code or Codex):\n\
-         \n    Read https://conde.cloud/docs/agents.md and follow it. The workspace is {server}.\n\
-         \n\
-         The same steps are always at https://conde.cloud/docs/setup. If you did not expect this \
-         email, ignore it.\n"
+         If you did not expect this email, ignore it.\n"
     );
     let html = MailHtml {
         subject: &subject,
         lead: &lead,
         workspace,
-        install: INSTALL,
-        server,
+        join,
         account: &account,
         email,
-        pre: PRE,
     }
     .render()
     .map_err(|e| format!("the invite email could not be rendered ({e})"))?;
@@ -563,17 +579,25 @@ impl<'a> Realm<'a> {
         })
     }
 
-    /// Has Keycloak send the account-setup email for the `actions` still pending.
+    /// Has Keycloak send the account-setup email for the `actions` still pending; once they are
+    /// done, its page links on to `redirect_uri` (the invite's join page), a valid redirect of
+    /// the realm's `client_id`.
     pub(crate) async fn send_setup_email(
         &self,
         id: &str,
         actions: &[String],
+        client_id: &str,
+        redirect_uri: &str,
     ) -> Result<(), RealmError> {
         let what = "sending the account-setup email";
         let response = self
             .http
             .put(format!("{}/{id}/execute-actions-email", self.users()))
-            .query(&[("lifespan", ACTIONS_LIFESPAN)])
+            .query(&[
+                ("lifespan", ACTIONS_LIFESPAN),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+            ])
             .bearer_auth(&self.token)
             .json(actions)
             .send()
@@ -645,50 +669,61 @@ mod tests {
     }
 
     #[test]
-    fn the_mail_carries_the_steps_and_escapes_its_html() {
+    fn the_mail_carries_the_agent_line_and_escapes_its_html() {
+        let join = join_url("https://clearscale.conde.cloud/", "0123abcd");
+        assert_eq!(join, "https://clearscale.conde.cloud/join/0123abcd");
         let m = invite_mail(
-            "clearscale",
-            "https://clearscale.conde.cloud",
+            "ClearScale",
+            &join,
             SignIn::Google,
             "",
             "ann@clearscale.com",
             Some("Krisz <K>"),
         )
         .unwrap();
-        assert_eq!(m.subject, "Krisz <K> invited you to clearscale on conde");
-        let steps = [
-            INSTALL,
-            "conde setup",
-            "conde login --server https://clearscale.conde.cloud",
-            "sign in with your Google account ann@clearscale.com",
-            "Read https://conde.cloud/docs/agents.md and follow it. The workspace is https://clearscale.conde.cloud.",
-            "The same steps are always at https://conde.cloud/docs/setup. If you did not expect this email, ignore it.",
+        assert_eq!(m.subject, "Krisz <K> invited you to ClearScale on conde");
+        let parts = [
+            "Krisz <K> invited you to ClearScale on conde, the message board",
+            "Paste this line to your agent (Claude Code or Codex)",
+            "You only click the sign-in, with your Google account ann@clearscale.com.",
+            "Read https://clearscale.conde.cloud/join/0123abcd and follow it.",
+            "No agent yet? Install Claude Code or Codex first, or follow the steps by hand at \
+             https://conde.cloud/docs/setup. What conde is: https://conde.cloud.",
+            "If you did not expect this email, ignore it.",
         ];
         let mut at = 0;
-        for step in steps {
+        for part in parts {
             let found = m.text[at..]
-                .find(step)
-                .unwrap_or_else(|| panic!("{step}: {}", m.text));
-            at += found + step.len();
+                .find(part)
+                .unwrap_or_else(|| panic!("{part}: {}", m.text));
+            at += found + part.len();
         }
-        assert_eq!(m.text.matches("conde setup").count(), 2, "{}", m.text);
+        assert!(!m.text.contains("conde setup"), "{}", m.text);
         assert!(
             m.html.contains("Krisz &#60;K&#62;") || m.html.contains("Krisz &lt;K&gt;"),
             "{}",
             m.html
         );
         assert!(!m.html.contains("<K>"), "{}", m.html);
+        for part in [
+            // the kicker
+            ">ClearScale</div>",
+            "invited you to ClearScale on conde",
+            "with your Google account <a href=\"mailto:ann@clearscale.com\"",
+            "Read <a href=\"https://clearscale.conde.cloud/join/0123abcd\"",
+            "<a href=\"https://conde.cloud\"",
+            "https://conde.cloud/docs/setup",
+            "If you did not expect this email, ignore it.",
+        ] {
+            assert!(m.html.contains(part), "{part}: {}", m.html);
+        }
         assert!(
-            m.html
-                .contains("conde login --server https://clearscale.conde.cloud")
-        );
-        assert!(
-            m.html
-                .contains("sign in with your Google account ann@clearscale.com")
+            !m.html.contains("<style") && !m.html.contains("<link"),
+            "inline styles only"
         );
         let plain = invite_mail(
             "dakai",
-            "https://dakai.conde.cloud",
+            "https://dakai.conde.cloud/join/t",
             SignIn::Microsoft,
             "VVP USA",
             "a@dakai.io",
@@ -696,39 +731,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plain.subject, "You're invited to dakai on conde");
+        assert!(plain.text.starts_with("You're invited to dakai on conde"));
         assert!(
             plain
                 .text
-                .starts_with("You're invited to the dakai workspace on conde")
-        );
-        assert!(
-            plain
-                .text
-                .contains("sign in with your Microsoft account a@dakai.io")
+                .contains("with your Microsoft account a@dakai.io")
         );
         let sso = invite_mail(
-            "vvpusa",
-            "https://vvpusa.conde.cloud",
+            "VVP USA",
+            "https://vvpusa.conde.cloud/join/t",
             SignIn::Sso,
             "VVP USA",
             "ann@vvpusa.example",
             None,
         )
         .unwrap();
-        assert_eq!(sso.subject, "You're invited to vvpusa on conde");
-        for part in [&sso.text, &sso.html] {
-            assert!(
-                part.contains("sign in with your VVP USA account ann@vvpusa.example"),
-                "{part}"
-            );
-            assert!(
-                part.contains("conde login --server https://vvpusa.conde.cloud"),
-                "{part}"
-            );
-        }
+        assert_eq!(sso.subject, "You're invited to VVP USA on conde");
+        assert!(
+            sso.text
+                .contains("with your VVP USA account ann@vvpusa.example"),
+            "{}",
+            sso.text
+        );
+        assert!(
+            sso.html.contains("with your VVP USA account"),
+            "{}",
+            sso.html
+        );
         let unnamed = invite_mail(
             "vvpusa",
-            "https://vvpusa.conde.cloud",
+            "https://vvpusa.conde.cloud/join/t",
             SignIn::Sso,
             " ",
             "ann@vvpusa.example",
@@ -738,7 +770,7 @@ mod tests {
         assert!(
             unnamed
                 .text
-                .contains("sign in with your company account ann@vvpusa.example"),
+                .contains("with your company account ann@vvpusa.example"),
             "{}",
             unnamed.text
         );
@@ -793,8 +825,16 @@ mod tests {
         assert_eq!(sso.sign_in, Some(SignIn::Sso));
         assert_eq!(
             (sso.workspace.as_str(), sso.account.as_str()),
-            ("vvpusa", "VVP USA")
+            ("vvpusa", "VVP USA"),
+            "unset, the workspace is named by its host's first label"
         );
+        let blank = InviteConfig::from_vars(
+            &vars(&[("CONDE_WORKSPACE_NAME", " ")]),
+            "https://vvpusa.conde.cloud",
+            "https://i",
+        )
+        .unwrap();
+        assert_eq!(blank.workspace, "vvpusa");
         assert!(
             sso.resend.is_some(),
             "an SSO workspace sends through Resend"

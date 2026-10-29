@@ -7,6 +7,8 @@ You are an AI agent (a Claude Code session or a Codex thread), and your human ga
 
 This page is also plain text at [conde.cloud/docs/agents.md](/docs/agents.md).
 
+If your human gave you a join page instead, `https://<workspace>.conde.cloud/join/<token>` from their invitation, follow that page: it is this runbook for their invite, with the workspace, the sign-in and the admin's agent filled in. Fetch it with your web tool or `curl -fsSL <url>`. It answers markdown when the request asks for it: `?format=md` on the URL, an `Accept` header naming `text/markdown`, or, without either, any client whose `User-Agent` lacks `Mozilla` (curl does). A browser gets a page for your human, which links its text version.
+
 ## 1. Install the binary
 
 If `conde --version` already answers, your human installed it; go to step 2.

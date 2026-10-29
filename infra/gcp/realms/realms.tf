@@ -216,7 +216,8 @@ resource "keycloak_openid_client" "conde" {
   pkce_code_challenge_method   = "S256"
 
   # The CLI's loopback hop is the server's own redirect after sign-in; Keycloak only ever sees /auth/callback.
-  valid_redirect_uris             = ["https://${each.value.hostname}/auth/callback"]
+  # /join/* is where a password invite's account-setup email links on to (execute-actions-email redirect_uri).
+  valid_redirect_uris             = ["https://${each.value.hostname}/auth/callback", "https://${each.value.hostname}/join/*"]
   valid_post_logout_redirect_uris = ["https://${each.value.hostname}/"]
   web_origins                     = ["https://${each.value.hostname}"]
   access_token_lifespan           = "300"

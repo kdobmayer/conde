@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use conde_remote::web::{
     AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrollment, HostKey, Identity,
-    Invite, Invited, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount, SessionRecord, SetWelcome,
-    WebResult, WebStore, WebStoreError, WebUser, Welcome, WelcomePatch,
+    Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount,
+    SessionRecord, SetWelcome, WebResult, WebStore, WebStoreError, WebUser, Welcome, WelcomePatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -21,6 +21,7 @@ use crate::util::iso_from_ms;
 const LOGIN: &str = "login";
 const CLI_CODE: &str = "cli_code";
 const KEY_DISPLAY: &str = "key_display";
+const JOIN: &str = "join";
 /// When a pasted-code login was first confirmed, by the login's key (no payload).
 const CLI_LOGIN: &str = "cli_login";
 /// How long that time is kept: past the code's own purge and any CLI wait, so a late confirm is
@@ -310,6 +311,7 @@ impl WebStore for WebBoard {
             (CLI_CODE, l.cli_code_ttl),
             (CLI_LOGIN, CLI_LOGIN_KEEP.max(l.cli_code_ttl)),
             (KEY_DISPLAY, l.key_display_ttl),
+            (JOIN, JOIN_TTL),
         ];
         self.write(|t| Ok(t.purge_web(now, l.session_idle, l.session_max, &ttls)?))
     }
@@ -541,6 +543,28 @@ impl WebStore for WebBoard {
 
     fn welcome(&self) -> WebResult<Welcome> {
         self.read(crate::welcome::stored)
+    }
+
+    fn published_welcome(&self) -> WebResult<Welcome> {
+        self.read(crate::welcome::published)
+    }
+
+    fn board_name(&self) -> Option<String> {
+        self.d.shared_name().map(String::from)
+    }
+
+    fn put_join(&self, token_digest: &str, join: &JoinRecord) -> WebResult<()> {
+        let payload = serde_json::to_string(join).map_err(|e| WebStoreError(e.to_string()))?;
+        self.write(|t| Ok(t.replace_web_token(JOIN, token_digest, &payload, join.created_at)?))
+    }
+
+    fn join(&self, token_digest: &str) -> WebResult<Option<JoinRecord>> {
+        let Some((payload, _)) = self.read(|t| t.web_token(JOIN, token_digest))? else {
+            return Ok(None);
+        };
+        serde_json::from_str(&payload)
+            .map(Some)
+            .map_err(|e| WebStoreError(e.to_string()))
     }
 
     fn set_welcome(&self, change: &WelcomePatch) -> WebResult<SetWelcome> {

@@ -228,6 +228,9 @@ pub fn invite(
         Some("keycloak") => {
             format!("invited {user} {email}, account-setup email sent by the sign-in server")
         }
+        Some("unconfigured") if answer["join"].is_string() => {
+            format!("invited {user} {email}, no mail configured: send them their join page")
+        }
         Some("unconfigured") => format!(
             "invited {user} {email}, no mail configured: tell them the steps at https://conde.cloud/docs/setup"
         ),
@@ -242,6 +245,9 @@ pub fn invite(
     };
     if by.is_some() && answer["mail"] == "keycloak" {
         line.push_str("\ninviter not shown: the sign-in server sends this email");
+    }
+    if let Some(join) = answer["join"].as_str() {
+        line.push_str(&format!("\njoin page: {join}"));
     }
     Ok(line)
 }

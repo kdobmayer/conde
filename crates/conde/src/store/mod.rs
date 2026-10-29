@@ -810,6 +810,16 @@ pub trait Tx {
     ) -> StoreResult<()>;
     /// Returns and deletes a one-time record as (payload, created_at).
     fn take_web_token(&self, kind: &str, digest: &str) -> StoreResult<Option<(String, i64)>>;
+    /// Stores a record under its digest, replacing one stored there.
+    fn replace_web_token(
+        &self,
+        kind: &str,
+        digest: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> StoreResult<()>;
+    /// A stored record as (payload, created_at), left in place.
+    fn web_token(&self, kind: &str, digest: &str) -> StoreResult<Option<(String, i64)>>;
     /// Deletes expired sessions and one-time records (`ttls` per kind, seconds).
     fn purge_web(
         &self,

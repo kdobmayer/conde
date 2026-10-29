@@ -1451,6 +1451,30 @@ impl Tx for PgTx {
             .map(|r| (r.get(0), r.get(1))))
     }
 
+    fn replace_web_token(
+        &self,
+        kind: &str,
+        digest: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> StoreResult<()> {
+        self.execute(
+            "INSERT INTO web_tokens(kind, digest, payload, created_at) VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (kind, digest) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
+            &[&kind, &digest, &payload, &created_at],
+        )?;
+        Ok(())
+    }
+
+    fn web_token(&self, kind: &str, digest: &str) -> StoreResult<Option<(String, i64)>> {
+        Ok(self
+            .query_opt(
+                "SELECT payload, created_at FROM web_tokens WHERE kind = $1 AND digest = $2",
+                &[&kind, &digest],
+            )?
+            .map(|r| (r.get(0), r.get(1))))
+    }
+
     fn purge_web(
         &self,
         now: i64,

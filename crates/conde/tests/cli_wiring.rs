@@ -1665,6 +1665,22 @@ fn admin_user_invites_and_lists_with_the_admin_key() {
         );
     }
 
+    // the join page the server issued is printed, and is the one to hand over without mail
+    for (mail, want) in [
+        ("sent", "invited ann ann@dakai.io, email sent"),
+        (
+            "unconfigured",
+            "invited ann ann@dakai.io, no mail configured: send them their join page",
+        ),
+    ] {
+        let join = "https://dakai.conde.cloud/join/0123abcd";
+        let (url, seen) = one_admin_answer(json!({"user": "ann", "email": "ann@dakai.io",
+            "status": "invited", "disabled": false, "mail": mail, "join": join}));
+        let line = conde::admin::invite(&url, key, "Ann", "ann@dakai.io", None).unwrap();
+        assert_eq!(line, format!("{want}\njoin page: {join}"));
+        seen.join().unwrap();
+    }
+
     let users = json!({"users": [
         {"name": "ann", "email": "ann@dakai.io", "issuers": ["https://auth.conde.cloud/realms/dakai"], "disabled": false},
         {"name": "bob", "email": null, "issuers": [], "disabled": true},

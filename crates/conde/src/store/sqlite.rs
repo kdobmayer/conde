@@ -930,6 +930,29 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
+    fn replace_web_token(
+        &self,
+        kind: &str,
+        digest: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO web_tokens(kind, digest, payload, created_at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(kind, digest) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
+            params![kind, digest, payload, created_at],
+        )?;
+        Ok(())
+    }
+
+    fn web_token(&self, kind: &str, digest: &str) -> StoreResult<Option<(String, i64)>> {
+        self.opt(
+            "SELECT payload, created_at FROM web_tokens WHERE kind = ?1 AND digest = ?2",
+            params![kind, digest],
+            pair,
+        )
+    }
+
     fn purge_web(
         &self,
         now: i64,

@@ -492,8 +492,9 @@ async fn create_user(
     }
 }
 
-/// The invite form of `POST /v1/admin/users`: `{name, email, inviter?}`. Creates the user, then
-/// sends the invite email per the workspace's sign-in ([`super::invite`]).
+/// The invite form of `POST /v1/admin/users`: `{name, email, inviter?}`. Creates the user, issues
+/// the invite's join page (`join` in the answer, on a workspace with sign-in), then sends the
+/// invite email per the workspace's sign-in ([`super::invite`]).
 async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
     let (Some(name), Some(email)) = (req.name.as_deref(), req.email.as_deref()) else {
         return bad_request("an invite is {name, email}");
@@ -541,9 +542,21 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
         Err(e) => return store_failed(e),
     };
     tracing::info!(user = %user.name, outcome, "admin invited a user");
+    let join = match invites {
+        Some(invites) if !user.disabled => {
+            match issue_join(&state, invites, &user, &email, inviter.as_deref()).await {
+                Ok(url) => Some(url),
+                Err(e) => return store_failed(e),
+            }
+        }
+        _ => None,
+    };
     let answer = |status: StatusCode, mail: &str, extra: Value| {
         let mut body = json!({"user": user.name, "email": email, "status": outcome,
                               "disabled": user.disabled, "mail": mail});
+        if let (Some(b), Some(url)) = (body.as_object_mut(), &join) {
+            b.insert("join".into(), url.as_str().into());
+        }
         if let (Some(b), Value::Object(extra)) = (body.as_object_mut(), extra) {
             b.extend(extra);
         }
@@ -596,6 +609,30 @@ async fn invite_user(state: AdminState, req: CreateUserRequest) -> Response {
         Ok(Err(RealmError::Conflict(why))) => failed(StatusCode::CONFLICT, "conflict", &why),
         Ok(Err(RealmError::Failed(why))) => failed(StatusCode::BAD_GATEWAY, "mail_failed", &why),
     }
+}
+
+/// Stores the invite's join record (or refreshes it: the same invite gives the same token) and
+/// returns its page, `<server>/join/<token>`.
+async fn issue_join(
+    state: &AdminState,
+    invites: &Invites,
+    user: &WebUser,
+    email: &str,
+    inviter: Option<&str>,
+) -> Result<String, super::WebStoreError> {
+    let token = super::join::token(&state.0.key_digest, user.user_id, email, inviter);
+    let record = super::JoinRecord {
+        user_id: user.user_id,
+        user_name: user.name.clone(),
+        inviter: inviter.map(String::from),
+        created_at: state.core().now(),
+    };
+    let key = super::join::token_digest(&token);
+    state
+        .core()
+        .store(move |s| s.put_join(&key, &record))
+        .await?;
+    Ok(format!("{}/join/{token}", invites.server))
 }
 
 /// What an invite's delivery did.

@@ -108,7 +108,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test
         shell: bash
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
   # The Windows release binary, built as release.yml builds it, installed by dist/install.ps1 from a
   # local copy of the bucket layout, then run as a new user would run it.
@@ -192,6 +192,50 @@ jobs:
           Write-Host $doctor
           Write-Host "--- exit status $LASTEXITCODE"
           $global:LASTEXITCODE = 0
+      # the real Task Scheduler: setup registers the task conde and starts the bridge on the pipe
+      - name: conde setup, then setup --check and doctor all clear
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:LOCALAPPDATA 'conde\data\conde.log'
+          try {
+            Write-Host '--- conde setup'
+            conde setup 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "conde setup: exit status $LASTEXITCODE" }
+            schtasks /Query /TN conde | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'no scheduled task conde' }
+            $pipe = '\\.\pipe\conde-' + ($env:USERNAME.ToLowerInvariant() -replace '[^a-z0-9._-]', '-')
+            Write-Host '--- conde setup --check'
+            $check = conde setup --check 2>&1 | Out-String
+            Write-Host $check
+            if ($LASTEXITCODE -ne 0) { throw "setup --check: exit status $LASTEXITCODE" }
+            foreach ($want in @("service: the bridge answers on $pipe", "service: the bridge runs this build ($env:VERSION", 'all clear')) {
+              if (-not $check.Contains($want)) { throw "setup --check did not print: $want" }
+            }
+            Write-Host '--- conde doctor'
+            $doctor = conde doctor 2>&1 | Out-String
+            Write-Host $doctor
+            if ($LASTEXITCODE -ne 0) { throw "doctor: exit status $LASTEXITCODE" }
+            foreach ($want in @("ok      daemon: reachable at $pipe", "ok      bridge: running this build ($env:VERSION", 'all clear')) {
+              if (-not $doctor.Contains($want)) { throw "doctor did not print: $want" }
+            }
+            # a bare runner: no harness above this shell, so it acts as the human
+            conde register ci.smoke | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'register failed' }
+            $user = $env:USERNAME.ToLowerInvariant()
+            $who = ((conde whoami) | Select-Object -First 1).Split(' ')[0]
+            if ($who -ne "$user/ci.smoke") { throw "whoami: $who" }
+            $env:CONDE_DIST_BASE_URL = 'http://127.0.0.1:8765'
+            $update = conde update --check 2>&1 | Out-String
+            Write-Host $update
+            if (-not $update.Contains("conde $env:VERSION is current")) { throw "update --check: $update" }
+          } finally {
+            Write-Host "--- $log"
+            Get-Content -Tail 100 $log -ErrorAction SilentlyContinue | Out-Host
+            schtasks /End /TN conde 2>&1 | Out-Null
+            schtasks /Delete /TN conde /F 2>&1 | Out-Null
+            $global:LASTEXITCODE = 0
+          }
 
   terraform:
     runs-on: ubuntu-24.04

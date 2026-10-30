@@ -202,6 +202,7 @@
 	}
 	.list a {
 		display: flex;
+		flex: none; /* the column's flex-shrink would squash a wrapped name to min-height */
 		justify-content: space-between;
 		align-items: baseline;
 		gap: 10px;

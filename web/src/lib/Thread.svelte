@@ -99,6 +99,11 @@
 
 <div class="thread" class:sheet={inSheet} bind:this={box}>
 	<div class="top">
+		{#if onclose}
+			<button type="button" class="close" onclick={onclose} aria-label="Close the thread" title="Close">
+				<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9" /></svg>
+			</button>
+		{/if}
 		{#if !inSheet}<div class="tkick">{threadTitle(s.messages, selected)}</div>{/if}
 		<svelte:element this={inSheet ? 'h3' : 'h2'} class="title" tabindex="-1" bind:this={heading}>{root ? headline(plainText(root.text)) : 'Thread'}</svelte:element>
 		{#if lines.length > 0}
@@ -112,7 +117,6 @@
 		{/if}
 		<div class="acts">
 			{#if convo}<a href={convo.href}>{convo.label}</a>{/if}
-			{#if onclose}<button type="button" class="close" onclick={onclose}>Close</button>{/if}
 		</div>
 	</div>
 
@@ -165,6 +169,7 @@
 		min-height: 0;
 	}
 	.top {
+		position: relative;
 		flex: none;
 		padding: 38px 40px 18px;
 		border-bottom: 1px solid var(--line);
@@ -173,6 +178,7 @@
 		padding: 4px 0 14px;
 	}
 	.tkick {
+		padding-right: 44px;
 		font: 10.5px/1.4 var(--sans);
 		letter-spacing: 0.12em;
 		text-transform: uppercase;
@@ -180,6 +186,7 @@
 	}
 	.title {
 		margin: 10px 0 8px;
+		padding-right: 28px;
 		font: 600 26px/1.25 var(--serif);
 		letter-spacing: -0.01em;
 		overflow-wrap: anywhere;
@@ -211,15 +218,33 @@
 		text-decoration-color: var(--faint);
 	}
 	.close {
-		margin-left: auto;
+		position: absolute;
+		top: 30px;
+		right: 30px;
+		display: grid;
+		place-items: center;
+		width: 34px;
+		height: 34px;
 		padding: 0;
 		border: none;
+		border-radius: 50%;
 		background: none;
-		color: var(--faint);
-		font-size: 13px;
+		color: var(--muted);
+		cursor: pointer;
 	}
-	.close:hover {
+	.close svg {
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.6;
+		stroke-linecap: round;
+	}
+	.close:hover,
+	.close:focus-visible {
 		color: var(--fg);
+		background: var(--line);
+	}
+	.sheet .close {
+		display: none;
 	}
 	.body {
 		flex: 1;

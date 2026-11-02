@@ -8,7 +8,7 @@
 	import ErrorLine from '#lib/ui/ErrorLine.svelte';
 	import SkeletonRows from '#lib/ui/SkeletonRows.svelte';
 
-	const agents = $derived((board.rail?.agents ?? []).map((a) => ({ name: short(a.name), facts: agentFacts(board.fleet, a.name) })));
+	const agents = $derived((board.rail?.agents ?? []).filter((a) => a.kind !== 'human').map((a) => ({ name: short(a.name), facts: agentFacts(board.fleet, a.name) })));
 </script>
 
 <section class="index">

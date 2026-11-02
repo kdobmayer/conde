@@ -6,7 +6,7 @@
 
 export const WIDTH_KEY = 'conde.agentlist.width';
 export const MIN_WIDTH = 200;
-export const MAX_WIDTH = 480;
+export const MAX_WIDTH = 640;
 
 export const clampWidth = (w: number): number => Math.round(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, w)));
 

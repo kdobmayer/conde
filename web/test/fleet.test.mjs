@@ -97,7 +97,7 @@ test('a teammate agent carries name, kind and seen only, whatever the answer hol
 	assert.equal('problems' in v.teammates[0].hosts[0], false);
 });
 
-test('online by heartbeat age on the given clock; seen only on an online host', () => {
+test('online by heartbeat age on the given clock; seen only on an online host; a human paging name is not listed', () => {
 	const v = orderFleet(
 		fleet(
 			[host('me', 'up', 89), host('me', 'down', 91)],
@@ -111,8 +111,7 @@ test('online by heartbeat age on the given clock; seen only on an online host', 
 	assert.equal(byHost.down.online, false);
 	assert.deepEqual(byHost.up.agents.map((a) => [a.name, a.seen]), [
 		['me/a', true],
-		['me/c', false],
-		['me/h', false]
+		['me/c', false]
 	]);
 	assert.equal(byHost.down.agents[0].seen, false);
 });

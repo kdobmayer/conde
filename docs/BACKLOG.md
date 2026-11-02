@@ -70,8 +70,8 @@ the last step. Desk runs the rest in this order after the Dakai cutover basics (
   SIGTERM ordering (s9 branch).
 - S7: done 2026-10-28 (docs/infra-network-s7.md): FQDN network policy on the cluster; the workspaces, Keycloak and
   Argo CD reach only named hosts, the any-public-443 and 465 rules and the GitHub ranges are gone; cluster-wide
-  policies, the mesh and the Cloudflare edge declined. Open: Autopilot had not yet restarted the nodes for the
-  feature (enforcement was proven on the node that runs every workload); demo and clearscale blip once when it does.
+  policies, the mesh and the Cloudflare edge declined. Autopilot restarted the nodes on 2026-11-02 01:31-01:45Z;
+  enforcement holds on both new nodes (named hosts connect, example.com refused; demo and clearscale blipped once).
   The owner's fork is open: keep the Google edge (recommended) or move to Cloudflare Tunnel plus Access. Revisit the Kubernetes ClusterNetworkPolicy when it is generally available on GKE.
 
 Owner's own steps, at his pace, none blocking the above:

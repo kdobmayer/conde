@@ -30,7 +30,7 @@ export interface NavAgent {
  * both are matched with the owner. */
 export function navAgents(rail: Rail | null, fleet: Fleet | null): NavAgent[] {
 	const owner = rail?.owner;
-	return (rail?.agents ?? []).map((a) => {
+	return (rail?.agents ?? []).filter((a) => a.kind !== 'human').map((a) => {
 		const bound = fleet?.agents.find((f) => f.owner === owner && f.name === a.name);
 		const online = bound ? fleet!.hosts.some((h) => h.owner === owner && h.host === bound.host && h.online) : false;
 		return {

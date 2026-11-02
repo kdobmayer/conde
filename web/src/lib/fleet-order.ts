@@ -61,7 +61,8 @@ export function orderFleet(fleet: Fleet, me: string, now: number): FleetView {
 	const own: OwnHost[] = [];
 	const team = new Map<string, HostRow<TeamAgent>[]>();
 	for (const h of fleet.hosts) {
-		const agents = fleet.agents.filter((a) => a.owner === h.owner && a.host === h.host);
+		// a human paging name is not an agent: it is left out, so its `web` host drops too
+		const agents = fleet.agents.filter((a) => a.owner === h.owner && a.host === h.host && a.kind !== 'human');
 		// A host with no bridge and no agent is the browser's own `web` host: nothing to show.
 		if (!h.bridge && agents.length === 0) continue;
 		const online = isOnline(h, fleet.online_ttl_s, now);

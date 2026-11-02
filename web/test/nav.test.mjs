@@ -25,6 +25,14 @@ test("an agent on an offline host reads offline though another owner's host of t
 	assert.equal(navAgents(rail, null)[0].state, 'unbound', 'fleet not loaded yet');
 });
 
+test('the paging name (kind human) is not an agent and is left out', () => {
+	const rail = { owner: 'alice', agents: [agent('alice/scribe'), { ...agent('alice/alice'), kind: 'human' }] };
+	assert.deepEqual(
+		navAgents(rail, null).map((a) => a.name),
+		['alice/scribe']
+	);
+});
+
 test('a channel two own agents share is listed once', () => {
 	const rail = { owner: 'alice', agents: [agent('alice/a', ['#dev', '#ops']), agent('alice/b', ['#dev'])] };
 	assert.deepEqual(navChannels(rail), ['#dev', '#ops']);

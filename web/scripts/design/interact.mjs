@@ -620,7 +620,7 @@ for (const hash of ['#/agents', '#/channels']) {
 		expect(r.text === LONG && r.lines >= 2 && !r.cut, JSON.stringify(r));
 		expect(r.first && r.timeFits, `time not on the first line or cut: ${JSON.stringify(r)}`);
 	});
-	await check('agent list: the default is 290 px; dragging the handle stops at 200 and 480 px', async () => {
+	await check('agent list: the default is 290 px; dragging the handle stops at 200 and 640 px', async () => {
 		expect((await listWidth()) === 290, `${await listWidth()}`);
 		const b = await box(page, '.agent-page [role=separator]');
 		const y = b.y + 300;
@@ -635,25 +635,25 @@ for (const hash of ['#/agents', '#/channels']) {
 		const c = await box(page, '.agent-page [role=separator]');
 		await page.mouse.move(c.x + c.width / 2, y);
 		await page.mouse.down();
-		await page.mouse.move(c.x + 600, y, { steps: 6 });
+		await page.mouse.move(c.x + 700, y, { steps: 6 });
 		await page.mouse.up();
-		expect((await listWidth()) === 480 && (await stored()) === '480', `wide: ${await listWidth()}, stored ${await stored()}`);
+		expect((await listWidth()) === 640 && (await stored()) === '640', `wide: ${await listWidth()}, stored ${await stored()}`);
 	});
 	await check('agent list: the width survives a reload', async () => {
 		await page.reload({ waitUntil: 'networkidle' });
 		await page.waitForSelector('.msg');
-		expect((await listWidth()) === 480, `${await listWidth()}`);
+		expect((await listWidth()) === 640, `${await listWidth()}`);
 	});
 	await check('agent list: the handle is a focusable separator; arrows resize, Home goes to 200, aria-valuenow follows', async () => {
 		await handle.focus();
 		const f = await focus(page);
 		expect(f.role === 'separator', JSON.stringify(f));
 		await page.keyboard.press('ArrowLeft');
-		expect((await listWidth()) === 464 && (await handle.getAttribute('aria-valuenow')) === '464', `${await listWidth()} / ${await handle.getAttribute('aria-valuenow')}`);
+		expect((await listWidth()) === 624 && (await handle.getAttribute('aria-valuenow')) === '624', `${await listWidth()} / ${await handle.getAttribute('aria-valuenow')}`);
 		await page.keyboard.press('Shift+ArrowLeft');
-		expect((await listWidth()) === 416, `${await listWidth()}`);
+		expect((await listWidth()) === 576, `${await listWidth()}`);
 		await page.keyboard.press('ArrowRight');
-		expect((await listWidth()) === 432 && (await stored()) === '432', `${await listWidth()}, stored ${await stored()}`);
+		expect((await listWidth()) === 592 && (await stored()) === '592', `${await listWidth()}, stored ${await stored()}`);
 		await page.keyboard.press('Home');
 		expect((await listWidth()) === 200, `${await listWidth()}`);
 		await page.keyboard.press('ArrowLeft');

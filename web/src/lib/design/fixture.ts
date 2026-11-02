@@ -222,7 +222,7 @@ export function rail(): Rail {
 	const kinds: Record<string, 'claude' | 'codex'> = { [DESK]: 'claude', [ASTRA]: 'codex', [HELPER]: 'claude', [BUILDER]: 'codex' };
 	return {
 		owner: OWNER,
-		agents: ownAgents.map((name) => {
+		agents: ownAgents.map((name): Rail['agents'][number] => {
 			const dms = new Map<string, { with: string; last_seq: number; last_at: string; unread: number }>();
 			for (const x of messages) {
 				if (x.place !== 'dm' || (x.from !== name && x.to !== name)) continue;
@@ -251,7 +251,7 @@ export function rail(): Rail {
 				dms: [...dms.values()].sort((a, b) => b.last_seq - a.last_seq),
 				channels: chs
 			};
-		})
+		}).concat([{ name: `${OWNER}/krisz`, kind: 'human', address: null, dms: [], channels: [] }])
 	};
 }
 

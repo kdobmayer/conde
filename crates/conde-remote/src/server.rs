@@ -425,7 +425,10 @@ pub async fn start_on(
         .with_state(shared.clone());
     let app = match web {
         Some(setup) => {
-            let (routes, state) = setup.into_parts(Arc::new(Registry(Arc::downgrade(&shared))));
+            let (routes, state) = setup.into_parts(
+                Arc::new(Registry(Arc::downgrade(&shared))),
+                Some(shared.dispatcher.clone()),
+            );
             let app = app.merge(routes);
             match state {
                 Some(web) => {

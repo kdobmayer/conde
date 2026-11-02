@@ -18,6 +18,7 @@ mod auth;
 pub mod invite;
 pub mod join;
 mod keys;
+mod nav;
 mod pages;
 mod ratelimit;
 pub(crate) use pages::document;
@@ -789,6 +790,8 @@ struct Inner {
     config: WebConfig,
     oidc: Oidc,
     limits: ratelimit::Limiters,
+    /// The board, for the masthead's lists on the signed-in pages; none in a bare test setup.
+    dispatcher: Option<Arc<dyn crate::Dispatcher>>,
 }
 
 /// Shared state of the sign-in and keys routes.
@@ -810,6 +813,16 @@ impl WebState {
         registry: Arc<dyn BridgeRegistry>,
         clock: Clock,
     ) -> WebState {
+        WebState::build(config, store, registry, clock, None)
+    }
+
+    fn build(
+        config: WebConfig,
+        store: Arc<dyn WebStore>,
+        registry: Arc<dyn BridgeRegistry>,
+        clock: Clock,
+        dispatcher: Option<Arc<dyn crate::Dispatcher>>,
+    ) -> WebState {
         let oidc = Oidc::new(&config);
         let limits = ratelimit::Limiters::new(config.limits);
         WebState(Arc::new(Inner {
@@ -821,7 +834,12 @@ impl WebState {
             config,
             oidc,
             limits,
+            dispatcher,
         }))
+    }
+
+    fn dispatcher(&self) -> Option<&Arc<dyn crate::Dispatcher>> {
+        self.0.dispatcher.as_ref()
     }
 
     fn core(&self) -> &Core {
@@ -899,16 +917,27 @@ impl WebSetup {
 
     /// The configured routes over the server's connection registry.
     pub fn router(self, registry: Arc<dyn BridgeRegistry>) -> Router {
-        self.into_parts(registry).0
+        self.into_parts(registry, None).0
     }
 
     /// The configured routes and, with Entra configured, the sign-in state they share (the
-    /// web app's routes authenticate browsers with it).
-    pub fn into_parts(self, registry: Arc<dyn BridgeRegistry>) -> (Router, Option<WebState>) {
+    /// web app's routes authenticate browsers with it). `dispatcher` answers the masthead's
+    /// reads on the signed-in server pages.
+    pub fn into_parts(
+        self,
+        registry: Arc<dyn BridgeRegistry>,
+        dispatcher: Option<Arc<dyn crate::Dispatcher>>,
+    ) -> (Router, Option<WebState>) {
         let mut app = Router::new();
         let mut state = None;
         if let Some(config) = &self.entra {
-            let web = WebState::new(config.clone(), self.store.clone(), registry.clone());
+            let web = WebState::build(
+                config.clone(),
+                self.store.clone(),
+                registry.clone(),
+                system_clock(),
+                dispatcher,
+            );
             app = app.merge(router(web.clone()));
             state = Some(web);
         }

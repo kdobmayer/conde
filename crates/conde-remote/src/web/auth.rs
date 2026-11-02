@@ -829,7 +829,7 @@ pub(crate) async fn cli_start(
     if paste {
         // GET only asks; the code is issued by the confirming POST (no side effect here)
         return Ok(pages::cli_confirm(
-            keys::header(&current),
+            keys::shell(&state, &current).await,
             &current.record.user_name,
             &cli_state,
             &challenge,
@@ -917,7 +917,7 @@ pub(crate) async fn cli_confirm(
     let minutes = state.config().cli_code_ttl.as_secs().div_ceil(60);
     let shown = format!("{}-{}", &code[..4], &code[4..]);
     Ok(pages::cli_code(
-        keys::header(&current),
+        keys::shell(&state, &current).await,
         &shown,
         minutes,
         &keys::idp_origin(&state),

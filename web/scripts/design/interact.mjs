@@ -592,6 +592,83 @@ for (const hash of ['#/agents', '#/channels']) {
 		await page.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
 		const w = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
 		expect(w[0] <= w[1], `scrollWidth ${w[0]} > clientWidth ${w[1]}`);
+		const main = await page.evaluate(() => [document.querySelector('.main').scrollWidth, document.querySelector('.main').clientWidth]);
+		expect(main[0] <= main[1], `main scrollWidth ${main[0]} > clientWidth ${main[1]}`);
+	});
+	await check('keys at 390: the app’s top bar and tab bar, in the Feed page’s place', async () => {
+		const bars = () =>
+			page.evaluate(() =>
+				['.mbar', '.tabs', '.mword', '.tabs > :last-child'].map((q) => {
+					const b = document.querySelector(q).getBoundingClientRect();
+					return `${q} ${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`;
+				})
+			);
+		const keys = await bars();
+		await page.goto(FEED, { waitUntil: 'networkidle' });
+		await page.waitForSelector('.tabs .who');
+		const feed = await bars();
+		expect(keys.join() === feed.join(), `keys ${keys.join(' | ')} feed ${feed.join(' | ')}`);
+		expect((await page.locator('.mast').isVisible()) === false, 'the masthead shows at 390');
+	});
+	await context.close();
+}
+
+// ---- the keys page sits in the app's shell: the same masthead in the same place, Keys current ----
+{
+	where = 'keys shell 1440';
+	const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+	const page = await context.newPage();
+	const csp = [];
+	page.on('console', (m) => m.type() === 'error' && /Content Security Policy/.test(m.text()) && csp.push(m.text()));
+	/** The masthead's parts and their boxes, read in the browser. */
+	const mast = () =>
+		page.evaluate(() => {
+			const r = (el) => (el ? [...['x', 'y', 'width', 'height'].map((k) => Math.round(el.getBoundingClientRect()[k]))] : null);
+			const m = document.querySelector('.mast');
+			return {
+				mast: r(m),
+				word: r(m.querySelector('.word')),
+				kick: r(m.querySelector('.kick')),
+				sections: [...m.querySelectorAll('.sections a')].map((a) => [a.textContent, ...r(a)]),
+				lists: [...m.querySelectorAll('ul')].map((u) => [[...u.querySelectorAll('li')].map((li) => li.textContent.replace(/\s+/g, ' ').trim()).join(' | '), ...r(u)]),
+				scope: [m.querySelector('.scope').textContent, ...r(m.querySelector('.scope'))],
+				who: [m.querySelector('.who').textContent.trim(), ...r(m.querySelector('.who'))],
+				font: getComputedStyle(m.querySelector('.word')).fontFamily,
+				loaded: [...document.fonts].filter((f) => f.status === 'loaded').map((f) => `${f.family} ${f.weight} ${f.style}`).sort()
+			};
+		});
+	await page.goto(FEED, { waitUntil: 'networkidle' });
+	await page.waitForSelector('.mast li a');
+	const feed = await mast();
+	await page.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
+	await page.evaluate(() => document.fonts.ready);
+	const keys = await mast();
+	await check('keys: the masthead has the Feed page’s parts, text and boxes; only the current section differs', async () => {
+		for (const k of ['mast', 'word', 'kick', 'sections', 'lists', 'scope', 'who'])
+			expect(JSON.stringify(feed[k]) === JSON.stringify(keys[k]), `${k}: feed ${JSON.stringify(feed[k])} keys ${JSON.stringify(keys[k])}`);
+		const current = await page.locator('.mast .sections a[aria-current=page]').textContent();
+		expect(current === 'Keys', current);
+	});
+	await check('keys: the app’s fonts load under the page’s CSP', async () => {
+		expect(keys.font === feed.font && keys.loaded.includes('Source Serif 4 600 normal') && keys.loaded.includes('Inter 400 normal'), JSON.stringify(keys.loaded));
+		expect(csp.length === 0, `CSP violations: ${csp.join(', ')}`);
+	});
+	await check('keys: the user menu opens upward in the foot; Light applies and is stored; Escape closes it', async () => {
+		await page.locator('.mast .who').click();
+		const panel = page.locator('.mast [role=menu]');
+		expect(await panel.isVisible(), 'the menu did not open');
+		const items = await panel.locator('[role=menuitemradio]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
+		expect(items.join(' ') === 'System:true Light:false Dark:false', items.join(' '));
+		await panel.locator('[data-theme-choice=light]').click();
+		const s = await page.evaluate(() => [document.documentElement.dataset.theme, getComputedStyle(document.body).backgroundColor, localStorage.getItem('conde.theme')]);
+		expect(s.join() === 'light,rgb(246, 243, 237),light', s.join());
+		expect((await panel.locator('[data-theme-choice=light]').getAttribute('aria-checked')) === 'true', 'Light not checked');
+		await page.keyboard.press('Escape');
+		expect(!(await panel.isVisible()), 'Escape did not close the menu');
+		await page.locator('.mast .who').click();
+		await page.mouse.click(900, 400);
+		expect(!(await panel.isVisible()), 'a click outside did not close the menu');
+		await page.evaluate(() => localStorage.removeItem('conde.theme'));
 	});
 	await context.close();
 }

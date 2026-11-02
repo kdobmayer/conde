@@ -7,9 +7,12 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::{CookieJar, SameSite};
 use serde::Deserialize;
+use serde_json::{Value, json};
 
+use super::nav::Nav;
 use super::session::{self, Session, WebError, digest, random_token};
 use super::{Core, Enrollment, HostKey, Minted, WebState, pages};
+use crate::WebPrincipal;
 
 /// How many `-N` suffixes the browser flows try when a host id belongs to another user.
 pub(crate) const HOST_SUFFIXES: u32 = 20;
@@ -161,10 +164,40 @@ pub(crate) fn idp_origin(state: &WebState) -> String {
     }
 }
 
-pub(crate) fn header(session: &Session) -> pages::Header<'_> {
-    pages::Header {
+/// A signed-in page's shell: the user, and the masthead's lists from the board, read as the
+/// app reads them (`owner.list`, `fleet.list`); a read that fails leaves its part out.
+pub(crate) async fn shell<'a>(state: &WebState, session: &'a Session) -> pages::Shell<'a> {
+    let user = &session.record.user_name;
+    let (rail, fleet) = tokio::join!(
+        board_read(state, session, "owner.list"),
+        board_read(state, session, "fleet.list")
+    );
+    pages::Shell {
         display: &session.record.display,
+        user,
         csrf: &session.record.csrf,
+        nav: Nav::new(user, rail.as_ref(), fleet.as_ref()),
+    }
+}
+
+/// One of the app's reads for the session's user; `None` without a board or when it fails.
+async fn board_read(state: &WebState, session: &Session, op: &'static str) -> Option<Value> {
+    let dispatcher = state.dispatcher()?.clone();
+    let user = WebPrincipal {
+        user_id: session.record.user_id,
+        user: session.record.user_name.clone(),
+    };
+    let request = json!({"v": 1, "type": "request", "request_id": "page", "op": op, "body": {}});
+    match tokio::task::spawn_blocking(move || dispatcher.dispatch_web(&user, request)).await {
+        Ok(mut response) if response["ok"] == true => Some(response["result"].take()),
+        Ok(response) => {
+            tracing::warn!(op, error = %response["error"], "masthead read refused");
+            None
+        }
+        Err(e) => {
+            tracing::error!(op, error = %e, "masthead read failed");
+            None
+        }
     }
 }
 
@@ -184,7 +217,7 @@ pub(crate) async fn page(
     let user_id = session.record.user_id;
     let keys = state.store(move |s| s.host_keys(user_id)).await?;
     Ok(pages::keys(
-        header(&session),
+        shell(&state, &session).await,
         &state.config().public_url,
         &one_per_host(keys),
         &idp_origin(&state),
@@ -295,7 +328,7 @@ pub(crate) async fn created(
     };
     let (host, replaced) = (display.host_id, display.replaced);
     let page = pages::created(
-        header(&session),
+        shell(&state, &session).await,
         &state.config().public_url,
         &host,
         key,

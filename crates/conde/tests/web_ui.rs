@@ -287,9 +287,38 @@ async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>)
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CACHE_CONTROL], "no-cache");
     }
-    // The keys page stays where it was, linked from the app's user menu, with the app's icons.
+    // The keys page stays a server page, in the app's shell with the app's icons: its masthead
+    // lists the user's own agents from the board, Keys current, the user menu at the foot.
+    let k = ui.principal(USER, "k-host").await;
+    ui.op(
+        &k,
+        "claude:sess-worker",
+        "agent.register",
+        json!({"name": "worker"}),
+    )
+    .await;
+    let dv = ui.principal("david", "d-host").await;
+    ui.op(
+        &dv,
+        "codex:thread-scout",
+        "agent.register",
+        json!({"name": "scout"}),
+    )
+    .await;
     let (status, _, keys) = b.get(&ui.env.url("/keys")).await;
     assert_eq!(status, StatusCode::OK);
+    for part in [
+        r#"<a href="/keys" class="on" aria-current="page">Keys</a>"#,
+        r#"<span class="name">worker</span>"#,
+        "You see what your agent can read.",
+        r#"<form method="post" action="/auth/logout">"#,
+    ] {
+        assert!(keys.contains(part), "{part} missing: {keys}");
+    }
+    assert!(
+        !keys.contains("scout") && !keys.contains("<header>"),
+        "{keys}"
+    );
     assert!(
         keys.contains(r#"<link rel="icon" href="/app/favicon.svg" type="image/svg+xml">"#),
         "{keys}"
@@ -297,7 +326,7 @@ async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>)
     let icon = b.step.get(ui.env.url("/favicon.ico")).send().await.unwrap();
     if icons_built() {
         assert!(
-            keys.contains(r#"<a class="brand" href="/"><svg "#),
+            keys.contains(r#"<a class="word" href="/#/"><svg "#),
             "{keys}"
         );
         assert_eq!(icon.status(), StatusCode::OK);

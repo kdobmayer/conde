@@ -3,9 +3,10 @@
 // Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
 // owner.search, fleet.list, channel.list; the feed, thread and search ops per docs/web-ui-v2/ia.md
 // "Server contract"),
-// /v1/events (a WebSocket that sends the hello frame), /keys (the server's keys page template
-// from crates/conde-remote/src/web/pages.rs, filled with fixture rows) and /join/<anything> (the
-// join page's template from crates/conde-remote/src/web/join.rs in the same shell, signed out).
+// /v1/events (a WebSocket that sends the hello frame), /keys (the server's layout, masthead and
+// keys templates from crates/conde-remote/src/web/pages.rs, filled with the fixture) and
+// /join/<anything> (the join page's template from crates/conde-remote/src/web/join.rs in the
+// same layout, signed out).
 
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
@@ -13,6 +14,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as fx from '../../src/lib/design/fixture.ts';
+import { navAgents, navChannels } from '../../src/lib/nav.svelte.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(process.argv[2] ?? join(here, '../../../crates/conde-remote/web-dist'));
@@ -184,43 +186,103 @@ function answer(raw, res) {
 	json(res, 200, { v: 1, type: 'response', request_id: r.request_id, ok: true, result });
 }
 
-// The keys page: the server's own template and stylesheet, filled with fixture rows.
+// The server's pages (pages.rs): its layout, user menu and keys templates, stylesheet and
+// scripts, rendered by a small subset of askama (what those templates use) over fixture data.
 const pagesRs = readFileSync(join(here, '../../../crates/conde-remote/src/web/pages.rs'), 'utf8');
-const css = pagesRs.match(/const CSS: &str = r#"([\s\S]*?)"#;/)[1];
-const themeJs = pagesRs.match(/const THEME_JS: &str = r#"([\s\S]*?)"#;/)[1];
-// The pages' CSP as pages.rs sends it, so the browser checks the theme script's hash.
-const pagesCsp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${createHash('sha256').update(themeJs).digest('base64')}'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
-const mark = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" class="mark" aria-hidden="true" focusable="false"><path style="fill:var(--muted)" d="M8 3h6v6H8Z"/><path fill="currentColor" d="M2 2h3v9h9v3H2Z"/></svg>';
+const rustStr = (name) => pagesRs.match(new RegExp(`const ${name}: &str = r#"([\\s\\S]*?)"#;`))[1];
+const template = (start) => pagesRs.match(new RegExp(`source = r#"(${start}[\\s\\S]*?)"#\\n\\s*\\)\\]`))[1];
+const css = rustStr('CSS');
+const themeJs = rustStr('THEME_JS');
+const menuJs = rustStr('MENU_JS');
+const layoutTpl = template('<!doctype html>');
+const menuTpl = template('<details class="menu-panel">');
+const keysTpl = template('<h1>Host keys</h1>');
+const sha = (js) => `'sha256-${createHash('sha256').update(js).digest('base64')}'`;
+// The pages' CSP as pages.rs sends it, so the browser checks the scripts' hashes and the fonts.
+const pagesCsp = (signedIn) =>
+	`default-src 'none'; style-src 'unsafe-inline'; script-src ${sha(themeJs)}${signedIn ? ` ${sha(menuJs)}` : ''}; img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
+
+/** Renders an askama template with `{{ path|filter }}`, `{% if [!]path[.is_empty()] %}`,
+ * `{% if let Some(x) = path %}`, `{% else %}` and `{% for x in path %}`; HTML-escaped unless `safe`. */
+function askama(src, ctx) {
+	const parts = src.split(/(\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\})/);
+	let at = 0;
+	const lookup = (scope, path) => path.split('.').reduce((v, k) => (v == null ? v : v[k]), scope);
+	const value = (scope, expr) => {
+		const not = expr.startsWith('!');
+		const e = not ? expr.slice(1) : expr;
+		const empty = e.endsWith('.is_empty()');
+		let v = lookup(scope, empty ? e.slice(0, -'.is_empty()'.length) : e);
+		if (empty) v = v.length === 0;
+		return not ? !v : v;
+	};
+	const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&#34;', "'": '&#39;' })[c]);
+	const enc = (strict) => (v) => {
+		const e = encodeURIComponent(String(v)).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+		return strict ? e : e.replace(/%2F/g, '/');
+	};
+	const filters = { safe: (v) => String(v), urlencode: enc(false), urlencode_strict: enc(true) };
+	// Parses up to one of `stops`; returns the nodes and the stop tag.
+	function block(stops) {
+		const nodes = [];
+		while (at < parts.length) {
+			const p = parts[at++];
+			if (p.startsWith('{{')) {
+				const [expr, filter] = p.slice(2, -2).trim().split('|');
+				nodes.push((scope) => (filter ? filters[filter](value(scope, expr)) : esc(value(scope, expr))));
+			} else if (p.startsWith('{%')) {
+				const tag = p.slice(2, -2).trim();
+				if (stops.includes(tag)) return [nodes, tag];
+				let m;
+				if ((m = tag.match(/^if let Some\((\w+)\) = (.+)$/)) || (m = tag.match(/^if (.+)$/))) {
+					const [bind, cond] = m.length === 3 ? [m[1], m[2]] : [null, m[1]];
+					const [then, stop] = block(['else', 'endif']);
+					const other = stop === 'else' ? block(['endif'])[0] : [];
+					nodes.push((scope) => {
+						const v = value(scope, cond);
+						const yes = bind ? v != null : !!v;
+						return run(yes ? then : other, yes && bind ? { ...scope, [bind]: v } : scope);
+					});
+				} else if ((m = tag.match(/^for (\w+) in (.+)$/))) {
+					const [, name, list] = m;
+					const [body] = block(['endfor']);
+					nodes.push((scope) => value(scope, list).map((x) => run(body, { ...scope, [name]: x })).join(''));
+				} else throw new Error(`template tag not mocked: ${tag}`);
+			} else nodes.push(() => p);
+		}
+		return [nodes, null];
+	}
+	const run = (nodes, scope) => nodes.map((n) => n(scope)).join('');
+	return run(block([])[0], ctx);
+}
+
+const mark = readFileSync(join(here, '../../static/app/mark.svg'), 'utf8').trim();
 const server = 'https://conde.nativeai.space';
+const layout = (title, body, shell = null) => askama(layoutTpl, { title, theme: themeJs, css, mark, shell, body, menu_js: menuJs, nonce: null, js: '' });
+
+/** The masthead as the server fills it: the app's own lists over the fixture's owner.list and fleet.list. */
+function shell() {
+	const rail = fx.rail();
+	const short = (n) => (n.startsWith(`${fx.OWNER}/`) ? n.slice(fx.OWNER.length + 1) : n);
+	const agents = navAgents(rail, fx.fleet).map((a) => ({ name: short(a.name), state: a.state, held: a.held || null, stuck: a.stuck || null }));
+	const channels = navChannels(rail).map((c) => ({ name: c, slug: c.slice(1) }));
+	const n = agents.length;
+	const scope = `You see what your ${n === 1 ? 'agent' : n > 1 ? `${n} agents` : 'agents'} can read.`;
+	const menu = (more) =>
+		askama(menuTpl, { display: fx.session.display, user: fx.session.user, csrf: 'mock', admin: (fx.fleet.admins ?? []).includes(fx.session.user), more });
+	return { agents, channels, scope, menu: menu(false), more: menu(true) };
+}
+
 function keysPage() {
-	const rows = fx.keys
-		.map(
-			(k) =>
-				`<tr>\n<td data-label="Host"><code>${k.host_id}</code></td><td data-label="Label">${k.label}</td><td data-label="Created">${k.created}</td><td data-label="Last seen">${k.last_seen}</td>\n` +
-				(k.revoked
-					? `<td class="muted" data-label="State">revoked ${k.revoked}</td><td></td>\n`
-					: `<td data-label="State">live</td><td><form method="post" action="/keys/${k.host_id}/revoke" class="inline"><input type="hidden" name="csrf" value="mock"><button class="danger">Revoke</button></form></td>`) +
-				`</tr>`
-		)
-		.join('\n');
+	const rows = fx.keys.map((k) => ({ ...k, revoked: k.revoked ?? null }));
 	const apps = fx.apps
 		.map(
 			(a) =>
 				`<tr>\n<td data-label="App"><code>${a.host}</code> <span class="muted">&#8220;${a.name}&#8221;</span></td><td data-label="Created">${a.created}</td><td data-label="Last used">${a.last_used}</td><td data-label="Expires">${a.expires}</td>\n<td><form class="inline"><button class="danger">Revoke</button></form></td>\n</tr>`
 		)
 		.join('\n');
-	const body = `<h1>Host keys</h1>
-<p class="muted">One key per machine. The bridge on that machine holds it, and every Claude and Codex session it finds acts as you. Revoking a key cuts that machine off at once.</p>
-<form method="post" action="/keys" class="row">
-<input type="hidden" name="csrf" value="mock">
-<input type="text" name="label" required maxlength="64" placeholder="Machine name, e.g. work-laptop" aria-label="Machine name">
-<button>Create key</button>
-</form>
-<div class="wrap"><table>
-<thead><tr><th>Host</th><th>Label</th><th>Created</th><th>Last seen</th><th>State</th><th></th></tr></thead>
-<tbody>
-${rows}</tbody>
-</table></div>
+	// Connected apps is the design of docs/REMOTE-MCP.md, not in pages.rs yet.
+	const body = `${askama(keysTpl, { csrf: 'mock', server, rows })}
 <h1>Connected apps</h1>
 <p class="muted">Apps such as Claude that act on this board as you, through its MCP endpoint <code>${server}/mcp</code>. Revoking one ends its access at once.</p>
 <div class="wrap"><table>
@@ -228,28 +290,7 @@ ${rows}</tbody>
 <tbody>
 ${apps}</tbody>
 </table></div>`;
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Host keys · conde</title>
-<meta name="color-scheme" content="dark light">
-<script>${themeJs}</script>
-<style>${css}</style>
-</head>
-<body>
-<header>
-<a class="brand" href="/">${mark}conde</a>
-<nav aria-label="Sections"><a href="/#/">Feed</a><a href="/#/agents">Agents</a><a href="/#/channels">Channels</a><a href="/#/fleet">Fleet</a><a href="/keys" aria-current="page">Keys</a></nav>
-<span class="who">${fx.session.display}</span>
-<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="mock"><button class="quiet">Sign out</button></form>
-</header>
-<main>
-${body}
-</main>
-</body>
-</html>`;
+	return layout('Host keys', body, shell());
 }
 
 // The join page: join.rs's template, its two branches and fields filled for an invited teammate.
@@ -257,7 +298,6 @@ const joinRs = readFileSync(join(here, '../../../crates/conde-remote/src/web/joi
 const joinTemplate = joinRs.match(/source = r#"(<div class="join">[\s\S]*?)"#/)[1];
 const joinConst = (name) => joinRs.match(new RegExp(`const ${name}: &str = "([^"]*)";`))[1];
 function joinPage() {
-	const server = 'https://conde.nativeai.space';
 	const url = `${server}/join/mock`;
 	const fields = {
 		workspace: 'nativeai',
@@ -276,25 +316,7 @@ function joinPage() {
 		.replace(/\{% if let Some\(by\) = inviter %\}([\s\S]*?)\{% else %\}[\s\S]*?\{% endif %\}/, '$1')
 		.replace(/\{% if password %\}[\s\S]*?\{% else %\}([\s\S]*?)\{% endif %\}/, '$1')
 		.replace(/\{\{ (\w+) \}\}/g, (_, k) => fields[k]);
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Join nativeai · conde</title>
-<meta name="color-scheme" content="dark light">
-<script>${themeJs}</script>
-<style>${css}</style>
-</head>
-<body>
-<header>
-<a class="brand" href="/">${mark}conde</a>
-</header>
-<main>
-${body}
-</main>
-</body>
-</html>`;
+	return layout('Join nativeai', body);
 }
 
 const http = createServer((req, res) => {
@@ -302,11 +324,11 @@ const http = createServer((req, res) => {
 	if (url.pathname === '/v1/session') return json(res, 200, fx.session);
 	if (url.pathname === '/v1/rpc' && req.method === 'POST') return rpc(req, res);
 	if (url.pathname === '/keys') {
-		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp });
+		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp(true) });
 		return res.end(keysPage());
 	}
 	if (url.pathname.startsWith('/join/')) {
-		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp });
+		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp(false) });
 		return res.end(joinPage());
 	}
 	let file = join(root, url.pathname === '/' ? 'index.html' : url.pathname);

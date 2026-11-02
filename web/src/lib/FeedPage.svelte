@@ -167,6 +167,11 @@
 		border-left: 1px solid var(--line);
 		background: var(--panel);
 	}
+	@media (min-width: 1600px) {
+		.side {
+			width: 560px;
+		}
+	}
 	.sheet :global(dialog header h2) {
 		font: 400 10.5px/1.4 var(--sans);
 		letter-spacing: 0.12em;

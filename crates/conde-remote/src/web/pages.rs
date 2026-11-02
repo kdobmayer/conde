@@ -53,9 +53,9 @@ body>main{max-width:960px;margin:0 auto;padding:40px 32px 56px}
 .sections a.on{border-left-color:var(--accent)}
 .mast ul{list-style:none;margin:8px 0 0;padding:0;font-size:13.5px}
 .label+ul{margin-bottom:18px}
-.mast li a{display:flex;align-items:center;gap:9px;padding:5px 0;color:var(--muted)}
+.mast li a{display:flex;align-items:baseline;gap:9px;padding:5px 0;color:var(--muted)}
 .mast li a:hover{color:var(--fg)}
-.name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.name{min-width:0;overflow-wrap:anywhere}
 .mast li b{margin-left:auto;font-weight:500;font-size:11px;color:var(--accent);white-space:nowrap}
 .mast li b+b{margin-left:6px}
 .empty{padding:5px 0;color:var(--faint)}
@@ -120,6 +120,8 @@ pre{padding:10px 12px;white-space:pre-wrap;word-break:break-all}
 .join li{margin:0 0 16px}
 .join li pre{margin:8px 0 0;font-size:13px}
 .join #key{font-size:14px;padding:14px 16px;border:1px solid var(--line)}
+@media (min-width:1280px){.mast{width:256px}}
+@media (min-width:1600px){.mast{width:288px}}
 @media (max-width:1100px){
 .page{padding-left:36px;padding-right:36px}
 }

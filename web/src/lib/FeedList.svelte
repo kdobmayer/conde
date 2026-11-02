@@ -109,7 +109,9 @@
 		if (s && s.scrollHeight - s.scrollTop - s.clientHeight < 800) loadOlder();
 	}
 
-	/** The first visible row and its distance below the top edge (under the head when it sticks). */
+	/** The first row whose top is in view and its distance below the top edge (under the head
+	 * when it sticks); the row cut by the edge only when it fills the view. Not the cut row: when
+	 * the rows rewrap at another width, the rows above the one being read change height. */
 	let anchor: { id: string; offset: number } | null = null;
 	function topEdge(): number {
 		const top = scroller!.getBoundingClientRect().top;
@@ -118,14 +120,19 @@
 	function record() {
 		if (!scroller) return;
 		const edge = topEdge();
+		const bottom = scroller.getBoundingClientRect().bottom;
+		let cut: { id: string; offset: number } | null = null;
 		for (const el of scroller.querySelectorAll<HTMLElement>('[data-id]')) {
 			const r = el.getBoundingClientRect();
-			if (r.bottom > edge) {
+			if (r.bottom <= edge) continue;
+			if (r.top >= edge - 1 && r.top < bottom) {
 				anchor = { id: el.dataset.id!, offset: r.top - edge };
 				return;
 			}
+			if (r.top >= bottom) break;
+			cut ??= { id: el.dataset.id!, offset: r.top - edge };
 		}
-		anchor = null;
+		anchor = cut;
 	}
 	function restore() {
 		if (!scroller || !anchor || atTop()) return;
@@ -135,21 +142,91 @@
 		if (Math.abs(delta) >= 1) scroller.scrollTop += delta;
 	}
 
+	/** The browser keeps the rows in place as they change: arrivals, a refresh, an older page,
+	 * smooth and momentum scrolling. It gets one case wrong, a change of the list's width (the
+	 * thread opening or closing beside it, the window resized), where the rows rewrap and the
+	 * rows above the one being read change height. There the list holds its own anchor for two
+	 * frames with the browser's anchoring off, and puts it back again if the rows change in
+	 * that time. The anchor keeps its row across resizes until the reader scrolls: `laidOut`
+	 * is the width it was taken at, so a scroll event between a width change and the observer
+	 * (the browser clamping the scroll as the rows rewrap) records nothing, and `restoredAt` is
+	 * where a restore left the list, so the scroll event it causes records nothing either.
+	 * The reader's own input (wheel, touch, keys, the scrollbar) records again once the layout
+	 * has settled, scroll event or not (the browser's adjustment for an arrival can cancel the
+	 * reader's scroll out), and a held row that leaves the list hands over to a row still in it. */
+	let laidOut = -1;
+	let holding = false;
+	let restoredAt: number | null = null;
 	function onscroll() {
 		if (atTop()) feed.atTop();
 		nearBottom();
+		if (!scroller || scroller.clientWidth !== laidOut) return;
+		if (restoredAt !== null && Math.abs(scroller.scrollTop - restoredAt) < 1) return;
+		restoredAt = null;
 		record();
+	}
+	function hold() {
+		restore();
+		restoredAt = scroller?.scrollTop ?? null;
 	}
 
 	$effect(() => {
 		const s = scroller;
 		if (!s) return;
+		let frame = 0;
 		const ro = new ResizeObserver(() => {
-			restore();
-			record();
+			const width = s.clientWidth;
+			if (laidOut === -1 || width === laidOut) {
+				restore();
+				record();
+				restoredAt = null;
+				laidOut = width;
+				return;
+			}
+			laidOut = width;
+			holding = true;
+			s.style.overflowAnchor = 'none';
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				frame = requestAnimationFrame(() => {
+					holding = false;
+					s.style.overflowAnchor = '';
+				});
+			});
+			hold();
 		});
 		ro.observe(s);
-		return () => ro.disconnect();
+		let settled = 0;
+		const input = () => {
+			restoredAt = null;
+			cancelAnimationFrame(settled);
+			settled = requestAnimationFrame(() => {
+				settled = requestAnimationFrame(() => {
+					if (s.clientWidth === laidOut) record();
+				});
+			});
+		};
+		const kinds = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
+		for (const k of kinds) s.addEventListener(k, input, { passive: true });
+		return () => {
+			ro.disconnect();
+			for (const k of kinds) s.removeEventListener(k, input);
+			cancelAnimationFrame(frame);
+			cancelAnimationFrame(settled);
+			holding = false;
+			s.style.overflowAnchor = '';
+		};
+	});
+
+	// rows that change while the list holds the anchoring are put back too; a held row that
+	// left the list (a refresh) hands over to the first row still in view
+	$effect(() => {
+		void rows;
+		untrack(() => {
+			if (holding) hold();
+			const id = anchor?.id;
+			if (id && !rows.some((m) => m.message_id === id)) record();
+		});
 	});
 
 	// a filter change is a fresh window: back to the top
@@ -291,11 +368,13 @@
 </div>
 
 <style>
+	/* the rows lay out by the column's width (FeedRow) */
 	.col {
 		flex: 1;
 		min-width: 0;
 		min-height: 0;
 		overflow-y: auto;
+		container: feed / inline-size;
 	}
 	.head {
 		position: sticky;
@@ -487,6 +566,55 @@
 		margin-top: 4px;
 		font: 16px/1.5 var(--serif);
 		overflow-wrap: anywhere;
+	}
+	/* desktop: the deck repeats the masthead's scope note, so it is left to the phone; the
+	   title and the search, the filters under them, or all on one line in a wide column; the
+	   list runs the column's full width */
+	@media (min-width: 721px) {
+		.head {
+			padding: 26px 56px 14px;
+		}
+		.hrow {
+			max-width: none;
+			align-items: center;
+		}
+		h1 {
+			font-size: 34px;
+		}
+		.deck {
+			display: none;
+		}
+		.filters,
+		.mode {
+			margin-top: 10px;
+		}
+		.list {
+			max-width: none;
+			padding: 0 56px 40px;
+		}
+		h2 {
+			margin: 22px 0 4px;
+		}
+	}
+	@container feed (min-width: 1100px) {
+		.head {
+			display: flex;
+			align-items: baseline;
+			gap: 8px 36px;
+		}
+		.hrow {
+			display: contents;
+		}
+		.search {
+			order: 3;
+			margin-left: auto;
+			align-self: center;
+		}
+		.filters,
+		.mode {
+			order: 2;
+			margin-top: 0;
+		}
 	}
 	@media (max-width: 720px) {
 		.head {

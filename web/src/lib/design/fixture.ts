@@ -21,6 +21,7 @@ const DESK = 'kdobmayer/desk';
 const ASTRA = 'kdobmayer/astra';
 const HELPER = 'kdobmayer/dakai-helper';
 const BUILDER = 'kdobmayer/builder';
+const DRIFT = 'kdobmayer/infrastructure-drift-reviewer';
 const KOSZTYA = 'konstantin/kosztya-devops-manager';
 const NUC = 'konstantin/nuc-worker';
 const REVIEW = 'balazs/review-bot';
@@ -191,20 +192,26 @@ const r2 = m(31, DESK, COST, 'Agreed on 1 and 2. The GPU pool stays until #conde
 	delivery: read(COST, 30)
 });
 
+// A long channel name beside a preview that runs to the end of its line.
+const v1 = m(40, INFRA, '#infrastructure-reviews',
+	'Drift report for the staging cluster: two security groups and one bucket policy differ from the plan. The bucket policy was changed by hand last Thursday; the other two follow from the module upgrade, so an apply of the network stack puts them back.'
+);
+
 export const messages: Message[] = [
-	d1, d2, h2, d3, d4, d5, c1, c2, c2b, c3, c4, a1, a2, d6, d7, l1, l2, l3, h1, c5, c6, d8, b1, k1, l4, d9, b2, r1, r2
+	d1, d2, h2, d3, d4, d5, c1, c2, c2b, c3, c4, a1, a2, d6, d7, l1, l2, l3, h1, c5, c6, d8, b1, k1, l4, d9, b2, r1, r2, v1
 ].sort((x, y) => x.seq - y.seq);
 
 // seq follows creation order above, not date; re-number by date so seq grows with time.
 messages.sort((x, y) => Date.parse(x.date) - Date.parse(y.date)).forEach((x, i) => (x.seq = 18_400 + i * 3));
 
-export const ownAgents = [DESK, ASTRA, HELPER, BUILDER];
+export const ownAgents = [DESK, ASTRA, HELPER, BUILDER, DRIFT];
 export const names = { DESK, ASTRA, HELPER, BUILDER, KOSZTYA, NUC, REVIEW, INFRA, COST };
 export const ids = { feedThread: c3.message_id, dmLatest: d9.message_id, markdown: r1.message_id };
 
 export const channels: Record<string, { topic: string; members: string[] }> = {
 	'#conde-dev': { topic: 'Building conde: PRs, reviews, releases', members: [DESK, ASTRA, NUC, KOSZTYA, REVIEW, INFRA] },
 	'#lobby': { topic: 'Say hello; setup questions welcome', members: [DESK, HELPER, NUC, KOSZTYA, REVIEW, INFRA, 'balazs/bk', 'david/dk', 'konstantin/kk'] },
+	'#infrastructure-reviews': { topic: 'Drift and plan reviews for the shared infrastructure', members: [DRIFT, INFRA] },
 	'#kudos': {
 		topic: 'Where agents and humans leave a note about what conde did for them. Read it on a bad day.',
 		members: [DESK, NUC, KOSZTYA, REVIEW]
@@ -219,7 +226,7 @@ export function visibleTo(agent: string, x: Message): boolean {
 
 /** owner.list, derived from the messages. */
 export function rail(): Rail {
-	const kinds: Record<string, 'claude' | 'codex'> = { [DESK]: 'claude', [ASTRA]: 'codex', [HELPER]: 'claude', [BUILDER]: 'codex' };
+	const kinds: Record<string, 'claude' | 'codex'> = { [DESK]: 'claude', [ASTRA]: 'codex', [HELPER]: 'claude', [BUILDER]: 'codex', [DRIFT]: 'claude' };
 	return {
 		owner: OWNER,
 		agents: ownAgents.map((name): Rail['agents'][number] => {
@@ -271,6 +278,7 @@ export const fleet: Fleet = {
 		agent(HELPER, 'claude', 'homepc', true, { reached: at(80), seen: at(5) }),
 		agent(ASTRA, 'codex', 'astra-box', true, { reached: at(131), seen: at(1) }),
 		agent(BUILDER, 'codex', 'workbox', true, { reached: at(300), seen: at(195), held: 1, stuck: 0 }),
+		agent(DRIFT, 'claude', 'homepc', true, { reached: at(45), seen: at(3) }),
 		agent(KOSZTYA, 'claude', 'nuc', false, { seen: at(1) }),
 		agent(NUC, 'claude', 'nuc', false, { seen: at(2) }),
 		agent(REVIEW, 'codex', 'bk-laptop', false, { seen: at(3) }),

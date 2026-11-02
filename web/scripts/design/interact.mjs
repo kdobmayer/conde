@@ -159,6 +159,8 @@ const focusedRow = (page) => page.evaluate(() => document.activeElement?.closest
 		await page.waitForSelector('aside.side');
 		await page.goBack();
 		await page.waitForFunction(() => !document.querySelector('aside.side'));
+		// the rows change layout with the column's width; the list restores its anchor after that
+		await settle(page);
 		expect((await hashOf(page)) === '#/', await hashOf(page));
 		expect(Math.abs((await rowTop(page, id)) - top) < 2, 'scroll position not kept');
 	});
@@ -498,6 +500,413 @@ const pass = (page) => page.evaluate(() => document.dispatchEvent(new Event('vis
 		await settle(page);
 		await pass(page);
 		await page.waitForFunction(() => /new message/.test([...document.querySelectorAll('[aria-live=polite]')].map((e) => e.textContent).join(' ') ?? ''), null, { timeout: 6000 });
+	});
+	await context.close();
+}
+
+// ---- an arrival above the reading position leaves the rows on screen where they were ----
+for (const size of [
+	{ width: 1280, height: 800 },
+	{ width: 390, height: 844 }
+]) {
+	const { context, page } = await openFeed(size, '#/', { fixed: false, label: 'arrival' });
+	let template = null;
+	let arrive = false;
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (op !== 'owner.feed') return route.fallback();
+		const res = await route.fetch();
+		const body = await res.json();
+		template ??= body.result?.messages?.[0];
+		if (template && arrive && !JSON.parse(route.request().postData()).body?.before) {
+			const text = 'Arrived while the reader was further down; long enough to take more than one line in the narrow column.';
+			body.result.messages.unshift({ ...template, message_id: 'ARRIVED-3', seq: template.seq + 1000, text });
+		}
+		return route.fulfill({ response: res, body: JSON.stringify(body) });
+	});
+	// reloaded with the route in place, so the first answer gives the arrival's template
+	await page.reload({ waitUntil: 'networkidle' });
+	await page.waitForSelector('.col [data-id]');
+	await check('arrival: one message arriving above keeps the row in view within 1 px', async () => {
+		const id = await scrollRowToTop(page, 9);
+		await settle(page);
+		const top = await rowTop(page, id);
+		arrive = true;
+		await pass(page);
+		await page.waitForSelector('.col a.row[data-id="ARRIVED-3"]', { state: 'attached', timeout: 6000 });
+		await settle(page);
+		const now = await rowTop(page, id);
+		expect(Math.abs(now - top) <= 1, `row moved from ${top} to ${now}`);
+	});
+	await context.close();
+}
+
+// ---- a pass that adds a row above and drops one as tall below keeps the reading position ----
+for (const size of [
+	{ width: 721, height: 900 },
+	{ width: 1280, height: 800 },
+	{ width: 390, height: 844 }
+]) {
+	const { context, page } = await openFeed(size, '#/', { fixed: false, label: 'swap' });
+	const seen = new Map();
+	let first = false;
+	let swap = null;
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (op !== 'owner.feed') return route.fallback();
+		const res = await route.fetch();
+		const body = await res.json();
+		for (const m of body.result?.messages ?? []) seen.set(m.message_id, m);
+		const newest = !JSON.parse(route.request().postData()).body?.before;
+		const top = [...seen.values()].reduce((a, b) => (a.seq > b.seq ? a : b));
+		if (first && newest) body.result.messages.unshift({ ...top, message_id: 'ARRIVED-4', seq: top.seq + 500 });
+		if (swap) {
+			// the dropped row comes back above as a new message: the same text, names and place
+			const gone = seen.get(swap);
+			body.result.messages = body.result.messages.filter((m) => m.message_id !== swap);
+			if (newest) body.result.messages.unshift({ ...gone, message_id: 'SWAPPED-IN', seq: top.seq + 1000, date: top.date, reply_to: null });
+		}
+		return route.fulfill({ response: res, body: JSON.stringify(body) });
+	});
+	await page.reload({ waitUntil: 'networkidle' });
+	await page.waitForSelector('.col [data-id]');
+	await check('swap: a row arriving above while one as tall leaves below keeps the row in view within 1 px', async () => {
+		const id = await scrollRowToTop(page, 9);
+		await settle(page);
+		// a first arrival puts up the last-visit divider, so the swap itself keeps the height
+		first = true;
+		await pass(page);
+		await page.waitForSelector('.col a.row[data-id="ARRIVED-4"]', { state: 'attached', timeout: 6000 });
+		await settle(page);
+		const top = await rowTop(page, id);
+		// a row below the reading row with rows on both sides, so no heading comes or goes with it
+		swap = await page.evaluate((id) => {
+			const rows = [...document.querySelectorAll('.col a.row')];
+			const at = rows.findIndex((r) => r.dataset.id === id);
+			return rows.slice(at + 2).find((r) => r.previousElementSibling?.matches('a.row') && r.nextElementSibling?.matches('a.row'))?.dataset.id ?? null;
+		}, id);
+		expect(swap, 'no row to drop');
+		const height = await page.evaluate(() => document.querySelector('.col .list').getBoundingClientRect().height);
+		await pass(page);
+		await page.waitForSelector('.col a.row[data-id="SWAPPED-IN"]', { state: 'attached', timeout: 6000 });
+		await settle(page);
+		const now = await rowTop(page, id);
+		const after = await page.evaluate(() => document.querySelector('.col .list').getBoundingClientRect().height);
+		expect(Math.abs(after - height) < 1, `the list changed height (${height} to ${after}); the case needs it unchanged`);
+		expect(Math.abs(now - top) <= 1, `row moved from ${top} to ${now}`);
+	});
+	await context.close();
+}
+
+// ---- a smooth scroll reaches its target through an older page and through a refresh ----
+{
+	const { context, page } = await openFeed({ width: 1280, height: 800 }, '#/', { fixed: false, label: 'smooth' });
+	let truncate = true;
+	/** The older page waits for this, so it lands while the list is moving. */
+	let release;
+	const held = new Promise((r) => (release = r));
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (op !== 'owner.feed') return route.fallback();
+		const b = JSON.parse(route.request().postData()).body ?? {};
+		if (truncate && b.before !== undefined && b.after === undefined) await held;
+		const res = await route.fetch();
+		const body = await res.json();
+		// the first window is 24 rows with more below, so the list loads an older page
+		if (truncate && b.after === undefined && b.before === undefined) {
+			body.result.messages = body.result.messages.slice(0, 24);
+			body.result.more = true;
+		}
+		return route.fulfill({ response: res, body: JSON.stringify(body) });
+	});
+	await page.reload({ waitUntil: 'networkidle' });
+	await page.waitForSelector('.col [data-id]');
+	await page.waitForTimeout(2200); // past the 2 s between refresh passes
+	await page.exposeFunction('releaseOlder', () => release());
+	/** Scrolls smoothly from `from` to `to`, starts `during` as it moves, answers where it stopped. */
+	const glide = (from, to, during) =>
+		page.evaluate(
+			async ({ from, to, during }) => {
+				const col = document.querySelector('.col');
+				col.scrollTop = from;
+				await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+				col.scrollTo({ top: to, behavior: 'smooth' });
+				await new Promise((r) => setTimeout(r, 60));
+				const moving = col.scrollTop > from && col.scrollTop < to;
+				if (during === 'refresh') document.dispatchEvent(new Event('visibilitychange'));
+				else await window.releaseOlder();
+				await new Promise((r) => setTimeout(r, 2000));
+				return { moving, at: col.scrollTop, rows: col.querySelectorAll('a.row').length };
+			},
+			{ from, to, during }
+		);
+	await check('smooth: a smooth scroll to the bottom reaches it while an older page is appended', async () => {
+		const rows = await page.locator('.col a.row').count();
+		const to = await page.evaluate(() => {
+			const col = document.querySelector('.col');
+			return col.scrollHeight - col.clientHeight;
+		});
+		const r = await glide(0, to, 'older');
+		expect(r.rows > rows, `no older page was appended (${rows} rows)`);
+		expect(r.moving, 'the scroll did not animate');
+		expect(Math.abs(r.at - to) <= 1, `stopped at ${r.at} of ${to}`);
+	});
+	await check('smooth: a smooth scroll reaches its target through a refresh that changes nothing', async () => {
+		truncate = false;
+		const r = await glide(300, 1300, 'refresh');
+		expect(r.moving, 'the scroll did not animate');
+		expect(Math.abs(r.at - 1300) <= 1, `stopped at ${r.at}`);
+	});
+	await context.close();
+}
+
+// ---- widening from the phone to the desktop keeps the row that was being read ----
+{
+	// a desktop window narrowed to the phone's width and widened again
+	where = 'widen 390';
+	const context = await browser.newContext({ viewport: { width: 390, height: 844 }, locale: 'en-GB', timezoneId: 'Europe/Budapest', reducedMotion: 'reduce' });
+	const page = await context.newPage();
+	await page.clock.setFixedTime(NOW);
+	await page.goto(FEED, { waitUntil: 'networkidle' });
+	await page.waitForSelector('.col [data-id]');
+	await settle(page);
+	/** The row's distance below the top edge of the list (under the head where it sticks). */
+	const offset = (id) =>
+		page.evaluate((id) => {
+			const col = document.querySelector('.col');
+			const head = col.querySelector('.head');
+			const edge = Math.max(col.getBoundingClientRect().top, getComputedStyle(head).position === 'sticky' ? head.getBoundingClientRect().bottom : -Infinity);
+			return document.querySelector(`.col [data-id="${id}"]`).getBoundingClientRect().top - edge;
+		}, id);
+	await check('widen: from 390 to 1280 px the top row of a list read halfway down stays at its place under the head within 1 px', async () => {
+		// the middle row 20 px under the top of the list (the head scrolls away on the phone)
+		const id = await page.evaluate(() => {
+			const col = document.querySelector('.col');
+			const rows = col.querySelectorAll('a.row');
+			const row = rows[Math.floor(rows.length / 2)];
+			col.scrollTop += row.getBoundingClientRect().top - col.getBoundingClientRect().top - 20;
+			return row.dataset.id;
+		});
+		await settle(page);
+		const before = await offset(id);
+		await page.setViewportSize({ width: 1280, height: 844 });
+		await settle(page);
+		const after = await offset(id);
+		expect(Math.abs(after - before) <= 1, `row offset ${before} became ${after}`);
+	});
+	await context.close();
+}
+
+/** A desktop window at `width` on the Feed, with a row's offset under the list's top edge (under
+ * the head where it sticks) to read and to set. */
+async function resizable(width, label, fixed = true) {
+	where = `${label} ${width}`;
+	const context = await browser.newContext({ viewport: { width, height: 844 }, locale: 'en-GB', timezoneId: 'Europe/Budapest', reducedMotion: 'reduce' });
+	const page = await context.newPage();
+	if (fixed) await page.clock.setFixedTime(NOW);
+	await page.goto(FEED, { waitUntil: 'networkidle' });
+	await page.waitForSelector('.col [data-id]');
+	await settle(page);
+	const edgeOf = () => {
+		const col = document.querySelector('.col');
+		const head = col.querySelector('.head');
+		return Math.max(col.getBoundingClientRect().top, getComputedStyle(head).position === 'sticky' ? head.getBoundingClientRect().bottom : -Infinity);
+	};
+	const offset = (id) =>
+		page.evaluate(
+			({ id, edgeOf }) => document.querySelector(`.col [data-id="${id}"]`).getBoundingClientRect().top - new Function(`return (${edgeOf})()`)(),
+			{ id, edgeOf: edgeOf.toString() }
+		);
+	/** The middle row put `px` under the edge (the head moves with the scroll on the phone, so twice). */
+	const middle = (px) =>
+		page.evaluate(
+			({ px, edgeOf }) => {
+				const edge = new Function(`return (${edgeOf})()`);
+				const col = document.querySelector('.col');
+				const rows = col.querySelectorAll('a.row');
+				const row = rows[Math.floor(rows.length / 2)];
+				for (let i = 0; i < 3; i++) col.scrollTop += row.getBoundingClientRect().top - edge() - px;
+				return row.dataset.id;
+			},
+			{ px, edgeOf: edgeOf.toString() }
+		);
+	return { context, page, offset, middle };
+}
+
+// ---- resizing there and back keeps the row being read, settled or in quick succession ----
+{
+	const { context, page, offset, middle } = await resizable(390, 'round trip');
+	for (const quick of [false, true]) {
+		await check(`round trip: 390 to 1280 and back to 390 px${quick ? ' in quick succession' : ''} leaves the row being read where it was within 1 px`, async () => {
+			const id = await middle(100);
+			await settle(page);
+			const before = await offset(id);
+			await page.setViewportSize({ width: 1280, height: 844 });
+			if (!quick) await settle(page);
+			await page.setViewportSize({ width: 390, height: 844 });
+			await settle(page);
+			const after = await offset(id);
+			expect(Math.abs(after - before) <= 1, `row offset ${before} became ${after}`);
+		});
+	}
+	await context.close();
+}
+
+/** The first row whose top is in view and its offset under the edge, as the reader sees it. */
+const reading = (page) =>
+	page.evaluate(() => {
+		const col = document.querySelector('.col');
+		const head = col.querySelector('.head');
+		const edge = Math.max(col.getBoundingClientRect().top, getComputedStyle(head).position === 'sticky' ? head.getBoundingClientRect().bottom : -Infinity);
+		for (const row of col.querySelectorAll('a.row')) {
+			const top = row.getBoundingClientRect().top;
+			if (top >= edge - 1) return { id: row.dataset.id, offset: top - edge };
+		}
+		return null;
+	});
+
+// ---- the held row leaving the list between two resizes ----
+{
+	const { context, page, offset, middle } = await resizable(390, 'held gone', false);
+	let drop = null;
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (op !== 'owner.feed' || !drop) return route.fallback();
+		const res = await route.fetch();
+		const body = await res.json();
+		body.result.messages = body.result.messages.filter((m) => m.message_id !== drop);
+		return route.fulfill({ response: res, body: JSON.stringify(body) });
+	});
+	await check('held gone: the row held across a resize leaves with a refresh; the next resize keeps the row in its place within 1 px', async () => {
+		const id = await middle(32);
+		await settle(page);
+		await page.setViewportSize({ width: 1280, height: 844 });
+		await settle(page);
+		await page.waitForTimeout(2200); // past the 2 s between refresh passes
+		drop = id;
+		await pass(page);
+		await page.waitForSelector(`.col a.row[data-id="${id}"]`, { state: 'detached', timeout: 6000 });
+		await settle(page);
+		const r = await reading(page);
+		await page.setViewportSize({ width: 390, height: 844 });
+		await settle(page);
+		const after = await offset(r.id);
+		expect(Math.abs(after - r.offset) <= 1, `row offset ${r.offset} became ${after}`);
+	});
+	await context.close();
+}
+
+// ---- the reader's scroll cancelled out by the browser's anchoring between two resizes ----
+{
+	const { context, page, offset, middle } = await resizable(390, 'input', false);
+	let arrive = false;
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (op !== 'owner.feed' || !arrive) return route.fallback();
+		const res = await route.fetch();
+		const body = await res.json();
+		const top = body.result?.messages?.[0];
+		if (!JSON.parse(route.request().postData()).body?.before && top) body.result.messages.unshift({ ...top, message_id: 'ARRIVED-6', seq: top.seq + 3000 });
+		return route.fulfill({ response: res, body: JSON.stringify(body) });
+	});
+	await check('input: a wheel up as tall as an arrival above leaves no net scroll; the next resize keeps the row in its place within 1 px', async () => {
+		await middle(32);
+		await settle(page);
+		await page.setViewportSize({ width: 1280, height: 844 });
+		await settle(page);
+		await page.waitForTimeout(2200);
+		// as the arrival goes in, the reader wheels up by its height: the browser's adjustment
+		// for the arrival and the reader's scroll cancel out in one frame
+		await page.evaluate(() => {
+			const col = document.querySelector('.col');
+			const list = col.querySelector('.list');
+			const was = list.getBoundingClientRect().height;
+			const mo = new MutationObserver(() => {
+				if (!list.querySelector('a.row[data-id="ARRIVED-6"]')) return;
+				mo.disconnect();
+				const by = list.getBoundingClientRect().height - was;
+				col.dispatchEvent(new WheelEvent('wheel', { deltaY: -by, bubbles: true }));
+				col.scrollTop -= by;
+			});
+			mo.observe(list, { childList: true, subtree: true });
+		});
+		arrive = true;
+		await pass(page);
+		await page.waitForSelector('.col a.row[data-id="ARRIVED-6"]', { state: 'attached', timeout: 6000 });
+		await settle(page);
+		const r = await reading(page);
+		await page.setViewportSize({ width: 390, height: 844 });
+		await settle(page);
+		const after = await offset(r.id);
+		expect(Math.abs(after - r.offset) <= 1, `row offset ${r.offset} became ${after}`);
+	});
+	await context.close();
+}
+
+// ---- rows that land while the width changes keep the row being read in place ----
+for (const [from, to] of [
+	[1280, 390],
+	[720, 721]
+]) {
+	const { context, page, offset, middle } = await resizable(from, 'resize and rows', false);
+	let arrive = false;
+	let release;
+	let asked;
+	const requested = new Promise((r) => (asked = r));
+	const held = new Promise((r) => (release = r));
+	await page.route('**/v1/rpc', async (route) => {
+		const op = JSON.parse(route.request().postData() ?? '{}').op;
+		if (op !== 'owner.feed' || !arrive) return route.fallback();
+		const newest = !JSON.parse(route.request().postData()).body?.before;
+		if (newest) {
+			asked();
+			await held;
+		}
+		const res = await route.fetch();
+		const body = await res.json();
+		const top = body.result?.messages?.[0];
+		if (newest && top) body.result.messages.unshift({ ...top, message_id: 'ARRIVED-5', seq: top.seq + 2000, text: 'Arrived as the window was resized; long enough to take two lines on the phone.' });
+		return route.fulfill({ response: res, body: JSON.stringify(body) });
+	});
+	await check(`resize and rows: ${from} to ${to} px with an arrival landing at once keeps the row being read within 1 px`, async () => {
+		const id = await middle(20);
+		await page.waitForTimeout(2200); // past the 2 s between refresh passes
+		const before = await offset(id);
+		arrive = true;
+		await pass(page);
+		await requested;
+		await Promise.all([page.setViewportSize({ width: to, height: 844 }), release()]);
+		await page.waitForSelector('.col a.row[data-id="ARRIVED-5"]', { state: 'attached', timeout: 6000 });
+		await settle(page);
+		const after = await offset(id);
+		expect(Math.abs(after - before) <= 1, `row offset ${before} became ${after}`);
+	});
+	await context.close();
+}
+
+// ---- a long place name never runs into the text of a wide row ----
+for (const width of [1280, 1600, 1920]) {
+	const { context, page } = await openFeed({ width, height: 900 }, '#/', { label: 'place' });
+	await check('place: the place and the delivery word stay clear of the text, a long channel name too', async () => {
+		const r = await page.evaluate(() => {
+			/** The painted extent of an element's text, clipped to its box when it clips. */
+			const ink = (el) => {
+				const range = document.createRange();
+				range.selectNodeContents(el);
+				const t = range.getBoundingClientRect();
+				const b = el.getBoundingClientRect();
+				return getComputedStyle(el).overflowX === 'hidden' ? { left: Math.max(t.left, b.left), right: Math.min(t.right, b.right), top: b.top, bottom: b.bottom } : t;
+			};
+			const hit = (a, b) => a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5;
+			const rows = [...document.querySelectorAll('.col a.row')];
+			const bad = rows.filter((row) => {
+				const text = row.querySelector('.text').getBoundingClientRect();
+				return [row.querySelector('.place'), row.querySelector('.meta')].some((el) => el && hit(ink(el), text));
+			});
+			return { long: rows.some((row) => row.querySelector('.place')?.textContent === '#infrastructure-reviews'), bad: bad.map((row) => row.querySelector('.place')?.textContent) };
+		});
+		expect(r.long, 'no row in #infrastructure-reviews');
+		expect(r.bad.length === 0, `over the text: ${r.bad.join(', ')}`);
 	});
 	await context.close();
 }

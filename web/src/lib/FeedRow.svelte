@@ -33,14 +33,13 @@
 
 <a class="row" class:sel={selected} class:chain {href} data-id={m.message_id} aria-current={selected ? 'true' : undefined} onclick={click}>
 	<span class="kick">
-		<time datetime={m.date}>{clock(m.date)}</time>
-		<span class="dir">{DIRECTION_WORD[m.direction]}</span>
+		<span class="when"><time datetime={m.date}>{clock(m.date)}</time> <span class="dir">{DIRECTION_WORD[m.direction]}</span></span>
 		<span class="who"
 			><b class:own={own(m.from)}>{short(m.from)}</b><svg class="arrow" viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"
 				><path d="M1.5 6h8.5M6.8 2.6 10.2 6 6.8 9.4" /></svg
 			><span class="sr-only">{' to '}</span><b class:own={dm && own(m.to)}>{dm ? short(m.to) : m.to}</b></span
 		>
-		<span class="place">{dm ? 'Direct' : m.place}</span>
+		<span class="place" title={dm ? undefined : m.place}>{dm ? 'Direct' : m.place}</span>
 	</span>
 	<span class="text">{plainText(m.text)}</span>
 	<span class="meta">
@@ -80,6 +79,9 @@
 		white-space: nowrap;
 		font: 12px/1.4 var(--sans);
 		color: var(--faint);
+	}
+	.when {
+		display: contents;
 	}
 	.dir {
 		flex: none;
@@ -133,6 +135,90 @@
 	}
 	.meta :global(.state.problem) {
 		color: var(--accent);
+	}
+	/* desktop rows sit closer than the phone's */
+	@media (min-width: 721px) {
+		.row {
+			padding: 11px 18px 11px 16px;
+		}
+		.text {
+			margin: 3px 0 4px;
+		}
+	}
+	/* a wide column reads like the conversation's script: when and who in a margin (the time
+	   over the direction word, the sender over the recipient), the text beside it in a long
+	   measure, the place over the delivery at the far edge; a row is two lines tall */
+	@container feed (min-width: 900px) {
+		.row {
+			display: grid;
+			grid-template-columns: 84px clamp(270px, 19cqi, 300px) minmax(0, 840px) minmax(180px, 1fr);
+			grid-template-rows: auto 1fr;
+			column-gap: 0;
+			align-items: start;
+			padding: 9px 18px 9px 16px;
+		}
+		.kick {
+			display: contents;
+			line-height: 17px;
+		}
+		/* 5 px down: the 12 px lines' baseline on the text's first */
+		.when {
+			grid-column: 1;
+			grid-row: 1 / 3;
+			display: flex;
+			flex-direction: column;
+			margin-top: 5px;
+		}
+		.who {
+			grid-column: 2;
+			grid-row: 1 / 3;
+			display: grid;
+			grid-template-columns: auto minmax(0, 1fr);
+			align-content: start;
+			margin: 5px 28px 0 0;
+		}
+		.who b {
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		.who b:first-child {
+			grid-column: 1 / 3;
+		}
+		.arrow {
+			margin: 0 5px 0 0;
+			align-self: center;
+		}
+		.text {
+			grid-column: 3;
+			grid-row: 1 / 3;
+			margin: 0;
+			max-width: none;
+			font-size: 16px;
+			line-height: 1.55;
+		}
+		/* the last column fits a long channel name and the delivery words; a longer name is cut
+		   and the words wrap, so neither runs into the text */
+		.place {
+			grid-column: 4;
+			grid-row: 1;
+			justify-self: end;
+			max-width: 100%;
+			margin: 5px 0 0;
+			padding: 0 0 0 20px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		.meta {
+			grid-column: 4;
+			grid-row: 2;
+			justify-self: end;
+			flex-wrap: wrap;
+			justify-content: flex-end;
+			gap: 0 10px;
+			max-width: 100%;
+			padding-left: 20px;
+			line-height: 17px;
+		}
 	}
 	@media (max-width: 720px) {
 		.row {

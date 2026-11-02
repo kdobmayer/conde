@@ -106,6 +106,7 @@
 		color: inherit;
 		text-decoration: none;
 	}
+	/* wider on wide screens, so a long agent name reads whole; a longer one wraps, never cut */
 	.mast {
 		width: 236px;
 		flex: none;
@@ -164,7 +165,7 @@
 	}
 	.mast li a {
 		display: flex;
-		align-items: center;
+		align-items: baseline;
 		gap: 9px;
 		padding: 5px 0;
 		color: var(--muted);
@@ -175,9 +176,7 @@
 	}
 	.name {
 		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		overflow-wrap: anywhere;
 	}
 	li b {
 		margin-left: auto;
@@ -240,6 +239,16 @@
 	.mbar,
 	.tabs {
 		display: none;
+	}
+	@media (min-width: 1280px) {
+		.mast {
+			width: 256px;
+		}
+	}
+	@media (min-width: 1600px) {
+		.mast {
+			width: 288px;
+		}
 	}
 	@media (max-width: 720px) {
 		.shell {

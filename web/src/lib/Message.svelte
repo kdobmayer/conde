@@ -140,6 +140,12 @@
 		font: 12.5px/1.4 var(--sans);
 		color: var(--faint);
 	}
+	/* a wide screen gives the text a longer measure, about 90 characters */
+	@media (min-width: 1600px) {
+		.msg {
+			grid-template-columns: var(--margin, 220px) minmax(0, 720px);
+		}
+	}
 	@media (max-width: 720px) {
 		.msg {
 			grid-template-columns: minmax(0, 1fr);

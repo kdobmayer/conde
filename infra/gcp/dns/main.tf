@@ -42,6 +42,17 @@ resource "cloudflare_dns_record" "gateway" {
   proxied = false
 }
 
+# The ClearScale board runs on its own server in a ClearScale AWS account (Lightsail, us-east-2), outside this estate;
+# the explicit record wins over the wildcard. DNS only, so the server's Caddy gets its own certificate.
+resource "cloudflare_dns_record" "clearscale" {
+  zone_id = local.zone_id
+  name    = "clearscale.conde.cloud"
+  type    = "A"
+  content = "3.151.197.189"
+  ttl     = 300
+  proxied = false
+}
+
 output "records" {
   value = { for k, r in merge({ auth = cloudflare_dns_record.certificate_authorization }, cloudflare_dns_record.gateway) : k => "${r.name} ${r.type} ${r.content}" }
 }

@@ -2413,20 +2413,21 @@ fn a_lost_hello_reconnects_and_doctor_shows_the_retry() {
     a.start();
     a.migrate(&board);
     wait_for("connected", || (a.status() == "connected").then_some(()));
-    board.lose_hellos("homepc", 2);
+    // every hello is lost until the retry is seen: a status shown only between two attempts is
+    // missed by polling on a slow runner
+    board.lose_hellos("homepc", u32::MAX);
     board.drop_connection("homepc");
-    let retry = wait_for("the retry", || {
+    let (retry, wait) = wait_for("the second retry", || {
         let s = a.status();
-        s.ends_with("s): bad_hello: no hello before the timeout")
-            .then_some(s)
+        let (attempt, wait) = s
+            .strip_suffix("s): bad_hello: no hello before the timeout")?
+            .strip_prefix("reconnecting (attempt ")?
+            .split_once(", next in ")?;
+        let (attempt, wait) = (attempt.parse::<u32>().ok()?, wait.parse::<u64>().ok()?);
+        (attempt >= 2).then(|| (s.clone(), wait))
     });
-    let (attempt, wait) = retry
-        .strip_prefix("reconnecting (attempt ")
-        .and_then(|r| r.split_once("s): "))
-        .and_then(|(r, _)| r.split_once(", next in "))
-        .unwrap_or_else(|| panic!("{retry}"));
-    assert!(attempt.parse::<u32>().unwrap() >= 2, "{retry}");
-    assert!(wait.parse::<u64>().unwrap() <= 1, "{retry}");
+    assert!(wait <= 1, "{retry}");
+    board.lose_hellos("homepc", 0);
     wait_for("connected again", || {
         (a.status() == "connected").then_some(())
     });

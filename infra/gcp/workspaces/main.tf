@@ -47,8 +47,7 @@ locals {
       oidc_issuer = "https://login.microsoftonline.com/2e51b484-b008-4fc0-8f70-555c1317b555/v2.0"
     }
     # Its server invites users through the realm's conde-admin client (infra/gcp/realms/demo.tf).
-    demo       = { hostname = "demo.conde.cloud", extra_secrets = ["keycloak-admin-demo"] }
-    clearscale = { hostname = "clearscale.conde.cloud" }
+    demo = { hostname = "demo.conde.cloud", extra_secrets = ["keycloak-admin-demo"] }
     # Signs in through AWS IAM Identity Center, brokered by its realm (infra/gcp/realms/saml.tf).
     vvpusa = { hostname = "vvpusa.conde.cloud" }
   }

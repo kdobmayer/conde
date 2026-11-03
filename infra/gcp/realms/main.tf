@@ -23,15 +23,12 @@ locals {
 
   # Workspaces that sign in through Keycloak; dakai signs in directly against its Entra tenant.
   tenants = {
-    demo       = { display_name = "conde demo", hostname = "demo.conde.cloud" }
-    clearscale = { display_name = "ClearScale", hostname = "clearscale.conde.cloud" }
-    vvpusa     = { display_name = "VVP USA", hostname = "vvpusa.conde.cloud" }
+    demo   = { display_name = "conde demo", hostname = "demo.conde.cloud" }
+    vvpusa = { display_name = "VVP USA", hostname = "vvpusa.conde.cloud" }
   }
 
   # Tenant realms that sign in only through Google; the OAuth client secret is in <name>-google-oauth-client-secret.
-  google_sign_in = {
-    clearscale = { hosted_domain = "clearscale.com", client_id = "327673226052-m2lh9vekck7mhp473m4gk6h1qfi8fjpq.apps.googleusercontent.com" }
-  }
+  google_sign_in = {}
 
   # Tenant realms that sign in only through a company's SAML identity provider (saml.tf): the provider's metadata file
   # (public: its endpoints and signing certificate), and the alias Keycloak's broker endpoint carries

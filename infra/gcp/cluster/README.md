@@ -23,9 +23,8 @@ copies it, and `kubernetes_manifest` needs the Argo CD CRDs at plan time:
 
 https://argocd.conde.cloud, chart `argo-cd` 10.10.3 (Argo CD v3.5.5) from https://argoproj.github.io/argo-helm. The
 server runs without TLS behind the Gateway, which terminates HTTPS with the wildcard certificate. The whole host is
-behind Identity-Aware Proxy (`iap.tf`): only krisztian@conde.cloud passes, then signs in to Argo CD itself; the
-Cloud Armor policy `conde-argocd` throttles each client IP. The CLI cannot answer IAP's browser sign-in, so it goes
-through a port-forward to the server instead of the load balancer:
+behind Identity-Aware Proxy (`iap.tf`): only krisztian@conde.cloud passes, then signs in to Argo CD itself. The
+CLI cannot answer IAP's browser sign-in, so it goes through a port-forward to the server instead of the load balancer:
 
     kubectl port-forward -n argocd svc/argocd-server 18081:80 --address=127.0.0.1 &
     argocd login 127.0.0.1:18081 --plaintext --sso

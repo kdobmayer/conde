@@ -100,10 +100,7 @@ resource "kubernetes_manifest" "keycloak_secrets" {
 # Keycloak's file vault: a realm's `${vault.<key>}` reads the file `<realm>_<key>` (underscores in either doubled), so
 # these values stay out of the realms state. One Secret Manager secret can back several files.
 locals {
-  keycloak_vault = merge(
-    { for realm in ["demo", "clearscale", "vvpusa", "infra", "master"] : "${realm}_smtp-password" => "resend-api-key" },
-    { "clearscale_google-client-secret" = "clearscale-google-oauth-client-secret" },
-  )
+  keycloak_vault = { for realm in ["demo", "vvpusa", "infra", "master"] : "${realm}_smtp-password" => "resend-api-key" }
 }
 
 resource "google_secret_manager_secret_iam_member" "keycloak_vault" {
@@ -415,7 +412,7 @@ resource "kubernetes_manifest" "keycloak_route" {
       }]
       hostnames = [local.keycloak_hostname]
       rules = [{
-        matches = [for prefix in ["/realms/demo", "/realms/clearscale", "/realms/vvpusa", "/realms/infra", "/resources"] : {
+        matches = [for prefix in ["/realms/demo", "/realms/vvpusa", "/realms/infra", "/resources"] : {
           path = { type = "PathPrefix", value = prefix }
         }]
         backendRefs = [{
@@ -522,9 +519,8 @@ resource "kubernetes_manifest" "keycloak_admin_backend" {
     }
     spec = {
       default = {
-        timeoutSec     = 60
-        securityPolicy = local.platform.cloud_armor_admin_policy_names["keycloak-admin"]
-        iap            = local.iap_policy
+        timeoutSec = 60
+        iap        = local.iap_policy
       }
       targetRef = {
         group = ""
@@ -709,7 +705,7 @@ resource "kubernetes_network_policy_v1" "keycloak" {
   }
 }
 
-# Hostname egress: the clearscale realm's Google provider (token, userinfo, keys), the Cloud SQL Auth Proxy's Admin API
+# Hostname egress: a Google sign-in realm's provider (token, userinfo, keys), the Cloud SQL Auth Proxy's Admin API
 # calls, and Resend's SMTP host for the realms' emails.
 resource "kubernetes_manifest" "keycloak_fqdn_network_policy" {
   manifest = {

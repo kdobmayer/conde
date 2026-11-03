@@ -1,12 +1,12 @@
 # Keycloak realms of conde on GCP
 
-The configuration of the Keycloak at https://auth.conde.cloud: the realms `demo` (local users with passwords),
-`clearscale` (Google sign-in only, for clearscale.com accounts) and `vvpusa` (VVP USA's AWS IAM Identity Center over
+The configuration of the Keycloak at https://auth.conde.cloud: the realms `demo` (local users with passwords)
+and `vvpusa` (VVP USA's AWS IAM Identity Center over
 SAML only, `saml.tf`), one conde workspace each, while `dakai` signs in
 directly against its Entra tenant; the realm `infra` for platform tools (Argo CD, group `infra-admins`, MFA
 required); and in the master realm the permanent admin `admin` and the client `terraform`. The realms `infra` and
 `master` sign in with password and OTP for every user (the `mfa-browser` flow; a user without OTP enrols at the first
-sign-in); `clearscale`, `vvpusa` and `infra` refuse the password grant at the token endpoint (flows.tf).
+sign-in); `vvpusa` and `infra` refuse the password grant at the token endpoint (flows.tf).
 Apply after the cluster and workspaces roots. The provider calls `/admin` and `/realms/master`, which the public
 host does not serve, so `run.sh` reaches Keycloak through a port-forward to its Service: it starts `kubectl
 port-forward -n keycloak svc/keycloak 18080:8080 --address=127.0.0.1` over the cluster's DNS endpoint as
@@ -38,7 +38,7 @@ Every generated value is write-only: it is in Keycloak and in Secret Manager, no
 
 | secret | value |
 |---|---|
-| `demo-oidc-client-secret`, `clearscale-oidc-client-secret`, `vvpusa-oidc-client-secret` | the secret of the realm's `conde` client (a new version of the secret the workspaces root created) |
+| `demo-oidc-client-secret`, `vvpusa-oidc-client-secret` | the secret of the realm's `conde` client (a new version of the secret the workspaces root created) |
 | `keycloak-admin-temp-password` | the temporary password of `admin` in the master realm |
 | `infra-krisztian-temp-password` | the temporary password of `krisztian` in the realm `infra` |
 | `keycloak-terraform-client-secret` | the secret of the master realm's `terraform` client |
@@ -88,7 +88,7 @@ after Keycloak has stopped accepting it. The secret version holding the old valu
 
 ## Later switches
 
-- MFA for a password realm: `require_mfa = { demo = true, clearscale = false }` makes Configure OTP a default
+- MFA for a password realm: `require_mfa = { demo = true, vvpusa = false }` makes Configure OTP a default
   action; Keycloak assigns it to users created after the change, so existing users get it by hand (Users, the user,
   Required user actions). A Google realm has no password form; its MFA is the company's Google Workspace policy.
 - Local passwords back on in a Google realm: in its `google-browser` flow, set the `google-browser-forms` subflow to

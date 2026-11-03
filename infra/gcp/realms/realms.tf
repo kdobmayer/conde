@@ -1,4 +1,4 @@
-# ── Realms: demo and clearscale for the conde workspaces, infra for platform tools ───────────────────────────────
+# ── Realms: demo and vvpusa for the conde workspaces, infra for platform tools ───────────────────────────────
 resource "keycloak_realm" "this" {
   for_each = local.realms
 
@@ -286,9 +286,4 @@ resource "keycloak_oidc_google_identity_provider" "this" {
   sync_mode          = "IMPORT"
   default_scopes     = "openid email profile"
   hide_on_login_page = false
-}
-
-moved {
-  from = keycloak_oidc_google_identity_provider.clearscale
-  to   = keycloak_oidc_google_identity_provider.this["clearscale"]
 }

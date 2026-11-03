@@ -135,20 +135,22 @@ locals {
     }
     dex           = { enabled = false }
     notifications = { enabled = false }
+    # Requests sized to the measured use (2026-11-03: controller 8m and 186Mi, repo-server 1m and 118Mi at idle); the
+    # memory limits stay unset, so a sync burst above the request is allowed.
     controller = {
-      resources = { requests = { cpu = "250m", memory = "512Mi" } }
+      resources = { requests = { cpu = "100m", memory = "384Mi" } }
     }
     repoServer = {
-      resources = { requests = { cpu = "250m", memory = "512Mi" } }
+      resources = { requests = { cpu = "100m", memory = "256Mi" } }
     }
     applicationSet = {
-      resources = { requests = { cpu = "100m", memory = "128Mi" } }
+      resources = { requests = { cpu = "50m", memory = "64Mi" } }
     }
     redis = {
-      resources = { requests = { cpu = "100m", memory = "128Mi" } }
+      resources = { requests = { cpu = "50m", memory = "64Mi" } }
     }
     server = {
-      resources = { requests = { cpu = "100m", memory = "256Mi" } }
+      resources = { requests = { cpu = "50m", memory = "128Mi" } }
       httproute = {
         enabled = true
         parentRefs = [{
@@ -178,16 +180,15 @@ locals {
           targetRef = { group = "", kind = "Service", name = "argocd-server" }
         }
       },
-      # The UI's watch streams stay open; the whole host is behind IAP (iap.tf), Cloud Armor throttles per IP.
+      # The UI's watch streams stay open; the whole host is behind IAP (iap.tf).
       {
         apiVersion = "networking.gke.io/v1"
         kind       = "GCPBackendPolicy"
         metadata   = { name = "argocd-server", namespace = local.argocd_namespace }
         spec = {
           default = {
-            timeoutSec     = 3600
-            securityPolicy = local.platform.cloud_armor_admin_policy_names["argocd"]
-            iap            = local.iap_policy
+            timeoutSec = 3600
+            iap        = local.iap_policy
           }
           targetRef = { group = "", kind = "Service", name = "argocd-server" }
         }

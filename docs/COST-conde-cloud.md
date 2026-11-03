@@ -5,33 +5,35 @@ Read on 2026-10-28 from the Terraform roots under `infra/gcp` and `infra/terrafo
 (read-only `az` and the Cost Management API), and the public price pages named per row. Prices are the list prices
 for `europe-west3` (Frankfurt) in USD; a month is 730 hours. Refreshed the same day after the cost cuts (one replica
 for demo and clearscale, smaller sidecars and Keycloak, the GKE metric packages off) and S4 (Identity-Aware Proxy in
-front of the admin surfaces). Updated on 2026-10-29 for the fourth workspace, vvpusa (one pod, one replica).
+front of the admin surfaces). Updated on 2026-10-29 for the fourth workspace, vvpusa (one pod, one replica), and on
+2026-11-03 for the removal of the clearscale workspace, Argo CD requests sized to its measured use, and the two admin
+throttle policies removed (the admin hosts stay behind Identity-Aware Proxy).
 
-The estate costs **259.1 USD a month** (232.4 EUR at the ECB reference rate of 1.1150 USD per EUR, 2026-10-27),
-of which GCP is 257.4 USD, Cloudflare 1.68 USD, Resend and GitHub Actions nothing. The biggest item is GKE Autopilot
-pod compute at 134.0 USD (52 percent): the five workspace pods and their Cloud SQL proxy sidecars are 76.5 USD. Demo,
-clearscale and vvpusa run one replica each and accept the single-replica outage the two replicas were introduced against
+The estate costs **207.2 USD a month** (185.8 EUR at the ECB reference rate of 1.1150 USD per EUR, 2026-10-27),
+of which GCP is 205.5 USD, Cloudflare 1.68 USD, Resend and GitHub Actions nothing. The biggest item is GKE Autopilot
+pod compute at 97.0 USD (47 percent): the four workspace pods and their Cloud SQL proxy sidecars are 61.2 USD. Demo
+and vvpusa run one replica each and accept the single-replica outage the two replicas were introduced against
 (nine minutes on 2026-10-09, `infra/terraform/conde.auto.tfvars`); dakai keeps two. Until the Azure removal (S6) the
-old estate runs in parallel at 89.8 USD a month, measured, so the outlay today is 349 USD a month.
+old estate runs in parallel at 89.8 USD a month, measured, so the outlay today is 297 USD a month.
 
 ## GCP, per resource
 
 | Resource | How it is billed | Quantity as built | Unit price (source, read 2026-10-28) | USD per month |
 |---|---|---|---|---|
-| GKE Autopilot pods, workspaces (`charts/conde-workspace`, `deploy/tenants`) | per second of requested vCPU, GiB memory, GiB ephemeral storage of running pods; Autopilot fills in a 1 GiB ephemeral default where none is requested | 5 pods: dakai 2 replicas, demo, clearscale and vvpusa 1 each (`deploy/tenants`); each pod `conde` 250 m / 512 Mi / 1 Gi plus the `cloud-sql-proxy` sidecar 50 m / 64 Mi / 100 Mi; 1.5 vCPU, 2.81 GiB, 5.49 GiB (the live sum of the four pods read on 2026-10-28, `kubectl get pods -A -o json`, plus one pod of the same shape) | 0.0573 USD per vCPU-hour, 0.0063421 per GiB-hour, 0.0001789 per GiB-hour ephemeral, Frankfurt table on https://cloud.google.com/kubernetes-engine/pricing | 76.48 |
+| GKE Autopilot pods, workspaces (`charts/conde-workspace`, `deploy/tenants`) | per second of requested vCPU, GiB memory, GiB ephemeral storage of running pods; Autopilot fills in a 1 GiB ephemeral default where none is requested | 4 pods: dakai 2 replicas, demo and vvpusa 1 each (`deploy/tenants`); each pod `conde` 250 m / 512 Mi / 1 Gi plus the `cloud-sql-proxy` sidecar 50 m / 64 Mi / 100 Mi; 1.2 vCPU, 2.25 GiB, 4.39 GiB | 0.0573 USD per vCPU-hour, 0.0063421 per GiB-hour, 0.0001789 per GiB-hour ephemeral, Frankfurt table on https://cloud.google.com/kubernetes-engine/pricing | 61.18 |
 | GKE Autopilot pods, Keycloak (`cluster/keycloak.tf`) | same | 1 pod: `keycloak` 250 m / 768 Mi / 1 Gi plus proxy sidecar 50 m / 64 Mi / 100 Mi = 0.3 vCPU, 0.81 GiB, 1.1 GiB | same | 16.45 |
-| GKE Autopilot pods, Argo CD (`cluster/argocd.tf`, chart argo-cd 10.10.3) | same | controller 250 m / 512 Mi, repo-server 250 m / 512 Mi, server 100 m / 256 Mi, applicationset 100 m / 128 Mi, redis 100 m / 128 Mi; 1 GiB ephemeral each by Autopilot default = 0.8 vCPU, 1.5 GiB, 5 GiB | same | 41.06 |
+| GKE Autopilot pods, Argo CD (`cluster/argocd.tf`, chart argo-cd 10.10.3) | same | controller 100 m / 384 Mi, repo-server 100 m / 256 Mi, server 50 m / 128 Mi, applicationset 50 m / 64 Mi, redis 50 m / 64 Mi (sized to the use measured on 2026-11-03: controller 8 m and 186 Mi, repo-server 1 m and 118 Mi; memory limits unset, so a sync may burst above the request); 1 GiB ephemeral each by Autopilot default = 0.35 vCPU, 0.875 GiB, 5 GiB | same | 19.34 |
 | GKE cluster fee | 0.10 USD per cluster-hour; the free tier gives 74.40 USD a month per billing account for one Autopilot or zonal cluster | 1 cluster, the only one on the billing account | 0.10 USD per hour and the 74.40 USD credit, https://cloud.google.com/kubernetes-engine/pricing | 73.00 fee, 74.40 credit: 0.00 |
 | Cloud SQL `conde-pg` compute (`platform/sql.tf`) | per hour of vCPU and memory, Enterprise edition, zonal (no HA uplift) | `db-custom-1-3840`: 1 vCPU, 3.75 GiB; POSTGRES_18, zone europe-west3-b | 0.0496 USD per vCPU-hour (36.208 per month), 0.0084 per GiB-hour (6.132 per month), Enterprise General Purpose, Frankfurt, https://cloud.google.com/sql/pricing | 59.20 |
 | Cloud SQL storage | per GiB-month, SSD, zonal | 20 GiB PD_SSD (autoresize on) | 0.204 USD per GiB-month, Frankfurt, same page | 4.08 |
 | Cloud SQL backups and PITR logs | per GiB-month of backup storage used | 7 retained automated backups, 7 days of transaction logs (in Cloud Storage); one backup exists so far, size not reported by the API | 0.096 USD per GiB-month, Frankfurt, same page | 0.10 (estimate, 1 GiB) |
 | Cloud Monitoring, Managed Service for Prometheus | per million samples ingested, no free allotment | the metric packages are off (`monitoring_config` in `platform/gke.tf` enables `SYSTEM_COMPONENTS` only; system metrics are free); measured: no samples ingested after 06:27 UTC on 2026-10-28, against 533 thousand an hour before | 0.06 USD per million samples, https://cloud.google.com/stackdriver/pricing | 0.00 |
 | Global external Application Load Balancer (Gateway `conde`, `cluster/gateway.tf`) | per forwarding-rule hour (first five rules share one charge) plus data processed | 2 global forwarding rules (HTTP redirect and HTTPS) on one static address; measured traffic 19 MB a day through the balancer | 0.025 USD per hour for the first five rules; 0.008 USD per GiB processed (the monthly view of the same Frankfurt table prints 0.01), https://cloud.google.com/vpc/network-pricing | 18.26 |
-| Cloud Armor policies `conde-web`, `conde-keycloak-admin`, `conde-argocd` (`platform/edge.tf`), Standard tier | per policy-hour, per rule-hour, per million requests evaluated | 3 policies, 9 rules: `conde-web` 5 (4 custom plus the default allow), each admin policy 2 (a per-IP throttle plus the default allow); every request meets one policy, measured 453 requests an hour, 330 thousand a month; Adaptive Protection has no Standard-tier price on the page | 0.006849315 USD per policy-hour (5.00 a month), 0.001369863 per rule-hour (1.00 a month), 0.75 per million requests, https://cloud.google.com/armor/pricing | 24.25 |
+| Cloud Armor policy `conde-web` (`platform/edge.tf`), Standard tier | per policy-hour, per rule-hour, per million requests evaluated | 1 policy, 5 rules (4 custom plus the default allow) on the public hosts; the admin hosts have none, Identity-Aware Proxy decides who reaches them; measured 453 requests an hour, 330 thousand a month; Adaptive Protection has no Standard-tier price on the page | 0.006849315 USD per policy-hour (5.00 a month), 0.001369863 per rule-hour (1.00 a month), 0.75 per million requests, https://cloud.google.com/armor/pricing | 10.25 |
 | Private Service Connect endpoint `psc-conde-pg` (`platform/sql.tf`) | per endpoint-hour plus consumer data processed | 1 forwarding rule; database traffic a few GiB a month | 0.01 USD per hour, 0.01 per GiB, https://cloud.google.com/vpc/network-pricing | 7.30 |
 | Cloud NAT `conde` (`foundation/main.tf`) | per assigned VM-hour, per external-address-hour, per GiB processed | 2 Autopilot nodes, 1 auto-allocated address; measured 618 MB processed on the first day (image pulls), taken as 3 GiB a month | 0.0014 USD per VM-hour, 0.005 per address-hour, 0.045 per GiB, https://cloud.google.com/vpc/network-pricing | 5.83 |
-| Secret Manager, active versions | per active secret version-hour per replica location, first 6 free | 23 secrets, 23 enabled versions, 1 location (counted 2026-10-29) | 0.000082192 USD per version-hour (0.06 a month), https://cloud.google.com/secret-manager/pricing | 1.02 |
-| Secret Manager, access operations | per 10,000 AccessSecretVersion calls, first 10,000 a month free | measured 1,174 calls in the hour 07:00 to 08:00 UTC on 2026-10-28, 857 thousand a month; the callers are the workspace and Keycloak service accounts, consistent with the Secret Manager CSI driver re-reading every mounted secret on its rotation poll (`secret_manager_config.rotation_config` in `platform/gke.tf`); with vvpusa's four mounts and Keycloak's vvpusa vault file, 28 mounted files instead of 23, scaled to 1.04 million a month (estimate, not measured) | 0.03 USD per 10,000, same page | 3.10 |
+| Secret Manager, active versions | per active secret version-hour per replica location, first 6 free | 19 secrets, 19 enabled versions, 1 location (counted 2026-10-29, less clearscale's four on 2026-11-03) | 0.000082192 USD per version-hour (0.06 a month), https://cloud.google.com/secret-manager/pricing | 0.78 |
+| Secret Manager, access operations | per 10,000 AccessSecretVersion calls, first 10,000 a month free | measured 1,174 calls in the hour 07:00 to 08:00 UTC on 2026-10-28, 857 thousand a month; the callers are the workspace and Keycloak service accounts, consistent with the Secret Manager CSI driver re-reading every mounted secret on its rotation poll (`secret_manager_config.rotation_config` in `platform/gke.tf`, every 120 s, the GKE default); with vvpusa's four mounts and Keycloak's vvpusa vault file, and without clearscale's four mounts and its two vault files, 22 mounted files instead of 23, scaled to 0.82 million a month (estimate, not measured) | 0.03 USD per 10,000, same page | 2.42 |
 | Cloud DNS private zone `conde-pg-psc` | per zone-hour, first 25 zones; queries per million | 1 private zone, queries from the cluster | 0.000273973 USD per zone-hour (0.20 a month), 0.40 per million queries, https://cloud.google.com/dns/pricing | 0.20 |
 | Cloud Storage `conde-cloud-dist`, `conde-tfstate-476201321288` | per GiB-month Standard, operations, internet egress | 195 MB and 2 MB stored; release downloads leave at 0.12 USD per GiB | 0.023 USD per GiB-month Standard Frankfurt, 0.005 per 1,000 class A operations, https://cloud.google.com/storage/pricing | 0.01 |
 | Internet egress through the load balancer | per GiB, Premium tier, from Frankfurt | measured 0.6 GiB a month | 0.12 USD per GiB to Europe and North America, Frankfurt table, https://cloud.google.com/vpc/network-pricing | 0.07 |
@@ -39,7 +41,7 @@ old estate runs in parallel at 89.8 USD a month, measured, so the outlay today i
 | Certificate Manager (`platform/edge.tf`) | per certificate-month, first 100 free | 1 managed certificate (apex and wildcard), 1 map, 1 DNS authorization | 0.00 for the first 100, https://cloud.google.com/certificate-manager/pricing | 0.00 |
 | Cloud Logging | per GiB ingested into the `_Default` bucket above 50 GiB a month, 30 days retention included | measured 31 MB an hour (container 16.5, node 11, the rest 3.5), 21 GiB a month | 0.50 USD per GiB above 50 GiB, https://cloud.google.com/stackdriver/pricing | 0.00 |
 | Static external address `conde-gateway` | free while attached to a forwarding rule | 1 global address, in use | https://cloud.google.com/vpc/network-pricing | 0.00 |
-| **GCP total** | | | | **257.41** |
+| **GCP total** | | | | **205.47** |
 
 ## Outside GCP
 
@@ -48,7 +50,7 @@ old estate runs in parallel at 89.8 USD a month, measured, so the outlay today i
 | Cloudflare: domain `conde.cloud` | yearly registration at cost | 1 domain; DNS zone and the Pages project `site` are on the free plan, no paid feature in use | 20.20 USD a year (owner, `docs/infra-plan-gcp.md`) | 1.68 |
 | Resend | free plan: 3,000 emails a month, 100 a day, 3 domains, 30 days retention; the next plan is Pro at 20 USD a month for 50,000 emails | invite emails only | https://resend.com/pricing | 0.00 |
 | GitHub Actions, repository `kdobmayer/conde` (private, personal account) | included minutes per month on the personal plan: 2,000 on Free, 3,000 on Pro (the plan is on https://github.com/settings/billing; the API scope of this machine cannot read it); macOS draws 10 included minutes per minute, Windows 2, Linux 1; beyond the allowance Linux 2-core 0.006 USD a minute, macOS 0.062 | a release run is two macOS jobs of 1 m 40 s each and about 17 Linux job-minutes (57 included minutes); a CI run is about 15 Linux minutes; on 2026-10-28 there were 3 releases and 7 CI runs (about 280 included minutes in one day) | https://docs.github.com/en/billing/concepts/product-billing/github-actions | 0.00 within the allowance |
-| **Total** | | | | **259.09** |
+| **Total** | | | | **207.15** |
 
 GitHub Actions per release, beyond the allowance: 4 macOS minutes (each job rounded up) at 0.062 plus 17 Linux minutes at 0.006 is 0.35 USD. In included minutes a release consumes 57 and a CI run about 15. The build-up cadence of 2026-10-28 (3 releases, 7 CI runs) would exhaust a Free plan's 2,000 minutes in about a week; the steady cadence of one release and a handful of CI runs a week (about 300 minutes a month) stays inside it. The macOS multiplier is the one GitHub documents for included minutes; the English page no longer prints the table on 2026-10-28, the Japanese page still lists Linux 1, Windows 2, macOS 10.
 
@@ -74,9 +76,9 @@ month is separate from the trial and stays after it.
   (https://prices.azure.com/api/retail/prices, region westeurope). The two Container Apps jobs (`caj-conde-psql`,
   `caj-conde-dump`) cost only when run.
 - The workspace count: each further workspace at the chart defaults adds 30.6 USD (two pods) plus a database and
-  secrets that round to nothing; the sidecars are 4.8 USD of that per workspace. A workspace on one replica, as demo,
-  clearscale and vvpusa run, adds 15.3 USD.
-- The Secret Manager rotation poll: 3.10 USD for reads nobody consumes between rotations; a longer rotation
+  secrets that round to nothing; the sidecars are 4.8 USD of that per workspace. A workspace on one replica, as demo
+  and vvpusa run, adds 15.3 USD.
+- The Secret Manager rotation poll: 2.42 USD for reads nobody consumes between rotations; a longer rotation
   interval or rotation off removes it.
 
 ## Not estimated

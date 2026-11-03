@@ -138,7 +138,7 @@ fn a_new_name_joins_the_lobby_once_silently() {
     let members = b.ok(ALICE, "channel.members", json!({"channel": "#lobby"}));
     assert_eq!(
         members["members"][1],
-        json!({"name": "krisz/bob", "behind": 0}),
+        json!({"name": "krisz/bob", "behind": 0, "notify": "mentions"}),
         "a member from the end of the log"
     );
     assert_eq!(
@@ -167,4 +167,138 @@ fn a_new_name_joins_the_lobby_once_silently() {
     b.ok(HUMAN, "agent.pin", json!({"name": "reviewer"}));
     let r = b.ok("codex:t-rev", "agent.register", json!({"name": "reviewer"}));
     assert_eq!(r["joined"], "#lobby");
+}
+
+// --- the notify setting -----------------------------------------------------------
+
+/// (member, notify) of a channel, as `channel.members` lists them.
+fn notify_of(b: &Board, actor: &str, channel: &str) -> Vec<(String, String)> {
+    let r = b.ok(actor, "channel.members", json!({"channel": channel}));
+    r["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["name"].as_str().unwrap().to_string(),
+                m["notify"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_member_sets_its_own_notify_by_join_or_by_notify() {
+    let b = Board::new();
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    b.register(CAROL, "carol");
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    let r = b.ok(BOB, "channel.join", json!({"channel": "#dev"}));
+    assert_eq!(r["notify"], "mentions", "the default");
+    assert_eq!(
+        notify_of(&b, ALICE, "#dev"),
+        [
+            ("krisz/alice".to_string(), "mentions".to_string()),
+            ("krisz/bob".to_string(), "mentions".to_string())
+        ]
+    );
+    // joining again with a setting changes it, without a second join post
+    let posts = b.message_count();
+    let r = b.ok(
+        BOB,
+        "channel.join",
+        json!({"channel": "#dev", "notify": "all"}),
+    );
+    assert_eq!(
+        (r["already_member"].as_bool(), r["notify"].as_str()),
+        (Some(true), Some("all"))
+    );
+    assert_eq!(b.message_count(), posts);
+    // joining again without one keeps it
+    let r = b.ok(BOB, "channel.join", json!({"channel": "#dev"}));
+    assert_eq!(r["notify"], "all");
+    let r = b.ok(
+        ALICE,
+        "channel.notify",
+        json!({"channel": "#dev", "notify": "all"}),
+    );
+    assert_eq!(r, json!({"channel": "#dev", "notify": "all"}));
+    assert_eq!(
+        notify_of(&b, BOB, "#dev"),
+        [
+            ("krisz/alice".to_string(), "all".to_string()),
+            ("krisz/bob".to_string(), "all".to_string())
+        ]
+    );
+    // a non-member sees names only, like read positions
+    let r = b.ok(CAROL, "channel.members", json!({"channel": "#dev"}));
+    assert_eq!(
+        r["members"],
+        json!([{"name": "krisz/alice"}, {"name": "krisz/bob"}])
+    );
+}
+
+#[test]
+fn only_a_member_sets_notify_and_only_to_mentions_or_all() {
+    let b = Board::new();
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    let (code, msg) = b
+        .call(
+            BOB,
+            "channel.notify",
+            json!({"channel": "#dev", "notify": "all"}),
+        )
+        .unwrap_err();
+    assert_eq!(code, ErrorCode::Forbidden, "{msg}");
+    let (code, _) = b
+        .call(
+            BOB,
+            "channel.notify",
+            json!({"channel": "#nope", "notify": "all"}),
+        )
+        .unwrap_err();
+    assert_eq!(code, ErrorCode::NotFound);
+    for bad in [
+        json!({"channel": "#dev", "notify": "every"}),
+        json!({"channel": "#dev"}),
+    ] {
+        let (code, msg) = b.call(ALICE, "channel.notify", bad).unwrap_err();
+        assert_eq!(code, ErrorCode::BadRequest, "{msg}");
+    }
+    let (code, msg) = b
+        .call(
+            ALICE,
+            "channel.notify",
+            json!({"channel": "#dev", "notify": "every"}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        (code, msg.as_str()),
+        (
+            ErrorCode::BadRequest,
+            "notify is 'mentions' or 'all', not 'every'"
+        )
+    );
+    let (code, msg) = b
+        .call(
+            BOB,
+            "channel.join",
+            json!({"channel": "#dev", "notify": "loud"}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        (code, msg.as_str()),
+        (
+            ErrorCode::BadRequest,
+            "notify is 'mentions' or 'all', not 'loud'"
+        )
+    );
+    assert_eq!(
+        notify_of(&b, ALICE, "#dev").len(),
+        1,
+        "the bad join joined nobody"
+    );
 }

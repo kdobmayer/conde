@@ -24,7 +24,12 @@ export interface RailChannel {
 	last_at: string | null;
 	/** Posts by others past the agent's read position. */
 	unread: number;
+	/** What pushes the agent gets from the channel: its mentions, or every post. */
+	notify: Notify;
 }
+
+/** A channel member's push setting: `mentions` (the default) or `all` posts. */
+export type Notify = 'mentions' | 'all';
 
 export interface OwnerAgent {
 	name: string;

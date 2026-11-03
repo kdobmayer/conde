@@ -499,6 +499,33 @@ fn lobby_auto_join_and_channel_topics() {
         agent("t-b", &["join", "#dev"]).1,
         "already a member of #dev\n"
     );
+    // the notify setting: by join, by notify, shown by members; a bad value names the two
+    assert_eq!(
+        agent("t-b", &["join", "#dev", "--notify", "all"]),
+        (
+            true,
+            "already a member of #dev\nnotify in #dev: all (every post)\n".into()
+        )
+    );
+    let (_, out) = agent("t-a", &["members", "#dev"]);
+    assert!(
+        out.contains("tester/bob\t1 behind\tnotified of every post\n"),
+        "{out}"
+    );
+    assert!(out.contains("tester/alice\t1 behind\n"), "{out}");
+    assert_eq!(
+        agent("t-b", &["notify", "#dev", "mentions"]),
+        (
+            true,
+            "notify in #dev: mentions (DMs, mentions and humans' posts)\n".into()
+        )
+    );
+    let (ok, out) = agent("t-b", &["notify", "#dev", "every"]);
+    assert!(
+        !ok && out.contains("invalid value 'every'")
+            && out.contains("[possible values: mentions, all]"),
+        "{out}"
+    );
     let (ok, out) = agent("t-b", &["topic", "#dev", "mine now"]);
     assert!(
         !ok && out.contains("only the creator of #dev or a human sets its topic"),
@@ -1028,6 +1055,42 @@ fn a_daemon_that_predates_boards_is_never_handed_a_board() {
     // without a board the request is the v1 one
     let (ok, out, _) = r.conde(&["send", "x", "hi"]);
     assert!(ok && out == "queued 01M to tester/x\n", "{out}");
+}
+
+/// A server from before the notify setting ignores `join --notify` and answers without a
+/// setting: the CLI says the join stands and fails, instead of reporting a setting never made.
+#[test]
+fn join_notify_against_a_server_without_the_setting_fails_after_the_join() {
+    let r = Root::new();
+    let d = r.fake(|req| {
+        Ok(match req["op"].as_str().unwrap() {
+            "channel.join" if req["body"]["channel"] == "#new" => {
+                json!({"channel": "#new", "already_member": false, "message_id": "01MJ", "topic": null})
+            }
+            "channel.join" => json!({"channel": "#dev", "already_member": true, "topic": null}),
+            _ => json!({}),
+        })
+    });
+    for (channel, joined) in [
+        ("#new", "joined #new (join post 01MJ)\n"),
+        ("#dev", "already a member of #dev\n"),
+    ] {
+        let (ok, out, err) = r.conde(&["join", channel, "--notify", "all"]);
+        assert!(!ok, "{out}");
+        assert_eq!(out, joined);
+        assert_eq!(
+            err,
+            format!(
+                "conde: the board's server does not support --notify yet, so your notify setting in {channel} was not changed; the membership stands\n"
+            )
+        );
+        let req = d.take().pop().unwrap();
+        assert_eq!(req["body"], json!({"channel": channel, "notify": "all"}));
+    }
+    // without --notify the same answer is a plain join
+    let (ok, out, err) = r.conde(&["join", "#new"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "joined #new (join post 01MJ)\n");
 }
 
 /// A bridge running another build than this binary: `conde doctor` names both builds and how to

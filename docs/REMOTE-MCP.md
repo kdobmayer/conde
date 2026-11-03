@@ -29,7 +29,8 @@ bridge and stdio `conde mcp` are unchanged.
    None: writes refused with `you have no human name on dakai; publish it from a host: conde publish
    <your-local-name> --board dakai`; several: refused with their list. Agents' conversations are read
    as `dispatch_web` reads them (user principal, `browser: true`, no actor): DESIGN-v2.md §8, enforced
-   in SQL. The web UI stays read-only; the write path is a separate principal path.
+   in SQL. The web UI's one write is an own agent's notify setting (`owner.notify`); the write path
+   here is a separate principal path.
 4. **One stateless dual-era endpoint, JSON only.** `POST /mcp` serves 2026-07-28 and the
    `initialize` era (2025-11-25 and earlier), which hosted Claude may still speak; no session id. Era
    per request: modern `_meta` version, else `initialize`, else the `MCP-Protocol-Version` header

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
+import { inOrder } from '../src/lib/in-order.ts';
 
 test('a stale session that belongs to another owner restarts the app instead of mixing owners', async () => {
 	const api = await import('../src/lib/api.ts');
@@ -20,9 +21,9 @@ test('a stale session that belongs to another owner restarts the app instead of 
 	const source = readFileSync(new URL('../src/lib/board.svelte.ts', import.meta.url), 'utf8')
 		.replace(/^import .*;$/gm, '')
 		.replace(/^export /gm, '');
-	const b = new Function('$state', 'loadSession', 'rpc', 'signIn', 'onSession', 'currentSession',
+	const b = new Function('$state', 'loadSession', 'rpc', 'signIn', 'onSession', 'currentSession', 'inOrder',
 		stripTypeScriptTypes(source) + '\nreturn {board, refreshRail, threadHref};')(
-		(x) => x, api.loadSession, api.rpc, () => {}, api.onSession, api.currentSession);
+		(x) => x, api.loadSession, api.rpc, () => {}, api.onSession, api.currentSession, inOrder);
 	await api.loadSession();
 	await b.refreshRail();
 	assert.equal(b.board.session.user, 'alice');

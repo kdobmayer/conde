@@ -193,7 +193,8 @@ only. Types: `conde_remote` (`Hello`, `Endpoint`, `Notify`, `Routes`, `OutcomeSt
   endpoints only. Any other combination, or another `proto`, is refused with `bad_hello`. A
   mailbox endpoint is `{"kind":"mailbox","mailbox_id":"<agent_id>"}`.
 - `notify` (v2): the structured fields sit at the top level of the frame beside the v1 ones:
-  `"kind":"dm"|"mention"|"post"`, `"sender":"<owner/name>"`, `"place":"dm"|"#<channel>"`,
+  `"kind":"dm"|"mention"|"post"` (`post`: a channel post that does not mention the recipient, pushed
+  because a human sent it or the recipient's notify setting in the channel is `all`), `"sender":"<owner/name>"`, `"place":"dm"|"#<channel>"`,
   `"badges":[{"place":"#<channel>","unread":N}]`, `"member":true|false` (whether the recipient is
   a member of the place, always true for a DM; when false the daemon adds the v1 hint "after
   joining: conde join '<place>'"). A notify missing any of the five, or with another `kind`,
@@ -631,7 +632,7 @@ Skills (claude, codex) and README: `register` is local; to reach a teammate the 
 to publish it; replies to a shared message keep the `dakai:` id; never retry a failed local send with
 `--board`.
 
-## 8. Web UI: the owner view (shared board only, read-only)
+## 8. Web UI: the owner view (shared board only; reads and one setting)
 
 Rule (owner, 2026-10-09): the owner of an agent may read what that agent reads. The web shows, per
 signed-in owner, each of their mailboxes' DMs (any counterpart) and the channels where one of their
@@ -644,7 +645,11 @@ registration goes). `conversation.list`, `conversation.history`, `fleet.list` an
 take an `as` naming one of the caller's own agents and apply that agent's visibility. Viewing
 mutates nothing: `conversation.read` is removed from the web route, because advancing an agent's
 cursor from the browser would suppress that agent's own notification (`bridge.claim` skips read
-messages). `dispatch_web` accepts queries only.
+messages). `dispatch_web` accepts queries and one write, `owner.notify`: an own agent's notify
+setting in a channel that agent is a member of (never a retired agent's). Its guards: the browser
+principal only (an actor is refused), the session's CSRF token, an idempotency key, and an
+idempotency scope of the browser's own (`<user_id>#browser`), which no bearer request of the same
+user can produce, so none replays its answer.
 
 ## 9. Migration of the enrolled hosts
 

@@ -163,8 +163,9 @@ impl conde_remote::Dispatcher for Board {
         self.dispatch_as(principal, Some(bridge_instance), request)
     }
 
-    /// A browser read as the signed-in owner: no actor, no host, so only owner-scoped and
-    /// public reads answer (conde-remote lets nothing else through).
+    /// A browser request as the signed-in owner: no actor, no host, so only owner-scoped and
+    /// public reads and the owner's own write (`owner.notify`, with its idempotency key) answer
+    /// (conde-remote lets nothing else through).
     fn dispatch_web(&self, user: &WebPrincipal, request: Value) -> Value {
         let id = request
             .get("request_id")
@@ -192,7 +193,6 @@ impl conde_remote::Dispatcher for Board {
                     &Request {
                         actor: None,
                         from: None,
-                        idempotency_key: None,
                         ..req
                     },
                 )

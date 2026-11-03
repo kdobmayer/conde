@@ -3,10 +3,14 @@
 	// newest first, beside the open conversation; on the phone the list, then the conversation.
 	import type { Snippet } from 'svelte';
 	import { page } from '$app/state';
-	import { board, short } from '#lib/board.svelte.ts';
+	import { mutate } from '#lib/api.ts';
+	import { board, changeRail, refreshRail, short } from '#lib/board.svelte.ts';
 	import { KIND, agentFacts, conversationsOf, latestOf } from '#lib/conversation.ts';
 	import { ago, stamp } from '#lib/time.ts';
+	import { nextNotify, notifyHint, notifyLabel, withNotify } from '#lib/notify.ts';
+	import type { Notify } from '#lib/types.ts';
 	import EmptyState from '#lib/ui/EmptyState.svelte';
+	import ErrorLine from '#lib/ui/ErrorLine.svelte';
 	import SkeletonRows from '#lib/ui/SkeletonRows.svelte';
 	import { MAX_WIDTH, MIN_WIDTH, clampWidth, readWidth, writeWidth } from '#lib/list-width.ts';
 
@@ -63,6 +67,27 @@
 		writeWidth(null);
 	}
 
+	/** The change in flight and the last change that failed, each with its agent: this layout
+	 * stays mounted from one agent's page to the next. */
+	let changing = $state<{ agent: string; channel: string } | null>(null);
+	let failed = $state<{ agent: string; channel: string; to: Notify; error: string } | null>(null);
+
+	/** Sets `agent`'s push setting for `channel`; the row shows the board's answer, never a guess. */
+	async function setNotify(agent: string, channel: string, to: Notify) {
+		if (changing) return;
+		changing = { agent, channel };
+		failed = null;
+		try {
+			await mutate('owner.notify', { agent, channel, notify: to });
+			changeRail((rail) => withNotify(rail, agent, channel, to));
+			void refreshRail();
+		} catch (e) {
+			failed = { agent, channel, to, error: (e as Error).message };
+		} finally {
+			changing = null;
+		}
+	}
+
 	const health = $derived.by(() => {
 		if (!facts) return '';
 		const problems = [facts.held ? `${facts.held} held` : '', facts.stuck ? `${facts.stuck} stuck` : ''].filter(Boolean);
@@ -97,12 +122,36 @@
 			{/each}
 			<h2 class="grp">Channels</h2>
 			{#each lists.channels as c (c.target)}
-				<a href={`#/c/${encodeURIComponent(c.target.slice(1))}`} class:on={open === c.target}>
-					<span>{c.target}</span><time datetime={c.last_at}>{stamp(c.last_at)}</time>
-				</a>
+				{@const all = c.notify === 'all'}
+				<div class="ch">
+					<a href={`#/c/${encodeURIComponent(c.target.slice(1))}`} class:on={open === c.target}>
+						<span>{c.target}</span><time datetime={c.last_at}>{stamp(c.last_at)}</time>
+					</a>
+					<button
+						type="button"
+						class="notify"
+						class:all
+						aria-pressed={all}
+						aria-label={notifyLabel(page.params.agent ?? '', c.target)}
+						aria-busy={changing?.agent === name && changing.channel === c.target}
+						title={notifyHint(c.notify ?? 'mentions')}
+						onclick={() => setNotify(name, c.target, nextNotify(c.notify ?? 'mentions'))}
+					>
+						<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+							<path d="M8 2.1c-2 0-3.5 1.6-3.5 3.6v2.5L3 10.7v.7h10v-.7l-1.5-2.5V5.7c0-2-1.5-3.6-3.5-3.6Z" />
+							<path class="clap" d="M6.5 12.9a1.5 1.5 0 0 0 3 0" />
+						</svg>
+					</button>
+				</div>
 			{:else}
 				<p class="none">In no channel.</p>
 			{/each}
+			{#if failed && failed.agent === name}
+				{@const f = failed}
+				<div class="notify-error">
+					<ErrorLine what={`Could not change ${f.channel}`} error={f.error} retry={() => setNotify(f.agent, f.channel, f.to)} />
+				</div>
+			{/if}
 			<p class="visible">Visible here: {page.params.agent}’s own DMs and its channels.</p>
 		{/if}
 	</nav>
@@ -225,6 +274,51 @@
 	.list a.on {
 		border-left-color: var(--accent);
 	}
+	.ch {
+		display: flex;
+		align-items: flex-start;
+	}
+	.ch a {
+		flex: 1;
+		min-width: 0;
+	}
+	/* the per-channel push setting: a quiet bell, outlined for mentions, filled for every post */
+	.notify {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 36px;
+		margin-right: -8px;
+		padding: 0;
+		border: none;
+		border-radius: 4px;
+		background: none;
+		color: var(--faint);
+	}
+	.notify svg {
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.3;
+		stroke-linejoin: round;
+		stroke-linecap: round;
+	}
+	.notify:hover {
+		color: var(--fg);
+	}
+	.notify.all {
+		color: var(--accent);
+	}
+	.notify.all svg path:not(.clap) {
+		fill: currentColor;
+	}
+	.notify[aria-busy='true'] {
+		opacity: 0.55;
+	}
+	.notify-error {
+		margin-top: 8px;
+		font-size: 13.5px;
+	}
 	time {
 		flex: none;
 		font: 12px/1.6 var(--sans);
@@ -267,6 +361,11 @@
 		}
 		.list a.on {
 			color: var(--muted);
+		}
+		.notify {
+			width: 44px;
+			height: 44px;
+			margin: -4px -12px -4px 0;
 		}
 		.handle,
 		.agent-page:not(.at-list) .list,

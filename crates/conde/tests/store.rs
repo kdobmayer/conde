@@ -159,6 +159,12 @@ fn main() {
             an_identities_rebuild_another_process_finished_first_is_skipped,
         );
     }
+    if wanted("sqlite::a_column_another_process_added_first_is_skipped") {
+        report.run(
+            "sqlite::a_column_another_process_added_first_is_skipped",
+            a_column_another_process_added_first_is_skipped,
+        );
+    }
     if wanted("sqlite::old_board_file_keeps_its_entra_identities") {
         report.run(
             "sqlite::old_board_file_keeps_its_entra_identities",
@@ -917,11 +923,26 @@ fn channels(s: &dyn Store) {
             vec![("a-team".into(), 0, 0), ("dev".into(), 3, 2)]
         );
         assert_eq!(
+            tx.channel_notify_all_ids("ch1").unwrap(),
+            Vec::<String>::new()
+        );
+        tx.set_membership_notify("ch1", &w.b, "all").unwrap();
+        assert_eq!(
+            tx.membership_notify("ch1", &w.b).unwrap().as_deref(),
+            Some("all")
+        );
+        assert_eq!(
+            tx.membership_notify("ch1", &w.a).unwrap().as_deref(),
+            Some("mentions")
+        );
+        assert_eq!(tx.membership_notify("ch2", &w.a).unwrap(), None);
+        assert_eq!(tx.channel_notify_all_ids("ch1").unwrap(), vec![w.b.clone()]);
+        assert_eq!(
             tx.channel_member_status("ch1").unwrap(),
             vec![
-                ("ana/c".into(), 0),
-                ("krisz/a".into(), 0),
-                ("krisz/b".into(), 2)
+                ("ana/c".into(), 0, "mentions".into()),
+                ("krisz/a".into(), 0, "mentions".into()),
+                ("krisz/b".into(), 2, "all".into())
             ]
         );
         tx.delete_membership("ch1", &w.b).unwrap();
@@ -2230,6 +2251,47 @@ fn an_identities_rebuild_another_process_finished_first_is_skipped() {
         .expect("the second open finds the table rebuilt");
     let s = SqliteStore::open(&path).unwrap();
     entra_identities_keep_their_users(&s);
+}
+
+/// Two processes open the same board file from before a column: the second one found it missing,
+/// then waits for the lock while the first adds it; it must find the column there and add nothing.
+fn a_column_another_process_added_first_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    drop(SqliteStore::open(&path).unwrap());
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("ALTER TABLE memberships DROP COLUMN notify")
+        .unwrap();
+    // the first process holds the write lock and adds the column, slowly
+    let first = rusqlite::Connection::open(&path).unwrap();
+    first.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let opener = {
+        let path = path.clone();
+        std::thread::spawn(move || SqliteStore::open(&path).map(|_| ()))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    first
+        .execute_batch(
+            "ALTER TABLE memberships ADD COLUMN notify TEXT NOT NULL DEFAULT 'mentions'
+                 CHECK (notify IN ('mentions', 'all'));
+             COMMIT;",
+        )
+        .unwrap();
+    opener
+        .join()
+        .unwrap()
+        .expect("the second open finds the column added");
+    let s = SqliteStore::open(&path).unwrap();
+    let w = world(&s);
+    write(&s, |tx| {
+        tx.insert_channel(&chan("ch1", "dev", &w.a)).unwrap();
+        tx.insert_membership("ch1", &w.a, 0).unwrap();
+        assert_eq!(
+            tx.membership_notify("ch1", &w.a).unwrap().as_deref(),
+            Some("mentions")
+        );
+    });
 }
 
 /// Settings replace their value; the admin role is set and cleared; a user's arrival is

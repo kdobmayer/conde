@@ -1,5 +1,6 @@
-// The web app only reads: a request carries no idempotency key, and a read refused for a stale
-// session (another sign-in replaced it) reloads the session and retries once with its token.
+// A read carries no idempotency key; the owner's one kind of write (owner.notify) carries one key
+// per call, the same on every retry. A request refused for a stale session (another sign-in
+// replaced it) reloads the session and retries once with its token.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -52,4 +53,40 @@ test('a page restored from the back/forward cache can sign in again', async () =
 	await loadSession().catch(() => {});
 	assert.equal(navigations.length, 2, 'a restored page signs in again');
 	delete globalThis.window;
+});
+
+test('a change carries one idempotency key, the same on the retry after a stale session', async () => {
+	let sessionReads = 0;
+	const requests = [];
+	globalThis.fetch = async (url, options) => {
+		if (url === '/v1/session') {
+			sessionReads++;
+			return Response.json({ user: 'alice', csrf: `token-${sessionReads}`, csrf_header: 'x-csrf-token' });
+		}
+		requests.push(JSON.parse(options.body));
+		if (requests.length === 1) {
+			return Response.json({ ok: false, error: { code: 'stale_session', message: 'session replaced' } }, { status: 403 });
+		}
+		return Response.json({ ok: true, result: { agent: 'alice/desk', channel: '#dev', notify: 'all' } });
+	};
+	const { mutate } = await import('../src/lib/api.ts?mutate');
+	const answer = await mutate('owner.notify', { agent: 'desk', channel: '#dev', notify: 'all' });
+	assert.equal(answer.notify, 'all');
+	assert.equal(requests.length, 2);
+	const [first, retry] = requests;
+	assert.equal(first.op, 'owner.notify');
+	assert.deepEqual(first.body, { agent: 'desk', channel: '#dev', notify: 'all' });
+	assert.ok(typeof first.idempotency_key === 'string' && first.idempotency_key.length > 0, 'a change carries a key');
+	assert.equal(retry.idempotency_key, first.idempotency_key, 'the retry reuses the key');
+	await mutate('owner.notify', { agent: 'desk', channel: '#dev', notify: 'mentions' });
+	assert.notEqual(requests[2].idempotency_key, first.idempotency_key, 'a new change gets a new key');
+});
+
+test('a refused change is an error with the code the board gave', async () => {
+	globalThis.fetch = async (url) =>
+		url === '/v1/session'
+			? Response.json({ user: 'alice', csrf: 't', csrf_header: 'x-csrf-token' })
+			: Response.json({ ok: false, error: { code: 'forbidden', message: "'bob/x' is not one of your agents" } });
+	const { mutate } = await import('../src/lib/api.ts?mutate-refused');
+	await assert.rejects(mutate('owner.notify', { agent: 'bob/x', channel: '#dev', notify: 'all' }), (e) => e.code === 'forbidden');
 });

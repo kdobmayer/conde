@@ -52,6 +52,11 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("users", "keycloak_invite", "TEXT"),
     ("users", "admin", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "arrived_at", "TEXT"),
+    (
+        "memberships",
+        "notify",
+        "TEXT NOT NULL DEFAULT 'mentions' CHECK (notify IN ('mentions', 'all'))",
+    ),
 ];
 
 pub struct SqliteStore {
@@ -114,26 +119,27 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
     for (table, column, decl) in ADDED_COLUMNS {
-        let mut stmt = conn.prepare(&format!(
-            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
-        ))?;
-        if stmt.exists([column])? {
+        let has_column = || {
+            conn.prepare(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+            ))?
+            .exists([column])
+        };
+        if has_column()? {
             continue;
         }
-        let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
-        if *column != "arrived_at" {
-            conn.execute_batch(&alter)?;
-            continue;
-        }
-        // as Postgres migration 0019, in the ALTER's transaction: users with a host before the
-        // welcome count as arrived
         conn.execute_batch("BEGIN IMMEDIATE")?;
-        let mut steps = || -> rusqlite::Result<()> {
+        let steps = || -> rusqlite::Result<()> {
             // another process may have added it while this one waited for the lock
-            if stmt.exists([column])? {
+            if has_column()? {
                 return Ok(());
             }
-            conn.execute_batch(&alter)?;
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+            if *column != "arrived_at" {
+                return Ok(());
+            }
+            // as Postgres migration 0019, in the ALTER's transaction: users with a host before the
+            // welcome count as arrived
             conn.execute_batch(
                 "UPDATE users SET arrived_at = COALESCE((SELECT MIN(c.created_at) FROM device_credentials c
                      WHERE c.user_id = users.user_id), '1970-01-01T00:00:00Z')
@@ -1225,6 +1231,35 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
+    fn membership_notify(&self, channel_id: &str, agent_id: &str) -> StoreResult<Option<String>> {
+        self.opt(
+            "SELECT notify FROM memberships WHERE channel_id = ?1 AND agent_id = ?2",
+            params![channel_id, agent_id],
+            one_col,
+        )
+    }
+
+    fn set_membership_notify(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        notify: &str,
+    ) -> StoreResult<()> {
+        self.exec(
+            "UPDATE memberships SET notify = ?3 WHERE channel_id = ?1 AND agent_id = ?2",
+            params![channel_id, agent_id, notify],
+        )?;
+        Ok(())
+    }
+
+    fn channel_notify_all_ids(&self, channel_id: &str) -> StoreResult<Vec<String>> {
+        self.rows(
+            "SELECT agent_id FROM memberships WHERE channel_id = ?1 AND notify = 'all' ORDER BY agent_id",
+            [channel_id],
+            one_col,
+        )
+    }
+
     fn channel_summaries(&self) -> StoreResult<Vec<ChannelSummary>> {
         self.rows(
             "SELECT c.name_lower, c.topic,
@@ -1243,14 +1278,15 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn channel_member_status(&self, channel_id: &str) -> StoreResult<Vec<(String, i64)>> {
+    fn channel_member_status(&self, channel_id: &str) -> StoreResult<Vec<(String, i64, String)>> {
         self.rows(
             "SELECT u.name || '/' || a.name_lower,
-                (SELECT COUNT(*) FROM messages m WHERE m.channel_id = x.channel_id AND m.commit_seq > x.read_seq)
+                (SELECT COUNT(*) FROM messages m WHERE m.channel_id = x.channel_id AND m.commit_seq > x.read_seq),
+                x.notify
              FROM memberships x JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
              WHERE x.channel_id = ?1 ORDER BY 1",
             [channel_id],
-            pair,
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
     }
 
@@ -2081,7 +2117,8 @@ impl Tx for SqliteTx<'_> {
                     (SELECT created_at FROM messages WHERE channel_id = c.channel_id
                      ORDER BY commit_seq DESC LIMIT 1),
                     (SELECT COUNT(*) FROM messages m WHERE m.channel_id = c.channel_id
-                     AND m.commit_seq > x.read_seq AND m.sender_agent_id <> x.agent_id)
+                     AND m.commit_seq > x.read_seq AND m.sender_agent_id <> x.agent_id),
+                    x.notify
              FROM memberships x JOIN channels c ON c.channel_id = x.channel_id
              JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
              WHERE a.owner_id = ?1 ORDER BY a.name_lower, c.name_lower",
@@ -2095,6 +2132,7 @@ impl Tx for SqliteTx<'_> {
                     last_seq: r.get(4)?,
                     last_at: r.get(5)?,
                     unread: r.get(6)?,
+                    notify: r.get(7)?,
                 })
             },
         )

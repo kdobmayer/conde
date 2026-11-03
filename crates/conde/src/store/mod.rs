@@ -522,6 +522,8 @@ pub struct ChannelThread {
     pub last_at: Option<String>,
     /// Posts by others past the agent's read position.
     pub unread: i64,
+    /// The agent's notify setting in the channel (`mentions` or `all`).
+    pub notify: String,
 }
 
 /// One notification of a message with its latest attempt.
@@ -915,10 +917,20 @@ pub trait Tx {
     fn insert_membership(&self, channel_id: &str, agent_id: &str, read_seq: i64)
     -> StoreResult<()>;
     fn delete_membership(&self, channel_id: &str, agent_id: &str) -> StoreResult<()>;
+    /// The member's notify setting (`mentions` or `all`), or None when not a member.
+    fn membership_notify(&self, channel_id: &str, agent_id: &str) -> StoreResult<Option<String>>;
+    fn set_membership_notify(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        notify: &str,
+    ) -> StoreResult<()>;
+    /// Ids of the members whose notify setting is `all`, sorted.
+    fn channel_notify_all_ids(&self, channel_id: &str) -> StoreResult<Vec<String>>;
     /// Every channel with member and message counts, by name.
     fn channel_summaries(&self) -> StoreResult<Vec<ChannelSummary>>;
-    /// (canonical member name, messages behind), by name.
-    fn channel_member_status(&self, channel_id: &str) -> StoreResult<Vec<(String, i64)>>;
+    /// (canonical member name, messages behind, notify setting), by name.
+    fn channel_member_status(&self, channel_id: &str) -> StoreResult<Vec<(String, i64, String)>>;
     /// Ids of every message posted in the channel.
     fn channel_message_ids(&self, channel_id: &str) -> StoreResult<Vec<String>>;
     /// Highest commit_seq in the channel among messages with id <= `message_id`, 0 when none.

@@ -2,7 +2,8 @@
 // Usage: node scripts/design/mock-server.mjs <build-dir> <port>
 // Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
 // owner.search, fleet.list, channel.list; the feed, thread and search ops per docs/web-ui-v2/ia.md
-// "Server contract"),
+// "Server contract"; owner.notify, the one write, changes the fixture's settings for the server's
+// life and, like the board, wants an idempotency key and one of the owner's agents),
 // /v1/events (a WebSocket that sends the hello frame), /keys (the server's layout, masthead and
 // keys templates from crates/conde-remote/src/web/pages.rs, filled with the fixture) and
 // /join/<anything> (the join page's template from crates/conde-remote/src/web/join.rs in the
@@ -180,6 +181,17 @@ function answer(raw, res) {
 		case 'owner.search':
 			result = search(b);
 			break;
+		case 'owner.notify': {
+			const agent = b.agent?.includes('/') ? b.agent : `${fx.OWNER}/${b.agent}`;
+			const refuse = (code, message) => json(res, 200, { ok: false, error: { code, message } });
+			if (!r.idempotency_key) return refuse('bad_request', "'owner.notify' needs an idempotency_key (1-200 chars)");
+			if (!fx.ownAgents.includes(agent)) return refuse('forbidden', `'${b.agent}' is not one of your agents`);
+			if (b.notify !== 'mentions' && b.notify !== 'all') return refuse('bad_request', "notify is 'mentions' or 'all'");
+			if (!fx.channels[b.channel]?.members.includes(agent)) return refuse('forbidden', `${agent} is not a member of ${b.channel}`);
+			fx.notify[`${agent} ${b.channel}`] = b.notify;
+			result = { agent, channel: b.channel, notify: b.notify };
+			break;
+		}
 		default:
 			return json(res, 200, { ok: false, error: { code: 'forbidden', message: `op ${r.op} not mocked` } });
 	}

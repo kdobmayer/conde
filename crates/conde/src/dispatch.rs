@@ -492,8 +492,13 @@ impl Dispatcher {
         Ok(result)
     }
 
-    /// Idempotency scope: the authenticated user plus the normalized actor.
+    /// Idempotency scope: the authenticated user plus the normalized actor. A browser's keys are
+    /// its own (`#` where every bearer scope has `|`), so a bearer request of the same user, any
+    /// raw actor included, never replays a browser-only answer.
     fn actor_id(&self, p: &Principal, req: &Request) -> String {
+        if p.browser {
+            return format!("{}#browser", p.user_id);
+        }
         let actor = req
             .actor
             .as_deref()

@@ -30,8 +30,8 @@ pub struct Principal {
     pub host_id: String,
 }
 
-/// A signed-in browser user: reads as the owner of their agents, never through a host
-/// credential and never as an agent.
+/// A signed-in browser user: reads as the owner of their agents and sets their notify settings,
+/// never through a host credential and never as an agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebPrincipal {
     pub user_id: i64,
@@ -52,8 +52,8 @@ pub trait Dispatcher: Send + Sync {
     ) -> serde_json::Value {
         self.dispatch(principal, request)
     }
-    /// A read from a signed-in browser, executed for the owner without an actor (the request's
-    /// `actor` and `from` are dropped). Default: refused.
+    /// A request from a signed-in browser (the owner's reads, and `owner.notify`), executed for
+    /// the owner without an actor (the request's `actor` and `from` are dropped). Default: refused.
     fn dispatch_web(&self, _user: &WebPrincipal, request: serde_json::Value) -> serde_json::Value {
         let id = request
             .get("request_id")

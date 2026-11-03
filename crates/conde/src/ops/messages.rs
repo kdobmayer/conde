@@ -52,10 +52,11 @@ pub struct Inserted {
 }
 
 /// Commit a message plus its attachments and notification intents.
-/// DMs and @mentions push; plain channel posts only badge; a human's channel
-/// post pushes to every member; the sender is never notified. On a shared board a human gets a
-/// notification only of a page (`page`: `blocked` or `done`), so no mention, `@everybody` or
-/// later path reaches one.
+/// DMs and @mentions push; a plain channel post pushes the members whose notify setting is
+/// `all` and only badges the others; a human's channel post pushes to every member; a mention
+/// wins over a post; the sender is never notified. On a shared board a human gets a
+/// notification only of a page (`page`: `blocked` or `done`), so no mention, `@everybody`,
+/// post or later path reaches one.
 pub fn insert_message(
     ctx: &Ctx,
     sender: &Agent,
@@ -97,6 +98,9 @@ pub fn insert_message(
             let members = channels::member_ids(ctx.db, &c.id)?;
             if sender.is_human() {
                 push.extend(members.iter().map(|m| (m.clone(), "post")));
+            } else {
+                let all = ctx.db.channel_notify_all_ids(&c.id)?;
+                push.extend(all.into_iter().map(|m| (m, "post")));
             }
             for m in mentions_in(text) {
                 if m == "everybody" {

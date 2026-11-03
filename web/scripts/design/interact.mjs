@@ -1,6 +1,6 @@
 // Drives the app's Feed and Fleet pages headless on the mock API: the filter menu, the thread
 // beside the Feed and in the sheet, the disclosure, the error line, the live announcer, the
-// agent list's resize handle and markdown in message bodies, by
+// agent list's resize handle and per-channel push setting, and markdown in message bodies, by
 // keyboard at 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844. Exits
 // non-zero when a check fails. Serves the built app through mock-server.mjs.
 // Usage: node scripts/design/interact.mjs [build-dir]
@@ -1155,6 +1155,135 @@ for (const hash of ['#/agents', '#/channels']) {
 		expect(!(await phone.page.locator('.agent-page [role=separator]').isVisible()), 'handle visible');
 		const w = await phone.page.evaluate(() => [document.querySelector('.agent-page .list').getBoundingClientRect().width, document.documentElement.scrollWidth]);
 		expect(w[0] === 390 && w[1] <= 390, JSON.stringify(w));
+	});
+	await phone.context.close();
+}
+
+// ---- the agent page's push setting per channel: a bell beside each channel, the board's answer ----
+{
+	const bell = (page, ch) => page.getByRole('button', { name: `Notify desk of every post in ${ch}` });
+	const pressed = async (page, ch) => (await bell(page, ch).getAttribute('aria-pressed')) === 'true';
+	const { context, page } = await openFeed({ width: 1440, height: 900 }, '#/a/desk', { label: 'notify', wait: '.agent-page .ch' });
+	const sent = [];
+	page.on('request', (r) => {
+		const body = r.url().endsWith('/v1/rpc') ? JSON.parse(r.postData() ?? '{}') : {};
+		if (body.op === 'owner.notify') sent.push(body);
+	});
+	await check('notify: each channel row has a bell beside its link; pressed for every post, not for mentions', async () => {
+		const rows = await page.locator('.agent-page .ch').evaluateAll((els) =>
+			els.map((e) => [e.querySelector('a span').textContent, !!e.querySelector('a button'), e.querySelector('button.notify')?.getAttribute('aria-pressed')])
+		);
+		expect(rows.length === 3 && rows.every((r) => !r[1]), `rows ${JSON.stringify(rows)}`);
+		expect((await pressed(page, '#conde-dev')) && !(await pressed(page, '#kudos')) && !(await pressed(page, '#lobby')), JSON.stringify(rows));
+	});
+	await check('notify: Tab from a channel link reaches its bell; Enter turns every post on with an idempotency key', async () => {
+		await page.locator('.agent-page .ch a', { hasText: '#kudos' }).focus();
+		await page.keyboard.press('Tab');
+		const f = await focus(page);
+		expect(f.tag === 'button' && (await bell(page, '#kudos').evaluate((b) => b === document.activeElement)), JSON.stringify(f));
+		await page.keyboard.press('Enter');
+		await settle(page);
+		expect(await pressed(page, '#kudos'), 'not pressed after Enter');
+		const last = sent.at(-1);
+		expect(sent.length === 1 && last.body.agent === 'kdobmayer/desk' && last.body.channel === '#kudos' && last.body.notify === 'all', JSON.stringify(sent));
+		expect(typeof last.idempotency_key === 'string' && last.idempotency_key.length > 0, 'no idempotency key');
+	});
+	await check('notify: the setting is the board’s: it survives a reload; Space turns it back to mentions', async () => {
+		await page.reload({ waitUntil: 'networkidle' });
+		await page.waitForSelector('.agent-page .ch');
+		expect(await pressed(page, '#kudos'), 'lost on reload');
+		await bell(page, '#kudos').focus();
+		await page.keyboard.press('Space');
+		await settle(page);
+		expect(!(await pressed(page, '#kudos')), 'still pressed after Space');
+		await page.reload({ waitUntil: 'networkidle' });
+		await page.waitForSelector('.agent-page .ch');
+		expect(!(await pressed(page, '#kudos')), 'pressed again after reload');
+	});
+	await check('notify: a refused change leaves the bell as it was and says so; Retry applies it', async () => {
+		await page.route('**/v1/rpc', async (route) => {
+			const body = JSON.parse(route.request().postData() ?? '{}');
+			if (body.op !== 'owner.notify') return route.fallback();
+			await route.fulfill({ json: { ok: false, error: { code: 'internal', message: 'the store did not answer' } } });
+		});
+		await bell(page, '#lobby').click();
+		await settle(page);
+		const alert = (await page.locator('.agent-page .notify-error [role=alert]').textContent()) ?? '';
+		expect(!(await pressed(page, '#lobby')), 'pressed after a refusal');
+		expect(/Could not change #lobby: the store did not answer\./.test(alert), alert);
+		await page.unroute('**/v1/rpc');
+		await page.locator('.agent-page .notify-error button', { hasText: 'Retry' }).click();
+		await settle(page);
+		expect((await pressed(page, '#lobby')) && (await page.locator('.agent-page .notify-error').count()) === 0, 'retry did not apply');
+		await bell(page, '#lobby').click();
+		await settle(page);
+		expect(!(await pressed(page, '#lobby')), 'not reset');
+	});
+	await check('notify: a refused change stays with its agent: no Retry on another agent’s page; back on it, Retry changes that agent', async () => {
+		await page.route('**/v1/rpc', async (route) => {
+			const body = JSON.parse(route.request().postData() ?? '{}');
+			if (body.op !== 'owner.notify') return route.fallback();
+			await route.fulfill({ json: { ok: false, error: { code: 'internal', message: 'the store did not answer' } } });
+		});
+		await bell(page, '#lobby').click();
+		await settle(page);
+		await page.unroute('**/v1/rpc');
+		expect((await page.locator('.agent-page .notify-error').count()) === 1, 'no error line');
+		const before = sent.length;
+		// by the rail's links, as a person goes: the agent page's layout stays mounted
+		await page.locator('a[href="#/a/dakai-helper"]').first().click();
+		await page.locator('.agent-page .list h1', { hasText: 'dakai-helper' }).waitFor();
+		await settle(page);
+		expect((await page.locator('.agent-page .notify-error').count()) === 0, 'desk’s failure shows on dakai-helper’s page');
+		await page.locator('a[href="#/a/desk"]').first().click();
+		await page.locator('.agent-page .list h1', { hasText: /^desk$/ }).waitFor();
+		await page.locator('.agent-page .notify-error button', { hasText: 'Retry' }).click();
+		await settle(page);
+		const retried = sent.slice(before).map((r) => [r.body.agent, r.body.channel, r.body.notify]);
+		expect(JSON.stringify(retried) === JSON.stringify([['kdobmayer/desk', '#lobby', 'all']]), JSON.stringify(retried));
+		expect(await pressed(page, '#lobby'), 'retry did not apply');
+		await bell(page, '#lobby').click();
+		await settle(page);
+		expect(!(await pressed(page, '#lobby')), 'not reset');
+	});
+	await check('notify: a rail read sent before a later change never lands over it', async () => {
+		// the first change's rail read is held until the second change's read has landed
+		let release = null;
+		let reads = 0;
+		await page.route('**/v1/rpc', async (route) => {
+			const body = JSON.parse(route.request().postData() ?? '{}');
+			if (body.op !== 'owner.list') return route.fallback();
+			const response = await route.fetch();
+			if (++reads === 1) await new Promise((resolve) => (release = resolve));
+			await route.fulfill({ response });
+		});
+		await bell(page, '#kudos').click();
+		for (let i = 0; i < 100 && !release; i++) await page.waitForTimeout(20);
+		expect(release, 'no rail read after the first change');
+		await bell(page, '#kudos').click();
+		await settle(page);
+		expect(!(await pressed(page, '#kudos')), 'pressed after the second change');
+		release();
+		await settle(page);
+		expect(!(await pressed(page, '#kudos')), 'the first change’s read put every post back');
+		await page.unroute('**/v1/rpc');
+		await page.reload({ waitUntil: 'networkidle' });
+		await page.waitForSelector('.agent-page .ch');
+		expect(!(await pressed(page, '#kudos')), 'the board holds every post');
+	});
+	await context.close();
+	const phone = await openFeed({ width: 390, height: 844 }, '#/a/desk', { label: 'notify', wait: '.agent-page .ch' });
+	await check('notify on the phone: a 44 px target that a tap toggles, no sideways scroll', async () => {
+		const b = await box(phone.page, '.agent-page .ch:has(a[href="#/c/kudos"]) button.notify');
+		expect(b.width >= 44 && b.height >= 44 && b.x + b.width <= 390, JSON.stringify(b));
+		await bell(phone.page, '#kudos').tap();
+		await settle(phone.page);
+		expect(await pressed(phone.page, '#kudos'), 'tap did not turn it on');
+		await bell(phone.page, '#kudos').tap();
+		await settle(phone.page);
+		expect(!(await pressed(phone.page, '#kudos')), 'tap did not turn it off');
+		const w = await phone.page.evaluate(() => document.documentElement.scrollWidth);
+		expect(w <= 390, `scroll width ${w}`);
 	});
 	await phone.context.close();
 }

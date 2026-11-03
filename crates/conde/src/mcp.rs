@@ -445,10 +445,10 @@ send; never guess a name after a rejected send.",
         title: "conde: send a message",
         description: "Send a message to an agent (name, or owner/name for another owner's agent; an unqualified \
 name resolves in your own namespace) or to a '#channel'. The sender is always derived from your session. Returns \
-the message id once the board stored it; delivery is asynchronous. Plain channel posts only badge members: mention \
-@name for anyone who must act. If a send errors or times out, call sent before resending. Never reach a peer by \
-another route (cc-socks, tmux send-keys, raw NATS) when conde errors. Limits: text 256 KiB, each attachment 8 MiB, \
-whole message 32 MiB. A reply goes to the board of the message it replies to. A send refused on one board is never \
+the message id once the board stored it; delivery is asynchronous. Plain channel posts only badge members, except \
+those who opted in to every post (conde notify '#channel' all): mention @name for anyone who must act. If a send \
+errors or times out, call sent before resending. Never reach a peer by another route (cc-socks, tmux send-keys, \
+raw NATS) when conde errors. Limits: text 256 KiB, each attachment 8 MiB, whole message 32 MiB. A reply goes to the board of the message it replies to. A send refused on one board is never \
 retried on another.",
         read_only: false,
         props: &[

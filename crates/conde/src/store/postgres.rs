@@ -138,6 +138,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("migrations/0018_keycloak_account.sql"),
     ),
     (19, "welcome", include_str!("migrations/0019_welcome.sql")),
+    (
+        20,
+        "membership_notify",
+        include_str!("migrations/0020_membership_notify.sql"),
+    ),
 ];
 
 /// Session lock held while migrating.
@@ -1765,6 +1770,39 @@ impl Tx for PgTx {
         Ok(())
     }
 
+    fn membership_notify(&self, channel_id: &str, agent_id: &str) -> StoreResult<Option<String>> {
+        Ok(self
+            .query_opt(
+                "SELECT notify FROM memberships WHERE channel_id = $1 AND agent_id = $2",
+                &[&channel_id, &agent_id],
+            )?
+            .map(|r| r.get(0)))
+    }
+
+    fn set_membership_notify(
+        &self,
+        channel_id: &str,
+        agent_id: &str,
+        notify: &str,
+    ) -> StoreResult<()> {
+        self.execute(
+            "UPDATE memberships SET notify = $3 WHERE channel_id = $1 AND agent_id = $2",
+            &[&channel_id, &agent_id, &notify],
+        )?;
+        Ok(())
+    }
+
+    fn channel_notify_all_ids(&self, channel_id: &str) -> StoreResult<Vec<String>> {
+        Ok(self
+            .query(
+                "SELECT agent_id FROM memberships WHERE channel_id = $1 AND notify = 'all' ORDER BY agent_id",
+                &[&channel_id],
+            )?
+            .iter()
+            .map(|r| r.get(0))
+            .collect())
+    }
+
     fn channel_summaries(&self) -> StoreResult<Vec<ChannelSummary>> {
         Ok(self
             .query(
@@ -1784,14 +1822,19 @@ impl Tx for PgTx {
             .collect())
     }
 
-    fn channel_member_status(&self, channel_id: &str) -> StoreResult<Vec<(String, i64)>> {
-        self.pairs(
-            "SELECT u.name || '/' || a.name_lower,
-                (SELECT COUNT(*) FROM messages m WHERE m.channel_id = x.channel_id AND m.commit_seq > x.read_seq)
-             FROM memberships x JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
-             WHERE x.channel_id = $1 ORDER BY 1",
-            &[&channel_id],
-        )
+    fn channel_member_status(&self, channel_id: &str) -> StoreResult<Vec<(String, i64, String)>> {
+        Ok(self
+            .query(
+                "SELECT u.name || '/' || a.name_lower,
+                    (SELECT COUNT(*) FROM messages m WHERE m.channel_id = x.channel_id AND m.commit_seq > x.read_seq),
+                    x.notify
+                 FROM memberships x JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
+                 WHERE x.channel_id = $1 ORDER BY 1",
+                &[&channel_id],
+            )?
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect())
     }
 
     fn channel_message_ids(&self, channel_id: &str) -> StoreResult<Vec<String>> {
@@ -2657,7 +2700,8 @@ impl Tx for PgTx {
                         (SELECT created_at FROM messages WHERE channel_id = c.channel_id
                          ORDER BY commit_seq DESC LIMIT 1),
                         (SELECT COUNT(*) FROM messages m WHERE m.channel_id = c.channel_id
-                         AND m.commit_seq > x.read_seq AND m.sender_agent_id <> x.agent_id)
+                         AND m.commit_seq > x.read_seq AND m.sender_agent_id <> x.agent_id),
+                        x.notify
                  FROM memberships x JOIN channels c ON c.channel_id = x.channel_id
                  JOIN agents a ON a.agent_id = x.agent_id JOIN users u ON u.user_id = a.owner_id
                  WHERE a.owner_id = $1 ORDER BY a.name_lower, c.name_lower",
@@ -2672,6 +2716,7 @@ impl Tx for PgTx {
                 last_seq: r.get(4),
                 last_at: r.get(5),
                 unread: r.get(6),
+                notify: r.get(7),
             })
             .collect())
     }

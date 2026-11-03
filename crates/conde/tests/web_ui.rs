@@ -125,6 +125,7 @@ on_both!(
     a_connected_bridge_keeps_its_host_online,
     the_slack_instance_is_never_a_host,
     the_built_app_reads_through_the_real_ops,
+    the_owner_sets_notify_for_their_own_agents_only,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -209,6 +210,29 @@ impl Ui {
     async fn rpc(&self, b: &Browser, csrf: &str, op: &str, body: Value) -> (StatusCode, Value) {
         let request =
             json!({"v": 1, "type": "request", "request_id": "r1", "op": op, "body": body});
+        let r = b
+            .step
+            .post(self.env.url("/v1/rpc"))
+            .header("x-csrf-token", csrf)
+            .header(header::ORIGIN, &self.env.base)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        (r.status(), r.json().await.unwrap_or(Value::Null))
+    }
+
+    /// One browser RPC that writes: the request carries `key` as its idempotency key.
+    async fn mutate(
+        &self,
+        b: &Browser,
+        csrf: &str,
+        op: &str,
+        body: Value,
+        key: &str,
+    ) -> (StatusCode, Value) {
+        let request = json!({"v": 1, "type": "request", "request_id": "r1", "op": op, "body": body,
+                             "idempotency_key": key});
         let r = b
             .step
             .post(self.env.url("/v1/rpc"))
@@ -846,7 +870,7 @@ async fn the_owner_sees_what_their_agents_can_read_and_nothing_else(d: Arc<Dispa
     assert_eq!(
         worker["channels"],
         json!([{"channel": "#team", "topic": "daily status", "last_seq": c.team_post["seq"],
-        "last_at": worker["channels"][0]["last_at"], "unread": 2}]),
+        "last_at": worker["channels"][0]["last_at"], "unread": 2, "notify": "mentions"}]),
         "scout's join notice and post"
     );
     let helper = &agents[0];
@@ -3049,4 +3073,155 @@ async fn an_encoded_traversal_never_leaves_the_build() {
         StatusCode::NOT_FOUND,
         "a file outside the build was served: {body}"
     );
+}
+
+// --- the owner's one write: an own agent's notify setting ----------------------------------------
+
+async fn the_owner_sets_notify_for_their_own_agents_only(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let body = |agent: &str, channel: &str, notify: &str| json!({"agent": agent, "channel": channel, "notify": notify});
+    let (status, v) = ui
+        .mutate(
+            &b,
+            &csrf,
+            "owner.notify",
+            body("worker", "#team", "all"),
+            "k1",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["result"],
+        json!({"agent": format!("{USER}/worker"), "channel": "#team", "notify": "all"}),
+        "{v}"
+    );
+    // the same key again is the same answer
+    let (_, again) = ui
+        .mutate(
+            &b,
+            &csrf,
+            "owner.notify",
+            body("worker", "#team", "all"),
+            "k1",
+        )
+        .await;
+    assert_eq!(again["result"], v["result"]);
+    let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    let worker = rail["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == format!("{USER}/worker"))
+        .unwrap();
+    assert_eq!(worker["channels"][0]["notify"], "all", "{worker}");
+    // from now on an agent's plain post reaches worker
+    let post = ui
+        .op(
+            &c.dv,
+            &c.scout,
+            "message.send",
+            json!({"to": {"channel": "#team"}, "text": "plain post"}),
+        )
+        .await;
+    let (d2, mid) = (
+        ui.d.clone(),
+        post["message_id"].as_str().unwrap().to_string(),
+    );
+    let pushed: Vec<(String, String)> =
+        blocking(move || d2.with_conn(|t| t.notifications()).unwrap())
+            .await
+            .into_iter()
+            .filter(|n| n.message_id == mid)
+            .map(|n| (n.recipient_name, n.kind))
+            .collect();
+    assert_eq!(pushed, [(format!("{USER}/worker"), "post".to_string())]);
+
+    // never another owner's agent, nor a channel the own agent is not in, nor a bad value
+    for (b_, code) in [
+        (body("david/scout", "#team", "all"), "forbidden"),
+        (body("scout", "#team", "all"), "not_found"),
+        (body("worker", "#secret", "all"), "forbidden"),
+        (body("helper", "#team", "all"), "forbidden"),
+        (body("worker", "#team", "loud"), "bad_request"),
+    ] {
+        let (_, v) = ui
+            .mutate(
+                &b,
+                &csrf,
+                "owner.notify",
+                b_.clone(),
+                &conde::util::new_ulid(),
+            )
+            .await;
+        assert_eq!(v["error"]["code"], code, "{b_}: {v}");
+    }
+    let members = ui
+        .op(
+            &c.dv,
+            &c.scout,
+            "channel.members",
+            json!({"channel": "#team"}),
+        )
+        .await;
+    assert!(
+        members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["name"] == format!("{USER}/worker") || m["notify"] == "mentions"),
+        "{members}"
+    );
+    // a write needs its idempotency key, like every write
+    let (_, v) = ui
+        .rpc(
+            &b,
+            &csrf,
+            "owner.notify",
+            body("worker", "#team", "mentions"),
+        )
+        .await;
+    assert_eq!(v["error"]["code"], "bad_request", "{v}");
+    // an agent never sets it through the owner op, not even for itself
+    let (d2, mut req) = (
+        ui.d.clone(),
+        Request::new("r", "owner.notify", body("worker", "#team", "mentions")),
+    );
+    req.actor = Some(c.worker.clone());
+    req.idempotency_key = Some("k2".into());
+    let k = c.k.clone();
+    let resp = blocking(move || d2.dispatch(&k, &req)).await;
+    assert_eq!(
+        resp.error.map(|e| e.code),
+        Some(conde::protocol::ErrorCode::Forbidden)
+    );
+    // the browser's key answers no bearer request of the same user, which is refused, never replayed
+    let (d2, mut req) = (
+        ui.d.clone(),
+        Request::new("r", "owner.notify", body("worker", "#team", "all")),
+    );
+    req.idempotency_key = Some("k1".into());
+    let k = c.k.clone();
+    let resp = blocking(move || d2.dispatch(&k, &req)).await;
+    assert_eq!(
+        resp.error.map(|e| e.code),
+        Some(conde::protocol::ErrorCode::Forbidden)
+    );
+    // nor one whose raw actor spells the browser's scope
+    let (d2, mut req) = (
+        ui.d.clone(),
+        Request::new("r", "owner.notify", body("worker", "#team", "all")),
+    );
+    req.actor = Some("browser:".into());
+    req.idempotency_key = Some("k1".into());
+    let k = c.k.clone();
+    let resp = blocking(move || d2.dispatch(&k, &req)).await;
+    assert_eq!(
+        resp.error.map(|e| e.code),
+        Some(conde::protocol::ErrorCode::Forbidden),
+        "{:?}",
+        resp.result
+    );
+    ui.server.shutdown().await.unwrap();
 }

@@ -33,6 +33,26 @@ fn parse_topic(raw: &str) -> OpResult<Option<String>> {
     Ok((!topic.is_empty()).then(|| topic.to_string()))
 }
 
+/// A membership's notify setting: `mentions` (DMs, mentions and humans' posts push; the
+/// default) or `all` (every post pushes).
+pub fn parse_notify(raw: &str) -> OpResult<&'static str> {
+    match raw {
+        "mentions" => Ok("mentions"),
+        "all" => Ok("all"),
+        _ => Err(bad_request(format!(
+            "notify is 'mentions' or 'all', not '{raw}'"
+        ))),
+    }
+}
+
+/// The member's notify setting.
+fn notify_of(ctx: &Ctx, channel: &Channel, agent_id: &str) -> OpResult<String> {
+    Ok(ctx
+        .db
+        .membership_notify(&channel.id, agent_id)?
+        .unwrap_or_else(|| "mentions".to_string()))
+}
+
 pub fn by_name(db: &dyn Tx, name: &str) -> OpResult<Option<Channel>> {
     Ok(db.channel_by_name(name)?)
 }
@@ -111,15 +131,26 @@ pub fn topic(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({"channel": format!("#{}", channel.name), "topic": topic}))
 }
 
+/// `channel.join` {channel, notify?}: joins with `notify` (default `mentions`); a member that
+/// names `notify` again changes its setting.
 pub fn join(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
     agents::unprotected(ctx, &me)?;
     let channel = existing(ctx, str_param(body, "channel")?)?;
+    let notify = opt_str(body, "notify")?.map(parse_notify).transpose()?;
     let label = format!("#{}", channel.name);
     if read_seq(ctx.db, &channel.id, &me.id)?.is_some() {
-        return Ok(json!({"channel": label, "already_member": true, "topic": channel.topic}));
+        if let Some(n) = notify {
+            ctx.db.set_membership_notify(&channel.id, &me.id, n)?;
+        }
+        let notify = notify_of(ctx, &channel, &me.id)?;
+        return Ok(
+            json!({"channel": label, "already_member": true, "topic": channel.topic, "notify": notify}),
+        );
     }
     add_member(ctx, &channel, &me.id)?;
+    let notify = notify.unwrap_or("mentions");
+    ctx.db.set_membership_notify(&channel.id, &me.id, notify)?;
     let text = format!("@{} joined {label}.", me.canonical());
     let post = insert_message(
         ctx,
@@ -132,8 +163,18 @@ pub fn join(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     )?
     .id;
     Ok(
-        json!({"channel": label, "already_member": false, "message_id": post, "topic": channel.topic}),
+        json!({"channel": label, "already_member": false, "message_id": post, "topic": channel.topic,
+               "notify": notify}),
     )
+}
+
+/// `channel.notify` {channel, notify}: the caller sets its own membership's notify setting.
+pub fn notify(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    let me = ctx.me()?;
+    let channel = member_channel(ctx, &me, str_param(body, "channel")?)?;
+    let notify = parse_notify(str_param(body, "notify")?)?;
+    ctx.db.set_membership_notify(&channel.id, &me.id, notify)?;
+    Ok(json!({"channel": format!("#{}", channel.name), "notify": notify}))
 }
 
 pub fn leave(ctx: &Ctx, body: &Value) -> OpResult<Value> {
@@ -186,7 +227,8 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     Ok(json!({"channels": channels}))
 }
 
-/// Who belongs to a channel; read positions (`behind`) only for a member, like its content.
+/// Who belongs to a channel; read positions (`behind`) and notify settings only for a member,
+/// like its content.
 pub fn members(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     let channel = existing(ctx, str_param(body, "channel")?)?;
     let member = match ctx.me() {
@@ -197,9 +239,9 @@ pub fn members(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         .db
         .channel_member_status(&channel.id)?
         .into_iter()
-        .map(|(name, behind)| {
+        .map(|(name, behind, notify)| {
             if member {
-                json!({"name": name, "behind": behind})
+                json!({"name": name, "behind": behind, "notify": notify})
             } else {
                 json!({"name": name})
             }

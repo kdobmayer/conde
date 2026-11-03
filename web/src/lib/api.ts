@@ -61,16 +61,20 @@ async function post(request: object, s: Session): Promise<Response> {
 	});
 }
 
-/** One read (the web app writes nothing); retried after a dropped connection and once after
- * a session reload. */
+/** One read; retried after a dropped connection and once after a session reload. */
 export async function rpc<T>(op: string, body: object = {}): Promise<T> {
-	const request: Record<string, unknown> = {
-		v: 1,
-		type: 'request',
-		request_id: crypto.randomUUID(),
-		op,
-		body
-	};
+	return send<T>({ v: 1, type: 'request', request_id: crypto.randomUUID(), op, body });
+}
+
+/** One change by the owner (the only writes are the owner's own settings): like {@link rpc}, with
+ * one idempotency key for the call, so a retry after a dropped connection or a session reload
+ * is answered with the first commit instead of applying twice. */
+export async function mutate<T>(op: string, body: object = {}): Promise<T> {
+	const key = crypto.randomUUID();
+	return send<T>({ v: 1, type: 'request', request_id: key, idempotency_key: key, op, body });
+}
+
+async function send<T>(request: Record<string, unknown>): Promise<T> {
 	try {
 		return await call<T>(request);
 	} catch (e) {

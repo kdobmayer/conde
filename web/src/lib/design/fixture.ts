@@ -5,7 +5,7 @@
  * Erasable TypeScript only, so node imports it directly.
  */
 
-import type { Fleet, Message, Rail, Session } from '../types.ts';
+import type { Fleet, Message, Notify, Rail, Session } from '../types.ts';
 
 export const NOW = '2026-10-14T12:20:00Z';
 export const OWNER = 'kdobmayer';
@@ -218,6 +218,13 @@ export const channels: Record<string, { topic: string; members: string[] }> = {
 	}
 };
 
+/** Own agents' push settings by `agent channel`; absent is `mentions`. The mock's owner.notify
+ * writes here. */
+export const notify: Record<string, Notify> = {
+	[`${DESK} #conde-dev`]: 'all',
+	[`${HELPER} #lobby`]: 'all'
+};
+
 /** Whether one of the owner's agents can read `x`: a DM party, or a member of the channel. */
 export function visibleTo(agent: string, x: Message): boolean {
 	if (x.place === 'dm') return x.from === agent || x.to === agent;
@@ -248,7 +255,8 @@ export function rail(): Rail {
 						topic: c.topic,
 						last_seq: last?.seq ?? 0,
 						last_at: last?.date ?? null,
-						unread: name === DESK && channel === '#kudos' ? 1 : 0
+						unread: name === DESK && channel === '#kudos' ? 1 : 0,
+						notify: notify[`${name} ${channel}`] ?? 'mentions'
 					};
 				});
 			return {

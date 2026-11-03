@@ -1,9 +1,10 @@
 //! The web UI's reads: what the signed-in owner's own agents can read, derived from ownership
 //! and enforced in the store's SQL (an agent of the owner is a DM party or a channel member),
-//! plus the fleet. Nothing here writes; nothing needs an actor.
+//! plus the fleet; and its one write, an own agent's notify setting. Nothing needs an actor.
 //!
 //! - `owner.list`: per agent of the owner, its DM conversations (any counterpart) and the
-//!   channels it belongs to.
+//!   channels it belongs to, each with the agent's notify setting.
+//! - `owner.notify`: sets an own agent's notify setting in a channel it belongs to.
 //! - `owner.history`: one of those conversations in full, paged, with per-message delivery
 //!   state for messages the owner's agents sent (every recipient) or received (theirs).
 //! - `owner.feed`: everything the owner's agents can read, newest first, between two seq bounds,
@@ -94,7 +95,7 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         if let Some(Value::Array(chs)) = agents.get_mut(&c.agent_id).map(|a| &mut a["channels"]) {
             chs.push(
                 json!({"channel": format!("#{}", c.name), "topic": c.topic, "last_seq": c.last_seq,
-                            "last_at": c.last_at, "unread": c.unread}),
+                            "last_at": c.last_at, "unread": c.unread, "notify": c.notify}),
             );
         }
     }
@@ -113,6 +114,27 @@ pub(crate) fn own_agent(ctx: &Ctx, body: &Value) -> OpResult<Agent> {
     }
     agents::by_name(ctx.db, ctx.p.user_id, &name)?
         .ok_or_else(|| not_found(format!("you have no agent named '{name}'")))
+}
+
+/// `owner.notify` {agent, channel, notify}: sets the notify setting of one of the owner's agents
+/// in a channel that agent belongs to.
+pub fn notify(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    browser_only(ctx)?;
+    let agent = own_agent(ctx, body)?;
+    // a retired agent stays readable but takes no new setting, as the rail does not show it
+    if agent.retired {
+        return Err(not_found(format!(
+            "you have no agent named '{}'",
+            agent.canonical()
+        )));
+    }
+    let channel = channels::member_channel(ctx, &agent, str_param(body, "channel")?)?;
+    let notify = channels::parse_notify(str_param(body, "notify")?)?;
+    ctx.db
+        .set_membership_notify(&channel.id, &agent.id, notify)?;
+    Ok(
+        json!({"agent": agent.canonical(), "channel": format!("#{}", channel.name), "notify": notify}),
+    )
 }
 
 /// `owner.history`: `{"agent", "with"}` (a DM thread) or `{"agent", "channel"}` (a channel the

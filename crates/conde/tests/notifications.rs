@@ -415,3 +415,92 @@ fn channel_fanout_attempts_settle_only_their_recipient() {
     assert_eq!(b.status_of(&mid, "bob"), "delivered");
     assert_eq!(b.status_of(&mid, "carol"), "held");
 }
+
+// --- the per-membership notify setting ----------------------------------------
+
+/// (recipient name, kind) of every notification of `mid`.
+fn kinds(b: &Board, mid: &str) -> Vec<(String, String)> {
+    b.notifications()
+        .into_iter()
+        .filter_map(|(k, kind, _)| {
+            k.strip_prefix(&format!("{mid}."))
+                .map(|name| (name.to_string(), kind))
+        })
+        .collect()
+}
+
+#[test]
+fn an_opted_in_member_is_pushed_every_post_and_a_default_member_is_not() {
+    let b = setup();
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    let joined = b.ok(
+        BOB,
+        "channel.join",
+        json!({"channel": "#dev", "notify": "all"}),
+    );
+    assert_eq!(joined["notify"], "all");
+    b.ok(CAROL, "channel.join", json!({"channel": "#dev"}));
+    let post = b.send(ALICE, "#dev", "standup: shipped the parser");
+    assert_eq!(kinds(&b, &post), [("bob".to_string(), "post".to_string())]);
+    // the opted-in member's own post never comes back to it
+    let own = b.send(BOB, "#dev", "standup: reviewing");
+    assert!(kinds(&b, &own).is_empty(), "{:?}", kinds(&b, &own));
+    // a mention stays a mention, for the opted-in member too
+    let mention = b.send(ALICE, "#dev", "@bob @carol please review");
+    assert_eq!(
+        kinds(&b, &mention),
+        [
+            ("bob".to_string(), "mention".to_string()),
+            ("carol".to_string(), "mention".to_string())
+        ]
+    );
+    let mut br = b.bridge(FakeNotifier::default());
+    br.pass().unwrap();
+    let bob = br.notifier().sent_to("codex:t-bob");
+    let text = format!(
+        "conde: krisz/alice posted in #dev (message {post}). Read it with: conde read '#dev'"
+    );
+    assert!(bob.iter().any(|s| s.1.starts_with(&text)), "{bob:?}");
+}
+
+#[test]
+fn switching_back_to_mentions_stops_the_posts() {
+    let b = setup();
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    b.ok(BOB, "channel.join", json!({"channel": "#dev"}));
+    let r = b.ok(
+        BOB,
+        "channel.notify",
+        json!({"channel": "#dev", "notify": "all"}),
+    );
+    assert_eq!(r, json!({"channel": "#dev", "notify": "all"}));
+    let on = b.send(ALICE, "#dev", "first");
+    assert_eq!(kinds(&b, &on), [("bob".to_string(), "post".to_string())]);
+    b.ok(
+        BOB,
+        "channel.notify",
+        json!({"channel": "#dev", "notify": "mentions"}),
+    );
+    let off = b.send(ALICE, "#dev", "second");
+    assert!(kinds(&b, &off).is_empty(), "{:?}", kinds(&b, &off));
+}
+
+#[test]
+fn a_humans_post_is_one_post_push_for_an_opted_in_member() {
+    let b = setup();
+    b.ok(HUMAN, "channel.create", json!({"channel": "#ops"}));
+    b.ok(
+        ALICE,
+        "channel.join",
+        json!({"channel": "#ops", "notify": "all"}),
+    );
+    b.ok(BOB, "channel.join", json!({"channel": "#ops"}));
+    let mid = b.send(HUMAN, "#ops", "stop deploying, @bob");
+    assert_eq!(
+        kinds(&b, &mid),
+        [
+            ("alice".to_string(), "post".to_string()),
+            ("bob".to_string(), "mention".to_string())
+        ]
+    );
+}

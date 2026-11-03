@@ -963,3 +963,36 @@ fn an_unbound_name_human_is_taken_over_by_the_human_name() {
             .unwrap();
     assert!(seats.iter().all(|m| m.agent_id != now.id), "{seats:?}");
 }
+
+#[test]
+fn a_human_seated_with_notify_all_still_hears_only_pages() {
+    let (b, zed) = shared();
+    b.ok(ALICE, "channel.create", json!({"channel": "#dev"}));
+    b.call_as(
+        &zed,
+        ZBOT,
+        "channel.join",
+        json!({"channel": "#dev", "notify": "all"}),
+    )
+    .unwrap();
+    // a legacy seat of the human name, opted in
+    let (dev, human) = (
+        b.d.with_conn(|tx| tx.channel_by_name("dev"))
+            .unwrap()
+            .unwrap()
+            .id,
+        b.agent_id("human"),
+    );
+    b.d.with_tx(|tx| {
+        tx.insert_membership(&dev, &human, 0)?;
+        Ok(tx.set_membership_notify(&dev, &human, "all")?)
+    })
+    .unwrap();
+    let mid = b.send(ALICE, "#dev", "standup: green");
+    assert_eq!(
+        b.status_of(&mid, "zbot"),
+        "pending",
+        "the opted-in agent hears it"
+    );
+    assert_eq!(b.status_of(&mid, "human"), "none");
+}

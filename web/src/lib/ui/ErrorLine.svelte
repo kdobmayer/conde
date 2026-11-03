@@ -1,13 +1,18 @@
 <script lang="ts">
 	// A failed call, inline where the data would be: what failed, Retry, and, while the last good
-	// data stays on screen, the time it is from.
-	let { error, asOf = null, retry }: { error: string; asOf?: number | null; retry: () => void } = $props();
+	// data stays on screen, the time it is from. `what` names a failed change instead of a load.
+	let {
+		error,
+		asOf = null,
+		retry,
+		what = 'Could not load'
+	}: { error: string; asOf?: number | null; retry: () => void; what?: string } = $props();
 
 	const hhmm = (ms: number) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 </script>
 
 <p class="error-line" role="alert">
-	<span class="what">Could not load: {error}.</span>
+	<span class="what">{what}: {error}.</span>
 	{#if asOf !== null}<span class="muted">Showing data as of {hhmm(asOf)}.</span>{/if}
 	<button type="button" class="quiet" onclick={retry}>Retry</button>
 </p>

@@ -91,15 +91,28 @@ enum Cmd {
     },
     /// Create a '#channel' (you become a member).
     Create { channel: String },
-    /// Join an existing '#channel'.
-    Join { channel: String },
+    /// Join an existing '#channel'; already a member, --notify changes your setting.
+    Join {
+        channel: String,
+        /// What in the channel notifies you: 'mentions' (DMs, mentions and humans' posts; the
+        /// default) or 'all' (every post).
+        #[arg(long, value_parser = ["mentions", "all"])]
+        notify: Option<String>,
+    },
+    /// Set what in a '#channel' notifies you: 'all' (every post) or 'mentions' (DMs, mentions
+    /// and humans' posts; the default).
+    Notify {
+        channel: String,
+        #[arg(value_parser = ["mentions", "all"])]
+        notify: String,
+    },
     /// Add a registered agent to a '#channel'.
     Invite { name: String, channel: String },
     /// Leave a '#channel'.
     Leave { channel: String },
     /// List channels.
     Channels,
-    /// List a '#channel's members and how far behind they are.
+    /// List a '#channel's members, how far behind they are and who hears every post.
     Members { channel: String },
     /// Set a '#channel's topic; empty text clears it (its creator or a human).
     Topic { channel: String, text: String },
@@ -451,6 +464,15 @@ enum HistoryCmd {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+}
+
+/// `channel.join` / `channel.notify`'s setting as one line.
+fn notify_line(r: &Value) -> String {
+    let channel = r["channel"].as_str().unwrap_or_default();
+    match r["notify"].as_str() {
+        Some("all") => format!("notify in {channel}: all (every post)"),
+        _ => format!("notify in {channel}: mentions (DMs, mentions and humans' posts)"),
+    }
 }
 
 #[derive(Subcommand)]
@@ -1123,8 +1145,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let r = sx.call("channel.create", json!({"channel": channel}))?;
             println!("created {} (you are a member)", s(&r["channel"]));
         }
-        Cmd::Join { channel } => {
-            let r = sx.call("channel.join", json!({"channel": channel}))?;
+        Cmd::Join { channel, notify } => {
+            let r = sx.call(
+                "channel.join",
+                json!({"channel": channel, "notify": notify}),
+            )?;
             if r["already_member"].as_bool() == Some(true) {
                 println!("already a member of {}", s(&r["channel"]));
             } else {
@@ -1134,6 +1159,23 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     println!("topic: {topic}");
                 }
             }
+            if notify.is_some() {
+                // a server from before the setting ignores it and answers without one
+                if r["notify"].is_null() {
+                    bail!(
+                        "the board's server does not support --notify yet, so your notify setting in {} was not changed; the membership stands",
+                        s(&r["channel"])
+                    );
+                }
+                println!("{}", notify_line(&r));
+            }
+        }
+        Cmd::Notify { channel, notify } => {
+            let r = sx.call(
+                "channel.notify",
+                json!({"channel": channel, "notify": notify}),
+            )?;
+            println!("{}", notify_line(&r));
         }
         Cmd::Invite { name, channel } => {
             let r = sx.call("channel.invite", json!({"name": name, "channel": channel}))?;
@@ -1159,11 +1201,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Members { channel } => {
             let r = sx.call("channel.members", json!({"channel": channel}))?;
             for m in r["members"].as_array().into_iter().flatten() {
-                match m["behind"].as_i64() {
-                    Some(0) => println!("{}\tup to date", s(&m["name"])),
-                    Some(behind) => println!("{}\t{behind} behind", s(&m["name"])),
-                    None => println!("{}", s(&m["name"])),
+                let mut line = match m["behind"].as_i64() {
+                    Some(0) => format!("{}\tup to date", s(&m["name"])),
+                    Some(behind) => format!("{}\t{behind} behind", s(&m["name"])),
+                    None => s(&m["name"]).to_string(),
+                };
+                if m["notify"] == "all" {
+                    line.push_str("\tnotified of every post");
                 }
+                println!("{line}");
             }
         }
         Cmd::Register { name, address } => {

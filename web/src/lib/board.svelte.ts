@@ -5,6 +5,7 @@
  */
 
 import { currentSession, loadSession, onSession, rpc, signIn } from './api';
+import { inOrder } from './in-order';
 import type { Fleet, Rail, Session } from './types';
 
 export type Topic = 'messages' | 'delivery' | 'fleet';
@@ -74,16 +75,25 @@ export function changed(topics: Topic[]): void {
 	}, 150);
 }
 
-export async function refreshRail(): Promise<void> {
-	try {
-		const rail = await rpc<Rail>('owner.list');
+const railReads = inOrder(
+	() => rpc<Rail>('owner.list'),
+	(rail) => {
 		if (!sameOwner()) return;
 		board.rail = rail;
 		board.railAt = Date.now();
 		board.error = '';
-	} catch (e) {
-		board.error = (e as Error).message;
-	}
+	},
+	(e) => (board.error = e.message)
+);
+
+export function refreshRail(): Promise<void> {
+	return railReads.refresh();
+}
+
+/** A write's answer put on the rail at once; rail reads sent before the write no longer land. */
+export function changeRail(change: (rail: Rail) => Rail): void {
+	railReads.wrote();
+	if (board.rail) board.rail = change(board.rail);
 }
 
 export async function refreshFleet(): Promise<void> {

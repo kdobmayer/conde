@@ -6,7 +6,7 @@
 
 import { stateWord, type Tone } from './ui/state.ts';
 import { clock, countdown } from './time.ts';
-import type { Fleet, FleetAgent, Message, OwnerAgent, Rail } from './types.ts';
+import type { Fleet, FleetAgent, Message, Notify, OwnerAgent, Rail } from './types.ts';
 
 /** The parent `messages[i]` replies to, when that parent is not the message just above it. */
 export function replyContext(messages: Pick<Message, 'message_id' | 'reply_to'>[], i: number): string | null {
@@ -66,6 +66,8 @@ export interface Entry {
 	last_seq: number;
 	last_at: string | null;
 	unread: number;
+	/** A channel's push setting for the agent; DMs have none. */
+	notify?: Notify;
 }
 
 /** An agent's conversations: DMs newest first, then channels newest first. */
@@ -74,7 +76,7 @@ export function conversationsOf(a: OwnerAgent): { dms: Entry[]; channels: Entry[
 	return {
 		dms: a.dms.map((d) => ({ target: d.with, last_seq: d.last_seq, last_at: d.last_at, unread: d.unread })).sort(newest),
 		channels: a.channels
-			.map((c) => ({ target: c.channel, last_seq: c.last_seq, last_at: c.last_at, unread: c.unread }))
+			.map((c) => ({ target: c.channel, last_seq: c.last_seq, last_at: c.last_at, unread: c.unread, notify: c.notify }))
 			.sort(newest)
 	};
 }

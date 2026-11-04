@@ -12,7 +12,11 @@ fn install_ps1_installs_the_released_binary_for_this_user() {
     // Windows PowerShell 5.1 decodes a script served without a charset as ANSI
     assert!(INSTALL_PS1.is_ascii());
     assert!(INSTALL_PS1.contains(&format!("$name = '{WINDOWS_BINARY}'")));
-    assert!(INSTALL_PS1.contains(r"Join-Path $env:LOCALAPPDATA 'conde\bin'"));
+    // out of AppData (a packaged app's shells see new files there redirected); the old location's
+    // binary counts as the one it upgrades, and its PATH entry goes
+    assert!(INSTALL_PS1.contains(r"Join-Path $env:USERPROFILE '.conde\bin'"));
+    assert!(INSTALL_PS1.contains(r"$legacy = if ($env:CONDE_INSTALL_DIR -or -not $env:LOCALAPPDATA) { $null } else { Join-Path $env:LOCALAPPDATA 'conde\bin' }"));
+    assert!(INSTALL_PS1.contains("$entries = @($all | Where-Object { -not (& $is $_ $legacy) })"));
     assert!(INSTALL_PS1.contains("Join-Path $dir 'conde.exe'"));
     // the bucket layout install.sh and `conde update` read, from the same default base
     assert!(INSTALL_PS1.contains(&format!(

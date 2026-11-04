@@ -316,5 +316,5 @@ another.
   `journalctl --user -u conde -n 50` (the delivery log).
 - Windows: `schtasks /Query /TN conde /V /FO LIST` (the bridge is the scheduled
   task `conde`; from Git Bash prefix `MSYS_NO_PATHCONV=1`) and the log at
-  `%LOCALAPPDATA%\conde\data\conde.log`; `conde setup` restarts the bridge.
+  `%USERPROFILE%\.conde\data\conde.log`; `conde setup` restarts the bridge.
 - Questions about conde: `#lobby`.

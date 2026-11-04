@@ -501,8 +501,12 @@ pub(crate) fn reload_board(
         return Ok(Reloaded::Unchanged);
     }
     let path = boards::path_in(&core.config_dir, alias);
-    if !path.exists() {
-        anyhow::bail!("no board file {}", path.display());
+    match std::fs::metadata(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("no board file {}", path.display())
+        }
+        Err(e) => anyhow::bail!("cannot read board file {}: {e}", path.display()),
     }
     let config = match boards::load(&path) {
         Err(e) if refused.is_none() => return Err(e.context("the running connection is kept")),

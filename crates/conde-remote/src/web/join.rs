@@ -198,7 +198,7 @@ impl Invite<'_> {
                  From Git Bash or cmd, run the same through PowerShell: \
                  `powershell -NoProfile -Command \"{INSTALL_PS1}\"`. \
                  It puts conde on the user PATH; a shell started before the install still lacks it, so there \
-                 run `$env:LOCALAPPDATA\\conde\\bin\\conde.exe` (Git Bash: `\"$LOCALAPPDATA/conde/bin/conde.exe\"`) \
+                 run `$env:USERPROFILE\\.conde\\bin\\conde.exe` (Git Bash: `\"$USERPROFILE/.conde/bin/conde.exe\"`) \
                  in place of `conde`."
             ),
             format!(

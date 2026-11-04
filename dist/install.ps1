@@ -1,9 +1,10 @@
-# Install the conde binary for this Windows user, in %LOCALAPPDATA%\conde\bin (no admin).
+# Install the conde binary for this Windows user, in %USERPROFILE%\.conde\bin (no admin).
 #
 #   irm https://conde.cloud/install.ps1 | iex
 #
 # CONDE_VERSION picks a release (default: the one in `latest`); CONDE_DIST_BASE_URL overrides the
-# download base, CONDE_INSTALL_DIR the target directory. Adds the directory to the user PATH.
+# download base, CONDE_INSTALL_DIR the target directory. Adds the directory to the user PATH, in
+# place of %LOCALAPPDATA%\conde\bin, where releases up to 0.5.17 installed it.
 # Runs in Windows PowerShell 5.1 and PowerShell 7; never exits the calling shell.
 
 & {
@@ -12,7 +13,9 @@
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     $base = if ($env:CONDE_DIST_BASE_URL) { $env:CONDE_DIST_BASE_URL.TrimEnd('/') } else { 'https://storage.googleapis.com/conde-cloud-dist' }
-    $dir = if ($env:CONDE_INSTALL_DIR) { $env:CONDE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'conde\bin' }
+    # out of AppData: a packaged app's shells (the Claude desktop app) see new files there redirected
+    $dir = if ($env:CONDE_INSTALL_DIR) { $env:CONDE_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.conde\bin' }
+    $legacy = if ($env:CONDE_INSTALL_DIR -or -not $env:LOCALAPPDATA) { $null } else { Join-Path $env:LOCALAPPDATA 'conde\bin' }
 
     # x64 Windows, or Arm64 Windows 11 running it under x64 emulation; a 32-bit shell on either
     $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
@@ -80,12 +83,16 @@
         # binaries moved aside earlier; one a bridge still runs stays locked until it exits
         Get-ChildItem -LiteralPath $dir -Filter 'conde.exe*.old' -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
-        # an upgrade: what the old conde says it is, given at most 5 s (an old binary that hangs must not stop it)
-        $upgrade = Test-Path -LiteralPath $dest
+        # an upgrade, here or from the old location: what the old conde says it is, given at most 5 s
+        # (an old binary that hangs must not stop it)
+        $old = $null
+        if (Test-Path -LiteralPath $dest) { $old = $dest }
+        elseif ($legacy -and (Test-Path -LiteralPath (Join-Path $legacy 'conde.exe'))) { $old = Join-Path $legacy 'conde.exe' }
+        $upgrade = [bool]$old
         $previous = 'unknown version'
         if ($upgrade) {
             $probe = New-Object Diagnostics.Process
-            $probe.StartInfo.FileName = $dest
+            $probe.StartInfo.FileName = $old
             $probe.StartInfo.Arguments = '--version'
             $probe.StartInfo.UseShellExecute = $false
             $probe.StartInfo.RedirectStandardOutput = $true
@@ -104,17 +111,21 @@
                 try {
                     if ([version]$Matches[1] -gt [version]($version -replace '[.+-][0-9A-Za-z.+-]+$', '')) {
                         Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
-                        Write-Host "kept $dest ($previous): newer than v$version; set CONDE_VERSION=$version to install it anyway"
+                        Write-Host "kept $old ($previous): newer than v$version; set CONDE_VERSION=$version to install it anyway"
                         return
                     }
                 } catch { }
             }
             # a running bridge locks conde.exe; a locked file can still be renamed, to a fresh name
-            Move-Item -LiteralPath $dest -Destination ("$dest." + [guid]::NewGuid().ToString('N') + '.old') -Force
+            if ($old -eq $dest) {
+                Move-Item -LiteralPath $dest -Destination ("$dest." + [guid]::NewGuid().ToString('N') + '.old') -Force
+            }
         }
         Move-Item -LiteralPath $exe -Destination $dest -Force
         $installed = "$(& $dest --version)"
-        if ($upgrade) { Write-Host "replaced $dest ($previous) with $installed" } else { Write-Host "installed $dest ($installed)" }
+        if ($old -eq $dest) { Write-Host "replaced $dest ($previous) with $installed" }
+        elseif ($upgrade) { Write-Host "installed $dest ($installed) in place of $old ($previous); the old copy stays for shells started before" }
+        else { Write-Host "installed $dest ($installed)" }
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -122,22 +133,30 @@
     # the user PATH, edited in the registry so its value kind (and %VARIABLES%) stay as they are
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
     $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    $entries = @($raw -split ';' | Where-Object { $_ -ne '' })
-    $present = $entries | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $dir.TrimEnd('\') }
-    if (-not $present) {
+    $is = { param($entry, $d) $d -and [Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -ieq $d.TrimEnd('\') }
+    $all = @($raw -split ';' | Where-Object { $_ -ne '' })
+    # the old location's entry goes: the binary there no longer updates
+    $entries = @($all | Where-Object { -not (& $is $_ $legacy) })
+    $swapped = $entries.Count -ne $all.Count
+    $present = $entries | Where-Object { & $is $_ $dir }
+    if (-not $present -or $swapped) {
+        if (-not $present) { $entries += $dir }
         $kind = if ($raw) { $key.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
-        $key.SetValue('Path', (($entries + $dir) -join ';'), $kind)
+        $key.SetValue('Path', ($entries -join ';'), $kind)
         # setting a user variable through .NET broadcasts the change to Explorer and new terminals
         [Environment]::SetEnvironmentVariable('CONDE_PATH_REFRESH', '1', 'User')
         [Environment]::SetEnvironmentVariable('CONDE_PATH_REFRESH', $null, 'User')
         Write-Host ""
-        Write-Host "added $dir to your user PATH. This window has it now; open new terminals, and restart"
-        Write-Host "running Claude Code and Codex sessions, so their shells find conde."
+        if (-not $present -and $swapped) { Write-Host "added $dir to your user PATH in place of $legacy." }
+        elseif (-not $present) { Write-Host "added $dir to your user PATH." }
+        else { Write-Host "removed $legacy from your user PATH; $dir is on it." }
+        Write-Host "This window has it now; open new terminals, and restart running Claude Code and Codex"
+        Write-Host "sessions, so their shells find conde."
     }
     $key.Close()
-    if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $dir.TrimEnd('\') })) {
-        $env:Path = "$env:Path;$dir"
-    }
+    $session = @(($env:Path -split ';') | Where-Object { $_ -ne '' -and -not (& $is $_ $legacy) })
+    if (-not ($session | Where-Object { & $is $_ $dir })) { $session += $dir }
+    $env:Path = $session -join ';'
 
     Write-Host ""
     if ($upgrade) {

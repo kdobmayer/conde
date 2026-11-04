@@ -9,7 +9,10 @@
 //! installed over it. Otherwise the staged file is renamed over the target, so the binary is
 //! either the old one or the whole new one, and the bridge service restarts onto it. Windows
 //! cannot replace a running executable, but can rename it: the old binary moves aside to
-//! `<name>.<ulid>.old` first (as install.ps1 does), and a later update removes it.
+//! `<name>.<ulid>.old` first (as install.ps1 does), and a later update removes it. A Windows binary
+//! running from `%LOCALAPPDATA%\conde\bin`, where install.ps1 put it up to 0.5.17, first copies
+//! itself to `%USERPROFILE%\.conde\bin` and the update goes there; then the task, the MCP entries
+//! and the skills name the new place and the bridge restarts onto it ([`setup::set_up_moved`]).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -179,8 +182,33 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
         })?;
     let exe = std::env::current_exe().context("locating the conde binary")?;
     let target = check_target(&exe, running_id())?;
-    remove_moved_aside(&target);
     let mut host = setup::System;
+    // Windows, the binary install.ps1 placed in AppData up to 0.5.17: it moves first, and the
+    // update goes to the new place
+    let moving = match cfg!(windows) {
+        true => Some(Env::from_process()?).filter(|env| env.moved_exe().is_some()),
+        false => None,
+    };
+    let (target, moved) = match moving {
+        Some(env) if opts.check => {
+            if let Some(to) = env.moved_exe() {
+                writeln!(
+                    out,
+                    "conde update moves {} to {} (out of AppData)",
+                    target.display(),
+                    to.display()
+                )?;
+            }
+            (target, None)
+        }
+        Some(env) => {
+            let env = setup::adopt_home_bin(&env, &mut host, out)?
+                .context("moving the binary out of AppData")?;
+            (check_target(&env.exe, None)?, Some(env))
+        }
+        None => (target, None),
+    };
+    remove_moved_aside(&target);
     let installed = installed_version(&mut host, &target)?;
 
     let base = base_url();
@@ -227,14 +255,14 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     )? {
         Plan::Current => {
             writeln!(out, "conde {installed} is current")?;
-            return Ok(0);
+            return set_up_moved(moved.as_ref(), &mut host, out);
         }
         Plan::Newer => {
             writeln!(
                 out,
                 "conde {installed} is newer than the latest release {wanted}; nothing to do"
             )?;
-            return Ok(0);
+            return set_up_moved(moved.as_ref(), &mut host, out);
         }
         Plan::Install => {}
     }
@@ -280,7 +308,7 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     if now != installed {
         if now.cmp_precedence(&wanted) != std::cmp::Ordering::Less {
             writeln!(out, "conde {now} is current")?;
-            return Ok(0);
+            return set_up_moved(moved.as_ref(), &mut host, out);
         }
         bail!(
             "{} changed to conde {now} while this update ran; nothing installed (run conde update \
@@ -291,9 +319,31 @@ pub fn run(opts: Options, out: &mut dyn Write) -> anyhow::Result<i32> {
     staged.replace(&target)?;
     writeln!(out, "conde {installed} -> {wanted}")?;
 
+    if moved.is_some() {
+        return set_up_moved(moved.as_ref(), &mut host, out);
+    }
     let env = Env::from_process()?;
     setup::restart_service(&env, &mut host, out, &target)
         .context("the binary is updated, but restarting the bridge failed")?;
+    Ok(0)
+}
+
+/// After a binary moved out of AppData: name the new one in the task, the MCP entries and the
+/// skills, restarting the bridge onto it.
+fn set_up_moved(
+    moved: Option<&Env>,
+    host: &mut dyn setup::Host,
+    out: &mut dyn Write,
+) -> anyhow::Result<i32> {
+    let Some(env) = moved else {
+        return Ok(0);
+    };
+    if !setup::set_up_moved(env, host, out, true)? {
+        bail!(
+            "the binary moved to {}, but a part of conde setup failed; run conde setup",
+            env.exe.display()
+        );
+    }
     Ok(0)
 }
 
@@ -318,10 +368,12 @@ fn clear_quarantine(host: &mut dyn Host, path: &Path) {
 
 /// An exclusive lock on [`LOCK_NAME`] next to the target, released when dropped. The file stays:
 /// removing a lock file others may hold open would let two installers lock different files.
-struct Lock(#[allow(dead_code)] std::fs::File);
+pub struct Lock(#[allow(dead_code)] std::fs::File);
 
 impl Lock {
-    fn acquire(target: &Path) -> anyhow::Result<Lock> {
+    /// Held by every write of the binary at `target`: this update's replace, and setup's copy to
+    /// the new place ([`setup::adopt_home_bin`]).
+    pub fn acquire(target: &Path) -> anyhow::Result<Lock> {
         let path = target.with_file_name(LOCK_NAME);
         let file = std::fs::OpenOptions::new()
             .create(true)

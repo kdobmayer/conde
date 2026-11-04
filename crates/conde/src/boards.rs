@@ -38,7 +38,7 @@ impl std::fmt::Debug for BoardConfig {
     }
 }
 
-/// `$XDG_CONFIG_HOME/conde`, else `~/.config/conde`.
+/// `$XDG_CONFIG_HOME/conde`, else `~/.config/conde` (Windows: `%USERPROFILE%\.conde\config`).
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     Ok(credentials::path()?
         .parent()
@@ -397,10 +397,14 @@ pub fn legacy_path(config: &Path) -> PathBuf {
     config.join("credentials")
 }
 
-/// Every board file under `config`, by alias; a file that cannot be read keeps its error.
+/// Every board file under `config`, by alias; a file that cannot be read keeps its error, a
+/// directory that cannot be listed is logged.
 pub fn load_all(config: &Path) -> Vec<(String, anyhow::Result<BoardConfig>)> {
     enrolled_in(&config.join("boards"))
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!("board files not read: {e:#}");
+            Vec::new()
+        })
         .into_iter()
         .map(|alias| {
             let cfg = load(&path_in(config, &alias));

@@ -9,7 +9,7 @@ conde login --server https://<workspace>.conde.cloud
 ```
 
 `install.sh` puts the binary in `~/.local/bin`; `install.ps1` puts `conde.exe` in
-`%LOCALAPPDATA%\conde\bin` and adds that directory to the user PATH. Both read `CONDE_VERSION` (a
+`%USERPROFILE%\.conde\bin` and adds that directory to the user PATH. Both read `CONDE_VERSION` (a
 release, default the one `latest` names), `CONDE_INSTALL_DIR` and `CONDE_DIST_BASE_URL`, check the
 binary against its `SHA256SUMS` line, run it once, and print the same `Next:` lines. `conde update`
 reads the same files.
@@ -76,14 +76,25 @@ musl standard library and a C compiler for it exist (rusqlite compiles SQLite fr
 ## Windows notes
 
 - The bridge is the scheduled task `conde` (`conde setup` registers it with `schtasks /Create /XML`
-  from `%LOCALAPPDATA%\conde\conde-task.xml`): `conde daemon` at the user's logon, in the desktop
+  from `%USERPROFILE%\.conde\conde-task.xml`): `conde daemon` at the user's logon, in the desktop
   session, no time limit, restarted on failure. No administrator rights are needed.
 - A running `conde.exe` cannot be replaced but can be renamed: `install.ps1` and `conde update` move
   it aside to `conde.exe.<id>.old`, put the new binary in its place, and remove the old copies on
   their next run once nothing runs them.
-- The local board and the bridge log are in `%LOCALAPPDATA%\conde\data`, the board files and secrets
-  in `%APPDATA%\conde` (owner-only DACL), and the CLI reaches the bridge over the named pipe
-  `\\.\pipe\conde-<user>`.
+- The local board and the bridge log are in `%USERPROFILE%\.conde\data`, the board files and
+  secrets in `%USERPROFILE%\.conde\config` (owner-only DACL), and the CLI reaches the bridge over
+  the named pipe `\\.\pipe\conde-<user>`.
+- Nothing lives under `AppData`: a packaged (MSIX) app such as the Claude desktop app redirects new
+  files its shells create there to a private per-package copy that the bridge, outside the package,
+  never sees. Releases up to 0.5.17 used `%LOCALAPPDATA%\conde\bin`, `%APPDATA%\conde` and
+  `%LOCALAPPDATA%\conde\data`; only the bridge of a later release moves them, at its start while no
+  other bridge holds the pipe (`paths::first_run_moves`): the config directory file by file, the
+  data directory and the task file by one rename (never copied, so a database is never copied
+  open; on another volume it stays). A location whose move is pending stays in use
+  (`paths::in_use`), and a binary still running from the
+  old `bin` (the bridge after an update from 0.5.17, or `conde update` and `conde setup` run from
+  there) copies itself to the new one, swaps the user PATH entry and rewrites the task and the MCP
+  entries (`setup::adopt_home_bin`, `setup::set_up_moved`).
 
 ## macOS notes
 

@@ -41,6 +41,8 @@ struct Fake {
     info: Option<Result<BoardInfo, String>>,
     /// What `loginctl show-user <uid> --property=Linger --value` prints; None: the call fails.
     linger: Option<&'static str>,
+    /// What a `conde.exe --version` probe prints; None: the default empty answer.
+    exe_version: Option<&'static str>,
 }
 
 impl Fake {
@@ -64,6 +66,7 @@ impl Fake {
             daemon_calls: Vec::new(),
             info: None,
             linger: Some("no"),
+            exe_version: None,
         }
     }
 
@@ -143,6 +146,13 @@ impl Host for Fake {
                 stdout = format!(
                     "\"HOST\",\"\\conde\",\"N/A\",\"Running\",\"Interactive only\",\"10/29/2026 9:00:00 AM\",\"{last}\",\"krisz\"\r\n"
                 );
+            }
+            // the user PATH edit: it says when it changed the value
+            ("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", _]) => {
+                stdout = "changed\r\n".into()
+            }
+            ("conde.exe", ["--version"]) if self.exe_version.is_some() => {
+                stdout = format!("{}\n", self.exe_version.unwrap())
             }
             ("launchctl", ["bootstrap", ..]) => self.launchd_loaded = true,
             ("launchctl", ["bootout", _]) => self.launchd_loaded = false,
@@ -496,6 +506,7 @@ fn windows_env(root: &Path) -> Env {
         windows: Some(WindowsEnv {
             appdata: root.join("home/AppData/Roaming"),
             local_appdata: root.join("home/AppData/Local"),
+            install_dir: None,
             user_sid: "S-1-5-21-1004336348-1177238915-682003330-1001".into(),
         }),
         path: r"C:\Windows\system32;C:\Users\krisz\AppData\Local\conde\bin".into(),
@@ -521,11 +532,16 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
     let opts = Options::select(true, true, true, false);
     let mut host = Fake::new(&env, &["claude", "codex"]);
     let task = env.windows_task();
-    assert_eq!(task, root.join("home/AppData/Local/conde/conde-task.xml"));
-    assert_eq!(
-        env.boards_dir(),
-        root.join("home/AppData/Roaming/conde/boards")
-    );
+    // under %USERPROFILE%\.conde, out of AppData, which a packaged app's shells see redirected
+    assert_eq!(task, root.join("home/.conde/conde-task.xml"));
+    assert_eq!(env.boards_dir(), root.join("home/.conde/config/boards"));
+    assert_eq!(env.windows_log(), root.join("home/.conde/data/conde.log"));
+    // while a file is left at the old place from AppData, it stays in use, never a fresh new one
+    let old_config = root.join("home/AppData/Roaming/conde");
+    std::fs::create_dir_all(&old_config).unwrap();
+    std::fs::write(old_config.join("default-board"), "local\n").unwrap();
+    assert_eq!(env.boards_dir(), old_config.join("boards"));
+    std::fs::remove_dir_all(&old_config).unwrap();
 
     let (ok, out) = run(&env, &opts, &mut host);
     assert!(ok, "{out}");
@@ -608,7 +624,7 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
     let (ok, check) = verify(&env, &Options::select(false, false, true, false), &mut host);
     assert!(ok, "{check}");
     assert!(
-        check.contains("service: %USERPROFILE%\\AppData") && check.contains("up to date"),
+        check.contains("service: %USERPROFILE%\\.conde") && check.contains("up to date"),
         "{check}"
     );
 
@@ -672,6 +688,274 @@ fn windows_scheduled_task_runs_the_single_daemon_and_configs_land_at_windows_pat
         out.contains("set CLAUDE_CONFIG_DIR persistently (setx NAME value)"),
         "{out}"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The PowerShell script an `-EncodedCommand` call carries.
+fn decoded(call: &str) -> String {
+    use base64::Engine as _;
+    let b64 = call.rsplit(' ').next().unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    let units: Vec<u16> = bytes
+        .chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16(&units).unwrap()
+}
+
+/// 0.5.17 and earlier installed conde.exe in %LOCALAPPDATA%\conde\bin and named it in the task
+/// and the MCP entries. Run from there, conde copies itself to %USERPROFILE%\.conde\bin, swaps
+/// the user PATH entry, and the task, the Claude entry and the Codex entry name the new binary
+/// under their own names (the old binary counts as this one, not as another instance).
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
+#[test]
+fn windows_binary_moves_out_of_appdata_and_the_task_and_mcp_entries_follow() {
+    let root = temp_root();
+    let legacy_dir = root.join("home/AppData/Local/conde/bin");
+    let legacy = legacy_dir.join("conde.exe");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(&legacy, b"this build").unwrap();
+    let old = Env {
+        exe: legacy.clone(),
+        path: format!(r"C:\Windows\system32;{}", legacy_dir.display()),
+        ..windows_env(&root)
+    };
+    enrolled(&old);
+    // what 0.5.17's setup left: the task (moved to .conde by the first run) and both MCP entries
+    let task = old.windows_task();
+    std::fs::create_dir_all(task.parent().unwrap()).unwrap();
+    std::fs::write(&task, setup::utf16_file(&setup::task_xml(&old))).unwrap();
+    let sock = old.socket.display().to_string();
+    claude_servers(
+        &old,
+        json!({"conde": {"type": "stdio", "command": legacy.display().to_string(), "args": ["mcp"], "env": {"CONDE_SOCK": sock}}}),
+    );
+    std::fs::create_dir_all(old.codex_config().parent().unwrap()).unwrap();
+    std::fs::write(
+        old.codex_config(),
+        format!(
+            "[mcp_servers.conde]\ncommand = '{}'\nargs = [\"mcp\"]\nenv = {{ CONDE_SOCK = '{sock}' }}\n",
+            legacy.display()
+        ),
+    )
+    .unwrap();
+    let new_exe = root.join("home/.conde/bin/conde.exe");
+    assert_eq!(old.moved_exe(), Some(new_exe.clone()));
+    let mut host = Fake::new(&old, &["claude", "codex"]);
+    host.alive = true;
+    host.daemon
+        .insert("board.list", Ok(json!({"boards": [{"board": "local"}]})));
+
+    // setup --check names the old place
+    let (ok, check) = verify(&old, &Options::select(false, false, true, false), &mut host);
+    assert!(!ok, "{check}");
+    assert!(
+        check.contains(r"ISSUE   binary: %USERPROFILE%\AppData/Local/conde/bin/conde.exe is where conde was up to 0.5.17; it belongs in %USERPROFILE%\.conde/bin/conde.exe; run: conde setup"),
+        "{check}"
+    );
+    host.take_calls();
+
+    let mut out = Vec::new();
+    let env = setup::adopt_home_bin(&old, &mut host, &mut out)
+        .unwrap()
+        .expect("the binary moves");
+    let said = String::from_utf8(out).unwrap();
+    assert_eq!(env.exe, new_exe);
+    assert_eq!(std::fs::read(&new_exe).unwrap(), b"this build");
+    assert!(
+        legacy.exists(),
+        "the old copy stays for shells started before"
+    );
+    assert_eq!(
+        env.path,
+        format!(
+            r"C:\Windows\system32;{}",
+            new_exe.parent().unwrap().display()
+        )
+    );
+    assert!(said.contains("conde: copied "), "{said}");
+    assert!(said.contains("your user PATH has "), "{said}");
+    let calls = host.take_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].starts_with("powershell -NoProfile -NonInteractive -EncodedCommand "));
+    let script = decoded(&calls[0]);
+    assert!(
+        script.contains(&format!(
+            "$old = '{}'; $new = '{}'",
+            legacy_dir.display(),
+            new_exe.parent().unwrap().display()
+        )),
+        "{script}"
+    );
+    assert!(script.contains("DoNotExpandEnvironmentNames"), "{script}");
+    assert_eq!(env.moved_exe(), None, "moved once");
+
+    // conde update's half: the task names the new binary and the bridge restarts onto it; the
+    // Claude and Codex entries keep the name conde and run the new binary
+    let mut out = Vec::new();
+    assert!(setup::set_up_moved(&env, &mut host, &mut out, true).unwrap());
+    let said = String::from_utf8(out).unwrap();
+    let calls = host.take_calls();
+    let create = format!("schtasks /Create /TN conde /XML {} /F", task.display());
+    for want in [
+        "claude mcp remove --scope user conde".to_string(),
+        add_call(&env, "conde"),
+        create.clone(),
+        "schtasks /End /TN conde".into(),
+        "schtasks /Run /TN conde".into(),
+    ] {
+        assert!(calls.contains(&want), "{want} not in {calls:?}");
+    }
+    assert!(!said.contains("another conde instance"), "{said}");
+    assert!(said.contains("service: restarted conde"), "{said}");
+    let xml = utf16(&std::fs::read(&task).unwrap());
+    assert!(
+        xml.contains(&format!("<Command>{}</Command>", new_exe.display())),
+        "{xml}"
+    );
+    let claude = serde_json::from_str::<Value>(&read(&env.claude_json())).unwrap();
+    assert_eq!(
+        claude["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["conde"]
+    );
+    assert_eq!(
+        claude["mcpServers"]["conde"]["command"],
+        new_exe.display().to_string()
+    );
+    let codex = read(&env.codex_config());
+    assert!(
+        codex.contains(&new_exe.display().to_string()) && !codex.contains("AppData"),
+        "{codex}"
+    );
+    assert!(!codex.contains("[mcp_servers.conde-"), "{codex}");
+
+    // the task already names the new binary (the bridge moved it): conde update still restarts
+    // the bridge onto it, though the bridge knows every board and runs the build of the old
+    // binary that runs the update (the one it replaced at the new place)
+    host.daemon.insert(
+        "board.list",
+        Ok(json!({"boards": [{"board": "local"}, {"board": "dakai"}]})),
+    );
+    host.daemon
+        .insert("doctor", Ok(json!({"build": conde::VERSION})));
+    let mut out = Vec::new();
+    assert!(setup::set_up_moved(&env, &mut host, &mut out, true).unwrap());
+    let said = String::from_utf8(out).unwrap();
+    let calls = host.take_calls();
+    assert!(!calls.contains(&create), "unchanged: {calls:?}");
+    for want in ["schtasks /End /TN conde", "schtasks /Run /TN conde"] {
+        assert!(calls.iter().any(|c| c == want), "{want} not in {calls:?}");
+    }
+    assert!(said.contains("service: restarted conde"), "{said}");
+
+    // the bridge's half (it runs as the task): the task is only re-registered, never ended
+    std::fs::write(&task, setup::utf16_file(&setup::task_xml(&old))).unwrap();
+    let mut out = Vec::new();
+    assert!(setup::set_up_moved(&env, &mut host, &mut out, false).unwrap());
+    let calls = host.take_calls();
+    assert_eq!(calls.last(), Some(&create), "{calls:?}");
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("/End") || c.contains("/Run")),
+        "{calls:?}"
+    );
+
+    // an old terminal still runs an older build from the old place: the newer one at the new
+    // place stays (never a downgrade), and setup names it; an older one there is replaced
+    std::fs::write(&legacy, b"an older build").unwrap();
+    host.exe_version = Some("conde 99.0.0 (abc 2026-11-04)");
+    let mut out = Vec::new();
+    let kept = setup::adopt_home_bin(&old, &mut host, &mut out)
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.exe, new_exe);
+    assert_eq!(std::fs::read(&new_exe).unwrap(), b"this build");
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("is this build or newer; it stays")
+    );
+    host.exe_version = Some("conde 0.0.1 (abc 2026-01-01)");
+    let mut out = Vec::new();
+    setup::adopt_home_bin(&old, &mut host, &mut out).unwrap();
+    assert_eq!(std::fs::read(&new_exe).unwrap(), b"an older build");
+    host.exe_version = None;
+    host.take_calls();
+
+    // the bridge running from the new place sets the user PATH right while the PATH it got still
+    // names the old directory (an edit from a packaged shell never left that app's registry copy)
+    let new_dir = new_exe.parent().unwrap().display().to_string();
+    for (path, edits) in [
+        (format!(r"C:\Windows;{}", legacy_dir.display()), true),
+        (r"C:\Windows".to_string(), true),
+        (format!(r"C:\Windows;{new_dir}"), false),
+    ] {
+        let at_home = Env {
+            path: path.clone(),
+            ..env.clone()
+        };
+        let mut out = Vec::new();
+        setup::repair_user_path(&at_home, &mut host, &mut out).unwrap();
+        let calls = host.take_calls();
+        assert_eq!(calls.len(), usize::from(edits), "{path}: {calls:?}");
+        if edits {
+            assert!(decoded(&calls[0]).contains(&format!("$new = '{new_dir}'")));
+        }
+    }
+
+    // $CONDE_INSTALL_DIR places the binary itself: nothing moves
+    let mut placed = old.clone();
+    placed.windows.as_mut().unwrap().install_dir = Some(legacy_dir.clone());
+    assert_eq!(placed.moved_exe(), None);
+    let mut out = Vec::new();
+    assert!(
+        setup::adopt_home_bin(&placed, &mut host, &mut out)
+            .unwrap()
+            .is_none()
+    );
+    setup::repair_user_path(&placed, &mut host, &mut out).unwrap();
+    assert!(host.take_calls().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The copy to the new place takes conde update's lock on that binary: while an update holds it,
+/// the copy waits, so the version it probed is the one it decides on.
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
+#[test]
+fn the_binary_copy_waits_for_an_update_of_the_new_place() {
+    let root = temp_root();
+    let legacy_dir = root.join("home/AppData/Local/conde/bin");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(legacy_dir.join("conde.exe"), b"this build").unwrap();
+    let old = Env {
+        exe: legacy_dir.join("conde.exe"),
+        ..windows_env(&root)
+    };
+    let new_exe = old.moved_exe().unwrap();
+    std::fs::create_dir_all(new_exe.parent().unwrap()).unwrap();
+    let held = conde::update::Lock::acquire(&new_exe).unwrap();
+    let mut host = Fake::new(&old, &[]);
+    let copy = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        setup::adopt_home_bin(&old, &mut host, &mut out)
+            .unwrap()
+            .unwrap()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!new_exe.exists(), "copied while an update held the lock");
+    assert!(!copy.is_finished());
+    drop(held);
+    assert_eq!(copy.join().unwrap().exe, new_exe);
+    assert_eq!(std::fs::read(&new_exe).unwrap(), b"this build");
     let _ = std::fs::remove_dir_all(&root);
 }
 

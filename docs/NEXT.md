@@ -119,7 +119,7 @@ DROPPED from the release gate 2026-10-14: no Windows user; the code stays, the w
 
 Scope, from what the code assumes today: x86_64-pc-windows-msvc build on a
 windows-latest runner (conde.exe + SHA256SUMS); install.ps1 (irm | iex) to
-%LOCALAPPDATA%\conde\bin with PATH update; the local CLI transport (unix
+%USERPROFILE%\.conde\bin (up to 0.5.17 %LOCALAPPDATA%\conde\bin) with PATH update; the local CLI transport (unix
 socket today) becomes a named pipe or Windows AF_UNIX with the same NDJSON
 frames and a peer check; the bridge service as a scheduled task at logon (or
 a Windows service); Claude Code's Windows local transport differs (the
@@ -127,7 +127,7 @@ cc-socks auth line is required only there, verify the pipe path and the
 session record on a Windows install of the current Claude Code); Codex
 app-server path on Windows; identity ancestry walk via the Windows process
 API (CreateToolhelp32Snapshot / NtQueryInformationProcess) behind the same
-ProcessTable injection; credentials under %APPDATA%\conde with ACL-restricted
+ProcessTable injection; credentials under %USERPROFILE%\.conde\config with ACL-restricted
 file; `conde setup` writes the Claude/Codex config at their Windows paths.
 Acceptance: the one Windows user runs the README path with desk watching.
 
@@ -182,14 +182,14 @@ Read from the shipped bundles, unverified on a Windows install (Claude Code
 Waits for the first Windows run:
 - `conde setup`: `schtasks /Create /XML` with a UTF-16 file, registration
   without elevation, the task starting at logon, no 72 h limit, the console
-  detaching to `%LOCALAPPDATA%\conde\data\conde.log` (a flash at logon);
+  detaching to `%USERPROFILE%\.conde\data\conde.log` (a flash at logon);
   `/End` is a hard stop; the state line reads English `schtasks` labels only.
 - The CLI pipe `\\.\pipe\conde-<user>`: owner-only DACL, remote clients
   rejected, the daemon's check of each client's token user and the client's
   check of the server's (a squatted name is refused, not used). Not
   verifiable by design: any process of the same user is trusted, as with the
   uid check on Unix.
-- Secret files under `%APPDATA%\conde`, and the data directory, created with a
+- Secret files under `%USERPROFILE%\.conde\config`, and the data directory, created with a
   protected DACL for the current user only; load and doctor accept a DACL whose
   allow entries name only the current user's SID, SYSTEM and Administrators.
   The file's owner is not read, as on Unix, where only the mode bits are.
@@ -207,8 +207,8 @@ Windows; tokio's named pipes carry the same NDJSON); the pipe in the global
 namespace, protected by its DACL and both SID checks; a scheduled task, not a
 service (no admin, runs in the desktop session); the task inherits the logon
 environment, so setup names relocated directories to `setx` instead of pinning
-them; data in `%LOCALAPPDATA%\conde\data`, config in `%APPDATA%\conde`
-(`XDG_CONFIG_HOME` still wins when set); a Windows send without a peer token
+them; data in `%USERPROFILE%\.conde\data`, config in `%USERPROFILE%\.conde\config` (after 0.5.17;
+`AppData` before, which a packaged app's shells see redirected; `XDG_CONFIG_HOME` still wins when set); a Windows send without a peer token
 fails at once instead of being dropped by Claude Code; the task names the user
 by SID (`<UserId>`), since Entra-joined machines name users `AzureAD\...`; a
 restart is reported only after `/End`, `/Run` and an answer on the pipe.

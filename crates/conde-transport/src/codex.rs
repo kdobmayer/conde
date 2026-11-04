@@ -186,8 +186,21 @@ fn resolve_codex(dirs: impl IntoIterator<Item = PathBuf>, arm64: bool) -> Option
     Some(shim)
 }
 
+/// Windows: the child gets no console window of its own (the bridge has none, and would flash one
+/// per spawn).
+fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 pub(crate) fn daemon_command() -> Command {
     let mut cmd = Command::new(codex_program());
+    no_window(&mut cmd);
     cmd.args(["app-server", "daemon", "start"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -200,6 +213,7 @@ pub(crate) fn daemon_command() -> Command {
 
 pub(crate) fn queue_command(thread_id: &str, text: &str) -> Command {
     let mut cmd = Command::new(codex_program());
+    no_window(&mut cmd);
     cmd.args(["queue", "--thread", thread_id, "--message", text])
         .stdin(Stdio::null());
     cmd

@@ -44,10 +44,12 @@ pub enum Os {
 /// What setup needs on Windows only.
 #[derive(Clone, Debug)]
 pub struct WindowsEnv {
-    /// `%APPDATA%`: conde's config (board files, the default board).
+    /// `%APPDATA%` and `%LOCALAPPDATA%`: where conde kept its files up to 0.5.17, and where
+    /// its old binary may still be (see [`crate::paths::WindowsDirs`]).
     pub appdata: PathBuf,
-    /// `%LOCALAPPDATA%`: the local board and the bridge's log.
     pub local_appdata: PathBuf,
+    /// `$CONDE_INSTALL_DIR`: the binary's directory when set.
+    pub install_dir: Option<PathBuf>,
     /// The user's SID, whose logon starts the task and who it runs as (a SID, not
     /// `DOMAIN\user`: Entra-joined machines name users `AzureAD\...`).
     pub user_sid: String,
@@ -100,6 +102,7 @@ impl Env {
             appdata: var("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")),
             local_appdata: var("LOCALAPPDATA")
                 .unwrap_or_else(|| home.join("AppData").join("Local")),
+            install_dir: var("CONDE_INSTALL_DIR"),
             user_sid: conde_transport::win::own_user_sid().context("reading this user's SID")?,
         });
         #[cfg(not(windows))]
@@ -200,14 +203,47 @@ impl Env {
         self.codex_dir().join("skills").join(name).join("SKILL.md")
     }
 
-    /// `$XDG_CONFIG_HOME/conde` (else `~/.config/conde`; Windows `%APPDATA%\conde`): board
-    /// files and the default board.
+    /// `$XDG_CONFIG_HOME/conde` (else `~/.config/conde`; Windows `%USERPROFILE%\.conde\config`):
+    /// board files and the default board.
     pub fn conde_config(&self) -> PathBuf {
-        match (&self.xdg_config_home, &self.windows) {
+        match (&self.xdg_config_home, self.os) {
             (Some(x), _) => x.join("conde"),
-            (None, Some(w)) => w.appdata.join("conde"),
-            (None, None) => self.home.join(".config").join("conde"),
+            (None, Os::Windows) => {
+                let config = self.windows_dirs().config;
+                crate::paths::windows_moves(&|k| self.windows_var(k), None)
+                    .into_iter()
+                    .find(|(_, new)| *new == config)
+                    .map_or(config, |(old, new)| crate::paths::config_in_use(&old, &new))
+            }
+            (None, _) => self.home.join(".config").join("conde"),
         }
+    }
+
+    /// Windows: conde's directories as this environment places them.
+    pub fn windows_dirs(&self) -> crate::paths::WindowsDirs {
+        crate::paths::WindowsDirs::resolve(&|k| self.windows_var(k), None)
+    }
+
+    fn windows_var(&self, k: &str) -> Option<PathBuf> {
+        let w = self.windows.as_ref();
+        match k {
+            "USERPROFILE" => Some(self.home.clone()),
+            "APPDATA" => w.map(|w| w.appdata.clone()),
+            "LOCALAPPDATA" => w.map(|w| w.local_appdata.clone()),
+            "CONDE_INSTALL_DIR" => w.and_then(|w| w.install_dir.clone()),
+            "XDG_CONFIG_HOME" => self.xdg_config_home.clone(),
+            "CONDE_DATA" => self.conde_data.clone(),
+            _ => None,
+        }
+    }
+
+    /// One of [`Env::windows_dirs`] as conde uses it while its move from AppData is pending
+    /// ([`crate::paths::in_use`]).
+    fn windows_in_use(&self, target: PathBuf) -> PathBuf {
+        crate::paths::windows_moves(&|k| self.windows_var(k), None)
+            .into_iter()
+            .find(|(_, new)| *new == target)
+            .map_or(target, |(old, new)| crate::paths::in_use(&old, &new))
     }
 
     pub fn boards_dir(&self) -> PathBuf {
@@ -241,23 +277,33 @@ impl Env {
 
     /// Windows: the local board's directory, as the daemon resolves it.
     fn windows_data(&self) -> PathBuf {
-        match &self.conde_data {
-            Some(d) => d.clone(),
-            None => crate::paths::windows_data_dir(
-                self.windows.as_ref().map(|w| w.local_appdata.clone()),
-                Some(self.home.clone()),
-            ),
-        }
+        self.windows_in_use(self.windows_dirs().data)
     }
 
     /// Windows: the task definition setup registers (`schtasks /Create /XML`).
     pub fn windows_task(&self) -> PathBuf {
-        self.windows_data().with_file_name("conde-task.xml")
+        self.windows_dirs().data.with_file_name("conde-task.xml")
     }
 
     /// Windows: where the bridge writes its log once it gives up its console.
     pub fn windows_log(&self) -> PathBuf {
         self.windows_data().join("conde.log")
+    }
+
+    /// Windows: the binary install.ps1 placed up to 0.5.17, `%LOCALAPPDATA%\conde\bin\conde.exe`.
+    pub fn legacy_exe(&self) -> Option<PathBuf> {
+        let w = self.windows.as_ref()?;
+        let var = |k: &str| (k == "LOCALAPPDATA").then(|| w.local_appdata.clone());
+        Some(crate::paths::windows_legacy_bin(&var, Some(self.home.clone())).join("conde.exe"))
+    }
+
+    /// Windows: where this binary belongs when it runs from [`Env::legacy_exe`] and
+    /// `$CONDE_INSTALL_DIR` does not place it: `%USERPROFILE%\.conde\bin\conde.exe`.
+    pub fn moved_exe(&self) -> Option<PathBuf> {
+        let w = self.windows.as_ref()?;
+        let legacy = self.legacy_exe()?;
+        (w.install_dir.is_none() && same_file(&self.exe, &legacy))
+            .then(|| self.windows_dirs().bin.join("conde.exe"))
     }
 
     fn show(&self, p: &Path) -> String {
@@ -399,6 +445,18 @@ pub trait Host {
 /// The real machine.
 pub struct System;
 
+/// Windows: a child gets no console window of its own (a bridge without a console would flash
+/// one per command); its output is captured either way.
+fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 /// The probe frame: any response, even a refusal, proves a live daemon.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -464,8 +522,7 @@ impl Host for System {
     }
 
     fn run(&mut self, prog: &str, args: &[&str]) -> anyhow::Result<CmdOut> {
-        let out = std::process::Command::new(prog)
-            .args(args)
+        let out = no_window(std::process::Command::new(prog).args(args))
             .stdin(std::process::Stdio::null())
             .output()
             .with_context(|| format!("running {prog}"))?;
@@ -496,8 +553,7 @@ impl Host for System {
         let out = open
             .open(&out_path)
             .with_context(|| format!("creating {}", out_path.display()))?;
-        let spawned = std::process::Command::new(prog)
-            .args(args)
+        let spawned = no_window(std::process::Command::new(prog).args(args))
             .stdin(std::process::Stdio::null())
             .stdout(out)
             .stderr(std::process::Stdio::null())
@@ -808,6 +864,17 @@ pub fn verify(
     };
     let fix = "; run: conde setup";
     writeln!(out, "conde {}", crate::VERSION)?;
+    if let Some(to) = env.moved_exe() {
+        line(
+            "ISSUE",
+            format!(
+                "binary: {} is where conde was up to 0.5.17; it belongs in {}{fix}",
+                env.show(&env.exe),
+                env.show(&to)
+            ),
+            out,
+        )?;
+    }
 
     if opts.service {
         let (path, want) = match env.os {
@@ -1441,6 +1508,247 @@ fn same_existing_file(a: &Path, b: &Path) -> bool {
     false
 }
 
+/// Windows, a binary running from [`Env::legacy_exe`]: copy it to [`Env::moved_exe`] and put
+/// that directory on the user PATH in place of the old one (a shell started before keeps the old
+/// copy, which stays). The environment to set up with, running from the new copy; None when this
+/// binary is not the old one.
+pub fn adopt_home_bin(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+) -> anyhow::Result<Option<Env>> {
+    let (Some(to), Some(legacy)) = (env.moved_exe(), env.legacy_exe()) else {
+        return Ok(None);
+    };
+    let (old_dir, new_dir) = (
+        legacy.parent().unwrap_or(&legacy).to_path_buf(),
+        to.parent().unwrap_or(&to).to_path_buf(),
+    );
+    // never a downgrade: an old terminal may still run an older build from the old place; the
+    // update lock keeps a conde update from replacing it between the probe and the copy
+    let dir = to
+        .parent()
+        .context("the new binary path has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let lock = crate::update::Lock::acquire(&to)?;
+    let there = to.exists().then(|| probe_version(host, &to)).flatten();
+    let ours = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok();
+    if there.is_some_and(|v| ours.is_none_or(|o| v.cmp_precedence(&o).is_ge())) {
+        writeln!(
+            out,
+            "conde: {} is this build or newer; it stays, and setup names it",
+            env.show(&to)
+        )?;
+    } else if place_binary(&env.exe, &to)? {
+        writeln!(
+            out,
+            "conde: copied {} to {} (conde keeps its files out of AppData now)",
+            env.show(&env.exe),
+            env.show(&to)
+        )?;
+    }
+    drop(lock);
+    swap_user_path(env, host, out, &old_dir, &new_dir)?;
+    let path = env
+        .path
+        .split(';')
+        .filter(|d| !d.is_empty() && !same_dir(d, &new_dir))
+        .map(|d| {
+            if same_dir(d, &old_dir) {
+                new_dir.to_string_lossy().into_owned()
+            } else {
+                d.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    Ok(Some(Env {
+        exe: to,
+        path,
+        ..env.clone()
+    }))
+}
+
+/// The version the binary at `path` reports; None when it does not run or names none.
+fn probe_version(host: &mut dyn Host, path: &Path) -> Option<semver::Version> {
+    let shown = path.to_string_lossy();
+    let r = host
+        .run_bounded(&shown, &["--version"], std::time::Duration::from_secs(10))
+        .ok()?;
+    r.ok.then(|| crate::update::reported_version(&r.stdout))
+        .flatten()
+}
+
+/// Windows, the bridge at each start: when the binary is at `%USERPROFILE%\.conde\bin` and the
+/// PATH this process got still names the old directory or lacks the new one, set the user PATH
+/// right. An edit made from a packaged app's shell (the Claude desktop app) lands in that app's
+/// private copy of the registry; the bridge runs outside it. Idempotent.
+pub fn repair_user_path(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+    let (Some(w), Some(legacy)) = (env.windows.as_ref(), env.legacy_exe()) else {
+        return Ok(());
+    };
+    let new_exe = env.windows_dirs().bin.join("conde.exe");
+    if w.install_dir.is_some() || !new_exe.is_file() {
+        return Ok(());
+    }
+    let (old_dir, new_dir) = (
+        legacy.parent().unwrap_or(&legacy).to_path_buf(),
+        new_exe.parent().unwrap_or(&new_exe).to_path_buf(),
+    );
+    let entries: Vec<&str> = env.path.split(';').collect();
+    if entries.iter().any(|d| same_dir(d, &old_dir))
+        || !entries.iter().any(|d| same_dir(d, &new_dir))
+    {
+        swap_user_path(env, host, out, &old_dir, &new_dir)?;
+    }
+    Ok(())
+}
+
+/// The user PATH with `new_dir` in place of `old_dir` ([`user_path_script`]).
+fn swap_user_path(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    old_dir: &Path,
+    new_dir: &Path,
+) -> anyhow::Result<()> {
+    let edit = host.run(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded_command(&user_path_script(old_dir, new_dir)),
+        ],
+    )?;
+    if !edit.ok {
+        bail!(
+            "putting {} on your user PATH failed: {}",
+            new_dir.display(),
+            edit.stderr.trim()
+        );
+    }
+    if edit.stdout.contains("changed") {
+        writeln!(
+            out,
+            "conde: your user PATH has {} in place of {}; open new terminals, and restart running \
+             Claude Code and Codex sessions, so their shells find it",
+            env.show(new_dir),
+            env.show(old_dir)
+        )?;
+    }
+    Ok(())
+}
+
+fn same_dir(entry: &str, dir: &Path) -> bool {
+    entry
+        .trim_end_matches(['\\', '/'])
+        .eq_ignore_ascii_case(dir.to_string_lossy().trim_end_matches(['\\', '/']))
+}
+
+/// `from`'s bytes at `to`, staged beside it; Ok(false) when `to` already has them. A file at `to`
+/// (which may be running) moves aside to `<name>.<ulid>.old`, as `conde update` does.
+fn place_binary(from: &Path, to: &Path) -> anyhow::Result<bool> {
+    let bytes = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+    if std::fs::read(to).is_ok_and(|b| b == bytes) {
+        return Ok(false);
+    }
+    let dir = to
+        .parent()
+        .context("the new binary path has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let staged = dir.join(format!(
+        ".conde-move.{}{}",
+        std::process::id(),
+        std::env::consts::EXE_SUFFIX
+    ));
+    std::fs::write(&staged, &bytes).with_context(|| format!("writing {}", staged.display()))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+    if to.exists() {
+        let name = to.file_name().unwrap_or_default().to_string_lossy();
+        let aside = to.with_file_name(format!("{name}.{}.old", crate::util::new_ulid()));
+        std::fs::rename(to, &aside).with_context(|| format!("moving {} aside", to.display()))?;
+    }
+    std::fs::rename(&staged, to).with_context(|| format!("placing {}", to.display()))?;
+    Ok(true)
+}
+
+/// A script for `powershell -EncodedCommand`: base64 of its UTF-16LE text, which no quoting of
+/// the command line can change.
+pub fn encoded_command(script: &str) -> String {
+    use base64::Engine as _;
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// PowerShell that edits the user PATH in the registry as install.ps1 does (value kind and
+/// %VARIABLES% kept): `add` where `remove` was, else at the end; prints `changed` when it did.
+pub fn user_path_script(remove: &Path, add: &Path) -> String {
+    let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$old = {old}; $new = {new}
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+$raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+$is = {{ param($entry, $dir) [Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -ieq $dir.TrimEnd('\') }}
+$entries = @()
+foreach ($e in @($raw -split ';' | Where-Object {{ $_ -ne '' }})) {{
+  if (& $is $e $old) {{ $e = $new }}
+  if ((& $is $e $new) -and ($entries | Where-Object {{ & $is $_ $new }})) {{ continue }}
+  $entries += $e
+}}
+if (-not ($entries | Where-Object {{ & $is $_ $new }})) {{ $entries += $new }}
+$value = $entries -join ';'
+if ($value -ne $raw) {{
+  $kind = if ($raw) {{ $key.GetValueKind('Path') }} else {{ [Microsoft.Win32.RegistryValueKind]::ExpandString }}
+  $key.SetValue('Path', $value, $kind)
+  [Environment]::SetEnvironmentVariable('CONDE_PATH_REFRESH', '1', 'User')
+  [Environment]::SetEnvironmentVariable('CONDE_PATH_REFRESH', $null, 'User')
+  'changed'
+}}
+$key.Close()
+"#,
+        old = quote(remove),
+        new = quote(add)
+    )
+}
+
+/// The parts of `conde setup` that name the binary, for one that moved ([`adopt_home_bin`]):
+/// the Claude Code and Codex MCP entries and skills, and the scheduled task when there is one.
+/// `restart`: the bridge restarts onto the new binary (`conde update`); without it (the bridge
+/// itself moving) the task is only re-registered and the running bridge keeps going until the
+/// task next starts it. Ok(false) when a part failed (each is reported).
+pub fn set_up_moved(
+    env: &Env,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+    restart: bool,
+) -> anyhow::Result<bool> {
+    let task = env.windows_task().exists();
+    let opts = Options {
+        claude: true,
+        codex: true,
+        keep_receiver_policy: true,
+        skip_welcome: true,
+        ..Options::default()
+    };
+    let mut ok = run(env, &opts, &mut Unattended(host), out)?;
+    if task {
+        // last: the running bridge may be this task's instance. With `restart`, the bridge
+        // restarts onto the new binary also when the task already named it (the bridge moved it)
+        let r = register_task(env, host, out).and_then(|_| match restart {
+            true => restart_service(env, host, out, &env.exe),
+            false => Ok(()),
+        });
+        if let Err(e) = r {
+            writeln!(out, "service: FAILED: {e:#}")?;
+            ok = false;
+        }
+    }
+    Ok(ok)
+}
+
 /// After `conde update` replaced `updated`: restart the bridge service setup installed, only when
 /// the program the service manager has loaded for it (and the one its unit or agent file names)
 /// is that file. Any other program, a missing one or none leaves the bridge running and says how
@@ -1760,7 +2068,9 @@ fn run_task(env: &Env, host: &mut dyn Host) -> anyhow::Result<()> {
     }
 }
 
-fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+/// Write the task definition and register it when it changed or is not registered; a running
+/// bridge keeps running.
+fn register_task(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<Change> {
     let file = env.windows_task();
     let change = write_bytes_if_changed(&file, &utf16_file(&task_xml(env)))?;
     writeln!(out, "service: {} {}", change.verb(), env.show(&file))?;
@@ -1777,6 +2087,11 @@ fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Resu
             "service: registered the scheduled task {TASK_NAME} (runs conde daemon at your logon)"
         )?;
     }
+    Ok(change)
+}
+
+fn schtasks(env: &Env, host: &mut dyn Host, out: &mut dyn Write) -> anyhow::Result<()> {
+    let change = register_task(env, host, out)?;
     let running = host.reach(&env.socket).is_ok();
     if running && (change == Change::Updated || predates_boards(env, host, out)?) {
         restart_task(env, host)?;
@@ -2363,8 +2678,12 @@ fn holder(env: &Env, present: bool, command: Option<&str>, sock: Option<&str>) -
             .find(|p| p.is_file())
     };
     let socket = sock.map_or_else(|| env.default_socket.clone(), PathBuf::from);
+    // the binary install.ps1 placed up to 0.5.17 is this one's earlier copy
+    let ours = |path: &Path| {
+        same_file(path, &env.exe) || env.legacy_exe().is_some_and(|l| same_file(path, &l))
+    };
     match resolved {
-        Some(path) if same_file(&path, &env.exe) => {
+        Some(path) if ours(&path) => {
             if socket == env.socket {
                 Holder::Ours
             } else {

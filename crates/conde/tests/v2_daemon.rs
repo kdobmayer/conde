@@ -1699,6 +1699,68 @@ fn a_re_login_takes_effect_without_a_restart() {
     );
 }
 
+/// Takes the boards directory and its board file away from this user (Unix: the directory's
+/// mode 000; Windows: a DACL that grants only SYSTEM), or gives them back.
+fn lock_boards(dir: &std::path::Path, file: &std::path::Path, locked: bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file;
+        let mode = if locked { 0o000 } else { 0o700 };
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        use conde_transport::win::Security;
+        if locked {
+            let system = Security::from_sddl("D:P(A;;GA;;;SY)").unwrap();
+            system.apply(file).unwrap();
+            system.apply(dir).unwrap();
+        } else {
+            // the owner keeps the right to rewrite the DACL
+            Security::owner_only(true).unwrap().apply(dir).unwrap();
+            Security::owner_only(false).unwrap().apply(file).unwrap();
+        }
+    }
+}
+
+/// A boards directory the bridge cannot read is reported with its OS error, at start and on a
+/// reload, never as a missing board file.
+#[test]
+fn an_unreadable_boards_dir_reports_the_os_error() {
+    #[cfg(unix)]
+    if conde::util::own_uid() == 0 {
+        eprintln!("skipped: root reads a mode-000 directory");
+        return;
+    }
+    daemon_log();
+    let mut h = Host::new("kdobmayer", "lockedpc");
+    let dir = h.config().join("boards");
+    let file = boards::path_in(&h.config(), "dakai");
+    let cfg = BoardConfig {
+        server: "https://board.invalid".into(),
+        host_id: h.host.clone(),
+        owner: h.user.clone(),
+        key: "k".into(),
+    };
+    boards::store(&file, "dakai", &cfg).unwrap();
+    lock_boards(&dir, &file, true);
+    h.start();
+    let reload = conde::admin::reload_bridge(&h.sock(), "dakai");
+    let log = daemon_log();
+    lock_boards(&dir, &file, false);
+    assert!(
+        reload.contains("os error") && !reload.contains("no board file"),
+        "{reload}"
+    );
+    let read_dir = format!("reading {}", dir.display());
+    assert!(
+        log.lines()
+            .any(|l| l.contains(&read_dir) && l.contains("os error")),
+        "{log}"
+    );
+}
+
 /// The distinct bridge instances whose hello the board saw in `frames`.
 fn hello_instances(frames: &[String]) -> HashSet<String> {
     frames

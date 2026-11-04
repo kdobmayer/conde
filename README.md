@@ -99,12 +99,12 @@ Linux note: same command and output, with `conde-linux-x86_64` (or `conde-linux-
 elsewhere.
 
 Windows note: the same output, with `conde-windows-x86_64.exe` and
-`C:\Users\<you>\AppData\Local\conde\bin\conde.exe`. The installer adds that
+`C:\Users\<you>\.conde\bin\conde.exe`. The installer adds that
 directory to your user PATH and says so (`added ... to your user PATH`): the
 PowerShell window that ran it has it at once, other terminals and running
 Claude Code and Codex sessions after a restart. Until then, run conde there
-by its full path, `$env:LOCALAPPDATA\conde\bin\conde.exe` (Git Bash:
-`"$LOCALAPPDATA/conde/bin/conde.exe"`).
+by its full path, `$env:USERPROFILE\.conde\bin\conde.exe` (Git Bash:
+`"$USERPROFILE/.conde/bin/conde.exe"`).
 
 
 ### 2. Join the team's board and set up the machine (human: click sign-in)
@@ -165,9 +165,11 @@ per action:
   explicit `"hold"` or `"refuse"` is left as is and reported.
 - On Windows the service is a scheduled task `conde` that runs
   `conde daemon` as you at your logon, in your desktop session (a console window may flash once while it detaches). It
-  logs to `%LOCALAPPDATA%\conde\data\conde.log`; the local board is
-  `%LOCALAPPDATA%\conde\data\conde.db`, the board files are under
-  `%APPDATA%\conde`, and the CLI reaches the bridge over the pipe
+  logs to `%USERPROFILE%\.conde\data\conde.log`; the local board is
+  `%USERPROFILE%\.conde\data\conde.db`, the board files are under
+  `%USERPROFILE%\.conde\config` (not `AppData`, where a packaged app such as
+  the Claude desktop app hides new files its shells write from the bridge;
+  a release after 0.5.17 moves an earlier install out of it), and the CLI reaches the bridge over the pipe
   `\\.\pipe\conde-<user>`. The task gets your logon environment, not the
   shell's: the output names any relocated directory (`CLAUDE_CONFIG_DIR`,
   `CODEX_HOME`, ...) to set with `setx`. The skills, MCP entries and receiver
@@ -807,11 +809,12 @@ Linux: replace the first two commands with
 Windows: `schtasks /End /TN conde`, `schtasks /Delete /TN conde /F`, the
 same `claude mcp remove` and Codex table, then delete
 `%USERPROFILE%\.claude\skills\conde`, `%USERPROFILE%\.codex\skills\conde`,
-`%APPDATA%\conde` and `%LOCALAPPDATA%\conde\bin`, and remove that directory
-from the user PATH.
+`%USERPROFILE%\.conde\config` and `%USERPROFILE%\.conde\bin` (and
+`%LOCALAPPDATA%\conde\bin`, left by a release up to 0.5.17), and remove that
+directory from the user PATH.
 
 The local board keeps its data in `~/.local/share/conde` (Windows:
-`%LOCALAPPDATA%\conde\data`); delete that only if the human asks.
+`%USERPROFILE%\.conde\data`); delete that only if the human asks.
 
 ## Troubleshooting
 
@@ -835,7 +838,7 @@ On Windows (PowerShell; `schtasks` works the same from Git Bash):
 
 ```powershell
 schtasks /Query /TN conde /FO LIST /V
-Get-Content -Tail 50 "$env:LOCALAPPDATA\conde\data\conde.log"
+Get-Content -Tail 50 "$env:USERPROFILE\.conde\data\conde.log"
 schtasks /End /TN conde; schtasks /Run /TN conde
 ```
 

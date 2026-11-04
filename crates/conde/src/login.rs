@@ -663,17 +663,15 @@ pub fn run(
 /// prompt waits: the default board stays as it is, an earlier host's names stay unpublished
 /// until a review). Ok(false) when a part failed (each is reported).
 fn set_up(out: &mut dyn std::io::Write) -> anyhow::Result<bool> {
-    use crate::setup::{Env, Options, System, Unattended};
+    use crate::setup::{Env, Options, System, Unattended, adopt_home_bin};
     let opts = Options {
         skip_welcome: true,
         ..Options::select(false, false, false, true)
     };
-    crate::setup::run(
-        &Env::from_process()?,
-        &opts,
-        &mut Unattended(&mut System),
-        out,
-    )
+    let env = Env::from_process()?;
+    // run from the binary's old place (Windows), setup names the new one
+    let env = adopt_home_bin(&env, &mut System, out)?.unwrap_or(env);
+    crate::setup::run(&env, &opts, &mut Unattended(&mut System), out)
 }
 
 /// Stores the key as the board file `alias` (account: the signed-in user), refusing to

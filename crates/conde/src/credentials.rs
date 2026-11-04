@@ -1,5 +1,5 @@
 //! The host's device credential: `$XDG_CONFIG_HOME/conde/credentials`
-//! (mode 0600; on Windows `%APPDATA%\conde\credentials`, owner-only), written by
+//! (mode 0600; on Windows `%USERPROFILE%\.conde\config\credentials`, owner-only), written by
 //! `conde enroll`, read by the bridge at start.
 
 use std::io::{BufRead, Write};
@@ -27,26 +27,9 @@ impl std::fmt::Debug for Credentials {
     }
 }
 
-/// `$XDG_CONFIG_HOME/conde/credentials`, else `~/.config/conde/credentials`
-/// (Windows: `%APPDATA%\conde\credentials`).
+/// `credentials` in the config directory ([`crate::paths::config_dir`]).
 pub fn path() -> anyhow::Result<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        Some(d) => PathBuf::from(d),
-        #[cfg(windows)]
-        None => PathBuf::from(
-            std::env::var_os("APPDATA")
-                .filter(|h| !h.is_empty())
-                .context("APPDATA is not set")?,
-        ),
-        #[cfg(not(windows))]
-        None => PathBuf::from(
-            std::env::var_os("HOME")
-                .filter(|h| !h.is_empty())
-                .context("HOME is not set")?,
-        )
-        .join(".config"),
-    };
-    Ok(base.join("conde").join("credentials"))
+    Ok(crate::paths::config_dir()?.join("credentials"))
 }
 
 /// The file's permission bits, when it exists.

@@ -742,6 +742,32 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             idle_timeout,
         } => {
             no_board("daemon", "")?;
+            // only the bridge moves what conde kept under AppData, before it resolves a path and
+            // while no other bridge holds the pipe (one that is exiting may still hold its files a
+            // moment); what cannot move stays in use where it is
+            #[cfg(windows)]
+            let mut moved = Vec::new();
+            #[cfg(windows)]
+            {
+                let socket = paths::socket_path();
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let last = std::time::Instant::now() >= deadline;
+                    if conde_transport::win::pipe_exists(socket.as_os_str()) {
+                        if last {
+                            moved.push(
+                                "conde: another bridge holds the pipe; what conde kept under AppData moves at a later start".into(),
+                            );
+                            break;
+                        }
+                    } else if crate::paths::windows_first_run(&mut |line| moved.push(line), last)
+                        || last
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
             // Task Scheduler gives the bridge a console window of its own: log to a file instead
             #[cfg(windows)]
             let _ = crate::win::detach_console(&paths::data_dir().join("conde.log"));
@@ -749,6 +775,33 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 .with_writer(std::io::stderr)
                 .with_target(false)
                 .init();
+            #[cfg(windows)]
+            {
+                for line in &moved {
+                    eprintln!("{line}");
+                }
+                // a bridge the old installer placed moves its binary out of AppData beside its work
+                std::thread::spawn(|| {
+                    let mut err = std::io::stderr();
+                    let moved = crate::setup::Env::from_process().and_then(|env| {
+                        let mut host = crate::setup::System;
+                        match crate::setup::adopt_home_bin(&env, &mut host, &mut err)? {
+                            Some(env) => {
+                                crate::setup::set_up_moved(&env, &mut host, &mut err, false)
+                            }
+                            None => crate::setup::repair_user_path(&env, &mut host, &mut err)
+                                .map(|()| true),
+                        }
+                    });
+                    match moved {
+                        Ok(true) => {}
+                        Ok(false) => eprintln!("conde: a part of the move failed; run conde setup"),
+                        Err(e) => eprintln!(
+                            "conde: moving the binary out of AppData failed: {e:#}; run conde setup"
+                        ),
+                    }
+                });
+            }
             let mut opts = daemon::Options::new(paths::data_dir(), paths::socket_path());
             opts.interval = Duration::from_secs_f64(interval.max(0.05));
             opts.once = once;
@@ -1539,8 +1592,13 @@ fn boards_migrate(alias: &str, publish: Option<crate::setup::Publish>) -> anyhow
 /// `conde setup`: the service runs the single daemon (the local board, plus every enrolled
 /// shared board); the default board and the migration review follow.
 fn setup(mut opts: crate::setup::Options, check: bool) -> anyhow::Result<i32> {
-    use crate::setup::{Env, System, run, verify};
+    use crate::setup::{Env, System, adopt_home_bin, run, verify};
     let env = Env::from_process()?;
+    // run from the binary's old place, setup moves it and names the new one everywhere
+    let env = match check {
+        true => env,
+        false => adopt_home_bin(&env, &mut System, &mut std::io::stdout())?.unwrap_or(env),
+    };
     if opts.default_board.is_some() || opts.publish.is_some() {
         opts.boards = true;
     }

@@ -31,7 +31,7 @@ On Windows, in PowerShell:
 irm https://conde.cloud/install.ps1 | iex
 ```
 
-It puts `%LOCALAPPDATA%\conde\bin` on the user PATH. A shell started before the install, such as your own tool shell, does not have it yet: there, run `$env:LOCALAPPDATA\conde\bin\conde.exe` (Git Bash: `"$LOCALAPPDATA/conde/bin/conde.exe"`) in place of `conde` until your human restarts this session.
+It puts `%USERPROFILE%\.conde\bin` on the user PATH. A shell started before the install, such as your own tool shell, does not have it yet: there, run `$env:USERPROFILE\.conde\bin\conde.exe` (Git Bash: `"$USERPROFILE/.conde/bin/conde.exe"`) in place of `conde` until your human restarts this session.
 
 Check:
 

@@ -158,7 +158,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = Join-Path $env:LOCALAPPDATA 'conde\bin'
+          $dir = Join-Path $env:USERPROFILE '.conde\bin'
           $run = 'irm http://127.0.0.1:8765/install.ps1 | iex'
           $env:CONDE_DIST_BASE_URL = 'http://127.0.0.1:8765'
           $out = powershell -NoProfile -Command $run | Out-String
@@ -181,16 +181,31 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = Join-Path $env:LOCALAPPDATA 'conde\bin'
+          $dir = Join-Path $env:USERPROFILE '.conde\bin'
           if ((Get-Command conde).Source -ne "$dir\conde.exe") { throw "conde resolves to $((Get-Command conde).Source)" }
           $v = conde --version
           Write-Host $v
           if (-not "$v".StartsWith("conde $env:VERSION (")) { throw "version: $v" }
+          # what conde 0.5.17 kept under AppData stays in use until the first bridge moves it (the setup
+          # step checks that): no command moves it
+          $moves = @(
+            @((Join-Path $env:APPDATA 'conde'), (Join-Path $env:USERPROFILE '.conde\config')),
+            @((Join-Path $env:LOCALAPPDATA 'conde\data'), (Join-Path $env:USERPROFILE '.conde\data'))
+          )
+          foreach ($m in $moves) {
+            if (Test-Path $m[1]) { throw "$($m[1]) exists before the first command" }
+            New-Item -ItemType Directory -Force $m[0] | Out-Null
+            Set-Content -Path (Join-Path $m[0] 'ci-marker') -Value $m[0]
+          }
           Write-Host '--- conde setup --check'
           $check = conde setup --check 2>&1 | Out-String
           Write-Host $check
           Write-Host "--- exit status $LASTEXITCODE"
           if (-not $check.Contains("conde $env:VERSION")) { throw 'setup --check did not run' }
+          foreach ($m in $moves) {
+            if (-not (Test-Path (Join-Path $m[0] 'ci-marker')) -or (Test-Path $m[1])) { throw "a command moved $($m[0])" }
+          }
+          if ($check.Contains('conde: moved')) { throw "a command moved: $check" }
           Write-Host '--- conde doctor'
           $doctor = conde doctor 2>&1 | Out-String
           Write-Host $doctor
@@ -201,7 +216,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $log = Join-Path $env:LOCALAPPDATA 'conde\data\conde.log'
+          $log = Join-Path $env:USERPROFILE '.conde\data\conde.log'
           try {
             Write-Host '--- conde setup'
             conde setup 2>&1 | Out-Host
@@ -214,6 +229,19 @@ jobs:
               conde doctor *> $null
               if ($LASTEXITCODE -eq 0) { break }
               Start-Sleep -Milliseconds 500
+            }
+            # the first bridge moved the config and the local board out of AppData, and said so
+            $moves = @(
+              @((Join-Path $env:APPDATA 'conde'), (Join-Path $env:USERPROFILE '.conde\config')),
+              @((Join-Path $env:LOCALAPPDATA 'conde\data'), (Join-Path $env:USERPROFILE '.conde\data'))
+            )
+            foreach ($m in $moves) {
+              if ((Test-Path $m[0]) -or ((Get-Content (Join-Path $m[1] 'ci-marker')) -ne $m[0])) { throw "the bridge did not move $($m[0])" }
+              $acl = Get-Acl $m[1]
+              if (-not $acl.AreAccessRulesProtected) { throw "$($m[1]) inherits its permissions" }
+              Write-Host "$($m[1]): $(($acl.Access | ForEach-Object { $_.IdentityReference }) -join ', ')"
+              if (-not (Select-String -Path $log -SimpleMatch "conde: moved $($m[0]) to $($m[1])" -Quiet)) { throw "the bridge did not say it moved $($m[0])" }
+              Remove-Item (Join-Path $m[1] 'ci-marker')
             }
             Write-Host '--- conde setup --check'
             $check = conde setup --check 2>&1 | Out-String
@@ -243,7 +271,7 @@ jobs:
             $up = pwsh -NoProfile -Command 'irm http://127.0.0.1:8765/install.ps1 | iex' | Out-String
             Write-Host $up
             if (-not $up.Contains('replaced ')) { throw "install.ps1 over a running bridge: $up" }
-            $dir = Join-Path $env:LOCALAPPDATA 'conde\bin'
+            $dir = Join-Path $env:USERPROFILE '.conde\bin'
             Get-ChildItem $dir | Out-Host
             conde doctor | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "doctor after the upgrade: exit status $LASTEXITCODE" }
@@ -267,7 +295,7 @@ jobs:
               if ($LASTEXITCODE -ne 0 -or -not $doctor.Contains('all clear')) { Write-Host $doctor; throw "${what}: doctor is not all clear" }
             }
             # setup's restart (as update runs it): a changed task file makes setup re-register and restart
-            $taskFile = Join-Path $env:LOCALAPPDATA 'conde\conde-task.xml'
+            $taskFile = Join-Path $env:USERPROFILE '.conde\conde-task.xml'
             foreach ($round in 1, 2) {
               [IO.File]::WriteAllText($taskFile, 'stale', [Text.Encoding]::Unicode)
               $out = conde setup --service 2>&1 | Out-String
@@ -309,7 +337,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $exe = (Get-Command conde).Source
           $srv = Join-Path $env:RUNNER_TEMP 'workspace'
-          $log = Join-Path $env:LOCALAPPDATA 'conde\data\conde.log'
+          $log = Join-Path $env:USERPROFILE '.conde\data\conde.log'
           $key = "$(conde admin key create --user krisztian --host ci-win --label ci --data $srv)".Trim()
           if (-not $key.StartsWith('conde_')) { throw "no host key: $key" }
           $env:CONDE_BOARD_NAME = 'vvp'
@@ -385,6 +413,112 @@ jobs:
             }
             Stop-Process -Id $front.Id -Force -ErrorAction SilentlyContinue
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            schtasks /End /TN conde 2>&1 | Out-Null
+            schtasks /Delete /TN conde /F 2>&1 | Out-Null
+            $global:LASTEXITCODE = 0
+          }
+
+      # A machine set up by 0.5.17, after its conde update put the new build in place: conde.exe, the
+      # config, the local board and the task file under AppData only, the task, the user PATH and the
+      # MCP entry naming the old binary. The bridge started from there moves all of it to
+      # %USERPROFILE%\.conde and points the task, PATH and MCP entry at the new binary; then conde
+      # update run from the old place, with the task already naming the new binary, restarts the bridge
+      # onto it. A name registered on the local board before is there after.
+      - name: an install from 0.5.17 or earlier moves out of AppData, by the bridge and by conde update
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $home2 = Join-Path $env:USERPROFILE '.conde'
+          $new = Join-Path $home2 'bin\conde.exe'
+          $oldBin = Join-Path $env:LOCALAPPDATA 'conde\bin'
+          $oldExe = Join-Path $oldBin 'conde.exe'
+          $moves = @(
+            @((Join-Path $home2 'config'), (Join-Path $env:APPDATA 'conde')),
+            @((Join-Path $home2 'data'), (Join-Path $env:LOCALAPPDATA 'conde\data')),
+            @((Join-Path $home2 'conde-task.xml'), (Join-Path $env:LOCALAPPDATA 'conde\conde-task.xml'))
+          )
+          $claudeJson = Join-Path $env:USERPROFILE '.claude.json'
+          $pipe = '\\.\pipe\conde-' + ($env:USERNAME.ToLowerInvariant() -replace '[^a-z0-9._-]', '-')
+          $env:CONDE_DIST_BASE_URL = 'http://127.0.0.1:8765'
+          $userPath = { @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ne '' }) }
+          $bridge = { @(Get-CimInstance Win32_Process -Filter "Name = 'conde.exe'" | Where-Object { $_.CommandLine -match ' daemon' }) }
+          $answers = {
+            param($exe, $what)
+            for ($i = 0; $i -lt 120; $i++) {
+              $doctor = & $exe doctor 2>&1 | Out-String
+              if ($doctor.Contains("ok      daemon: reachable at $pipe")) { return }
+              Start-Sleep -Milliseconds 500
+            }
+            Write-Host $doctor
+            throw "${what}: the bridge does not answer"
+          }
+          try {
+            conde setup --service 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "conde setup: exit status $LASTEXITCODE" }
+            & $answers $new 'setup'
+            # the marker on the local board: the name the setup step registered
+            if (-not ((& $new agents | Out-String).Contains('ci.smoke'))) { throw 'no ci.smoke on the local board' }
+            schtasks /End /TN conde | Out-Host
+            for ($i = 0; $i -lt 60 -and (& $bridge).Count; $i++) { Start-Sleep -Milliseconds 250 }
+            if ((& $bridge).Count) { throw 'the bridge did not stop' }
+
+            # old only: nothing at %USERPROFILE%\.conde
+            foreach ($m in $moves) {
+              New-Item -ItemType Directory -Force (Split-Path $m[1]) | Out-Null
+              Move-Item $m[0] $m[1]
+            }
+            $xml = [IO.File]::ReadAllText($moves[2][1]).Replace("<Command>$new</Command>", "<Command>$oldExe</Command>")
+            [IO.File]::WriteAllText($moves[2][1], $xml, [Text.Encoding]::Unicode)
+            New-Item -ItemType Directory -Force $oldBin | Out-Null
+            Move-Item $new $oldExe
+            Remove-Item -Recurse -Force $home2
+            schtasks /Create /TN conde /XML $moves[2][1] /F | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'registering the old task failed' }
+            [Environment]::SetEnvironmentVariable('Path', ((@($oldBin) + (& $userPath | Where-Object { $_ -ine (Split-Path $new) })) -join ';'), 'User')
+            $json = Get-Content -Raw $claudeJson | ConvertFrom-Json
+            $json.mcpServers.conde.command = $oldExe
+            $json | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 $claudeJson
+
+            schtasks /Run /TN conde | Out-Host
+            $moved = {
+              foreach ($m in $moves) {
+                if (-not (Test-Path $m[0]) -or (Test-Path $m[1])) { throw "$($m[1]) has not moved to $($m[0])" }
+              }
+              if (-not (Test-Path $new)) { throw "no $new" }
+              $exec = (Get-ScheduledTask -TaskName conde).Actions[0].Execute
+              if ($exec -ne $new) { throw "the task runs $exec" }
+              $p = & $userPath
+              if ($p -contains $oldBin -or -not ($p -contains (Split-Path $new))) { throw "user PATH $($p -join ';')" }
+              $servers = (Get-Content -Raw $claudeJson | ConvertFrom-Json).mcpServers
+              if ($servers.conde.command -ne $new) { throw "the MCP entry runs $($servers.conde.command)" }
+              if (@($servers.PSObject.Properties.Name | Where-Object { $_ -like 'conde-*' }).Count) { throw 'a second MCP entry' }
+            }
+            $ok = $false
+            for ($i = 0; $i -lt 120 -and -not $ok; $i++) {
+              Start-Sleep -Milliseconds 500
+              try { & $moved; $ok = $true } catch { $why = $_ }
+            }
+            if (-not $ok) { throw "the bridge's move: $why" }
+            # whether re-registering the task ended the bridge that did it: either is fine, it is reported
+            Write-Host "after the bridge's move the bridge runs $((& $bridge).ExecutablePath)"
+            & $answers $new 'the bridge''s move'
+            if (-not ((& $new agents | Out-String).Contains('ci.smoke'))) { throw 'ci.smoke is gone after the move' }
+
+            # the task file already names the new binary: conde update still restarts the bridge onto it
+            $up = & $oldExe update 2>&1 | Out-String
+            Write-Host $up
+            if ($LASTEXITCODE -ne 0) { throw "conde update: exit status $LASTEXITCODE" }
+            foreach ($want in @("conde $env:VERSION is current", 'service: restarted conde')) {
+              if (-not $up.Contains($want)) { throw "conde update did not print: $want" }
+            }
+            & $answers $new 'conde update'
+            $runs = @((& $bridge).ExecutablePath)
+            if ($runs.Count -ne 1 -or $runs[0] -ne $new) { throw "after conde update the bridge runs $($runs -join ', ')" }
+            & $moved
+          } finally {
+            $log = Join-Path $home2 'data\conde.log'
+            Write-Host "--- $log"
+            Get-Content -Tail 80 $log -ErrorAction SilentlyContinue | Out-Host
             schtasks /End /TN conde 2>&1 | Out-Null
             schtasks /Delete /TN conde /F 2>&1 | Out-Null
             $global:LASTEXITCODE = 0

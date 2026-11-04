@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# agentvm: the steps on a person's agent VM that come after the bootstrap. Run as root (the operator
+# reaches it through `az vm run-command`); every step runs as the agent user.
+#
+#   agentvm status
+#   agentvm claude-login-start          prints the Claude sign-in URL for the person
+#   agentvm claude-login-finish CODE    types the code the sign-in page showed into the waiting login
+#   agentvm conde-login-start           prints the conde (dakai) sign-in URL for the person
+#   agentvm conde-login-finish CODE     finishes the conde enrollment with the code that page showed
+#   agentvm agent-start NAME            starts the first agent with remote control; it registers NAME on conde
+#   agentvm agent-log                   the agent's terminal, as it is now
+set -euo pipefail
+
+CONF=/etc/agentvm.conf
+[ -f "$CONF" ] && . "$CONF"
+AGENT_USER="${AGENT_USER:-agent}"
+WORK_DIR_NAME="${WORK_DIR_NAME:-work}"
+CONDE_SERVER="${CONDE_SERVER:-https://dakai.conde.cloud}"
+uid=$(id -u "$AGENT_USER")
+home=$(getent passwd "$AGENT_USER" | cut -d: -f6)
+
+as_agent() {
+  sudo -u "$AGENT_USER" -H env XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    bash -lc "cd ~ && $1"
+}
+q() { printf '%q' "$1"; }
+
+need_bootstrap() {
+  [ -f /var/lib/agentvm/bootstrap-done ] || { echo "bootstrap not finished yet (tail /var/log/agentvm-bootstrap.log)"; exit 2; }
+}
+
+cmd_status() {
+  if [ -f /var/lib/agentvm/bootstrap-done ]; then echo "bootstrap: done $(cat /var/lib/agentvm/bootstrap-done)";
+  else echo "bootstrap: running"; tail -n 5 /var/log/agentvm-bootstrap.log 2>/dev/null || true; return 0; fi
+  as_agent 'echo "claude: $(claude --version)"; claude auth status --text 2>&1 | sed "s/^/  /"'
+  as_agent 'conde boards 2>&1 | sed "s/^/conde boards: /"'
+  as_agent 'systemctl --user is-active conde 2>&1 | sed "s/^/conde bridge: /"'
+  as_agent 'systemctl --user is-active claude-agent 2>&1 | sed "s/^/agent: /"'
+}
+
+# The Claude CLI has no device-code login: it prints a URL, and the page the person signs in on shows a
+# code that has to be typed into this same process (it holds the PKCE verifier). So the login runs in a
+# tmux session, in a transient user unit so it survives the run-command that started it.
+cmd_claude_login_start() {
+  need_bootstrap
+  as_agent 'systemctl --user stop agentvm-claude-login 2>/dev/null; systemctl --user reset-failed agentvm-claude-login 2>/dev/null; tmux -L login kill-server 2>/dev/null; true'
+  as_agent "systemd-run --user --quiet --unit=agentvm-claude-login -E PATH=\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin -p Type=oneshot -p RemainAfterExit=yes \
+    tmux -L login new-session -d -s login -x 2000 -y 50 'claude auth login; sleep 120'"
+  for _ in $(seq 30); do
+    url=$(as_agent "tmux -L login capture-pane -p -J -t login 2>/dev/null" | grep -o 'https://claude\.com/cai/oauth/authorize[^ ]*' | head -1 || true)
+    [ -n "$url" ] && { echo "$url"; return 0; }
+    sleep 1
+  done
+  echo "no sign-in URL after 30 s; the login printed:"; as_agent "tmux -L login capture-pane -p -J -t login" || true
+  exit 1
+}
+
+cmd_claude_login_finish() {
+  local code="${1:?usage: agentvm claude-login-finish CODE}"
+  as_agent "tmux -L login send-keys -t login -l $(q "$code") && tmux -L login send-keys -t login Enter"
+  for _ in $(seq 30); do
+    if as_agent 'claude auth status --json 2>/dev/null' | jq -e '.loggedIn == true' >/dev/null 2>&1; then
+      as_agent 'claude auth status --text'
+      as_agent 'tmux -L login kill-server 2>/dev/null; systemctl --user stop agentvm-claude-login 2>/dev/null; true'
+      return 0
+    fi
+    sleep 1
+  done
+  echo "not signed in after 30 s; the login printed:"; as_agent "tmux -L login capture-pane -p -J -t login | tail -n 15" || true
+  exit 1
+}
+
+# conde's own headless login: the first call prints the URL and exits 3 (waiting for the code), the second
+# call finishes the enrollment with the code the sign-in page showed. Enrolling publishes nothing.
+cmd_conde_login_start() {
+  need_bootstrap
+  set +e; as_agent "conde login --server $(q "$CONDE_SERVER") --code 2>&1"; rc=$?; set -e
+  [ "$rc" = 0 ] || [ "$rc" = 3 ] || exit "$rc"
+}
+
+cmd_conde_login_finish() {
+  local code="${1:?usage: agentvm conde-login-finish CODE}"
+  as_agent "conde login --server $(q "$CONDE_SERVER") --code $(q "$code") 2>&1"
+  as_agent 'conde boards'
+}
+
+# The first agent: an interactive Claude session with remote control on, in a tmux session owned by a
+# user service, so it starts at boot and comes back after a crash. Its first prompt has it register its
+# name on conde; afterwards the same conversation is resumed (same session id), never a new one.
+cmd_agent_start() {
+  need_bootstrap
+  local name="${1:?usage: agentvm agent-start NAME [PERMISSION_MODE]}" mode="${2:-bypassPermissions}"
+  as_agent 'claude auth status --json' | jq -e '.loggedIn == true' >/dev/null || { echo "Claude is not signed in yet"; exit 2; }
+  local sid; sid=$(uuidgen)
+  as_agent "mkdir -p ~/.config/agentvm ~/.config/systemd/user && cat > ~/.config/agentvm/agent.env <<EOF
+AGENT_NAME=$(q "$name")
+SESSION_ID=$sid
+PERMISSION_MODE=$(q "$mode")
+WORK_DIR=\$HOME/$WORK_DIR_NAME
+EOF"
+  install -m 0755 -o "$AGENT_USER" /usr/local/lib/agentvm/run-agent "$home/.config/agentvm/run-agent"
+  as_agent 'cat > ~/.config/systemd/user/claude-agent.service <<EOF
+[Unit]
+Description=First Claude agent (remote control, conde)
+After=conde.service network-online.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/tmux -L agent new-session -d -s agent -x 220 -y 50 %h/.config/agentvm/run-agent
+ExecStop=/usr/bin/tmux -L agent kill-server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload && systemctl --user enable --now claude-agent'
+  sleep 15
+  cmd_agent_log
+}
+
+cmd_agent_log() {
+  as_agent 'tmux -L agent capture-pane -p -J -t agent 2>&1 | grep -v "^\s*$" | tail -n 40'
+}
+
+case "${1:-}" in
+  status) cmd_status ;;
+  claude-login-start) cmd_claude_login_start ;;
+  claude-login-finish) shift; cmd_claude_login_finish "$@" ;;
+  conde-login-start) cmd_conde_login_start ;;
+  conde-login-finish) shift; cmd_conde_login_finish "$@" ;;
+  agent-start) shift; cmd_agent_start "$@" ;;
+  agent-log) cmd_agent_log ;;
+  *) sed -n '2,13p' "$0"; exit 64 ;;
+esac

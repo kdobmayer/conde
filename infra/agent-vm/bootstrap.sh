@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# First-boot setup of a person's agent VM (Ubuntu 24.04), run once by cloud-init as root.
+# Everything is installed here, at deploy time, from the vendors' current releases, so a new VM
+# never starts on an outdated image. Nothing here signs in: the sign-ins need the person and run
+# later through `agentvm` (installed by cloud-init next to this script).
+set -euo pipefail
+
+[ -f /etc/agentvm.conf ] && . /etc/agentvm.conf
+AGENT_USER="${AGENT_USER:-agent}"
+WORK_DIR_NAME="${WORK_DIR_NAME:-work}"
+DONE=/var/lib/agentvm/bootstrap-done
+
+exec > >(tee -a /var/log/agentvm-bootstrap.log) 2>&1
+echo "== bootstrap start $(date -u +%FT%TZ)"
+export DEBIAN_FRONTEND=noninteractive
+
+# --- System packages: current Ubuntu updates, git from the git-core PPA (Ubuntu's lags), gh from GitHub's repo.
+apt-get update
+apt-get -y -o Dpkg::Options::=--force-confnew upgrade
+apt-get -y install ca-certificates curl gnupg software-properties-common \
+  tmux jq ripgrep unzip build-essential python3 python3-venv uuid-runtime
+add-apt-repository -y ppa:git-core/ppa
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  > /etc/apt/sources.list.d/github-cli.list
+apt-get update
+apt-get -y install git gh
+
+# --- The agent's own user. Linger starts its systemd user manager at boot, so the conde bridge and the
+# agent run without anyone logged in.
+id "$AGENT_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$AGENT_USER"
+loginctl enable-linger "$AGENT_USER"
+uid=$(id -u "$AGENT_USER")
+for _ in $(seq 60); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+[ -S "/run/user/$uid/bus" ] || { echo "user manager of $AGENT_USER did not start"; exit 1; }
+
+as_agent() {
+  sudo -u "$AGENT_USER" -H env XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="/home/$AGENT_USER/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    bash -lc "cd ~ && $1"
+}
+
+# --- User-level tools, each from its own installer (latest release; the conde installer checks SHA256SUMS).
+as_agent 'curl -fsSL https://claude.ai/install.sh | bash'
+as_agent 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+as_agent 'curl -fsSL https://conde.cloud/install.sh | bash'
+
+# --- Claude Code state that a terminal would otherwise ask for: onboarding done, the work folder
+# trusted (remote control asks to trust a folder, and there is no terminal to answer), and bypass mode
+# accepted for this dedicated VM.
+as_agent "mkdir -p ~/$WORK_DIR_NAME ~/.claude && cd ~/$WORK_DIR_NAME && git init -q 2>/dev/null || true"
+as_agent "f=~/.claude.json; [ -f \$f ] || echo '{}' > \$f; \
+  jq --arg d \"\$HOME/$WORK_DIR_NAME\" '.hasCompletedOnboarding = true
+     | .projects[\$d].hasTrustDialogAccepted = true
+     | .projects[\$d].hasCompletedProjectOnboarding = true' \$f > \$f.new && mv \$f.new \$f"
+as_agent "f=~/.claude/settings.json; [ -f \$f ] || echo '{}' > \$f; \
+  jq '.skipDangerousModePermissionPrompt = true' \$f > \$f.new && mv \$f.new \$f"
+
+# --- conde: the bridge as a user service, the skill and MCP entry for Claude Code, receiver policy accept.
+# Joining the shared board (dakai) is a sign-in, done later by `agentvm conde-login-*`.
+as_agent 'conde setup'
+as_agent 'conde setup --check' || true
+
+mkdir -p "$(dirname "$DONE")"
+date -u +%FT%TZ > "$DONE"
+echo "== bootstrap done $(date -u +%FT%TZ)"
+as_agent 'echo "claude $(claude --version)"; conde --version; uv --version'; git --version; gh --version | head -1

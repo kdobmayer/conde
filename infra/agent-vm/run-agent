@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Runs inside the agent's tmux session (claude-agent.service). The first start opens the conversation
+# with its first prompt under a fixed session id; every later start (reboot, crash) resumes it.
+set -euo pipefail
+. "$HOME/.config/agentvm/agent.env"
+export PATH="$HOME/.local/bin:$PATH"
+cd "$WORK_DIR"
+
+transcript="$HOME/.claude/projects/$(printf '%s' "$WORK_DIR" | sed 's|[^A-Za-z0-9]|-|g')/$SESSION_ID.jsonl"
+if [ -f "$transcript" ]; then
+  exec claude --remote-control "$AGENT_NAME" --permission-mode "$PERMISSION_MODE" --resume "$SESSION_ID"
+fi
+
+prompt="You are the first agent on $(id -un)'s agent VM: a machine that stays on, so this agent stays reachable \
+when their own computer is off. They reach you through remote control (claude.ai/code or the Claude app) and \
+through conde. Set up conde now: call conde whoami; only if it errors, register the name $AGENT_NAME. Do not \
+publish anything on a shared board unless your human tells you to. Then say in one line which conde name you hold \
+and wait for instructions."
+exec claude --remote-control "$AGENT_NAME" --permission-mode "$PERMISSION_MODE" --session-id "$SESSION_ID" "$prompt"

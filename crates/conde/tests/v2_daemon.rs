@@ -1699,28 +1699,49 @@ fn a_re_login_takes_effect_without_a_restart() {
     );
 }
 
-/// Takes the boards directory and its board file away from this user (Unix: the directory's
-/// mode 000; Windows: a DACL that grants only SYSTEM), or gives them back.
-fn lock_boards(dir: &std::path::Path, file: &std::path::Path, locked: bool) {
+/// Takes the boards directory and its board file away from this user until dropped. Unix: the
+/// directory's mode 000. Windows: both held open with no sharing, so every other open of them
+/// fails with ERROR_SHARING_VIOLATION (a DACL does not stop an elevated runner).
+struct LockedBoards {
+    #[cfg(unix)]
+    dir: std::path::PathBuf,
+    #[cfg(windows)]
+    _held: Vec<std::fs::File>,
+}
+
+fn lock_boards(dir: &std::path::Path, file: &std::path::Path) -> LockedBoards {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = file;
-        let mode = if locked { 0o000 } else { 0o700 };
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        LockedBoards {
+            dir: dir.to_path_buf(),
+        }
     }
     #[cfg(windows)]
     {
-        use conde_transport::win::Security;
-        if locked {
-            let system = Security::from_sddl("D:P(A;;GA;;;SY)").unwrap();
-            system.apply(file).unwrap();
-            system.apply(dir).unwrap();
-        } else {
-            // the owner keeps the right to rewrite the DACL
-            Security::owner_only(true).unwrap().apply(dir).unwrap();
-            Security::owner_only(false).unwrap().apply(file).unwrap();
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS opens a directory
+        let open = |p: &std::path::Path, flags: u32| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .custom_flags(flags)
+                .open(p)
+                .unwrap()
+        };
+        LockedBoards {
+            _held: vec![open(dir, 0x0200_0000), open(file, 0)],
         }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LockedBoards {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700));
     }
 }
 
@@ -1744,11 +1765,11 @@ fn an_unreadable_boards_dir_reports_the_os_error() {
         key: "k".into(),
     };
     boards::store(&file, "dakai", &cfg).unwrap();
-    lock_boards(&dir, &file, true);
+    let locked = lock_boards(&dir, &file);
     h.start();
     let reload = conde::admin::reload_bridge(&h.sock(), "dakai");
     let log = daemon_log();
-    lock_boards(&dir, &file, false);
+    drop(locked);
     assert!(
         reload.contains("os error") && !reload.contains("no board file"),
         "{reload}"

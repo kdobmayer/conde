@@ -312,7 +312,10 @@ jobs:
             }
             $waits = @(Select-String -Path $log -Pattern 'busy; waiting up to').Count
             Write-Host "bridges that waited for the previous one to release the pipe: $waits"
-            # a bridge that dies comes back with the task's one-minute trigger
+            # a bridge that dies comes back with the task's one-minute trigger; the kill and the look
+            # after it stay clear of the trigger (it fires at :00), which would start a new bridge in them
+            $s = (Get-Date).Second
+            if ($s -ge 54 -or $s -lt 3) { Start-Sleep -Seconds ((63 - $s) % 60) }
             $daemon = Get-CimInstance Win32_Process -Filter "Name = 'conde.exe'" | Where-Object { $_.CommandLine -match ' daemon' }
             if (@($daemon).Count -ne 1) { throw "expected one bridge process: $(@($daemon).Count)" }
             Stop-Process -Id $daemon.ProcessId -Force

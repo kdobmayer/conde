@@ -629,14 +629,27 @@ mod tests {
     #[test]
     fn migration_refuses_a_location_it_cannot_look_at() {
         let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("a-file");
-        std::fs::write(&file, "x").unwrap();
         let new = root.path().join(".conde/config");
-        assert!(move_if_absent(&file.join("conde"), &new).is_err());
+        assert!(move_if_absent(&unlookable(root.path()), &new).is_err());
         assert!(!new.exists());
         let old = old_config(root.path());
-        assert!(move_if_absent(&old, &file.join("config")).is_err());
+        assert!(move_if_absent(&old, &unlookable(root.path())).is_err());
         assert!(old.join("boards/demo.json").exists());
+    }
+
+    /// A path whose metadata cannot be read for another reason than "not found": on Unix one
+    /// through a regular file (ENOTDIR); Windows reports that as not found (ERROR_PATH_NOT_FOUND),
+    /// so there a name Windows refuses (ERROR_INVALID_NAME).
+    fn unlookable(root: &Path) -> PathBuf {
+        let path = if cfg!(windows) {
+            root.join("bad|name")
+        } else {
+            std::fs::write(root.join("a-file"), "x").unwrap();
+            root.join("a-file").join("child")
+        };
+        let err = path.symlink_metadata().unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        path
     }
 
     /// While a move is pending (the old location there, the new one not) the old one stays in
@@ -652,9 +665,7 @@ mod tests {
         assert_eq!(in_use(&old, &new), new, "both");
         std::fs::remove_dir(&old).unwrap();
         assert_eq!(in_use(&old, &new), new, "moved");
-        let file = root.path().join("a-file");
-        std::fs::write(&file, "x").unwrap();
-        let unknown = file.join("old");
+        let unknown = unlookable(root.path());
         assert_eq!(
             in_use(&unknown, &root.path().join("none")),
             unknown,

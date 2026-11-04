@@ -290,7 +290,8 @@ jobs:
               $state = (Get-ScheduledTask -TaskName conde).State
               $last = (Get-ScheduledTaskInfo -TaskName conde).LastTaskResult
               Write-Host "${what}: task $state, last result $last"
-              if ("$state" -ne 'Running' -or $last -ne 267009) { throw "${what}: the task is $state, last result $last" }
+              # 0x800710E0: the one-minute trigger came while the instance ran and was refused (IgnoreNew)
+              if ("$state" -ne 'Running' -or ($last -ne 267009 -and $last -ne 2147946720)) { throw "${what}: the task is $state, last result $last" }
               $doctor = conde doctor 2>&1 | Out-String
               if ($LASTEXITCODE -ne 0 -or -not $doctor.Contains('all clear')) { Write-Host $doctor; throw "${what}: doctor is not all clear" }
             }

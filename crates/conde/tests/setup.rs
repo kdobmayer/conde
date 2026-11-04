@@ -41,6 +41,9 @@ struct Fake {
     info: Option<Result<BoardInfo, String>>,
     /// What `loginctl show-user <uid> --property=Linger --value` prints; None: the call fails.
     linger: Option<&'static str>,
+    /// The task's last result while the bridge runs: 267009 (0x41301), or what Task Scheduler
+    /// writes over it when it refuses a launch because an instance runs.
+    running_result: i64,
     /// What a `conde.exe --version` probe prints; None: the default empty answer.
     exe_version: Option<&'static str>,
 }
@@ -66,6 +69,7 @@ impl Fake {
             daemon_calls: Vec::new(),
             info: None,
             linger: Some("no"),
+            running_result: 267009,
             exe_version: None,
         }
     }
@@ -142,7 +146,11 @@ impl Host for Fake {
                 self.ended = 1;
             }
             ("schtasks", ["/Query", _, _, "/FO", "CSV", "/V", "/NH"]) => {
-                let last = if self.alive { 267009 } else { self.ended };
+                let last = if self.alive {
+                    self.running_result
+                } else {
+                    self.ended
+                };
                 stdout = format!(
                     "\"HOST\",\"\\conde\",\"N/A\",\"Running\",\"Interactive only\",\"10/29/2026 9:00:00 AM\",\"{last}\",\"krisz\"\r\n"
                 );
@@ -957,6 +965,27 @@ fn the_binary_copy_waits_for_an_update_of_the_new_place() {
     assert_eq!(copy.join().unwrap().exe, new_exe);
     assert_eq!(std::fs::read(&new_exe).unwrap(), b"this build");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The task's one-minute trigger, or a Run, that comes while an instance runs is refused
+/// (IgnoreNew), and Task Scheduler writes 0x800710E0 over the last result of the running task:
+/// that is a running bridge, not one that exited.
+// a Linux or macOS machine: a Windows host cannot spell its paths
+#[cfg(unix)]
+#[test]
+fn a_launch_refused_while_the_bridge_runs_is_not_an_exit() {
+    // schtasks prints the result signed, PowerShell unsigned
+    for refused in [-2147020576_i64, 2147946720] {
+        let root = temp_root();
+        let env = windows_env(&root);
+        let mut host = Fake::new(&env, &[]);
+        host.running_result = refused;
+        let (ok, out) = run(&env, &Options::select(false, false, true, false), &mut host);
+        assert!(ok, "{out}");
+        assert!(out.contains("service: started conde"), "{out}");
+        assert!(!out.contains("exited"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 // a Linux or macOS machine: a Windows host cannot spell its paths

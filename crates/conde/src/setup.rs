@@ -1965,6 +1965,15 @@ pub fn utf16_file(text: &str) -> Vec<u8> {
 /// What `schtasks` reports as a task's last result while an instance runs (0x41301).
 pub const TASK_RUNNING: i64 = 0x41301;
 
+/// What Task Scheduler writes over the last result of a running task when it refuses a launch
+/// (the one-minute trigger, a Run) because an instance runs (IgnoreNew): 0x800710E0.
+pub const TASK_REFUSED: u32 = 0x8007_10E0;
+
+/// Whether a last result means an instance runs: 0x41301, or a launch refused for it.
+fn instance_runs(last: Option<i64>) -> bool {
+    last.is_some_and(|r| r == TASK_RUNNING || r as u32 == TASK_REFUSED)
+}
+
 /// The task's last result: the `Last Result` column of `schtasks /Query /FO CSV /V /NH`, whose
 /// columns are fixed while their header and the status words are in the system's language.
 pub fn task_last_result(csv: &str) -> Option<i64> {
@@ -2044,10 +2053,10 @@ fn run_task(env: &Env, host: &mut dyn Host) -> anyhow::Result<()> {
     loop {
         let last = query_last_result(host)?;
         let reached = host.reach(&env.socket);
-        if last == Some(TASK_RUNNING) && reached.is_ok() {
+        if instance_runs(last) && reached.is_ok() {
             return Ok(());
         }
-        if last.is_some() && last != before && last != Some(TASK_RUNNING) {
+        if last.is_some() && last != before && !instance_runs(last) {
             bail!(
                 "the bridge exited, task last result {}; see {}",
                 show_result(last),

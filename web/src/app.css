@@ -1,6 +1,7 @@
 /* Design B, Editorial (docs/web-ui-v2/options/README.md): warm off-white on ink, one terracotta
-   accent for own agents and anything that needs attention, grey status. Source Serif 4 and Inter
-   are bundled (lib/fonts.css); the fallback stacks cover the time before they load.
+   accent for own agents and selection (--warn, the same tone, marks what needs attention), grey
+   status. Source Serif 4 and Inter are bundled (lib/fonts.css); the fallback stacks cover the
+   time before they load.
    Two themes on one token set: dark here, light under [data-theme='light'], which the inline
    script in app.html sets from the user's choice or the system (lib/theme.ts). The light
    values keep the dark hierarchy and its contrast against bg, panel and soft: fg 13.8:1 and up,
@@ -185,4 +186,56 @@ code {
 	.placeholder p {
 		font-size: 17px;
 	}
+}
+
+/* The beta look (lib/theme.ts, chosen in the user menu), dark theme only: Jade. A cool graphite,
+   one jade for what is yours or selected, amber for what needs attention, a near-black jade rail.
+   Promoting it moves these values into :root; dropping it deletes this block. pages.rs carries
+   the tokens and the rail for the server's pages (test/pages.test.mjs keeps them equal). */
+:root[data-ui='beta'][data-theme='dark'] {
+	--bg: #131517;
+	--panel: #181a1c;
+	--soft: #1f2224;
+	--line: #282a2d;
+	--fg: #e4e9eb;
+	--muted: #b0b7ba;
+	--faint: #8e9598;
+	--accent: #54be9d;
+	--on-accent: #06120e;
+	--mine: #54be9d1f;
+	--ok: #b0b7ba;
+	--warn: #dfb67b;
+	--danger: #dfb67b;
+	--scrim: #05070899;
+}
+:root[data-ui='beta'][data-theme='dark'] :is(.mast, .mbar, .tabs) {
+	--bg: #0b1914;
+	--soft: #0d261e;
+	--line: #152c24;
+	--muted: #adbbb5;
+	--faint: #899a93;
+	background: var(--bg);
+}
+:root[data-ui='beta'][data-theme='dark'] .mast .word .mark {
+	color: var(--accent);
+}
+:root[data-ui='beta'][data-theme='dark'] .mast .sections a.on {
+	background: #54be9d24;
+}
+:root[data-ui='beta'][data-theme='dark'] .agent-page .kick {
+	color: var(--accent);
+}
+@media (min-width: 721px) {
+	:root[data-ui='beta'][data-theme='dark'] .agent-page .list a.on {
+		background: var(--mine);
+	}
+}
+/* own messages: a quieter wash than the selection and no bar; the offsets cancel, nothing moves */
+:root[data-ui='beta'][data-theme='dark'] .msg.mine:not(.selected) {
+	margin: 0 -18px;
+	padding-right: 16px;
+	padding-left: 16px;
+	border-left: 2px solid transparent;
+	border-radius: 8px;
+	background: #54be9d12;
 }

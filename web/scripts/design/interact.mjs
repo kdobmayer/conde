@@ -1066,7 +1066,7 @@ for (const hash of ['#/agents', '#/channels']) {
 		await page.locator('.mast .who').click();
 		const panel = page.locator('.mast [role=menu]');
 		expect(await panel.isVisible(), 'the menu did not open');
-		const items = await panel.locator('[role=menuitemradio]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
+		const items = await panel.locator('[data-theme-choice]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
 		expect(items.join(' ') === 'System:true Light:false Dark:false', items.join(' '));
 		await panel.locator('[data-theme-choice=light]').click();
 		const s = await page.evaluate(() => [document.documentElement.dataset.theme, getComputedStyle(document.body).backgroundColor, localStorage.getItem('conde.theme')]);
@@ -1364,7 +1364,7 @@ for (const hash of ['#/agents', '#/channels']) {
 	});
 	await check('theme: the user menu offers System, Light and Dark; Light applies at once and is stored', async () => {
 		await page.locator('.mast .who').click();
-		const items = await page.locator('[role=menu] [role=menuitemradio]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
+		const items = await page.locator('[role=menu] [data-theme-choice]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
 		expect(items.join(' ') === 'System:true Light:false Dark:false', items.join(' '));
 		await page.locator('[data-theme-choice=light]').click();
 		const s = await state();
@@ -1399,6 +1399,211 @@ for (const hash of ['#/agents', '#/channels']) {
 		await page.locator('[data-theme-choice=system]').click();
 		s = await state();
 		expect(s.theme === 'light' && s.bg === LIGHT && s.stored === null, JSON.stringify(s));
+	});
+	await context.close();
+}
+
+// ---- the look: current by default, the beta in the user menu, kept per browser ----
+{
+	where = 'look 1440';
+	const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+	const page = await context.newPage();
+	const state = () =>
+		page.evaluate(() => {
+			const color = (sel, prop) => {
+				const el = document.querySelector(sel);
+				return el ? getComputedStyle(el)[prop] : null;
+			};
+			return {
+				ui: document.documentElement.dataset.ui ?? null,
+				theme: document.documentElement.dataset.theme,
+				bg: getComputedStyle(document.body).backgroundColor,
+				rail: color('.mast', 'backgroundColor'),
+				held: color('.mast li b', 'color'),
+				stored: localStorage.getItem('conde.ui')
+			};
+		});
+	const DARK = 'rgb(19, 21, 24)';
+	const BETA = 'rgb(19, 21, 23)';
+	const RAIL = 'rgb(11, 25, 20)';
+	const LIGHT = 'rgb(246, 243, 237)';
+	await check('look: current by default; attention keeps today’s tone', async () => {
+		await page.goto(FEED, { waitUntil: 'networkidle' });
+		await page.waitForSelector('.mast li b');
+		const s = await state();
+		expect(s.ui === null && s.bg === DARK && s.held === 'rgb(212, 136, 107)' && s.stored === null, JSON.stringify(s));
+	});
+	await check('look: the user menu offers Current and Beta; Beta applies at once, is stored and says it is dark only', async () => {
+		await page.locator('.mast .who').click();
+		const items = await page.locator('[role=menu] [data-ui-choice]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
+		expect(items.join(' ') === 'Current:true Beta:false', items.join(' '));
+		expect(!(await page.locator('[role=menu] .note').isVisible()), 'the note shows for Current');
+		await page.locator('[data-ui-choice=beta]').click();
+		const s = await state();
+		expect(s.ui === 'beta' && s.bg === BETA && s.rail === RAIL && s.held === 'rgb(223, 182, 123)' && s.stored === 'beta', JSON.stringify(s));
+		expect((await page.locator('[data-ui-choice=beta]').getAttribute('aria-checked')) === 'true', 'Beta not checked');
+		expect(await page.locator('[role=menu] .note').isVisible(), 'no note for Beta');
+	});
+	await check('look: a reload keeps the beta before the app starts', async () => {
+		await page.addInitScript(() =>
+			document.addEventListener('readystatechange', () => document.readyState === 'interactive' && (window.__uiAtParse = document.documentElement.dataset.ui), { once: true })
+		);
+		await page.reload({ waitUntil: 'networkidle' });
+		const s = await state();
+		const atParse = await page.evaluate(() => window.__uiAtParse);
+		expect(atParse === 'beta' && s.ui === 'beta' && s.bg === BETA, JSON.stringify({ atParse, ...s }));
+	});
+	await check('look: the keys page follows the beta and its menu shows it', async () => {
+		await page.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
+		const s = await state();
+		expect(s.ui === 'beta' && s.bg === BETA && s.rail === RAIL, JSON.stringify(s));
+		await page.locator('.mast .who').click();
+		const panel = page.locator('.mast [role=menu]');
+		const items = await panel.locator('[data-ui-choice]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`));
+		expect(items.join(' ') === 'Current:false Beta:true', items.join(' '));
+		expect(await panel.locator('[data-ui-note]').isVisible(), 'no note for Beta');
+		await panel.locator('[data-ui-choice=current]').click();
+		const t = await state();
+		expect(t.ui === null && t.bg === DARK && t.stored === null, JSON.stringify(t));
+		expect(!(await panel.locator('[data-ui-note]').isVisible()), 'the note stays for Current');
+		await panel.locator('[data-ui-choice=beta]').click();
+		expect((await state()).ui === 'beta', 'the keys menu did not choose Beta');
+	});
+	await check('look: the beta leaves the light theme as it is; Current clears the choice', async () => {
+		await page.emulateMedia({ colorScheme: 'light' });
+		await page.goto(FEED, { waitUntil: 'networkidle' });
+		let s = await state();
+		expect(s.ui === 'beta' && s.theme === 'light' && s.bg === LIGHT, JSON.stringify(s));
+		await page.emulateMedia({ colorScheme: 'dark' });
+		await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark', null, { timeout: 2000 }).catch(() => {});
+		await page.locator('.mast .who').click();
+		await page.locator('[data-ui-choice=current]').click();
+		s = await state();
+		expect(s.ui === null && s.bg === DARK && s.stored === null, JSON.stringify(s));
+	});
+	await context.close();
+}
+
+/** A menu's choices as `Label:aria-checked`, the theme's then the look's. */
+const choices = (menu) =>
+	menu.locator('[data-theme-choice], [data-ui-choice]').evaluateAll((els) => els.map((e) => `${e.textContent.trim()}:${e.getAttribute('aria-checked')}`).join(' '));
+/** The root's theme and look. */
+const root = (page) => page.evaluate(() => `${document.documentElement.dataset.theme} ${document.documentElement.dataset.ui ?? 'current'}`);
+/** Lets a system preference change reach the page's listeners. */
+const frames = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+// ---- the menu shows what the page applied, when the browser does not store the choice ----
+{
+	where = 'look unstored 1440';
+	const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+	await context.addInitScript(() => {
+		Storage.prototype.setItem = () => {
+			throw new DOMException('full', 'QuotaExceededError');
+		};
+	});
+	const page = await context.newPage();
+	await check('look: on the keys page with storage failing, Beta and Light stay checked once chosen', async () => {
+		await page.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
+		await page.locator('.mast .who').click();
+		const menu = page.locator('.mast [role=menu]');
+		await menu.locator('[data-ui-choice=beta]').click();
+		let r = await root(page);
+		let c = await choices(menu);
+		expect(r === 'dark beta' && c === 'System:true Light:false Dark:false Current:false Beta:true', `${r} | ${c}`);
+		expect(await menu.locator('[data-ui-note]').isVisible(), 'no note for Beta');
+		await menu.locator('[data-theme-choice=light]').click();
+		r = await root(page);
+		c = await choices(menu);
+		expect(r === 'light beta' && c === 'System:false Light:true Dark:false Current:false Beta:true', `${r} | ${c}`);
+	});
+	for (const [label, url, wait] of [
+		['keys page', `${FEED}keys`, '.mast .who'],
+		['app', FEED, '.mast li b']
+	])
+		await check(`look: in the ${label} with storage failing, a system change keeps the chosen Dark and Beta`, async () => {
+			await page.emulateMedia({ colorScheme: 'dark' });
+			await page.goto(url, { waitUntil: 'networkidle' });
+			await page.waitForSelector(wait);
+			await page.locator('.mast .who').click();
+			const menu = page.locator('.mast [role=menu]');
+			await menu.locator('[data-theme-choice=dark]').click();
+			await menu.locator('[data-ui-choice=beta]').click();
+			await page.emulateMedia({ colorScheme: 'light' });
+			await frames(page);
+			const r = await root(page);
+			const c = await choices(menu);
+			expect(r === 'dark beta' && c === 'System:false Light:false Dark:true Current:false Beta:true', `${r} | ${c}`);
+		});
+	await context.close();
+}
+
+// ---- another tab's choice reaches the page and its menu ----
+{
+	where = 'look tabs 1440';
+	const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+	const other = await context.newPage();
+	await other.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
+	for (const [label, url, wait] of [
+		['keys page', `${FEED}keys`, '.mast .who'],
+		['app', FEED, '.mast li b']
+	])
+		await check(`look: another tab's Light and Beta reach the ${label} and its menu`, async () => {
+			await other.evaluate(() => localStorage.clear());
+			const page = await context.newPage();
+			await page.goto(url, { waitUntil: 'networkidle' });
+			await page.waitForSelector(wait);
+			await page.locator('.mast .who').click();
+			const menu = page.locator('.mast [role=menu]');
+			await other.evaluate(() => {
+				localStorage.setItem('conde.theme', 'light');
+				localStorage.setItem('conde.ui', 'beta');
+			});
+			await page.waitForFunction(() => document.documentElement.dataset.ui === 'beta', null, { timeout: 2000 }).catch(() => {});
+			const r = await root(page);
+			const c = await choices(menu);
+			expect(r === 'light beta' && c === 'System:false Light:true Dark:false Current:false Beta:true', `${r} | ${c}`);
+			expect(await menu.getByText('The beta restyles the dark theme.').isVisible(), 'no note for Beta');
+			await page.close();
+		});
+	for (const [label, url, wait] of [
+		['keys page', `${FEED}keys`, '.mast .who'],
+		['app', FEED, '.mast li b']
+	])
+		await check(`look: with storage failing in the ${label}, another tab's write leaves its menu on what the page shows`, async () => {
+			await other.evaluate(() => localStorage.clear());
+			const page = await context.newPage();
+			await page.addInitScript(() => {
+				Storage.prototype.setItem = () => {
+					throw new DOMException('full', 'QuotaExceededError');
+				};
+			});
+			await page.goto(url, { waitUntil: 'networkidle' });
+			await page.waitForSelector(wait);
+			await page.locator('.mast .who').click();
+			const menu = page.locator('.mast [role=menu]');
+			await menu.locator('[data-ui-choice=beta]').click();
+			await other.evaluate(() => localStorage.setItem('conde.other', '1'));
+			await page.waitForFunction(() => document.documentElement.dataset.ui !== 'beta', null, { timeout: 1000 }).catch(() => {});
+			const r = await root(page);
+			const c = await choices(menu);
+			expect(c.endsWith(r.endsWith('beta') ? 'Current:false Beta:true' : 'Current:true Beta:false'), `${r} | ${c}`);
+			await page.close();
+		});
+	await context.close();
+}
+
+// ---- the phone's menu ("More") shows the beta's note too ----
+{
+	where = 'look 390';
+	const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, colorScheme: 'dark' });
+	const page = await context.newPage();
+	await check('look: on the keys page at 390, More then Beta shows that menu’s note', async () => {
+		await page.goto(`${FEED}keys`, { waitUntil: 'networkidle' });
+		await page.locator('.tabs .who').click();
+		const menu = page.locator('.tabs [role=menu]');
+		await menu.locator('[data-ui-choice=beta]').click();
+		expect((await root(page)) === 'dark beta', await root(page));
+		expect(await menu.locator('[data-ui-note]').isVisible(), 'the More menu shows no note for Beta');
 	});
 	await context.close();
 }

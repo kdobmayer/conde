@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { board } from './board.svelte';
-	import { CHOICES, LABELS } from './theme';
-	import { choose, theme } from './theme.svelte';
+	import { CHOICES, LABELS, UIS, UI_LABELS } from './theme';
+	import { choose, chooseUi, theme } from './theme.svelte';
 
 	/** The owner's menu. It sits at the bottom of the screen in both places (the masthead's foot,
 	 * the phone's "More" tab), so it opens upward; `more` adds the Keys link the phone tab bar has
@@ -33,6 +33,15 @@
 						<button class="quiet" role="menuitemradio" aria-checked={theme.choice === c} data-theme-choice={c} onclick={() => choose(c)}>{LABELS[c]}</button>
 					{/each}
 				</div>
+			</div>
+			<div class="theme" role="group" aria-label="Interface">
+				<span class="kick" aria-hidden="true">Interface</span>
+				<div class="seg">
+					{#each UIS as u (u)}
+						<button class="quiet" role="menuitemradio" aria-checked={theme.ui === u} data-ui-choice={u} onclick={() => chooseUi(u)}>{UI_LABELS[u]}</button>
+					{/each}
+				</div>
+				{#if theme.ui === 'beta'}<span class="note">The beta restyles the dark theme.</span>{/if}
 			</div>
 			{#if more}<a role="menuitem" href="/keys">Keys</a>{/if}
 			<form method="post" action="/auth/logout">
@@ -105,6 +114,10 @@
 		font: 400 10.5px/1.4 var(--sans);
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
+		color: var(--faint);
+	}
+	.note {
+		font-size: 12.5px;
 		color: var(--faint);
 	}
 	.seg {

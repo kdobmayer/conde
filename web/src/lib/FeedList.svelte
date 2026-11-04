@@ -464,10 +464,10 @@
 		text-underline-offset: 5px;
 	}
 	.filters .attn {
-		color: var(--accent);
+		color: var(--warn);
 	}
 	.filters .attn[aria-pressed='true'] {
-		text-decoration: underline 2px var(--accent);
+		text-decoration: underline 2px var(--warn);
 		text-underline-offset: 5px;
 	}
 	.newbar {

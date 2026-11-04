@@ -4,8 +4,8 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="color-scheme" content="dark light" />
-		<!-- The theme before the first paint (lib/theme.ts); its copy in pages.rs must match. -->
-		<script>(function(){var r=document.documentElement,m=matchMedia('(prefers-color-scheme: light)');function a(){var t=null;try{t=localStorage.getItem('conde.theme')}catch(e){}r.dataset.theme=t==='light'||t==='dark'?t:m.matches?'light':'dark'}a();m.addEventListener('change',a);addEventListener('storage',a)})()</script>
+		<!-- The theme and the look before the first paint (lib/theme.ts); test/pages.test.mjs keeps its copy in pages.rs equal. -->
+		<script>(function(){var r=document.documentElement,m=matchMedia('(prefers-color-scheme: light)');function a(){var t=null,u=null;try{t=localStorage.getItem('conde.theme');u=localStorage.getItem('conde.ui')}catch(e){}r.dataset.theme=t==='light'||t==='dark'?t:m.matches?'light':'dark';if(u==='beta')r.dataset.ui=u;else delete r.dataset.ui}a();m.addEventListener('change',a);addEventListener('storage',a)})()</script>
 		<title>conde</title>
 		<link rel="icon" href="/app/favicon-light-32.png" sizes="32x32" type="image/png" media="(prefers-color-scheme: light)" />
 		<link rel="icon" href="/app/favicon-dark-32.png" sizes="32x32" type="image/png" media="(prefers-color-scheme: dark)" />

@@ -3,7 +3,7 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
 // The theme script inline in app.html, allowed by its hash (test/theme.test.mjs checks it).
-const themeHash = 'sha256-Hof4aQPFx2uDmN649sesR+jaKFXfTdz8GmXIkxB5pDI=';
+const themeHash = 'sha256-2ZPB0wbiHQz4aHmab97kj8k6WQLaCUM120sc3I9qZKM=';
 
 // The UI is embedded in the conde server binary: the shell at `/`, everything else under `/app/`.
 export default defineConfig({

@@ -134,7 +134,7 @@
 		color: var(--faint);
 	}
 	.meta :global(.state.problem) {
-		color: var(--accent);
+		color: var(--warn);
 	}
 	/* desktop rows sit closer than the phone's */
 	@media (min-width: 721px) {

@@ -29,8 +29,12 @@ const CSS: &str = r#"@font-face{font-family:'Source Serif 4';font-style:normal;f
 @font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url('/app/fonts/inter-v5.3.0-latin-400-normal.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 @font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url('/app/fonts/inter-v5.3.0-latin-ext-600-normal.woff2') format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
 @font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url('/app/fonts/inter-v5.3.0-latin-600-normal.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
-:root{--bg:#131518;--panel:#191c20;--soft:#20242a;--line:#2a2e34;--fg:#ebe6dc;--muted:#b8b2a7;--faint:#8e887e;--accent:#d4886b;--on-accent:#131518;--danger:#d4886b;--serif:'Source Serif 4','Source Serif Pro',Georgia,'Times New Roman',serif;--sans:Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color-scheme:dark}
-:root[data-theme=light]{--bg:#f6f3ed;--panel:#fcfaf6;--soft:#ebe6dd;--line:#dcd5ca;--fg:#1d1b18;--muted:#4f4a43;--faint:#666056;--accent:#8f3e22;--on-accent:#fcfaf6;--danger:#8f3e22;color-scheme:light}
+:root{--bg:#131518;--panel:#191c20;--soft:#20242a;--line:#2a2e34;--fg:#ebe6dc;--muted:#b8b2a7;--faint:#8e887e;--accent:#d4886b;--on-accent:#131518;--warn:#d4886b;--danger:#d4886b;--serif:'Source Serif 4','Source Serif Pro',Georgia,'Times New Roman',serif;--sans:Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color-scheme:dark}
+:root[data-theme=light]{--bg:#f6f3ed;--panel:#fcfaf6;--soft:#ebe6dd;--line:#dcd5ca;--fg:#1d1b18;--muted:#4f4a43;--faint:#666056;--accent:#8f3e22;--on-accent:#fcfaf6;--warn:#8f3e22;--danger:#8f3e22;color-scheme:light}
+:root[data-ui=beta][data-theme=dark]{--bg:#131517;--panel:#181a1c;--soft:#1f2224;--line:#282a2d;--fg:#e4e9eb;--muted:#b0b7ba;--faint:#8e9598;--accent:#54be9d;--on-accent:#06120e;--warn:#dfb67b;--danger:#dfb67b}
+:root[data-ui=beta][data-theme=dark] :is(.mast,.mbar,.tabs){--bg:#0b1914;--soft:#0d261e;--line:#152c24;--muted:#adbbb5;--faint:#899a93;background:var(--bg)}
+:root[data-ui=beta][data-theme=dark] .mast .word .mark{color:var(--accent)}
+:root[data-ui=beta][data-theme=dark] .mast .sections a.on{background:#54be9d24}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 var(--sans);-webkit-text-size-adjust:100%}
 a{color:var(--accent)}
@@ -56,7 +60,7 @@ body>main{max-width:960px;margin:0 auto;padding:40px 32px 56px}
 .mast li a{display:flex;align-items:baseline;gap:9px;padding:5px 0;color:var(--muted)}
 .mast li a:hover{color:var(--fg)}
 .name{min-width:0;overflow-wrap:anywhere}
-.mast li b{margin-left:auto;font-weight:500;font-size:11px;color:var(--accent);white-space:nowrap}
+.mast li b{margin-left:auto;font-weight:500;font-size:11px;color:var(--warn);white-space:nowrap}
 .mast li b+b{margin-left:6px}
 .empty{padding:5px 0;color:var(--faint)}
 .mast i{display:inline-block;width:7px;height:7px;border-radius:50%;border:1px solid var(--faint);flex:none}
@@ -78,6 +82,7 @@ body>main{max-width:960px;margin:0 auto;padding:40px 32px 56px}
 .panel p{margin:0;color:var(--muted)}
 .panel a{color:var(--fg)}
 .theme{display:flex;flex-direction:column;gap:6px}
+.note{font-size:12.5px;color:var(--faint)}
 .panel .kick{font:400 10.5px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
 .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .page{padding:34px 48px 40px;max-width:1000px}
@@ -153,14 +158,14 @@ td:last-child{justify-content:flex-end;padding-top:10px}
 button.danger{padding:6px 14px}
 }"#;
 
-/// The app's theme choice (web/src/lib/theme.ts), applied before the first paint: the inline
+/// The app's theme and look choices (web/src/lib/theme.ts), applied before the first paint: the inline
 /// script of web/src/app.html, byte for byte (a web test compares them); allowed by its hash.
-const THEME_JS: &str = r#"(function(){var r=document.documentElement,m=matchMedia('(prefers-color-scheme: light)');function a(){var t=null;try{t=localStorage.getItem('conde.theme')}catch(e){}r.dataset.theme=t==='light'||t==='dark'?t:m.matches?'light':'dark'}a();m.addEventListener('change',a);addEventListener('storage',a)})()"#;
+const THEME_JS: &str = r#"(function(){var r=document.documentElement,m=matchMedia('(prefers-color-scheme: light)');function a(){var t=null,u=null;try{t=localStorage.getItem('conde.theme');u=localStorage.getItem('conde.ui')}catch(e){}r.dataset.theme=t==='light'||t==='dark'?t:m.matches?'light':'dark';if(u==='beta')r.dataset.ui=u;else delete r.dataset.ui}a();m.addEventListener('change',a);addEventListener('storage',a)})()"#;
 
 /// The user menu of a signed-in page (web/src/lib/theme.svelte.ts and UserMenu.svelte): the
-/// theme choice stored as the app stores it, and a menu closed by Escape or a click outside it;
-/// allowed by its hash.
-const MENU_JS: &str = r#"(function(){var K='conde.theme',r=document.documentElement,b=document.querySelectorAll('[data-theme-choice]'),d=document.querySelectorAll('details.menu-panel');function c(){var t=null;try{t=localStorage.getItem(K)}catch(e){}return t==='light'||t==='dark'?t:'system'}function s(){var v=c();b.forEach(function(x){x.setAttribute('aria-checked',String(x.dataset.themeChoice===v))})}b.forEach(function(x){x.addEventListener('click',function(){var v=x.dataset.themeChoice;try{if(v==='system')localStorage.removeItem(K);else localStorage.setItem(K,v)}catch(e){}r.dataset.theme=v==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):v;s()})});addEventListener('click',function(e){d.forEach(function(m){if(m.open&&!m.contains(e.target))m.open=false})});addEventListener('keydown',function(e){if(e.key==='Escape')d.forEach(function(m){m.open=false})});addEventListener('storage',s);s()})()"#;
+/// theme and look choices stored as the app stores them, and a menu closed by Escape or a click outside it;
+/// the choices are held here, so the page and both menus keep them when storage fails; allowed by its hash.
+const MENU_JS: &str = r#"(function(){var K='conde.theme',U='conde.ui',r=document.documentElement,q=matchMedia('(prefers-color-scheme: light)'),b=document.querySelectorAll('[data-theme-choice]'),u=document.querySelectorAll('[data-ui-choice]'),n=document.querySelectorAll('[data-ui-note]'),d=document.querySelectorAll('details.menu-panel'),t,w;function g(k){try{return localStorage.getItem(k)}catch(e){return null}}function l(){t=g(K);t=t==='light'||t==='dark'?t:'system';w=g(U)==='beta'?'beta':'current'}function p(){r.dataset.theme=t==='system'?(q.matches?'light':'dark'):t;if(w==='beta')r.dataset.ui=w;else delete r.dataset.ui;b.forEach(function(x){x.setAttribute('aria-checked',String(x.dataset.themeChoice===t))});u.forEach(function(x){x.setAttribute('aria-checked',String(x.dataset.uiChoice===w))});n.forEach(function(x){x.hidden=w!=='beta'})}function o(k,v,z){try{if(v===z)localStorage.removeItem(k);else localStorage.setItem(k,v)}catch(e){}}b.forEach(function(x){x.addEventListener('click',function(){t=x.dataset.themeChoice;o(K,t,'system');p()})});u.forEach(function(x){x.addEventListener('click',function(){w=x.dataset.uiChoice;o(U,w,'current');p()})});addEventListener('click',function(e){d.forEach(function(m){if(m.open&&!m.contains(e.target))m.open=false})});addEventListener('keydown',function(e){if(e.key==='Escape')d.forEach(function(m){m.open=false})});q.addEventListener('change',p);addEventListener('storage',function(){l();p()});l();p()})()"#;
 
 /// The CSP source of an inline script.
 fn script_hash(js: &str) -> String {
@@ -206,6 +211,11 @@ pub(crate) struct Shell<'a> {
 <div class="theme" role="group" aria-label="Theme">
 <span class="kick" aria-hidden="true">Theme</span>
 <div class="seg"><button type="button" class="quiet" role="menuitemradio" aria-checked="false" data-theme-choice="system">System</button><button type="button" class="quiet" role="menuitemradio" aria-checked="false" data-theme-choice="light">Light</button><button type="button" class="quiet" role="menuitemradio" aria-checked="false" data-theme-choice="dark">Dark</button></div>
+</div>
+<div class="theme" role="group" aria-label="Interface">
+<span class="kick" aria-hidden="true">Interface</span>
+<div class="seg"><button type="button" class="quiet" role="menuitemradio" aria-checked="false" data-ui-choice="current">Current</button><button type="button" class="quiet" role="menuitemradio" aria-checked="false" data-ui-choice="beta">Beta</button></div>
+<span class="note" data-ui-note hidden>The beta restyles the dark theme.</span>
 </div>
 {% if more %}<a role="menuitem" href="/keys" aria-current="page">Keys</a>
 {% endif %}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="quiet" role="menuitem">Sign out</button></form>
@@ -761,7 +771,7 @@ mod tests {
                 .to_string();
             // the hash the app shell's CSP carries (web/vite.config.ts) for the same script
             assert!(
-                csp.contains("script-src 'sha256-Hof4aQPFx2uDmN649sesR+jaKFXfTdz8GmXIkxB5pDI='"),
+                csp.contains("script-src 'sha256-2ZPB0wbiHQz4aHmab97kj8k6WQLaCUM120sc3I9qZKM='"),
                 "{csp}"
             );
             assert_eq!(csp.contains("'nonce-"), nonce, "{csp}");

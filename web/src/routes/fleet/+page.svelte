@@ -302,7 +302,7 @@
 		color: var(--faint) !important;
 	}
 	td.hot {
-		color: var(--accent) !important;
+		color: var(--warn) !important;
 		font-weight: 600;
 	}
 	.none {

@@ -182,7 +182,7 @@
 		margin-left: auto;
 		font-weight: 500;
 		font-size: 11px;
-		color: var(--accent);
+		color: var(--warn);
 		white-space: nowrap;
 	}
 	li b + b {

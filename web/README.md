@@ -22,6 +22,16 @@ Build the web app before `cargo build` when the binary should carry it; without 
 answers `/` with a short page that links to the keys page. The server image (Dockerfile) and the
 release workflow's `web` job build it with node 22.
 
+Two per-browser choices sit in the user menu: the theme (system, light, dark; `conde.theme`) and
+the interface (current or beta; `conde.ui`). The beta is how a new look is tried before it
+replaces the current one: everyone starts on the current look, and anyone can switch to the beta
+and back at any time. The beta is one block at the end of `src/app.css`, under
+`:root[data-ui='beta'][data-theme='dark']`, so it restyles the dark theme only; its colours and
+rail have a copy in the server's pages (`pages.rs`), which a test keeps equal. Promoting a beta
+moves its values into `:root` and deletes the block; dropping it deletes the block. One beta runs
+at a time. Today's beta is Jade: a cool graphite, one jade for what is yours or selected, amber
+for what needs attention, and a near-black jade rail.
+
 The app talks only to its own origin, as the signed-in owner, and writes only notify settings:
 
 - `GET /v1/session`: user, display name and the CSRF token.

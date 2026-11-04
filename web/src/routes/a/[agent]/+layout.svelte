@@ -247,7 +247,7 @@
 		color: var(--muted);
 	}
 	.warn {
-		color: var(--accent);
+		color: var(--warn);
 	}
 	.list a {
 		display: flex;

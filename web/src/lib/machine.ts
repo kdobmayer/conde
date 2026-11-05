@@ -42,6 +42,24 @@ export interface MachineView {
 	claude: boolean;
 }
 
+/** What the page knows: `known` once a status answered or said `not_found` (no machine). */
+export interface Load {
+	known: boolean;
+	machine: Machine | null;
+	/** The last failed read, cleared by the next answer. */
+	error: string;
+}
+
+export const UNKNOWN: Load = { known: false, machine: null, error: '' };
+
+/** The page after one status read: an answer or `not_found` is known; any other failure keeps
+ * what was known (nothing, before the first answer) and says why. */
+export function settle(prev: Load, read: { machine: Machine } | { error: { code: string; message: string } }): Load {
+	if ('machine' in read) return { known: true, machine: read.machine, error: '' };
+	if (read.error.code === 'not_found') return { known: true, machine: null, error: '' };
+	return { ...prev, error: read.error.message };
+}
+
 /** Server clock minus this browser's clock, from an answer's `now` read between `asked` and `answered`. */
 export function skew(serverNow: string, asked: number, answered: number): number {
 	return Date.parse(serverNow) - (asked + answered) / 2;

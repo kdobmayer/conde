@@ -2,7 +2,7 @@
 // sign-in lines, and the server clock's skew.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { elapsed, machineView, skew } from '../src/lib/machine.ts';
+import { UNKNOWN, elapsed, machineView, settle, skew } from '../src/lib/machine.ts';
 
 const NOW = Date.parse('2026-11-05T22:30:00Z');
 const at = (s) => new Date(NOW - s * 1000).toISOString();
@@ -82,4 +82,18 @@ test('the skew is the server clock minus the midpoint of the call', () => {
 	const browser = NOW - 300_000;
 	const s = skew(new Date(NOW).toISOString(), browser, browser);
 	assert.equal(elapsed(at(60), browser + s), '1 min');
+});
+
+test('the page knows nothing until a status answer or not_found; a failed read is an error, never "no machine"', () => {
+	let load = settle(UNKNOWN, { error: { code: 'network', message: 'The server could not be reached' } });
+	assert.deepEqual(load, { known: false, machine: null, error: 'The server could not be reached' });
+	load = settle(load, { error: { code: 'internal', message: 'storage error' } });
+	assert.equal(load.known, false);
+	load = settle(load, { error: { code: 'not_found', message: 'no machine is set up for you' } });
+	assert.deepEqual(load, { known: true, machine: null, error: '' });
+	const m = machine('requested');
+	load = settle(load, { machine: m });
+	assert.deepEqual(load, { known: true, machine: m, error: '' });
+	load = settle(load, { error: { code: 'network', message: 'The server could not be reached' } });
+	assert.deepEqual(load, { known: true, machine: m, error: 'The server could not be reached' }, 'the last answer stays');
 });

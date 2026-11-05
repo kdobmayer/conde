@@ -4,38 +4,33 @@
 	import { onMount } from 'svelte';
 	import { mutate, rpc, RpcError } from '#lib/api.ts';
 	import { board, onBoard } from '#lib/board.svelte.ts';
-	import { machineView, skew, type Machine } from '#lib/machine.ts';
+	import { UNKNOWN, machineView, settle, skew, type Load, type Machine } from '#lib/machine.ts';
 	import Disclosure from '#lib/ui/Disclosure.svelte';
 	import ErrorLine from '#lib/ui/ErrorLine.svelte';
 	import SkeletonRows from '#lib/ui/SkeletonRows.svelte';
 
-	let machine = $state<Machine | null>(null);
-	let loaded = $state(false);
-	let error = $state('');
+	let load = $state<Load>(UNKNOWN);
+	const machine = $derived(load.machine);
+	const error = $derived(load.error);
 	let failedSetup = $state('');
 	let busy = $state(false);
 
-	async function load(): Promise<void> {
+	async function read(): Promise<void> {
 		try {
 			const asked = Date.now();
 			const m = await rpc<Machine>('machine.status');
 			board.skewMs = skew(m.now, asked, Date.now());
-			machine = m;
-			error = '';
+			load = settle(load, { machine: m });
 		} catch (e) {
-			if (e instanceof RpcError && e.code === 'not_found') {
-				machine = null;
-				error = '';
-			} else error = (e as Error).message;
-		} finally {
-			loaded = true;
+			const code = e instanceof RpcError ? e.code : 'internal';
+			load = settle(load, { error: { code, message: (e as Error).message } });
 		}
 	}
 
 	async function setup(): Promise<void> {
 		busy = true;
 		try {
-			machine = await mutate<Machine>('machine.setup');
+			load = settle(load, { machine: await mutate<Machine>('machine.setup') });
 			failedSetup = '';
 		} catch (e) {
 			failedSetup = (e as Error).message;
@@ -45,12 +40,12 @@
 	}
 
 	onMount(() => {
-		void load();
+		void read();
 		const off = onBoard((topics) => {
-			if (topics.includes('machine') || topics.includes('fleet')) void load();
+			if (topics.includes('machine') || topics.includes('fleet')) void read();
 		});
 		const timer = setInterval(() => {
-			if (document.visibilityState === 'visible') void load();
+			if (document.visibilityState === 'visible') void read();
 		}, 30_000);
 		return () => {
 			off();
@@ -62,7 +57,7 @@
 	const lastSeen = $derived(
 		board.fleet?.hosts.find((h) => h.owner === board.session?.user && h.host === machine?.host_id)?.last_seen ?? null
 	);
-	const view = $derived(loaded ? machineView(machine, now, lastSeen) : null);
+	const view = $derived(load.known ? machineView(machine, now, lastSeen) : null);
 </script>
 
 <section class="machine">
@@ -74,13 +69,13 @@
 	<div class="body">
 		{#if !view}
 			{#if error}
-				<ErrorLine {error} retry={() => void load()} />
+				<ErrorLine {error} retry={() => void read()} />
 			{:else}
 				<SkeletonRows count={2} height={40} />
 			{/if}
 		{:else}
 			{#if error}
-				<ErrorLine {error} retry={() => void load()} />
+				<ErrorLine {error} retry={() => void read()} />
 			{/if}
 			<p class="state" data-state={machine?.state ?? 'none'}>{view.headline}</p>
 			<p class="detail">{view.detail}</p>

@@ -33,6 +33,7 @@ page and the relay) is in conde itself.
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped) |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
+| `pilot-rebuild.sh` | operator, locally, pilot only | the rebuild's steps that are not one command: `inventory`, the manual `join`, `signin` by hand, `publish`; deleted with the enrol route |
 | `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, condeResource (required: the conde-machines application id), vmSize (B2as_v2 by default, D2as_v5 for the pilot). Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
 | `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; Azure Policy: only the AADSSHLoginForLinux extension (Deny), since RBAC cannot narrow extension writes. Accepted residual: the identity could create its own VM in the subnet with a copy of a person's OS disk |
@@ -87,6 +88,40 @@ session) when the Claude sign-in has under three days left or has ended: once a 
 hour if the page failed or was stored without reaching Slack (the board needs the person's Slack id). When the
 bridge sends `machine_event`, it runs the same script and the timer goes.
 
+## Rebuilding a person's VM (pilot: Levente, Oliver)
+
+Moves a person from a test-flow VM (`vm-agent-<short>`, user = their short name) onto an image VM
+(`vm-agent-<owner>`, user `agent`). The names differ, so the new VM is staged first. What cannot carry over: the
+old agent's conversation history, and files on the old VM nobody copied out. Each old VM is deleted only on
+Krisztián's go, per VM. Steps 2 and 4 are `pilot-rebuild.sh` until the enrol route and the onboarding page exist;
+then the server does them and the script is deleted.
+
+1. **Inventory**, and the person copies out what they keep: `./pilot-rebuild.sh inventory <short>`.
+2. **Stage the new VM** (the server's "set up my agent", or by hand):
+
+   ```sh
+   az deployment group create -g conde-vm -n agent-vm-<owner> \
+     --template-spec "$(az ts show -g conde-vm -n agent-vm -v <version> --query id -o tsv)" \
+     -p owner=<owner> ownerObjectId=<Entra object id> condeResource=<conde-machines app id> vmSize=Standard_D2as_v5
+   ```
+
+   Until the enrol route exists: `./pilot-rebuild.sh join <owner>` (the person signs in to conde),
+   `./pilot-rebuild.sh join <owner> CODE`.
+3. **Sign-ins** through the page, or `./pilot-rebuild.sh signin <owner> claude` and `signin <owner> code CODE`,
+   then `signin <owner> github`. The hook registers the name locally.
+4. **Move the name**: on the old VM, as its user, `conde unpublish vm.agent --board dakai`; then
+   `./pilot-rebuild.sh publish <owner>` (the server publishes it itself once the enrol route exists).
+5. **Check with a real request**: another host's agent sends `<owner>/vm.agent` a question on dakai and gets the
+   answer.
+6. **Retire the old VM**, on Krisztián's go: stop its agent (`systemctl --user disable --now claude-agent` as its
+   user); ask desk to revoke the old host's keys (`vm-agent-<short>`; the admin API, which also disconnects its
+   bridge); check its delete settings
+   (`az vm show -g conde-vm -n vm-agent-<short> --query "[networkProfile.networkInterfaces[0].deleteOption, storageProfile.osDisk.deleteOption]"`:
+   the test flow's VMs keep NIC and disk on delete); then `AGENTVM_RG=conde-vm ./agentvm.sh delete <short>`, which
+   deletes VM, NIC and disk.
+
+After both pilot VMs: `agent-rg.bicep` (the server's roles and the extension policy).
+
 ## Existing VMs (made before 5 Nov)
 
 They carry a copy of the agent unit in `~/.config/systemd/user`, which takes precedence over the root-owned
@@ -138,4 +173,4 @@ side exists the pilot runs them by hand, keeping stdin open (closing it cancels)
 ## Not here yet
 
 - The bridge's handling of the relay frames and the machine events (`online`, `needs_sign_in`): conde's half.
-- The probe: a test VM from the image first, then Levente's and Oliver's VMs rebuilt from it.
+- The rebuild of Levente's and Oliver's VMs (above), after the probe passed on 5 Nov.

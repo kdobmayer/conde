@@ -3,6 +3,7 @@
 #
 #   claude ok|expiring|expired|unknown <loginExpiresAt>     (expiring: under 3 days left)
 #   github ok|expired
+#   codex ok|expired         (ok: a cached credential, ~/.codex/auth.json; that it still refreshes is not proven)
 #
 # With --notify (the pilot's hourly timer, agentvm-signin-check.timer) it pages the human through conde when the
 # Claude sign-in is expiring or expired: once per day per condition, so "expired" still pages after an "expiring"
@@ -30,6 +31,7 @@ read -r c_state c_exp < <(claude_state)
 if gh auth status --hostname github.com >/dev/null 2>&1; then g_state=ok; else g_state=expired; fi
 echo "claude $c_state $c_exp"
 echo "github $g_state"
+if codex login status >/dev/null 2>&1; then echo "codex ok"; else echo "codex expired"; fi
 
 [ "${1:-}" = --notify ] || exit 0
 case "$c_state" in expiring|expired) ;; *) exit 0 ;; esac

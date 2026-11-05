@@ -122,6 +122,7 @@ build {
       "${path.root}/../agentvm-firstboot.service",
       "${path.root}/../relay-claude",
       "${path.root}/../relay-github",
+      "${path.root}/../relay-codex",
       "${path.root}/../agentvm-signin-check",
       "${path.root}/../agentvm-signin-check.service",
       "${path.root}/../agentvm-signin-check.timer",

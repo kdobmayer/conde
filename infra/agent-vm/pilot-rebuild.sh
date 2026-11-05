@@ -6,7 +6,7 @@
 #                                              uncommitted files, ~/work's newest files, the gh login)
 #   ./pilot-rebuild.sh join OWNER              no enrol route yet: conde's own sign-in for the person (prints the URL)
 #   ./pilot-rebuild.sh join OWNER CODE         finishes it, then first boot without the mint (marker, machine.env)
-#   ./pilot-rebuild.sh signin OWNER claude|github   no page yet: the relay helper by hand, input kept open (a FIFO)
+#   ./pilot-rebuild.sh signin OWNER claude|github|codex   no page yet: the relay helper by hand, input kept open (a FIFO)
 #   ./pilot-rebuild.sh signin OWNER code CODE  the Claude code the person got; prints the relay's outcome
 #   ./pilot-rebuild.sh publish OWNER           publishes vm.agent on dakai (once the old host has unpublished it)
 #
@@ -73,9 +73,9 @@ systemctl start agentvm-firstboot; journalctl -u agentvm-firstboot --no-pager -o
 # The relay by hand (no onboarding page): the helper reads a FIFO kept open, so it waits across separate
 # run-commands (EOF would cancel it).
 cmd_signin() {
-  local owner="${1:?usage: pilot-rebuild.sh signin OWNER claude|github|code CODE}" what="${2:?}"; name_ok "$owner"
+  local owner="${1:?usage: pilot-rebuild.sh signin OWNER claude|github|codex|code CODE}" what="${2:?}"; name_ok "$owner"
   case "$what" in
-    claude|github)
+    claude|github|codex)
       on_vm "vm-agent-$owner" "$(as_user agent "d=\$HOME/.relay-$what; systemctl --user stop relay-$what-byhand 2>/dev/null; rm -rf \$d; mkdir -p \$d; mkfifo \$d/in
 systemd-run --user --quiet --unit=relay-$what-byhand bash -c \"exec 3<>\$d/in; /usr/local/lib/agentvm/relay-$what <&3 >\$d/out 2>\$d/err\"
 timeout 10 bash -c 'echo start > \"\$1\"' _ \$d/in || { echo 'relay did not start'; exit 1; }

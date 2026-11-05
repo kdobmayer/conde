@@ -82,7 +82,8 @@ Until the Entra app conde-machines exists (Krisztián's half), the deployment ca
 
 ## Sign-in expiry (pilot)
 
-`agentvm-signin-check` prints `claude ok|expiring|expired|unknown <loginExpiresAt>` and `github ok|expired`. Its
+`agentvm-signin-check` prints `claude ok|expiring|expired|unknown <loginExpiresAt>`, `github ok|expired` and
+`codex ok|expired` (a cached Codex credential, which renews itself; that it still refreshes is not checked). Its
 hourly user timer runs it with `--notify`, which pages the human through conde (`conde page`, as the agent's own
 session) when the Claude sign-in has under three days left or has ended: once a day per condition, retried next
 hour if the page failed or was stored without reaching Slack (the board needs the person's Slack id). When the
@@ -121,6 +122,12 @@ then the server does them and the script is deleted.
    deletes VM, NIC and disk.
 
 After both pilot VMs: `agent-rg.bicep` (the server's roles and the extension policy).
+
+## Codex
+
+The image installs the Codex CLI beside Claude Code (OpenAI's installer, as the agent user). The person signs in
+with OpenAI's device code through `relay-codex`; device-code sign-in must be enabled in their OpenAI workspace or
+security settings. Codex sessions start over SSH in tmux; the image configures no continuously running Codex agent.
 
 ## Existing VMs (made before 5 Nov)
 
@@ -165,6 +172,7 @@ relay, as the agent user, with a line protocol on stdin and stdout:
 |---|---|---|
 | `relay-claude` | `start`, then `code <code>`; EOF or SIGTERM cancels | `url <authorize URL>`, `waiting`, `done`, `failed <reason>` |
 | `relay-github` | `start`; EOF or SIGTERM cancels | `url <verification URL> <user_code> <expires_at>`, `waiting`, `done`, `failed <reason>` |
+| `relay-codex` | `start`; EOF or SIGTERM cancels | `url <device URL> <user_code> <expires_at>`, `waiting`, `done`, `failed <reason>` |
 
 Reasons are the contract's: `expired`, `denied`, `bad_code`, `process_exited`, `timeout`, `busy`. Until the bridge
 side exists the pilot runs them by hand, keeping stdin open (closing it cancels):

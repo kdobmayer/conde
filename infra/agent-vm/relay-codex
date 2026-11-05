@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# The Codex sign-in for the relay: OpenAI's device code, as the agent user. The bridge execs it per relay and speaks a
+# line protocol on stdin/stdout (until then the pilot runs it by hand, pilot-rebuild.sh signin OWNER codex):
+#
+#   in:  start                                  start codex login --device-auth
+#        EOF or SIGTERM                         cancel: the login process is killed
+#   out: url <URL> <user_code> <expires_at>     for the page: the person enters the code on OpenAI's page
+#        waiting                                waiting for the person
+#        done                                   signed in ("Successfully logged in" and exit 0; ~/.codex/auth.json)
+#        failed <reason>                        expired | process_exited | busy
+#
+# codex login --device-auth reads no terminal: it prints the link and the code, polls OpenAI, saves the credential and
+# exits. So it runs as one child process with its output captured. The code is an opaque server string: whatever
+# follows "one-time code". Device-code sign-in must be enabled in the person's OpenAI workspace.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+WINDOW="${RELAY_CODEX_WINDOW:-900}"   # the CLI's own "expires in 15 minutes"
+
+say() { printf '%s\n' "$*"; }
+err() { printf 'relay-codex: %s\n' "$*" >&2; }
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/agentvm-relay-codex.lock"
+flock -n 9 || { say "failed busy"; exit 0; }
+
+read -r cmd || exit 0
+[ "$cmd" = start ] || { err "expected start"; say "failed process_exited"; exit 0; }
+
+d=$(mktemp -d)
+pid=
+# Its own process group (setsid), so a cancel kills it with any children; without the lock's descriptor, so nothing
+# it leaves behind holds the lock.
+cleanup() { [ -n "$pid" ] && { kill -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }; rm -rf "$d"; }
+trap 'cleanup; exit 0' TERM INT
+setsid codex login --device-auth >"$d/out" 2>"$d/err" 9>&- &
+pid=$!
+plain() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$1"; }
+
+url="" code=""
+for _ in $(seq 60); do
+  url=$(plain "$d/out" | grep -oE 'https://[^[:space:]]+' | head -n 1)
+  code=$(plain "$d/out" | awk '/one-time code/ {want = 1; next} want && NF {print $1; exit}')
+  [ -n "$url" ] && [ -n "$code" ] && break
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 1
+done
+if [ -z "$url" ] || [ -z "$code" ]; then
+  err "no device link and code from codex: $(plain "$d/err" | tail -n 2 | tr '\n' ' ')"; cleanup; say "failed process_exited"; exit 0
+fi
+deadline=$(( $(date +%s) + WINDOW ))
+say "url $url $code $(date -u -d "@$deadline" +%FT%TZ)"
+say waiting
+
+# Wait for the process, a second at a time, ending at once when the bridge closes stdin (cancel).
+while kill -0 "$pid" 2>/dev/null; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then cleanup; say "failed expired"; exit 0; fi
+  if read -r -t 1 _; then :; else [ $? -gt 128 ] || { cleanup; exit 0; }; fi
+done
+wait "$pid"; rc=$?; pid=
+if [ "$rc" -eq 0 ] && grep -q 'Successfully logged in' <(plain "$d/err") <(plain "$d/out"); then
+  rm -rf "$d"; say done
+elif plain "$d/err" | grep -qiE 'expired|timed out|timeout'; then
+  err "the code expired (exit $rc)"; rm -rf "$d"; say "failed expired"
+else
+  err "codex login ended (exit $rc): $(plain "$d/err" | tail -n 2 | tr '\n' ' ')"; rm -rf "$d"; say "failed process_exited"
+fi
+exit 0

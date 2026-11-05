@@ -60,7 +60,8 @@ install_from() {  # $1 URL, $2 shell
 install_from https://claude.ai/install.sh bash
 install_from https://astral.sh/uv/install.sh sh
 install_from https://conde.cloud/install.sh bash
-verify_tools() { as_agent 'echo "claude $(claude --version)"; conde --version; uv --version'; git --version; gh --version | head -1; }
+install_from https://chatgpt.com/codex/install.sh "env CODEX_NON_INTERACTIVE=true sh"   # OpenAI's installer, as the agent
+verify_tools() { as_agent 'echo "claude $(claude --version)"; conde --version; uv --version; codex --version'; git --version; gh --version | head -1; }
 
 # --- Claude Code state that a terminal would otherwise ask for: onboarding done, the work folder
 # trusted (remote control asks to trust a folder, and there is no terminal to answer), and bypass mode

@@ -16,7 +16,7 @@ cloud-init status --wait >/dev/null || true   # its apt run holds the lock
 
 install -d -m 0755 /usr/local/lib/agentvm
 install -m 0755 "$SRC/bootstrap.sh" "$SRC/run-agent" "$SRC/conde-register-hook" "$SRC/agentvm-firstboot" \
-  "$SRC/relay-claude" "$SRC/relay-github" "$SRC/agentvm-signin-check" /usr/local/lib/agentvm/
+  "$SRC/relay-claude" "$SRC/relay-github" "$SRC/relay-codex" "$SRC/agentvm-signin-check" /usr/local/lib/agentvm/
 install -m 0644 "$SRC/claude-agent.service" "$SRC/agentvm-signin-check.service" "$SRC/agentvm-signin-check.timer" /etc/systemd/user/
 install -m 0755 "$SRC/agentvm" /usr/local/bin/agentvm
 # GITHUB_*: the relay's GitHub device flow. The pilot uses the gh CLI's public OAuth client id until the

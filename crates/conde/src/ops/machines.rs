@@ -1,7 +1,7 @@
 //! A person's agent machine (`machines`, one per person). `machine.setup` creates the record, or
 //! adopts a host the person joined by hand, or clears a failed deployment for a retry; its answer
 //! says `deploy` when a deployment PUT is due, which conde-remote issues (the Azure client lives
-//! there). `machine.status` reads the record with the agent's state. The startup exchange: the
+//! there). `machine.status` reads the owner's own record with the agent's state. The startup exchange: the
 //! first live endpoint of the person's `vm.agent` on the machine's host gets one DM from the
 //! person's human row, and the agent's reply to it marks the machine ready.
 
@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 
 use super::agents::{self, Agent, PUBLIC_AGENT};
 use super::messages::{Target, insert_message};
-use super::services;
 use super::web::{ONLINE_TTL_MS, browser_only};
 use crate::address::Kind;
 use crate::dispatch::{Ctx, MachineSettings, OpResult, conflict, forbidden, not_found, opt_str};
@@ -121,30 +120,17 @@ pub fn setup(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     Ok(out)
 }
 
-/// `machine.status {owner?}`: the signed-in owner's record in the browser; a service (a user with
-/// a service sender row, as `service.notify` checks) names any `owner`. `not_found` without a
-/// record.
+/// `machine.status {}`: the signed-in owner's own record, in the browser only (a service reads a
+/// person's state through `service.presence`); `not_found` without a record.
 pub fn status(ctx: &Ctx, body: &Value) -> OpResult<Value> {
-    let owner = opt_str(body, "owner")?.map(str::to_lowercase);
-    let user_id = if ctx.p.browser {
-        browser_only(ctx)?;
-        if owner.as_deref().is_some_and(|o| o != ctx.p.user) {
-            return Err(forbidden("the browser reads its own machine only"));
-        }
-        ctx.p.user_id
-    } else {
-        services::sender(ctx)?;
-        let owner =
-            owner.ok_or_else(|| crate::dispatch::bad_request("missing string field 'owner'"))?;
-        ctx.db
-            .user_by_name(&owner)?
-            .ok_or_else(|| not_found(format!("no user {owner} on this board")))?
-            .user_id
-    };
+    browser_only(ctx)?;
+    if opt_str(body, "owner")?.is_some_and(|o| o.to_lowercase() != ctx.p.user) {
+        return Err(forbidden("the browser reads its own machine only"));
+    }
     let m = ctx
         .db
-        .machine_of_user(user_id)?
-        .ok_or_else(|| not_found("no machine is set up for this person"))?;
+        .machine_of_user(ctx.p.user_id)?
+        .ok_or_else(|| not_found("no machine is set up for you"))?;
     status_json(ctx.db, &m, ctx.now_ms)
 }
 
@@ -156,17 +142,20 @@ pub fn status_json(db: &dyn Tx, m: &MachineRow, now_ms: i64) -> OpResult<Value> 
         .filter(|u| u.admin && !u.disabled)
         .map(|u| u.name)
         .collect();
-    let sign_in = m
-        .sign_in
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .unwrap_or(Value::Null);
     Ok(json!({
         "state": state_of(db, m, now_ms)?, "host_id": m.host_id, "requested_at": m.requested_at,
         "minted_at": m.minted_at, "deploy_state": m.deploy_state, "deploy_error": m.deploy_error,
         "probe_id": m.probe_id, "ready_at": m.ready_at, "session_online_at": m.session_online_at,
-        "sign_in": sign_in, "relay": null, "admins": admins, "now": iso_from_ms(now_ms),
+        "sign_in": sign_in_json(m), "relay": null, "admins": admins, "now": iso_from_ms(now_ms),
     }))
+}
+
+/// The record's sign-in flows as JSON (null when none were reported or unreadable).
+pub fn sign_in_json(m: &MachineRow) -> Value {
+    m.sign_in
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or(Value::Null)
 }
 
 /// Whether the machine joined the board: minted, or (until the enrol route) joined by hand with a
@@ -187,7 +176,7 @@ fn joined(db: &dyn Tx, m: &MachineRow) -> OpResult<bool> {
 /// (reachable and the startup exchange answered), `connected` (heartbeat within the TTL and
 /// `vm.agent` published on the host), `disconnected` (a bridge was seen, no heartbeat within the
 /// TTL), else `up`.
-fn state_of(db: &dyn Tx, m: &MachineRow, now_ms: i64) -> OpResult<&'static str> {
+pub fn state_of(db: &dyn Tx, m: &MachineRow, now_ms: i64) -> OpResult<&'static str> {
     if m.deleting_at.is_some() {
         return Ok("deleting");
     }

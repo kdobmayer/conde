@@ -67,6 +67,7 @@ pub static OPS: &[OpSpec] = &[
     op!("human.done_pages", paging::done_pages, mutation),
     op!("human.status", paging::status, query),
     op!("service.notify", services::notify, mutation),
+    op!("service.presence", services::presence, query),
     op!("channel.create", channels::create, mutation),
     op!("channel.join", channels::join, mutation),
     op!("channel.leave", channels::leave, mutation),

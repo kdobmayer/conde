@@ -1,11 +1,13 @@
 //! A service's notices to people (`service.notify`): a board user with one unbound sender row of
 //! actor kind `service` (made by the admin's services route) tells a person of an event in one
 //! line and a link. The notice goes to the person's public agent when it is reachable, else to
-//! the person as a page, which the Slack worker sends them.
+//! the person as a page, which the Slack worker sends them. `service.presence` tells the same
+//! service the state of a person's agent machine.
 
 use serde_json::{Value, json};
 
 use super::agents::{Agent, public_agent_reachable};
+use super::machines;
 use super::messages::{Target, insert_message};
 use super::paging::PAGE_CHARS;
 use crate::dispatch::{Ctx, OpResult, bad_request, forbidden, not_found, str_param};
@@ -52,6 +54,22 @@ fn person(ctx: &Ctx, to: &str) -> OpResult<UserRow> {
     found
         .filter(|u| !u.disabled)
         .ok_or_else(|| not_found(format!("no user {to} on this board")))
+}
+
+/// `service.presence {to}`: the person's machine as `{state, sign_in}` (`machine.status`'s state
+/// word and the reported sign-in flows), nothing else; `not_found` without a machine. Reads the
+/// store only, never Azure.
+pub fn presence(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    sender(ctx)?;
+    let user = person(ctx, str_param(body, "to")?.trim())?;
+    let m = ctx
+        .db
+        .machine_of_user(user.user_id)?
+        .ok_or_else(|| not_found(format!("{} has no machine", user.name)))?;
+    Ok(json!({
+        "state": machines::state_of(ctx.db, &m, ctx.now_ms)?,
+        "sign_in": machines::sign_in_json(&m),
+    }))
 }
 
 /// `service.notify {to, text, link}`.

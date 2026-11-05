@@ -101,6 +101,7 @@ on_both!(
     the_same_event_id_is_answered_once_without_a_second_message,
     a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired,
     the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply_marks_ready,
+    a_service_reads_a_persons_presence_and_nothing_else,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -2178,6 +2179,19 @@ async fn notices(d: &Arc<Dispatcher>) -> Notices {
 }
 
 impl Notices {
+    /// `service.presence {to}` with the service's key.
+    async fn presence(&self, to: &str) -> Value {
+        self.s
+            .rpc(
+                &self.praxia,
+                None,
+                "service.presence",
+                json!({"to": to}),
+                None,
+            )
+            .await
+    }
+
     async fn notify(&self, to: &str, text: &str, link: &str, event: &str) -> Value {
         self.s
             .rpc(
@@ -2499,15 +2513,7 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
         .await;
     assert_eq!(r["ok"], false, "{r}");
     assert_eq!(machine_of(&d, uid).await.ready_at, None);
-    let r =
-        n.s.rpc(
-            &n.praxia,
-            None,
-            "machine.status",
-            json!({"owner": "levente-szabo"}),
-            None,
-        )
-        .await;
+    let r = n.presence("levente-szabo").await;
     assert_eq!(r["result"]["state"], "connected", "{r}");
     // the agent's own reply marks it ready
     n.s.ok(
@@ -2518,35 +2524,52 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
     )
     .await;
     assert!(machine_of(&d, uid).await.ready_at.is_some());
-    let r =
-        n.s.rpc(
-            &n.praxia,
-            None,
-            "machine.status",
-            json!({"owner": "levente-szabo"}),
-            None,
-        )
-        .await;
+    let r = n.presence("levente-szabo").await;
     assert_eq!(r["result"]["state"], "ready", "{r}");
-    // only a service names another owner; a person without a record is not found
+}
+
+/// A service reads a person's presence by board user name or sign-in email: the state and the
+/// sign-in flows, nothing else. A person without a machine, or no such person, is not found; a
+/// key without a service row is refused; `machine.status` takes no bearer request, a service's
+/// included.
+async fn a_service_reads_a_persons_presence_and_nothing_else(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    let flows = r#"{"claude":"expired","github":"ok","codex":"ok"}"#;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| Ok(t.machine_set_sign_in(uid, Some(flows))?))
+            .unwrap()
+    })
+    .await;
+    for to in ["levente-szabo", "Levente.Szabo@dakai.io"] {
+        let r = n.presence(to).await;
+        assert_eq!(r["ok"], true, "{to}: {r}");
+        assert_eq!(
+            r["result"],
+            json!({"state": "up", "sign_in": {"claude": "expired", "github": "ok", "codex": "ok"}}),
+            "{to}"
+        );
+    }
+    for to in ["oliver", "nobody@dakai.io", "nobody"] {
+        let r = n.presence(to).await;
+        assert_eq!(r["error"]["code"], "not_found", "{to}: {r}");
+    }
     let r =
         n.s.rpc(
             &n.lev,
             None,
-            "machine.status",
-            json!({"owner": "levente-szabo"}),
+            "service.presence",
+            json!({"to": "levente-szabo"}),
             None,
         )
         .await;
     assert_eq!(r["error"]["code"], "forbidden", "{r}");
-    let r =
-        n.s.rpc(
-            &n.praxia,
-            None,
-            "machine.status",
-            json!({"owner": "oliver"}),
-            None,
-        )
-        .await;
-    assert_eq!(r["error"]["code"], "not_found", "{r}");
+    for (key, body) in [
+        (&n.praxia, json!({"owner": "levente-szabo"})),
+        (&n.lev, json!({})),
+    ] {
+        let r = n.s.rpc(key, None, "machine.status", body, None).await;
+        assert_eq!(r["error"]["code"], "forbidden", "{r}");
+    }
 }

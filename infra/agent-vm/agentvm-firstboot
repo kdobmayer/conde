@@ -145,7 +145,7 @@ if [ ! -f "$home/.config/agentvm/agent.env" ]; then
     PERMISSION_MODE "$PERMISSION_MODE" WORK_DIR "$home/$WORK_DIR_NAME" \
     | as_agent 'umask 077 && mkdir -p ~/.config/agentvm && cat > ~/.config/agentvm/agent.env'
 fi
-as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent agentvm-signin-check.timer'
+as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent agentvm-signin-check.timer conde-update.timer'
 
 date -u +%FT%TZ > "$DONE"
 log "done; the agent starts when the person has signed in to Claude"

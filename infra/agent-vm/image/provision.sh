@@ -46,10 +46,10 @@ Unattended-Upgrade::Origins-Pattern {
 };
 CONF
 
-# --- conde updates itself daily (a user timer of the agent user; `conde update` restarts the bridge)
+# --- conde updates itself daily: a user timer, root-owned in /etc/systemd/user and enabled for the agent by first
+# boot (nothing root writes goes into the agent's folders); `conde update` runs as the agent and restarts the bridge.
 home=$(getent passwd "$AGENT_USER" | cut -d: -f6)
-install -d -o "$AGENT_USER" -g "$AGENT_USER" "$home/.config/systemd/user/timers.target.wants"
-cat > "$home/.config/systemd/user/conde-update.service" <<'UNIT'
+cat > /etc/systemd/user/conde-update.service <<'UNIT'
 [Unit]
 Description=Update conde to the latest release
 
@@ -57,7 +57,7 @@ Description=Update conde to the latest release
 Type=oneshot
 ExecStart=%h/.local/bin/conde update
 UNIT
-cat > "$home/.config/systemd/user/conde-update.timer" <<'UNIT'
+cat > /etc/systemd/user/conde-update.timer <<'UNIT'
 [Unit]
 Description=Daily conde update
 
@@ -69,16 +69,14 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 UNIT
-ln -sf ../conde-update.timer "$home/.config/systemd/user/timers.target.wants/conde-update.timer"
-chown -R "$AGENT_USER:$AGENT_USER" "$home/.config/systemd"
+chmod 0644 /etc/systemd/user/conde-update.service /etc/systemd/user/conde-update.timer
 
 # --- first boot
 install -m 0644 "$SRC/agentvm-firstboot.service" /etc/systemd/system/
 systemctl enable agentvm-firstboot.service
 
 # --- nothing of this build VM may reach the VMs made from it
-jq 'del(.userID)' "$home/.claude.json" > "$home/.claude.json.new" && mv "$home/.claude.json.new" "$home/.claude.json"
-chown "$AGENT_USER:$AGENT_USER" "$home/.claude.json"
+sudo -u "$AGENT_USER" -H bash -c 'jq "del(.userID)" ~/.claude.json > ~/.claude.json.new && mv ~/.claude.json.new ~/.claude.json'
 rm -rf "$home/.local/share/conde" "$home/.config/conde" /var/lib/agentvm/firstboot-done /var/lib/agentvm/bootstrap-done
 rm -rf "$SRC"
 cloud-init clean --logs

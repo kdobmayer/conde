@@ -1,19 +1,31 @@
 /**
- * The navigation model (ia.md "Navigation"): five sections, the owner's agents with their state,
+ * The navigation model (ia.md "Navigation"): the sections (Machine where the board sets up agent
+ * machines), the owner's agents with their state,
  * and the channels any of them is in, once each.
  */
 
 import type { Fleet, Rail } from './types';
 
-export type SectionId = 'feed' | 'agents' | 'channels' | 'fleet' | 'keys';
+export type SectionId = 'feed' | 'agents' | 'channels' | 'fleet' | 'machine' | 'keys';
 
 export const SECTIONS: { id: SectionId; label: string; href: string }[] = [
 	{ id: 'feed', label: 'Feed', href: '#/' },
 	{ id: 'agents', label: 'Agents', href: '#/agents' },
 	{ id: 'channels', label: 'Channels', href: '#/channels' },
 	{ id: 'fleet', label: 'Fleet', href: '#/fleet' },
+	{ id: 'machine', label: 'Machine', href: '#/machine' },
 	{ id: 'keys', label: 'Keys', href: '/keys' }
 ];
+
+/** The sections a board shows: Machine only where it sets up agent machines. */
+export function sections(machines: boolean): typeof SECTIONS {
+	return SECTIONS.filter((s) => s.id !== 'machine' || machines);
+}
+
+/** The phone's tab bar: every section but Keys, which is in More. */
+export function tabs(machines: boolean): typeof SECTIONS {
+	return sections(machines).filter((s) => s.id !== 'keys');
+}
 
 export type AgentState = 'online' | 'offline' | 'unbound';
 
@@ -53,5 +65,6 @@ export function sectionOf(routeId: string | null): SectionId | null {
 	if (routeId === '/agents' || routeId?.startsWith('/a/')) return 'agents';
 	if (routeId === '/channels' || routeId?.startsWith('/c/')) return 'channels';
 	if (routeId === '/fleet') return 'fleet';
+	if (routeId === '/machine') return 'machine';
 	return null;
 }

@@ -220,3 +220,9 @@ variables, all set or none (some set: the server refuses to start and names the 
 managed identity endpoint Container Apps provides (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`); without it the machines
 variables are refused. The Terraform sets all five on ca-conde (`machines_env` in infra/terraform/main.tf). The
 startup log line `web surface enabled` shows the configuration, without the identity header.
+
+With the variables set and an Entra sign-in, an invited person's first browser sign-in records their machine,
+starts the named deployment `vm-agent-<owner>` and lands on the web app's Machine page; a member who signed in
+before uses the page's "Set up my agent". A member with a VM joined by hand (a live key of `vm-agent-<owner>`, or
+of the host their `vm.agent` is published on) gets the record without a deployment. The page reads the deployment
+from Azure when it is shown, at most every 30 s; a refused or failed deployment shows its error and a retry.

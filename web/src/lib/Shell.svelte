@@ -5,7 +5,7 @@
 	import type { Snippet } from 'svelte';
 	import { page } from '$app/state';
 	import { board, short } from './board.svelte';
-	import { SECTIONS, navAgents, navChannels, sectionOf } from './nav.svelte';
+	import { SECTIONS, navAgents, navChannels, sectionOf, sections, tabs } from './nav.svelte';
 	import { back } from './back.svelte';
 	import UserMenu from './UserMenu.svelte';
 	import Mark from './Mark.svelte';
@@ -18,6 +18,8 @@
 	const openAgent = $derived(page.route.id?.startsWith('/a/') ? page.params.agent : undefined);
 	const openChannel = $derived(page.route.id?.startsWith('/c/') ? `#${page.params.name}` : undefined);
 	const sectionLabel = $derived(SECTIONS.find((s) => s.id === section)?.label ?? '');
+	const shown = $derived(sections(board.session?.machines ?? false));
+	const tabbed = $derived(tabs(board.session?.machines ?? false));
 	const scope = $derived(
 		agents.length === 1
 			? 'You see what your agent can read.'
@@ -34,7 +36,7 @@
 		</a>
 		<div class="kick">Shared board · read-only</div>
 		<nav class="sections" aria-label="Sections">
-			{#each SECTIONS as s (s.id)}
+			{#each shown as s (s.id)}
 				<a href={s.href} class:on={section === s.id} aria-current={section === s.id ? 'page' : undefined}>{s.label}</a>
 			{/each}
 		</nav>
@@ -88,7 +90,7 @@
 	</main>
 
 	<nav class="tabs" aria-label="Sections">
-		{#each SECTIONS.slice(0, 4) as s (s.id)}
+		{#each tabbed as s (s.id)}
 			<a href={s.href} class:on={section === s.id} aria-current={section === s.id ? 'page' : undefined}>{s.label}</a>
 		{/each}
 		<UserMenu more />

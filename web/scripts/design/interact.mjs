@@ -1592,6 +1592,38 @@ const frames = (page) => page.evaluate(() => new Promise((r) => requestAnimation
 	await context.close();
 }
 
+// ---- the Machine page: no machine, "Set up my agent", then the request's progress (the mock keeps
+// the machine, so the phone pass sees the request) ----
+for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+	where = `machine ${size.width}`;
+	const phone = size.width < 720;
+	const context = await browser.newContext({ viewport: size, ...(phone ? { isMobile: true, hasTouch: true } : {}), locale: 'en-GB' });
+	const page = await context.newPage();
+	await check(phone ? 'machine: a tab of its own, Keys in More, the request shown' : 'machine: listed, setup offered, the request shown after the click', async () => {
+		await page.goto(`${FEED}#/machine`, { waitUntil: 'networkidle' });
+		const bar = phone ? '.tabs' : '.mast .sections';
+		const labels = await page.locator(`${bar} a`).allTextContents();
+		expect(labels.includes('Machine'), labels.join(','));
+		expect(!phone || !labels.includes('Keys'), `Keys is in More on the phone: ${labels.join(',')}`);
+		const current = await page.locator(`${bar} a[aria-current=page]`).textContent();
+		expect(current === 'Machine', `current section ${current}`);
+		const state = page.locator('.machine .state');
+		await state.waitFor();
+		if (!phone) {
+			expect((await state.textContent()) === 'Your agent has no machine yet.', await state.textContent());
+			await page.getByRole('button', { name: 'Set up my agent' }).click();
+		}
+		await page.locator('.machine .state[data-state=requested]').waitFor({ timeout: 2000 });
+		const detail = await page.locator('.machine .detail').textContent();
+		expect(/^Requested \d+ (s|min) ago · Azure: running\.$/.test(detail ?? ''), detail);
+		expect((await page.getByRole('button', { name: 'Set up my agent' }).count()) === 0, 'the setup button stays after the request');
+		expect((await page.locator('.machine .host').textContent()) === 'vm-agent-kdobmayer', 'the host');
+		const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+		expect(!overflow, 'the page scrolls sideways');
+	});
+	await context.close();
+}
+
 // ---- the phone's menu ("More") shows the beta's note too ----
 {
 	where = 'look 390';

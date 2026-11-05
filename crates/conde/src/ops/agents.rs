@@ -432,3 +432,29 @@ pub fn profile_set(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     ctx.db.set_display(&agent.id, value)?;
     Ok(json!({"name": agent.canonical(), "key": "Display", "value": value}))
 }
+
+/// The name of each person's public agent, the agent on their machine.
+pub const PUBLIC_AGENT: &str = "vm.agent";
+
+/// The owner's public agent when it is reachable: `<owner>/vm.agent` is published (a mailbox
+/// binding), its host's bridge heartbeat is within [`super::web::ONLINE_TTL_MS`], and that bridge
+/// lists the mailbox as a live endpoint, which the daemon does only while the mailbox's session
+/// is up. A heartbeat alone is only connected.
+pub fn public_agent_reachable(db: &dyn Tx, owner_id: i64, now_ms: i64) -> OpResult<Option<Agent>> {
+    let Some(agent) = by_name(db, owner_id, PUBLIC_AGENT)? else {
+        return Ok(None);
+    };
+    let Some(address) = agent.address.as_ref().filter(|a| a.kind == Kind::Mailbox) else {
+        return Ok(None);
+    };
+    let online_after = crate::util::iso_from_ms(now_ms - super::web::ONLINE_TTL_MS);
+    let connected = db
+        .host_bridges()?
+        .into_iter()
+        .any(|h| h.host == address.host && h.heartbeat.is_some_and(|t| t >= online_after));
+    let live = connected
+        && db.endpoint_rows()?.into_iter().any(|e| {
+            e.host == address.host && e.kind == Kind::Mailbox.as_str() && e.target == address.target
+        });
+    Ok(live.then_some(agent))
+}

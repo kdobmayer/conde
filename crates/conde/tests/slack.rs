@@ -300,6 +300,34 @@ fn a_page_sends_one_escaped_slack_message_naming_its_kind() {
     );
 }
 
+/// A service's notice to a person whose agent is not reachable reads as the service's display
+/// name and the line, then its own link, then the board link; all escaped.
+#[test]
+fn a_service_page_renders_as_a_notice_with_its_link() {
+    use conde_remote::web::WebStore;
+    let f = Fixture::new(Vec::new());
+    conde::web_store::WebBoard::new(f.b.d.clone())
+        .create_service("praxia", "praxy", "Praxy")
+        .unwrap();
+    let praxia = f.b.other("praxia", "praxy");
+    let mut req = Request::new(
+        conde::util::new_ulid(),
+        "service.notify",
+        json!({"to": "krisz", "text": "Question <on> Acme & co",
+               "link": "https://praxia.example/q/1?a=1&b=2|3"}),
+    );
+    req.idempotency_key = Some("evt-1".into());
+    let resp = f.b.d.dispatch(&praxia, &req);
+    assert_eq!(resp.result.as_ref().unwrap()["via"], "human", "{resp:?}");
+    assert_eq!(f.pass(), 1);
+    assert_eq!(
+        f.calls()[0].1["text"],
+        "Praxy: Question &lt;on&gt; Acme &amp; co\n\
+         <https://praxia.example/q/1?a=1&amp;b=2%7C3|Open in Praxy>\n\
+         <https://conde.example/#/a/human/dm/praxia/praxy|Open in conde on dakai>"
+    );
+}
+
 #[test]
 fn only_pages_reach_slack() {
     let f = Fixture::new(Vec::new());

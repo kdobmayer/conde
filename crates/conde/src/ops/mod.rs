@@ -10,6 +10,7 @@ pub mod messages;
 pub mod migrate;
 pub mod misc;
 pub mod paging;
+pub mod services;
 pub mod web;
 
 use crate::dispatch::OpSpec;
@@ -64,6 +65,7 @@ pub static OPS: &[OpSpec] = &[
     op!("human.page", paging::page, mutation),
     op!("human.done_pages", paging::done_pages, mutation),
     op!("human.status", paging::status, query),
+    op!("service.notify", services::notify, mutation),
     op!("channel.create", channels::create, mutation),
     op!("channel.join", channels::join, mutation),
     op!("channel.leave", channels::leave, mutation),

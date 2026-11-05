@@ -1,7 +1,8 @@
 //! Slack DMs for people on the shared board (docs/DESIGN-human-paging.md): a server-side reader
-//! of the notification outbox that sends each page an agent sends its human (`human.page`) to the
-//! human's owner as a Slack DM, once per page, only while the page is unread and younger than
-//! [`MAX_AGE_MS`]. Nothing else reaches Slack: Slack is a one-way notification channel.
+//! of the notification outbox that sends each page an agent sends its human (`human.page`), and
+//! each service notice that went to a human (`service.notify`), to the human's owner as a Slack
+//! DM, once per page, only while the page is unread and younger than [`MAX_AGE_MS`]. Nothing else
+//! reaches Slack: Slack is a one-way notification channel.
 //!
 //! Each owner's Slack member id is `users.slack_member_id`: imported once from
 //! `CONDE_SLACK_NOTIFY` where empty, looked up by the sign-in email (`users.lookupByEmail`) at
@@ -566,9 +567,10 @@ fn claim(tx: &dyn Tx, config: &SlackConfig, now: i64) -> anyhow::Result<Vec<Job>
         ) else {
             continue;
         };
+        let sender = tx.agent_by_id(&m.sender_id)?;
         // A send of this page still dispatching outlived its lease: its replica died mid-send.
         tx.slack_abandon(&n.message_id, &n.owner, &iso_from_ms(now))?;
-        let text = render(config, &m, &rcpt);
+        let text = render(config, &m, &rcpt, sender.as_ref());
         let attempt_id = new_ulid();
         tx.insert_attempt(
             &attempt_id,
@@ -700,17 +702,41 @@ fn first_line(text: &str) -> String {
 }
 
 /// Who and what kind of page (`is blocked on you:` or `finished:`), the line, and the link to
-/// the conversation in the human's web view (`#/a/<human>/dm/<owner>/<name>`) on the board.
-pub fn render(config: &SlackConfig, m: &Message, rcpt: &Agent) -> String {
+/// the conversation in the human's web view (`#/a/<human>/dm/<owner>/<name>`) on the board; a
+/// service's notice (`from` a service row) is its display name, the line, and its own link first.
+pub fn render(config: &SlackConfig, m: &Message, rcpt: &Agent, from: Option<&Agent>) -> String {
     let (sender, board) = (escape(&m.sender), escape(&config.board));
-    let mut text = match m.page.as_deref() {
-        Some("done") => format!("{sender} finished:"),
-        _ => format!("{sender} is blocked on you:"),
-    };
     let line = first_line(&m.text);
-    if !line.is_empty() {
-        text.push_str(&format!("\n>{}", escape(&line)));
-    }
+    let mut text =
+        match from.filter(|a| a.actor_kind.as_deref() == Some(crate::ops::services::SERVICE)) {
+            // a service's notice: its line, then its link (the message's second line)
+            Some(service) => {
+                let name = escape(service.display.as_deref().unwrap_or(&m.sender));
+                let mut text = format!("{name}: {}", escape(&line));
+                if let Some(link) = m
+                    .text
+                    .lines()
+                    .nth(1)
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                {
+                    // a `|` would end the link's URL part early
+                    let url = escape(link).replace('|', "%7C");
+                    text.push_str(&format!("\n<{url}|Open in {name}>"));
+                }
+                text
+            }
+            None => {
+                let mut text = match m.page.as_deref() {
+                    Some("done") => format!("{sender} finished:"),
+                    _ => format!("{sender} is blocked on you:"),
+                };
+                if !line.is_empty() {
+                    text.push_str(&format!("\n>{}", escape(&line)));
+                }
+                text
+            }
+        };
     match &config.public_url {
         Some(origin) => {
             let conversation = match &m.channel {

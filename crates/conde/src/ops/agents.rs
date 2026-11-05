@@ -439,8 +439,12 @@ pub const PUBLIC_AGENT: &str = "vm.agent";
 /// The owner's public agent when it is reachable: `<owner>/vm.agent` is published (a mailbox
 /// binding), its host's bridge heartbeat is within [`super::web::ONLINE_TTL_MS`], and that bridge
 /// lists the mailbox as a live endpoint, which the daemon does only while the mailbox's session
-/// is up. A heartbeat alone is only connected.
+/// is up, and the owner's machine record does not say the Claude sign-in expired. A heartbeat
+/// alone is only connected.
 pub fn public_agent_reachable(db: &dyn Tx, owner_id: i64, now_ms: i64) -> OpResult<Option<Agent>> {
+    if super::machines::claude_expired(db, owner_id)? {
+        return Ok(None);
+    }
     let Some(agent) = by_name(db, owner_id, PUBLIC_AGENT)? else {
         return Ok(None);
     };

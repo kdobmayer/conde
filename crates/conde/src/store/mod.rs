@@ -563,6 +563,53 @@ pub struct HostBridge {
     pub last_seen: Option<String>,
 }
 
+/// A person's agent machine (`machines`, one per user); times are ISO text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineRow {
+    pub user_id: i64,
+    /// `vm-agent-<owner>`: the VM, the host and the deployment name (an adopted host keeps its own).
+    pub host_id: String,
+    /// The owner's Entra object id, the template's `ownerObjectId`.
+    pub owner_object_id: String,
+    pub vm_size: String,
+    /// When the deployment PUT was accepted; None while it was never issued.
+    pub requested_at: Option<String>,
+    /// The named deployment's `provisioningState` as last read, and when it was read.
+    pub deploy_state: Option<String>,
+    pub deploy_checked_at: Option<String>,
+    /// The PUT's or the deployment's terminal error.
+    pub deploy_error: Option<String>,
+    pub principal_id: Option<String>,
+    pub minted_at: Option<String>,
+    /// The startup exchange: the board's probe DM to the agent, and when its reply arrived.
+    pub probe_id: Option<String>,
+    pub ready_at: Option<String>,
+    pub session_online_at: Option<String>,
+    /// JSON of the last reported sign-in flows (`{"claude":"expired",...}`).
+    pub sign_in: Option<String>,
+    pub deleting_at: Option<String>,
+    pub delete_error: Option<String>,
+}
+
+/// A new machine record ([`Tx::machine_request`]); `minted_at` is set for an adopted host.
+#[derive(Clone, Debug)]
+pub struct NewMachine<'a> {
+    pub user_id: i64,
+    pub host_id: &'a str,
+    pub owner_object_id: &'a str,
+    pub vm_size: &'a str,
+    pub minted_at: Option<&'a str>,
+}
+
+/// The deployment columns of a machine record, written together ([`Tx::machine_set_deploy`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MachineDeploy {
+    pub requested_at: Option<String>,
+    pub deploy_state: Option<String>,
+    pub deploy_checked_at: Option<String>,
+    pub deploy_error: Option<String>,
+}
+
 /// A live harness endpoint as the host's bridge last reported it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndpointRow {
@@ -1207,6 +1254,21 @@ pub trait Tx {
     fn touch_bridge(&self, instance: &str, at: &str) -> StoreResult<bool>;
     /// Announces a board change ([`topics`]) to the browsers on commit.
     fn announce(&self, topics: u8);
+
+    // agent machines
+    /// The subject of the user's identity of `issuer` (for Entra the `oid`).
+    fn identity_subject(&self, user_id: i64, issuer: &str) -> StoreResult<Option<String>>;
+    fn machine_of_user(&self, user_id: i64) -> StoreResult<Option<MachineRow>>;
+    fn machine_request(&self, m: &NewMachine) -> StoreResult<()>;
+    fn machine_set_deploy(&self, user_id: i64, d: &MachineDeploy) -> StoreResult<()>;
+    /// Sets `deploy_checked_at = at` while the record is pending (accepted, not minted, no error,
+    /// not deleting) and was last checked before `before` (or never); whether it did.
+    fn machine_claim_check(&self, user_id: i64, before: &str, at: &str) -> StoreResult<bool>;
+    fn machine_set_probe(&self, user_id: i64, probe_id: &str) -> StoreResult<()>;
+    /// Sets `ready_at` unless set; whether this call set it.
+    fn machine_set_ready(&self, user_id: i64, at: &str) -> StoreResult<bool>;
+    fn machine_set_sign_in(&self, user_id: i64, sign_in: Option<&str>) -> StoreResult<()>;
+    fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()>;
     /// Every channel membership of the owner's agents, by agent then channel name.
     fn owner_memberships(&self, owner_id: i64) -> StoreResult<Vec<Membership>>;
     /// The newest messages over `ranges` (see [`feed_seqs_sql`]) with `after < seq < before`, at
@@ -1373,7 +1435,9 @@ pub mod topics {
     pub const DELIVERY: u8 = 2;
     /// Bindings, pins, profiles, bridges, endpoints.
     pub const FLEET: u8 = 4;
-    pub const ALL: u8 = MESSAGES | DELIVERY | FLEET;
+    /// Agent machine records.
+    pub const MACHINE: u8 = 8;
+    pub const ALL: u8 = MESSAGES | DELIVERY | FLEET | MACHINE;
 }
 
 /// Raised after a write transaction commits that made a notification pending

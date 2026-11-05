@@ -60,7 +60,7 @@ const FAILED: &[&str] = &[
 
 /// The owner view is the signed-in human's, never an agent's: an agent reads its own
 /// conversations only (DESIGN §3). Only the browser principal passes; an actor never does.
-fn browser_only(ctx: &Ctx) -> OpResult<()> {
+pub(crate) fn browser_only(ctx: &Ctx) -> OpResult<()> {
     if !ctx.p.browser || ctx.actor.is_some() {
         return Err(forbidden(
             "the owner view is for the signed-in owner in the browser, not for agents",

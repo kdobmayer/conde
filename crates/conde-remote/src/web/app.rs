@@ -53,9 +53,9 @@ pub const ALL_TOPICS: u8 = u8::MAX;
 const COALESCE: Duration = Duration::from_millis(250);
 /// Ping period of the event socket (inside the ingress idle cut) and its session recheck.
 const EVENTS_PING: Duration = Duration::from_secs(30);
-/// The ops a browser may call: the owner-scoped reads, the fleet and public directory reads, and
-/// `owner.notify` (an own agent's notify setting). Nothing that sends, registers or acts as an
-/// agent.
+/// The ops a browser may call: the owner-scoped reads, the fleet and public directory reads,
+/// `owner.notify` (an own agent's notify setting), and the owner's machine (`machine.setup`,
+/// `machine.status`). Nothing that sends, registers or acts as an agent.
 const BROWSER_OPS: &[&str] = &[
     "owner.notify",
     "owner.list",
@@ -68,6 +68,8 @@ const BROWSER_OPS: &[&str] = &[
     "agent.list",
     "channel.list",
     "channel.members",
+    "machine.setup",
+    "machine.status",
 ];
 
 /// What the app routes share with the server.
@@ -201,11 +203,21 @@ pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Resp
         let message = format!("'{op}' is not available in the browser");
         return api_error(StatusCode::FORBIDDEN, "forbidden", &message);
     }
+    let setup = op == "machine.setup";
+    let machine = setup || op == "machine.status";
     if let Some(obj) = request.as_object_mut() {
         obj.remove("actor");
         obj.remove("from");
     }
-    let response = dispatch(app, principal(&session.record), request).await;
+    let user = principal(&session.record);
+    if machine {
+        super::machines::refresh(&app.web, user.user_id).await;
+    }
+    let user_id = user.user_id;
+    let response = dispatch(app, user, request).await;
+    if setup {
+        super::machines::after_setup(&app.web, user_id, &response);
+    }
     ([no_store()], axum::Json(response)).into_response()
 }
 
@@ -220,6 +232,7 @@ async fn session_info(State(app): State<AppState>, headers: HeaderMap) -> Respon
         [no_store()],
         axum::Json(json!({
             "user": r.user_name, "display": r.display, "csrf": r.csrf, "csrf_header": CSRF_HEADER,
+            "machines": app.web.machines().is_some(),
         })),
     )
         .into_response()
@@ -430,11 +443,16 @@ async fn events(
 }
 
 fn topic_names(bits: u8) -> Vec<&'static str> {
-    [(1u8, "messages"), (2, "delivery"), (4, "fleet")]
-        .into_iter()
-        .filter(|(bit, _)| bits & bit != 0)
-        .map(|(_, name)| name)
-        .collect()
+    [
+        (1u8, "messages"),
+        (2, "delivery"),
+        (4, "fleet"),
+        (8, "machine"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| bits & bit != 0)
+    .map(|(_, name)| name)
+    .collect()
 }
 
 async fn run_events(
@@ -598,7 +616,7 @@ mod tests {
         assert_eq!(topic_names(5), vec!["messages", "fleet"]);
         assert_eq!(
             topic_names(ALL_TOPICS),
-            vec!["messages", "delivery", "fleet"]
+            vec!["messages", "delivery", "fleet", "machine"]
         );
     }
 }

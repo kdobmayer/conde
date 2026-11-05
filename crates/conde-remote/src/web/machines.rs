@@ -1,12 +1,24 @@
-//! The server's side of the agent machines: where a person's VM is deployed (`CONDE_MACHINES_*`)
-//! and the Azure Resource Manager token of the server's own managed identity (id-conde).
+//! The server's side of the agent machines: where a person's VM is deployed (`CONDE_MACHINES_*`),
+//! the Azure Resource Manager client of the server's own managed identity (id-conde), and the two
+//! triggers of a deployment: a person's first sign-in and the page's "Set up my agent"
+//! (`machine.setup`, whose answer says when a PUT is due). The deployment is read on demand by
+//! the page's `machine.status` and `machine.setup`, never by a timer.
+//!
+//! Azure calls, all with id-conde's token for `https://management.azure.com/`:
+//! - the token: `GET $IDENTITY_ENDPOINT` (Container Apps), cached until 5 minutes before expiry;
+//! - the deployment: `PUT .../resourceGroups/<rg>/providers/Microsoft.Resources/deployments/<host>`
+//!   from the template spec version, Incremental; a 200 or 201 is accepted, anything else is the
+//!   record's error (the next setup retries);
+//! - its state: `GET` of the same deployment, at most once every 30 s per pending record; a failed
+//!   read changes nothing (the next read retries).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+use serde_json::{Value, json};
 use thiserror::Error;
 
-use super::ConfigError;
+use super::{ConfigError, WebState, WebUser};
 
 /// The VM size a deployment asks for when `CONDE_MACHINES_VM_SIZE` is unset.
 pub const DEFAULT_VM_SIZE: &str = "Standard_B2as_v2";
@@ -15,6 +27,13 @@ const IDENTITY_API_VERSION: &str = "2019-08-01";
 /// A cached token is asked for again this long before it expires.
 const RENEW_BEFORE_SECS: u64 = 300;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Resource Manager's public endpoint.
+pub const ARM_URL: &str = "https://management.azure.com";
+const DEPLOYMENTS_API_VERSION: &str = "2021-04-01";
+/// A pending record's deployment is read at most this often (seconds).
+pub const DEPLOY_CHECK_EVERY: i64 = 30;
+/// The longest Azure error text kept on a record.
+const ERROR_CHARS: usize = 500;
 
 const REQUIRED: [&str; 5] = [
     "CONDE_MACHINES_SUBSCRIPTION",
@@ -37,6 +56,8 @@ pub struct MachinesConfig {
     pub audience: String,
     pub vm_size: String,
     pub identity: ManagedIdentity,
+    /// Resource Manager's base URL ([`ARM_URL`]; a test's fake otherwise).
+    pub arm_url: String,
 }
 
 /// The server's user-assigned identity as the Container Apps identity endpoint serves it.
@@ -110,6 +131,7 @@ impl MachinesConfig {
             audience,
             vm_size: vm_size.unwrap_or_else(|| DEFAULT_VM_SIZE.into()),
             identity,
+            arm_url: ARM_URL.into(),
         }))
     }
 }
@@ -187,5 +209,248 @@ impl Azure {
         .ok_or_else(|| AzureError("the managed identity token has no expires_on".into()))?;
         *cached = Some((body.access_token.clone(), expires_on));
         Ok(body.access_token)
+    }
+}
+
+/// One deployment's parameters, as `machine.setup` answers them in `deploy`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Deployment {
+    pub owner: String,
+    pub host_id: String,
+    pub owner_object_id: String,
+    pub vm_size: String,
+}
+
+/// An Azure error body's code and message, else the status alone.
+async fn refusal(what: &str, response: reqwest::Response) -> AzureError {
+    let status = response.status();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    let error = &body["error"];
+    let text = match (error["code"].as_str(), error["message"].as_str()) {
+        (Some(code), Some(message)) => format!("{what} answered {status}: {code}: {message}"),
+        _ => format!("{what} answered {status}"),
+    };
+    AzureError(text.chars().take(ERROR_CHARS).collect())
+}
+
+impl Azure {
+    fn deployment_url(&self, config: &MachinesConfig, name: &str) -> String {
+        format!(
+            "{}/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Resources/deployments/{name}?api-version={DEPLOYMENTS_API_VERSION}",
+            config.arm_url.trim_end_matches('/'),
+            config.subscription,
+            config.resource_group
+        )
+    }
+
+    /// The named deployment of the template spec version for one person; Ok on 200 or 201.
+    pub async fn put_deployment(
+        &self,
+        config: &MachinesConfig,
+        server: &str,
+        d: &Deployment,
+    ) -> Result<(), AzureError> {
+        let token = self.token().await?;
+        let body = json!({"properties": {
+            "mode": "Incremental",
+            "templateLink": {"id": config.template_spec},
+            "parameters": {
+                "owner": {"value": d.owner},
+                "ownerObjectId": {"value": d.owner_object_id},
+                "condeResource": {"value": config.audience},
+                "vmSize": {"value": d.vm_size},
+                "condeServer": {"value": server},
+            },
+        }});
+        let response = self
+            .http
+            .put(self.deployment_url(config, &d.host_id))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AzureError(format!("the deployment PUT failed: {e}")))?;
+        match response.status().as_u16() {
+            200 | 201 => Ok(()),
+            _ => Err(refusal("the deployment PUT", response).await),
+        }
+    }
+
+    /// The named deployment's `provisioningState`, with `properties.error` when it is `Failed` or
+    /// `Canceled`.
+    pub async fn deployment_state(
+        &self,
+        config: &MachinesConfig,
+        name: &str,
+    ) -> Result<(String, Option<String>), AzureError> {
+        let token = self.token().await?;
+        let response = self
+            .http
+            .get(self.deployment_url(config, name))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| AzureError(format!("the deployment read failed: {e}")))?;
+        if !response.status().is_success() {
+            return Err(refusal("the deployment read", response).await);
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| AzureError(format!("the deployment read is not JSON: {e}")))?;
+        let props = &body["properties"];
+        let state = props["provisioningState"]
+            .as_str()
+            .ok_or_else(|| AzureError("the deployment has no provisioningState".into()))?
+            .to_string();
+        let error = matches!(state.as_str(), "Failed" | "Canceled").then(|| {
+            let e = &props["error"];
+            let detail = e["details"][0]["message"].as_str();
+            let text = match (e["message"].as_str(), detail) {
+                (Some(m), Some(d)) if m != d => format!("{m} {d}"),
+                (Some(m), _) => m.to_string(),
+                (None, Some(d)) => d.to_string(),
+                (None, None) => format!("the deployment ended {state}"),
+            };
+            text.chars().take(ERROR_CHARS).collect()
+        });
+        Ok((state, error))
+    }
+}
+
+/// The agent machines as the web routes use them: the configuration and its Azure client.
+pub(crate) struct Machines {
+    pub config: MachinesConfig,
+    pub azure: Azure,
+}
+
+impl Machines {
+    pub fn new(config: MachinesConfig) -> Machines {
+        Machines {
+            azure: Azure::new(config.identity.clone()),
+            config,
+        }
+    }
+}
+
+/// Runs one browser request as `user` on a blocking thread.
+async fn dispatch_web(state: &WebState, user: &WebUser, request: Value) -> Option<Value> {
+    let dispatcher = state.dispatcher()?.clone();
+    let principal = crate::WebPrincipal {
+        user_id: user.user_id,
+        user: user.name.clone(),
+    };
+    tokio::task::spawn_blocking(move || dispatcher.dispatch_web(&principal, request))
+        .await
+        .ok()
+}
+
+/// A person's first sign-in: `machine.setup` as they would click it, then its deployment.
+pub(crate) async fn request(state: &WebState, user: &WebUser) {
+    let id = format!("signin-{:032x}", rand::random::<u128>());
+    let request = json!({"v": 1, "type": "request", "request_id": id, "idempotency_key": id,
+                         "op": "machine.setup", "body": {}});
+    match dispatch_web(state, user, request).await {
+        Some(response) if response["ok"] == true => after_setup(state, user.user_id, &response),
+        Some(response) => {
+            tracing::warn!(user = %user.name, error = %response["error"], "no machine requested at the first sign-in")
+        }
+        None => {
+            tracing::warn!(user = %user.name, "no machine requested at the first sign-in: no board")
+        }
+    }
+}
+
+/// After a `machine.setup` answer: the deployment PUT it asks for, in a spawned task.
+pub(crate) fn after_setup(state: &WebState, user_id: i64, response: &Value) {
+    let Some(machines) = state.machines().cloned() else {
+        return;
+    };
+    let Some(d) = response["result"]
+        .get("deploy")
+        .filter(|d| !d.is_null())
+        .and_then(|d| serde_json::from_value::<Deployment>(d.clone()).ok())
+    else {
+        return;
+    };
+    let (state, server) = (state.clone(), state.config().public_url.clone());
+    tokio::spawn(async move {
+        let error = match machines
+            .azure
+            .put_deployment(&machines.config, &server, &d)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(host = %d.host_id, "machine deployment accepted");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(host = %d.host_id, error = %e, "machine deployment refused");
+                Some(e.to_string())
+            }
+        };
+        if let Err(e) = state
+            .store(move |s| s.machine_deployed(user_id, error.as_deref()))
+            .await
+        {
+            tracing::error!(error = %e, "the machine deployment's outcome was not stored");
+        }
+    });
+}
+
+/// Before `machine.status` and `machine.setup`: the pending record's deployment, read when no
+/// read happened in the last [`DEPLOY_CHECK_EVERY`] seconds.
+pub(crate) async fn refresh(state: &WebState, user_id: i64) {
+    let Some(machines) = state.machines().cloned() else {
+        return;
+    };
+    let host = match state
+        .store(move |s| s.machine_check_due(user_id, DEPLOY_CHECK_EVERY))
+        .await
+    {
+        Ok(Some(host)) => host,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "machine deployment check not claimed");
+            return;
+        }
+    };
+    match machines
+        .azure
+        .deployment_state(&machines.config, &host)
+        .await
+    {
+        Ok((deploy_state, error)) => {
+            if let Err(e) = state
+                .store(move |s| s.machine_checked(user_id, &deploy_state, error.as_deref()))
+                .await
+            {
+                tracing::error!(error = %e, "the machine deployment's state was not stored");
+            }
+        }
+        Err(e) => tracing::warn!(%host, error = %e, "machine deployment not read"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The hand deployment and the template name a person's deployment as the server does
+    /// (`vm-agent-<owner>`, the VM's own name), so both write one deployment record.
+    #[test]
+    fn a_hand_deployment_and_the_server_share_one_deployment_name() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../infra/agent-vm/");
+        let read = |f: &str| std::fs::read_to_string(format!("{root}{f}")).unwrap();
+        let (readme, template) = (read("README.md"), read("template/agent-vm.bicep"));
+        assert!(
+            readme.contains("az deployment group create -g conde-vm -n vm-agent-<owner>"),
+            "the README's hand deployment"
+        );
+        for (file, text) in [("README.md", &readme), ("agent-vm.bicep", &template)] {
+            assert!(
+                !text.contains("agent-vm-<owner>"),
+                "{file} names another deployment"
+            );
+        }
+        assert!(template.contains("one named deployment per person (`vm-agent-<owner>`)"));
     }
 }

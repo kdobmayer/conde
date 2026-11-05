@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 use sha2::Digest;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 include!("../../conde-remote/tests/support/web_harness.rs");
 
@@ -126,6 +127,14 @@ on_both!(
     the_slack_instance_is_never_a_host,
     the_built_app_reads_through_the_real_ops,
     the_owner_sets_notify_for_their_own_agents_only,
+    the_first_sign_in_of_an_invited_person_requests_a_machine_and_lands_on_the_page,
+    a_returning_member_gets_a_machine_only_from_the_setup_step_with_its_stored_subject,
+    a_refused_put_is_never_issued_and_the_setup_step_issues_it,
+    a_failed_deployment_is_read_on_demand_throttled_and_retried_by_setup,
+    a_hand_joined_host_is_adopted_without_a_deploy,
+    setup_is_refused_while_deleting,
+    machine_status_says_requested_failed_not_connected_up_connected_disconnected_and_ready,
+    an_adopted_running_machine_is_probed_at_setup_and_its_reply_marks_it_ready,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -141,6 +150,14 @@ async fn ui(d: &Arc<Dispatcher>) -> Ui {
 }
 
 async fn ui_with(d: &Arc<Dispatcher>, config: ServerConfig) -> Ui {
+    ui_full(d, config, None).await
+}
+
+async fn ui_full(
+    d: &Arc<Dispatcher>,
+    config: ServerConfig,
+    machines: Option<web::MachinesConfig>,
+) -> Ui {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let idp = start_idp().await;
     // Bound here and handed over: the port is known before the server starts, and no other
@@ -159,7 +176,7 @@ async fn ui_with(d: &Arc<Dispatcher>, config: ServerConfig) -> Ui {
     let web = WebSetup {
         entra: Some(entra),
         admin_key: None,
-        machines: None,
+        machines,
         store: store.clone(),
     };
     let server = conde::cloud::start_on(
@@ -3224,5 +3241,791 @@ async fn the_owner_sets_notify_for_their_own_agents_only(d: Arc<Dispatcher>) {
         "{:?}",
         resp.result
     );
+    ui.server.shutdown().await.unwrap();
+}
+
+// --- agent machines -----------------------------------------------------------------------------
+
+const AUDIENCE: &str = "52f027a8-e3d6-4fb8-996c-d2221d38b6d6";
+const TEMPLATE_SPEC: &str = "/subscriptions/sub-1/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2";
+const DEPLOYMENTS: &str =
+    "/subscriptions/sub-1/resourceGroups/conde-vm/providers/Microsoft.Resources/deployments/";
+
+/// One request the fake Resource Manager received.
+#[derive(Clone, Debug)]
+struct ArmCall {
+    method: String,
+    path: String,
+    query: String,
+    auth: String,
+    body: Value,
+}
+
+/// A fake Resource Manager: records every request, refuses one without the identity's bearer
+/// token (401), and answers deployment PUTs and GETs from scripts, each answer used once and the
+/// last one kept.
+struct Arm {
+    url: String,
+    calls: Mutex<Vec<ArmCall>>,
+    puts: Mutex<std::collections::VecDeque<(u16, Value)>>,
+    gets: Mutex<std::collections::VecDeque<(u16, Value)>>,
+}
+
+fn running() -> Value {
+    json!({"name": "d", "properties": {"provisioningState": "Running"}})
+}
+
+fn next_answer(q: &Mutex<std::collections::VecDeque<(u16, Value)>>) -> (u16, Value) {
+    let mut q = q.lock().unwrap();
+    if q.len() > 1 {
+        q.pop_front().unwrap()
+    } else {
+        q[0].clone()
+    }
+}
+
+async fn fake_arm() -> Arc<Arm> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let arm = Arc::new(Arm {
+        url: format!("http://{}", listener.local_addr().unwrap()),
+        calls: Mutex::new(Vec::new()),
+        puts: Mutex::new([(201, json!({"name": "d"}))].into()),
+        gets: Mutex::new([(200, running())].into()),
+    });
+    let a = arm.clone();
+    let app = Router::new().fallback(
+        move |method: axum::http::Method,
+              uri: axum::http::Uri,
+              headers: HeaderMap,
+              body: axum::body::Bytes| {
+            let a = a.clone();
+            async move {
+                a.calls.lock().unwrap().push(ArmCall {
+                    method: method.to_string(),
+                    path: uri.path().to_string(),
+                    query: uri.query().unwrap_or("").to_string(),
+                    auth: headers
+                        .get(header::AUTHORIZATION)
+                        .map(|v| v.to_str().unwrap().to_string())
+                        .unwrap_or_default(),
+                    body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+                });
+                let bearer = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.starts_with("Bearer arm-token-"));
+                let (status, body) = match method.as_str() {
+                    _ if !bearer => (
+                        401,
+                        json!({"error": {"code": "AuthenticationFailed", "message": "no token"}}),
+                    ),
+                    "PUT" => next_answer(&a.puts),
+                    _ => next_answer(&a.gets),
+                };
+                (StatusCode::from_u16(status).unwrap(), axum::Json(body))
+            }
+        },
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    arm
+}
+
+impl Arm {
+    fn script(&self, method: &str, answers: Vec<(u16, Value)>) {
+        let q = if method == "PUT" {
+            &self.puts
+        } else {
+            &self.gets
+        };
+        *q.lock().unwrap() = answers.into();
+    }
+
+    fn calls(&self, method: &str) -> Vec<ArmCall> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.method == method)
+            .cloned()
+            .collect()
+    }
+
+    /// The `method` calls once there are `n` of them.
+    async fn wait(&self, method: &str, n: usize) -> Vec<ArmCall> {
+        for _ in 0..100 {
+            let calls = self.calls(method);
+            if calls.len() >= n {
+                return calls;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("{method}: {:?}", self.calls(method));
+    }
+}
+
+/// The server with agent machines on, against a fake Resource Manager and identity endpoint.
+async fn ui_machines(d: &Arc<Dispatcher>) -> (Ui, Arc<Arm>) {
+    let arm = fake_arm().await;
+    let (identity, _) = identity_endpoint(200, 3600).await;
+    let machines = web::MachinesConfig {
+        subscription: "sub-1".into(),
+        resource_group: "conde-vm".into(),
+        template_spec: TEMPLATE_SPEC.into(),
+        audience: AUDIENCE.into(),
+        vm_size: web::DEFAULT_VM_SIZE.into(),
+        identity: web::ManagedIdentity {
+            endpoint: identity,
+            header: "identity-header".into(),
+            client_id: "id-conde".into(),
+        },
+        arm_url: arm.url.clone(),
+    };
+    (
+        ui_full(d, ServerConfig::default(), Some(machines)).await,
+        arm,
+    )
+}
+
+/// Signs in from `/keys`, stepping through every redirect: where the callback sends the browser.
+async fn sign_in_landing(b: &Browser, env: &Env<WebBoard>) -> String {
+    let mut url = env.url("/keys");
+    loop {
+        let r = b.step.get(&url).send().await.unwrap();
+        let status = r.status();
+        let location = r
+            .headers()
+            .get(header::LOCATION)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_else(|| panic!("{url}: {status}"));
+        if url.contains("/auth/callback") {
+            return location;
+        }
+        url = reqwest::Url::parse(&url)
+            .unwrap()
+            .join(&location)
+            .unwrap()
+            .to_string();
+    }
+}
+
+impl Ui {
+    /// Binds the provider's current person to `user` before any sign-in, so the next sign-in is a
+    /// returning member's.
+    async fn bound(&self, user: &str, oid: &str, email: &str) {
+        let identity = web::Identity {
+            issuer: self.env.idp.issuer.clone(),
+            subject: oid.into(),
+            display_name: None,
+            preferred_username: Some(email.into()),
+            email: None,
+            verified_email: Some(email.into()),
+        };
+        let (store, user) = (self.env.store.clone(), user.to_string());
+        blocking(move || store.bind_identity(&user, &identity).unwrap()).await;
+    }
+
+    /// The provider's person from now on.
+    fn person(&self, oid: &str, upn: &str, name: &str) {
+        let mut p = self.env.idp.person.lock().unwrap();
+        p.oid = oid.into();
+        p.upn = upn.into();
+        p.name = name.into();
+    }
+
+    async fn setup(&self, b: &Browser, csrf: &str) -> Value {
+        let (status, v) = self
+            .mutate(
+                b,
+                csrf,
+                "machine.setup",
+                json!({}),
+                &conde::util::new_ulid(),
+            )
+            .await;
+        assert_eq!(
+            (status, v["ok"].as_bool()),
+            (StatusCode::OK, Some(true)),
+            "{v}"
+        );
+        v["result"].clone()
+    }
+
+    async fn user_id(&self, user: &str) -> i64 {
+        let (d, user) = (self.d.clone(), user.to_string());
+        blocking(move || d.with_conn(|t| t.user_id(&user)).unwrap().unwrap()).await
+    }
+
+    async fn record(&self, user: &str) -> Option<conde::store::MachineRow> {
+        let (d, uid) = (self.d.clone(), self.user_id(user).await);
+        blocking(move || d.with_conn(|t| t.machine_of_user(uid)).unwrap()).await
+    }
+
+    /// The record once `ready` says it is.
+    async fn record_when(
+        &self,
+        user: &str,
+        ready: impl Fn(&conde::store::MachineRow) -> bool,
+    ) -> conde::store::MachineRow {
+        for _ in 0..100 {
+            if let Some(m) = self.record(user).await.filter(|m| ready(m)) {
+                return m;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("{user}: {:?}", self.record(user).await);
+    }
+
+    async fn write(
+        &self,
+        f: impl FnOnce(&dyn conde::store::Tx) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        let d = self.d.clone();
+        blocking(move || d.with_tx(f).unwrap()).await;
+    }
+}
+
+fn deployment_body(owner: &str, oid: &str, server: &str) -> Value {
+    json!({"properties": {
+        "mode": "Incremental",
+        "templateLink": {"id": TEMPLATE_SPEC},
+        "parameters": {
+            "owner": {"value": owner},
+            "ownerObjectId": {"value": oid},
+            "condeResource": {"value": AUDIENCE},
+            "vmSize": {"value": "Standard_B2as_v2"},
+            "condeServer": {"value": server},
+        },
+    }})
+}
+
+/// An invited person's first sign-in records the machine, PUTs the named deployment of the
+/// template spec with the token's oid and lands on the page; a later sign-in returns where it
+/// started and PUTs nothing; a first sign-in through `conde login` keeps the login's return.
+async fn the_first_sign_in_of_an_invited_person_requests_a_machine_and_lands_on_the_page(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let b = Browser::new();
+    assert_eq!(sign_in_landing(&b, &ui.env).await, "/#/machine");
+    let put = arm.wait("PUT", 1).await.remove(0);
+    assert_eq!(put.path, format!("{DEPLOYMENTS}vm-agent-{USER}"));
+    assert_eq!(put.query, "api-version=2021-04-01");
+    assert_eq!(put.auth, "Bearer arm-token-1");
+    assert_eq!(
+        put.body,
+        deployment_body(USER, "oid-krisztian", &ui.env.base)
+    );
+    let m = ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    assert_eq!(
+        (
+            m.host_id.as_str(),
+            m.owner_object_id.as_str(),
+            m.deploy_error
+        ),
+        (&*format!("vm-agent-{USER}"), "oid-krisztian", None)
+    );
+    let session = ui.session(&b).await;
+    assert_eq!(session["machines"], true, "{session}");
+    let status = ui
+        .ok(
+            &b,
+            session["csrf"].as_str().unwrap(),
+            "machine.status",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status["state"], "requested", "{status}");
+    assert_eq!(status["host_id"], format!("vm-agent-{USER}"));
+    // a returning member's sign-in: back where it started, no second PUT
+    let again = Browser::new();
+    again.sign_in(&ui.env).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(arm.calls("PUT").len(), 1);
+    // a first sign-in through conde login keeps its return, and still asks for the machine
+    ui.env
+        .invite("levente-szabo", "levente.szabo@dakai.example")
+        .await;
+    ui.person(
+        "oid-levente",
+        "Levente.Szabo@dakai.example",
+        "Levente Szabó",
+    );
+    let cli = Browser::new();
+    browser_leg(&ui.env, &cli, &cli_run()).await;
+    let put = arm.wait("PUT", 2).await.remove(1);
+    assert_eq!(put.path, format!("{DEPLOYMENTS}vm-agent-levente-szabo"));
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A member bound before machines existed gets no machine at sign-in; "Set up my agent" records
+/// it with the stored identity's subject and PUTs; a second click while it is pending PUTs nothing.
+async fn a_returning_member_gets_a_machine_only_from_the_setup_step_with_its_stored_subject(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    ui.bound(USER, "oid-krisztian", INVITED.1).await;
+    let (b, csrf) = ui.browser().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(arm.calls("PUT").is_empty());
+    let (_, v) = ui.rpc(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(r["state"], "requested", "{r}");
+    let put = arm.wait("PUT", 1).await.remove(0);
+    assert_eq!(
+        put.body,
+        deployment_body(USER, "oid-krisztian", &ui.env.base)
+    );
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(r["deploy"], Value::Null, "{r}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(arm.calls("PUT").len(), 1);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A PUT Azure refuses leaves the record never issued with the refusal as its error, shown as
+/// `failed`; the setup step issues it again and the accepted PUT clears the error.
+async fn a_refused_put_is_never_issued_and_the_setup_step_issues_it(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    arm.script(
+        "PUT",
+        vec![
+            (
+                403,
+                json!({"error": {"code": "AuthorizationFailed", "message": "no write on conde-vm"}}),
+            ),
+            (201, json!({"name": "d"})),
+        ],
+    );
+    let (b, csrf) = ui.browser_landing().await;
+    let m = ui.record_when(USER, |m| m.deploy_error.is_some()).await;
+    assert_eq!(m.requested_at, None);
+    let status = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(status["state"], "failed", "{status}");
+    assert_eq!(
+        status["deploy_error"],
+        "the deployment PUT answered 403 Forbidden: AuthorizationFailed: no write on conde-vm"
+    );
+    assert!(
+        arm.calls("GET").is_empty(),
+        "a refused PUT has no deployment to read"
+    );
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(
+        (r["state"].as_str(), r["deploy_error"].clone()),
+        (Some("requested"), Value::Null),
+        "{r}"
+    );
+    arm.wait("PUT", 2).await;
+    let m = ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    assert_eq!(m.deploy_error, None);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A pending deployment is read when the page asks, at most once in 30 s, with the identity's
+/// token: `Running`; then a read Azure fails (503), which changes nothing stored; then, 30 s
+/// later, `Failed` with its error, which the page shows; setup clears it and PUTs again.
+async fn a_failed_deployment_is_read_on_demand_throttled_and_retried_by_setup(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    arm.script(
+        "GET",
+        vec![
+            (200, running()),
+            (
+                503,
+                json!({"error": {"code": "ServiceUnavailable", "message": "try later"}}),
+            ),
+            (
+                200,
+                json!({"properties": {"provisioningState": "Failed", "error": {
+                    "code": "DeploymentFailed",
+                    "message": "At least one resource deployment operation failed.",
+                    "details": [{"code": "SkuNotAvailable", "message": "Standard_B2as_v2 is not available."}],
+                }}}),
+            ),
+        ],
+    );
+    let (b, csrf) = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let first = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    let second = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    for s in [&first, &second] {
+        assert_eq!(
+            (s["state"].as_str(), s["deploy_state"].as_str()),
+            (Some("requested"), Some("Running")),
+            "{s}"
+        );
+    }
+    let gets = arm.calls("GET");
+    assert_eq!(gets.len(), 1, "one read in 30 s");
+    assert_eq!(gets[0].path, format!("{DEPLOYMENTS}vm-agent-{USER}"));
+    assert_eq!(gets[0].query, "api-version=2021-04-01");
+    assert_eq!(gets[0].auth, "Bearer arm-token-1");
+    // a failed read changes nothing stored; the next one, after the interval, reads again
+    d.advance_clock(31_000);
+    let unread = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(
+        (
+            unread["state"].as_str(),
+            unread["deploy_state"].as_str(),
+            unread["deploy_error"].clone()
+        ),
+        (Some("requested"), Some("Running"), Value::Null),
+        "{unread}"
+    );
+    assert_eq!(arm.calls("GET").len(), 2);
+    d.advance_clock(31_000);
+    let failed = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(
+        (failed["state"].as_str(), failed["deploy_state"].as_str()),
+        (Some("failed"), Some("Failed")),
+        "{failed}"
+    );
+    assert_eq!(
+        failed["deploy_error"],
+        "At least one resource deployment operation failed. Standard_B2as_v2 is not available."
+    );
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(
+        (
+            r["state"].as_str(),
+            r["deploy_error"].clone(),
+            r["deploy_state"].clone()
+        ),
+        (Some("requested"), Value::Null, Value::Null),
+        "{r}"
+    );
+    arm.wait("PUT", 2).await;
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A member who joined a VM by hand (a live key of `vm-agent-<owner>`, or the host of their
+/// published vm.agent) gets the record as joined, with no deployment.
+async fn a_hand_joined_host_is_adopted_without_a_deploy(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    ui.bound(USER, "oid-krisztian", INVITED.1).await;
+    let (b, csrf) = ui.browser().await;
+    let uid = ui.user_id(USER).await;
+    let store = ui.env.store.clone();
+    blocking(move || {
+        store
+            .mint_host_key(uid, &format!("vm-agent-{USER}"), "vm", "digest-k", START)
+            .unwrap()
+    })
+    .await;
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(
+        (
+            r["state"].as_str(),
+            r["host_id"].clone(),
+            r["deploy"].clone()
+        ),
+        (Some("up"), json!(format!("vm-agent-{USER}")), Value::Null),
+        "{r}"
+    );
+    assert!(r["minted_at"].is_string(), "{r}");
+    // a pilot VM under a short name: the published vm.agent's host
+    let lev = "levente-szabo";
+    ui.env.invite(lev, "levente.szabo@dakai.example").await;
+    ui.bound(lev, "oid-levente", "levente.szabo@dakai.example")
+        .await;
+    ui.person(
+        "oid-levente",
+        "Levente.Szabo@dakai.example",
+        "Levente Szabó",
+    );
+    let (b2, csrf2) = ui.browser().await;
+    let lid = ui.user_id(lev).await;
+    let store = ui.env.store.clone();
+    blocking(move || {
+        store
+            .mint_host_key(lid, "vm-agent-levente", "vm", "digest-l", START)
+            .unwrap()
+    })
+    .await;
+    ui.write(move |t| {
+        t.insert_agent("agent-lev", lid, "vm.agent")?;
+        t.set_binding(
+            "agent-lev",
+            Some(&conde::address::Address::parse("mailbox:mbx-lev@vm-agent-levente", "-").unwrap()),
+        )?;
+        Ok(())
+    })
+    .await;
+    let r = ui.setup(&b2, &csrf2).await;
+    assert_eq!(
+        (r["state"].as_str(), r["host_id"].as_str()),
+        (Some("up"), Some("vm-agent-levente")),
+        "{r}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(arm.calls("PUT").is_empty());
+    ui.server.shutdown().await.unwrap();
+}
+
+/// While the disable route removes the machine, setup is refused and the status says so.
+async fn setup_is_refused_while_deleting(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines(&d).await;
+    let (b, csrf) = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let uid = ui.user_id(USER).await;
+    ui.write(move |t| Ok(t.machine_set_deleting(uid, "2026-11-05T23:00:00.000Z")?))
+        .await;
+    let (_, v) = ui
+        .mutate(&b, &csrf, "machine.setup", json!({}), "k-del")
+        .await;
+    assert_eq!(v["error"]["code"], "conflict", "{v}");
+    let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(s["state"], "deleting", "{s}");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Every state the page shows, from what the store holds: accepted (`requested`), a terminal
+/// error (`failed`), 30 minutes without joining (`not_connected`), joined (`up`), a heartbeat and
+/// the published vm.agent (`connected`), a live endpoint with the startup exchange answered
+/// (`ready`), the heartbeat past the TTL (`disconnected`). The browser reads only its own.
+async fn machine_status_says_requested_failed_not_connected_up_connected_disconnected_and_ready(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, _arm) = ui_machines(&d).await;
+    ui.bound(USER, "oid-krisztian", INVITED.1).await;
+    let (b, csrf) = ui.browser().await;
+    let uid = ui.user_id(USER).await;
+    let host = format!("vm-agent-{USER}");
+    let iso = |ms: i64| conde::util::iso_from_ms(ms);
+    let now = d.now_ms();
+    let h = host.clone();
+    ui.write(move |t| {
+        t.machine_request(&conde::store::NewMachine {
+            user_id: uid,
+            host_id: &h,
+            owner_object_id: "oid-krisztian",
+            vm_size: "Standard_B2as_v2",
+            minted_at: None,
+        })?;
+        t.machine_set_deploy(
+            uid,
+            &conde::store::MachineDeploy {
+                requested_at: Some(iso(now)),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    })
+    .await;
+    let state = || async { ui.ok(&b, &csrf, "machine.status", json!({})).await };
+    let s = state().await;
+    assert_eq!(s["state"], "requested", "{s}");
+    assert!(
+        s["now"].is_string() && s["admins"].is_array() && s["relay"].is_null(),
+        "{s}"
+    );
+    ui.write(move |t| {
+        t.machine_set_deploy(
+            uid,
+            &conde::store::MachineDeploy {
+                requested_at: Some(iso(now)),
+                deploy_error: Some("quota".into()),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(state().await["state"], "failed");
+    let late = now - conde::ops::machines::JOIN_DEADLINE_MS - 1_000;
+    ui.write(move |t| {
+        t.machine_set_deploy(
+            uid,
+            &conde::store::MachineDeploy {
+                requested_at: Some(iso(late)),
+                deploy_checked_at: Some(iso(now)),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(state().await["state"], "not_connected");
+    // joined by hand: a live key of the host
+    let (store, h) = (ui.env.store.clone(), host.clone());
+    blocking(move || {
+        store
+            .mint_host_key(uid, &h, "vm", "digest-k", START)
+            .unwrap()
+    })
+    .await;
+    assert_eq!(state().await["state"], "up");
+    let h = host.clone();
+    ui.write(move |t| {
+        t.fence(&h, "inst-1", &iso(now))?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(
+        state().await["state"],
+        "up",
+        "a heartbeat without the published vm.agent"
+    );
+    let h = host.clone();
+    ui.write(move |t| {
+        t.insert_agent("agent-k", uid, "vm.agent")?;
+        let address = format!("mailbox:mbx-k@{h}");
+        t.set_binding(
+            "agent-k",
+            Some(&conde::address::Address::parse(&address, "-").unwrap()),
+        )?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(state().await["state"], "connected");
+    let h = host.clone();
+    ui.write(move |t| {
+        t.replace_endpoints(&h, "inst-1", &[("mailbox", "mbx-k")], &iso(now))?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(
+        state().await["state"],
+        "connected",
+        "reachable, not answered"
+    );
+    ui.write(move |t| {
+        t.machine_set_ready(uid, &iso(now))?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(state().await["state"], "ready");
+    d.advance_clock(conde::ops::web::ONLINE_TTL_MS + 1_000);
+    assert_eq!(state().await["state"], "disconnected");
+    // the browser reads its own machine only
+    let (_, v) = ui
+        .rpc(&b, &csrf, "machine.status", json!({"owner": "david"}))
+        .await;
+    assert_eq!(v["error"]["code"], "forbidden", "{v}");
+    ui.server.shutdown().await.unwrap();
+}
+
+impl Ui {
+    /// A first sign-in that lands on the machine page, with the CSRF token of its session.
+    async fn browser_landing(&self) -> (Browser, String) {
+        let b = Browser::new();
+        assert_eq!(sign_in_landing(&b, &self.env).await, "/#/machine");
+        let s = self.session(&b).await;
+        (b, s["csrf"].as_str().unwrap().to_string())
+    }
+}
+
+/// A pilot VM already running when its owner adopts it: its bridge announced the published
+/// vm.agent's live endpoint before the record existed and announces nothing new after. Setup
+/// sends the probe at adoption, once, from the endpoints on record, and the running bridge gets it
+/// without a reconnect; the agent's reply marks the machine ready; a repeated setup and a repeated
+/// endpoints frame send no second probe.
+async fn an_adopted_running_machine_is_probed_at_setup_and_its_reply_marks_it_ready(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, _arm) = ui_machines(&d).await;
+    ui.bound(USER, "oid-krisztian", INVITED.1).await;
+    let (b, csrf) = ui.browser().await;
+    let host = format!("vm-agent-{USER}");
+    let vm = ui.principal(USER, &host).await;
+    let uid = vm.user_id;
+    let key = format!("conde_test_{}", conde::util::new_ulid());
+    let (store, h, digest) = (
+        ui.env.store.clone(),
+        host.clone(),
+        conde_remote::token_digest(&key),
+    );
+    blocking(move || store.mint_host_key(uid, &h, "vm", &digest, START).unwrap()).await;
+    // published: vm.agent bound to its mailbox on the migrated host
+    let h = host.clone();
+    ui.write(move |t| {
+        t.set_host_mailbox_only(&h)?;
+        t.insert_agent("agent-k", uid, "vm.agent")?;
+        let address = format!("mailbox:mbx-k@{h}");
+        t.set_binding(
+            "agent-k",
+            Some(&conde::address::Address::parse(&address, "-").unwrap()),
+        )?;
+        Ok(())
+    })
+    .await;
+    // announced: the running bridge's hello lists the live mailbox
+    let mut req = format!("{}/v1/bridge", ui.env.base.replace("http", "ws"))
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let mailbox = json!([{"kind": "mailbox", "mailbox_id": "mbx-k"}]);
+    let hello = json!({"v": 1, "type": "hello", "host_id": host, "bridge_instance": "inst-k",
+                       "endpoints": mailbox, "proto": 2, "window": 4});
+    ws.send(tungstenite::Message::text(hello.to_string()))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let d2 = d.clone();
+        let rows = blocking(move || d2.with_conn(|t| t.endpoint_rows()).unwrap()).await;
+        if rows.iter().any(|e| e.target == "mbx-k") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let messages = || {
+        let d2 = d.clone();
+        async move { blocking(move || d2.with_conn(|t| t.message_count()).unwrap()).await }
+    };
+    assert_eq!(messages().await, 0, "no record yet, no probe");
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(r["state"], "connected", "{r}");
+    let probe = ui
+        .record(USER)
+        .await
+        .unwrap()
+        .probe_id
+        .expect("the probe at adoption");
+    let (d2, id) = (d.clone(), probe.clone());
+    let m = blocking(move || d2.with_conn(|t| t.message_by_id(&id)).unwrap().unwrap()).await;
+    assert_eq!(
+        (m.sender.as_str(), m.text.as_str()),
+        (&*format!("{USER}/human"), conde::ops::machines::PROBE_TEXT)
+    );
+    // the running bridge gets it, no reconnect and no endpoint change
+    let notify = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = ws.next().await.unwrap().unwrap();
+            let Ok(text) = frame.to_text() else { continue };
+            let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+            if v["type"] == "notify" && v["message_id"] == probe.as_str() {
+                return v;
+            }
+        }
+    })
+    .await
+    .expect("the probe reaches the running bridge");
+    assert_eq!(
+        notify["endpoint"],
+        json!({"kind": "mailbox", "mailbox_id": "mbx-k"})
+    );
+    // a repeated setup and a repeated endpoints frame send no second probe
+    ui.setup(&b, &csrf).await;
+    let again = json!({"v": 1, "type": "endpoints", "added": mailbox, "removed": []});
+    ws.send(tungstenite::Message::text(again.to_string()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(ui.record(USER).await.unwrap().probe_id, Some(probe.clone()));
+    assert_eq!(messages().await, 1, "one probe");
+    ui.op(
+        &vm,
+        "mailbox:mbx-k",
+        "message.send",
+        json!({"to": {"agent": format!("{USER}/human")}, "text": "here", "reply_to": probe}),
+    )
+    .await;
+    let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(s["state"], "ready", "{s}");
+    drop(ws);
     ui.server.shutdown().await.unwrap();
 }

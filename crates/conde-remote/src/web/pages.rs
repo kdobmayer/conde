@@ -197,6 +197,8 @@ pub(crate) struct Shell<'a> {
     pub user: &'a str,
     pub csrf: &'a str,
     pub nav: Nav,
+    /// The board sets up agent machines: the Machine section shows.
+    pub machines: bool,
 }
 
 /// The user menu (UserMenu.svelte): at the masthead's foot, and as the phone tab bar's "More",
@@ -237,6 +239,7 @@ struct ShellView {
     scope: String,
     menu: String,
     more: String,
+    machines: bool,
 }
 
 impl From<Shell<'_>> for ShellView {
@@ -257,6 +260,7 @@ impl From<Shell<'_>> for ShellView {
             channels: s.nav.channels,
             menu,
             more,
+            machines: s.machines,
         }
     }
 }
@@ -282,7 +286,7 @@ impl From<Shell<'_>> for ShellView {
 <aside class="mast">
 <a class="word" href="/#/">{{ mark|safe }}conde</a>
 <div class="kick">Shared board · read-only</div>
-<nav class="sections" aria-label="Sections"><a href="/#/">Feed</a><a href="/#/agents">Agents</a><a href="/#/channels">Channels</a><a href="/#/fleet">Fleet</a><a href="/keys" class="on" aria-current="page">Keys</a></nav>
+<nav class="sections" aria-label="Sections"><a href="/#/">Feed</a><a href="/#/agents">Agents</a><a href="/#/channels">Channels</a><a href="/#/fleet">Fleet</a>{% if s.machines %}<a href="/#/machine">Machine</a>{% endif %}<a href="/keys" class="on" aria-current="page">Keys</a></nav>
 <h2 class="label">Your agents</h2>
 <ul>
 {% if let Some(agents) = s.agents %}{% for a in agents %}<li><a href="/#/a/{{ a.name|urlencode_strict }}" title="{{ a.state }}"><i class="{{ a.state }}" aria-hidden="true"></i><span class="name">{{ a.name }}</span><span class="sr-only">, {{ a.state }}</span>{% if let Some(n) = a.held %} <b>held {{ n }}</b>{% endif %}{% if let Some(n) = a.stuck %} <b>stuck {{ n }}</b>{% endif %}</a></li>
@@ -300,7 +304,7 @@ impl From<Shell<'_>> for ShellView {
 <main class="main"><div class="page">
 {{ body|safe }}
 </div></main>
-<nav class="tabs" aria-label="Sections"><a href="/#/">Feed</a><a href="/#/agents">Agents</a><a href="/#/channels">Channels</a><a href="/#/fleet">Fleet</a><div class="menu more">{{ s.more|safe }}</div></nav>
+<nav class="tabs" aria-label="Sections"><a href="/#/">Feed</a><a href="/#/agents">Agents</a><a href="/#/channels">Channels</a><a href="/#/fleet">Fleet</a>{% if s.machines %}<a href="/#/machine">Machine</a>{% endif %}<div class="menu more">{{ s.more|safe }}</div></nav>
 </div>
 <script>{{ menu_js|safe }}</script>
 {% else %}<header>
@@ -649,6 +653,7 @@ mod tests {
             user: "ann",
             csrf: "c",
             nav,
+            machines: false,
         }
     }
 
@@ -706,6 +711,20 @@ mod tests {
             assert!(page.contains(part), "{part} missing: {page}");
         }
         assert!(!page.contains("<header>"), "{page}");
+        assert!(!page.contains("#/machine"), "{page}");
+        let machines = keys_page(
+            Some(Shell {
+                machines: true,
+                ..ann(Nav::new("ann", Some(&rail), Some(&fleet)))
+            }),
+            None,
+        );
+        for part in [
+            r#"<a href="/#/fleet">Fleet</a><a href="/#/machine">Machine</a><a href="/keys" class="on" aria-current="page">Keys</a></nav>"#,
+            r#"<a href="/#/fleet">Fleet</a><a href="/#/machine">Machine</a><div class="menu more">"#,
+        ] {
+            assert!(machines.contains(part), "{part} missing: {machines}");
+        }
         let failed = keys_page(Some(ann(Nav::new("ann", None, None))), None);
         assert!(
             failed.contains(

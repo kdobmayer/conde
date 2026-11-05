@@ -651,6 +651,15 @@ pub async fn start_on(
     config: ServerConfig,
 ) -> std::io::Result<ServerHandle> {
     d.share(&board_name().map_err(std::io::Error::other)?);
+    if let Some(web) = &config.web
+        && let (Some(m), Some(sign_in)) = (&web.machines, &web.entra)
+        && sign_in.entra_tenant.is_some()
+    {
+        d.set_machines(crate::dispatch::MachineSettings {
+            issuer: sign_in.issuer.clone(),
+            vm_size: m.vm_size.clone(),
+        });
+    }
     // Every owner has exactly one human name before the board answers anyone, and every user
     // who signed in before emails were stored has one for the Slack worker's first lookups; a
     // board that moved serves nobody, so it writes nothing.

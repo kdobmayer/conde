@@ -68,7 +68,7 @@ default.
 
 ## What a person's VM does, start to finish
 
-1. The server deploys the template spec as `agent-vm-<owner>` with the person's name, Entra object id and size, and
+1. The server deploys the template spec as `vm-agent-<owner>` with the person's name, Entra object id and size, and
    records the VM identity's `principalId` in the machine record as soon as the VM resource exists (not from the
    deployment outputs, which come only after the extension).
 2. First boot (`agentvm-firstboot`): a token for the VM's identity with conde-machines as the resource,
@@ -103,7 +103,7 @@ then the server does them and the script is deleted.
 2. **Stage the new VM** (the server's "set up my agent", or by hand):
 
    ```sh
-   az deployment group create -g conde-vm -n agent-vm-<owner> \
+   az deployment group create -g conde-vm -n vm-agent-<owner> \
      --template-spec "$(az ts show -g conde-vm -n agent-vm -v <version> --query id -o tsv)" \
      -p owner=<owner> ownerObjectId=<Entra object id> condeResource=<CONDE_MACHINES_AUDIENCE> vmSize=Standard_D2as_v5
    ```

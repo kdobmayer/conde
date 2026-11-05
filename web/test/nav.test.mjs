@@ -2,7 +2,7 @@
 // are listed once, and every route belongs to its section.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { navAgents, navChannels, sectionOf } from '../src/lib/nav.svelte.ts';
+import { navAgents, navChannels, sectionOf, sections, tabs } from '../src/lib/nav.svelte.ts';
 
 const agent = (name, channels = []) => ({ name, kind: 'claude', address: null, dms: [], channels: channels.map((channel) => ({ channel })) });
 const bound = (owner, name, host, held = 0) => ({ name: `${owner}/${name}`, owner, host, held, stuck: 0 });
@@ -48,8 +48,16 @@ test('every route belongs to its section', () => {
 		'/a/[agent]/dm/[owner]/[name]': 'agents',
 		'/channels': 'channels',
 		'/c/[name]': 'channels',
-		'/fleet': 'fleet'
+		'/fleet': 'fleet',
+		'/machine': 'machine'
 	};
 	for (const [route, section] of Object.entries(cases)) assert.equal(sectionOf(route), section, route);
 	assert.equal(sectionOf(null), null, 'no route');
+});
+
+test('Machine shows where the board sets up agent machines; the phone tabs leave Keys to More', () => {
+	assert.deepEqual(sections(false).map((s) => s.id), ['feed', 'agents', 'channels', 'fleet', 'keys']);
+	assert.deepEqual(sections(true).map((s) => s.id), ['feed', 'agents', 'channels', 'fleet', 'machine', 'keys']);
+	assert.deepEqual(tabs(true).map((s) => s.id), ['feed', 'agents', 'channels', 'fleet', 'machine']);
+	assert.deepEqual(tabs(false).map((s) => s.id), ['feed', 'agents', 'channels', 'fleet']);
 });

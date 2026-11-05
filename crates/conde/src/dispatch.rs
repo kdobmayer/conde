@@ -92,6 +92,17 @@ pub struct Ctx<'a> {
     pub mailbox_only: bool,
     /// The server sends Slack DMs (a bot token is configured): a page can reach a human.
     pub slack: bool,
+    /// The board sets up agent machines.
+    pub machines: Option<&'a MachineSettings>,
+}
+
+/// What the board needs to set up agent machines (`conde server` with `CONDE_MACHINES_*` and an
+/// Entra sign-in).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineSettings {
+    /// The sign-in's Entra issuer, whose identity subject (the `oid`) is the owner's object id.
+    pub issuer: String,
+    pub vm_size: String,
 }
 
 impl Ctx<'_> {
@@ -215,6 +226,8 @@ pub struct Dispatcher {
     slack: AtomicBool,
     /// Users whose Slack member id the worker looks up by email (a sign-in stored the email).
     slack_lookups: Mutex<BTreeSet<i64>>,
+    /// Set once this board sets up agent machines.
+    machines: OnceLock<MachineSettings>,
 }
 
 impl Dispatcher {
@@ -240,7 +253,17 @@ impl Dispatcher {
             shared: OnceLock::new(),
             slack: AtomicBool::new(false),
             slack_lookups: Mutex::default(),
+            machines: OnceLock::new(),
         }
+    }
+
+    /// This board sets up agent machines; set once, a later call keeps the first settings.
+    pub fn set_machines(&self, settings: MachineSettings) {
+        let _ = self.machines.set(settings);
+    }
+
+    pub fn machines(&self) -> Option<&MachineSettings> {
+        self.machines.get()
     }
 
     /// Whether the Slack worker runs on this board (`conde server` with a bot token).
@@ -473,6 +496,7 @@ impl Dispatcher {
             board,
             mailbox_only,
             slack: self.slack(),
+            machines: self.machines(),
         };
         let result = (spec.run)(&ctx, &req.body)?;
         if spec.mutation && !spec.bridge_only {
@@ -544,9 +568,11 @@ fn refuse_on_migrated_host(p: &Principal, req: &Request) -> OpResult<()> {
 
 /// What a committed (non-bridge) mutation changed, as the web UI groups it.
 fn board_topics(op: &str) -> u8 {
-    use crate::store::topics::{DELIVERY, FLEET, MESSAGES};
+    use crate::store::topics::{DELIVERY, FLEET, MACHINE, MESSAGES};
     let fleet = ["agent.", "profile.", "mailbox.", "host."];
-    if fleet.iter().any(|f| op.starts_with(f)) {
+    if op.starts_with("machine.") {
+        MACHINE
+    } else if fleet.iter().any(|f| op.starts_with(f)) {
         FLEET | MESSAGES
     } else {
         MESSAGES | DELIVERY

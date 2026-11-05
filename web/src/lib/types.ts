@@ -5,6 +5,8 @@ export interface Session {
 	display: string;
 	csrf: string;
 	csrf_header: string;
+	/** The board sets up agent machines (the Machine section shows). */
+	machines?: boolean;
 }
 
 /** A DM conversation of one of the owner's agents. */

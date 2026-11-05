@@ -562,7 +562,7 @@ pub(crate) async fn callback(
             tracing::warn!(error = %e, "sign-in refused");
             WebError::Forbidden("The sign-in could not be verified. Start again.".into())
         })?;
-    let user = resolve_user(&state, identity.clone()).await?;
+    let (user, first) = resolve_user(&state, identity.clone()).await?;
     if user.disabled {
         tracing::warn!(user = %user.name, "sign-in of a disabled user refused");
         return Err(WebError::Forbidden(
@@ -575,9 +575,20 @@ pub(crate) async fn callback(
         .or(identity.preferred_username.clone())
         .unwrap_or_else(|| user.name.clone());
     tracing::info!(user = %user.name, "signed in");
-    let jar = session::start(&state, jar, user.user_id, user.name, display).await?;
+    let jar = session::start(&state, jar, user.user_id, user.name.clone(), display).await?;
     let jar = jar.remove(removal(login_retry_cookie(secure), "/", secure));
-    Ok((jar, Redirect::to(&txn.return_to)).into_response())
+    // a first sign-in asks for the person's machine and lands on its page; `conde login` keeps its return
+    let return_to = if first && state.machines().is_some() {
+        super::machines::request(&state, &user).await;
+        if txn.return_to.starts_with("/auth/cli") {
+            txn.return_to
+        } else {
+            "/#/machine".to_string()
+        }
+    } else {
+        txn.return_to
+    };
+    Ok((jar, Redirect::to(&return_to)).into_response())
 }
 
 /// A callback whose sign-in is not pending here any more (another browser's, already finished,
@@ -670,14 +681,14 @@ const NOT_INVITED: &str = "This account is not invited to this board. Ask the bo
 
 /// The board user of the identity. An identity bound to no user is let in only by the invite
 /// gate: its verified email must be the email of exactly one user, who holds no identity of
-/// this issuer yet; that user is then bound to it.
-async fn resolve_user(state: &WebState, identity: Identity) -> Result<WebUser, WebError> {
+/// this issuer yet; that user is then bound to it. `true` with a user bound by this sign-in.
+async fn resolve_user(state: &WebState, identity: Identity) -> Result<(WebUser, bool), WebError> {
     let (issuer, email) = (identity.issuer.clone(), identity.verified_email.clone());
     let outcome = state
         .store(move |s| {
             if let Some(user) = s.user_by_identity(&identity.issuer, &identity.subject)? {
                 s.set_profile(user.user_id, &identity)?;
-                return Ok(Ok(user));
+                return Ok(Ok((user, false)));
             }
             let Some(email) = identity.verified_email.clone() else {
                 return Ok(Err("no verified email"));
@@ -685,7 +696,7 @@ async fn resolve_user(state: &WebState, identity: Identity) -> Result<WebUser, W
             Ok(match s.claim_invite(&identity, &email)? {
                 Invite::Bound(user) => {
                     tracing::info!(user = %user.name, issuer = %identity.issuer, "invite claimed");
-                    Ok(user)
+                    Ok((user, true))
                 }
                 Invite::NoUser => Err("no user has the email"),
                 Invite::Ambiguous => Err("more than one user has the email"),

@@ -1,7 +1,8 @@
 // Design-only mock of the conde web API over the design fixture, serving a built app.
 // Usage: node scripts/design/mock-server.mjs <build-dir> <port>
 // Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
-// owner.search, fleet.list, channel.list; the feed, thread and search ops per docs/web-ui-v2/ia.md
+// owner.search, fleet.list, channel.list, machine.status and machine.setup (no machine until
+// setup, then one being set up); the feed, thread and search ops per docs/web-ui-v2/ia.md
 // "Server contract"; owner.notify, the one write, changes the fixture's settings for the server's
 // life and, like the board, wants an idempotency key and one of the owner's agents),
 // /v1/events (a WebSocket that sends the hello frame), /keys (the server's layout, masthead and
@@ -129,6 +130,9 @@ function search(b) {
 	return { hits, next_cursor: null };
 }
 
+/** The owner's machine: none until `machine.setup`. */
+let machine = null;
+
 function rpc(req, res) {
 	let raw = '';
 	req.on('data', (c) => (raw += c));
@@ -190,6 +194,17 @@ function answer(raw, res) {
 			if (!fx.channels[b.channel]?.members.includes(agent)) return refuse('forbidden', `${agent} is not a member of ${b.channel}`);
 			fx.notify[`${agent} ${b.channel}`] = b.notify;
 			result = { agent, channel: b.channel, notify: b.notify };
+			break;
+		}
+		case 'machine.status':
+			if (!machine) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no machine is set up for this person' } });
+			result = { ...machine, now: new Date().toISOString() };
+			break;
+		case 'machine.setup': {
+			if (!r.idempotency_key) return json(res, 200, { ok: false, error: { code: 'bad_request', message: "'machine.setup' needs an idempotency_key (1-200 chars)" } });
+			const at = new Date().toISOString();
+			machine ??= { state: 'requested', host_id: `vm-agent-${fx.OWNER}`, requested_at: at, minted_at: null, deploy_state: 'Running', deploy_error: null, probe_id: null, ready_at: null, session_online_at: null, sign_in: null, relay: null, admins: [] };
+			result = { ...machine, now: at, deploy: null };
 			break;
 		}
 		default:
@@ -282,7 +297,7 @@ function shell() {
 	const scope = `You see what your ${n === 1 ? 'agent' : n > 1 ? `${n} agents` : 'agents'} can read.`;
 	const menu = (more) =>
 		askama(menuTpl, { display: fx.session.display, user: fx.session.user, csrf: 'mock', admin: (fx.fleet.admins ?? []).includes(fx.session.user), more });
-	return { agents, channels, scope, menu: menu(false), more: menu(true) };
+	return { agents, channels, scope, menu: menu(false), more: menu(true), machines: true };
 }
 
 function keysPage() {
@@ -333,7 +348,7 @@ function joinPage() {
 
 const http = createServer((req, res) => {
 	const url = new URL(req.url, 'http://x');
-	if (url.pathname === '/v1/session') return json(res, 200, fx.session);
+	if (url.pathname === '/v1/session') return json(res, 200, { ...fx.session, machines: true });
 	if (url.pathname === '/v1/rpc' && req.method === 'POST') return rpc(req, res);
 	if (url.pathname === '/keys') {
 		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp(true) });

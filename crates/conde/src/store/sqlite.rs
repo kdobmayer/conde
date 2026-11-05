@@ -13,11 +13,11 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Params, Row, params, pa
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary,
     ChannelThread, CredentialRow, Delivery, DmDelivery, DmThread, DueNotification, EndpointRow,
-    EvidenceRow, FeedArg, FeedRange, HostBridge, ImportState, ImportedAgent, McpCodeRow,
-    McpGrantRow, McpRefreshRow, Membership, Message, Mode, NewMessage, NewNotification,
-    NotificationRow, OpenAttempt, PendingSignal, SearchScope, SlackDue, StaleAttempt, Store,
-    StoreError, StoreResult, Tx, UserRow, UserSlack, Wake, Wakes, WebSessionRow, address_of,
-    feed_seqs_sql, problem_seqs_sql, thread_down_sql, thread_up_sql,
+    EvidenceRow, FeedArg, FeedRange, HostBridge, ImportState, ImportedAgent, MachineDeploy,
+    MachineRow, McpCodeRow, McpGrantRow, McpRefreshRow, Membership, Message, Mode, NewMachine,
+    NewMessage, NewNotification, NotificationRow, OpenAttempt, PendingSignal, SearchScope,
+    SlackDue, StaleAttempt, Store, StoreError, StoreResult, Tx, UserRow, UserSlack, Wake, Wakes,
+    WebSessionRow, address_of, feed_seqs_sql, problem_seqs_sql, thread_down_sql, thread_up_sql,
 };
 use crate::address::Address;
 
@@ -403,6 +403,31 @@ fn user_slack_row(r: &Row) -> rusqlite::Result<UserSlack> {
 
 const USER_SELECT: &str = "SELECT u.user_id, u.name, u.disabled,
     EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.user_id), u.email, u.admin FROM users u";
+
+const MACHINE_SELECT: &str = "SELECT user_id, host_id, owner_object_id, vm_size, requested_at,
+    deploy_state, deploy_checked_at, deploy_error, principal_id, minted_at, probe_id, ready_at,
+    session_online_at, sign_in, deleting_at, delete_error FROM machines";
+
+fn machine_row(r: &Row) -> rusqlite::Result<MachineRow> {
+    Ok(MachineRow {
+        user_id: r.get(0)?,
+        host_id: r.get(1)?,
+        owner_object_id: r.get(2)?,
+        vm_size: r.get(3)?,
+        requested_at: r.get(4)?,
+        deploy_state: r.get(5)?,
+        deploy_checked_at: r.get(6)?,
+        deploy_error: r.get(7)?,
+        principal_id: r.get(8)?,
+        minted_at: r.get(9)?,
+        probe_id: r.get(10)?,
+        ready_at: r.get(11)?,
+        session_online_at: r.get(12)?,
+        sign_in: r.get(13)?,
+        deleting_at: r.get(14)?,
+        delete_error: r.get(15)?,
+    })
+}
 
 fn user_row(r: &Row) -> rusqlite::Result<UserRow> {
     Ok(UserRow {
@@ -2592,6 +2617,95 @@ impl Tx for SqliteTx<'_> {
 
     fn announce(&self, topics: u8) {
         self.wakes.borrow_mut().board |= topics;
+    }
+
+    // agent machines
+
+    fn identity_subject(&self, user_id: i64, issuer: &str) -> StoreResult<Option<String>> {
+        self.opt(
+            "SELECT subject FROM identities WHERE user_id = ?1 AND issuer = ?2",
+            params![user_id, issuer],
+            |r| r.get(0),
+        )
+    }
+
+    fn machine_of_user(&self, user_id: i64) -> StoreResult<Option<MachineRow>> {
+        self.opt(
+            &format!("{MACHINE_SELECT} WHERE user_id = ?1"),
+            [user_id],
+            machine_row,
+        )
+    }
+
+    fn machine_request(&self, m: &NewMachine) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO machines(user_id, host_id, owner_object_id, vm_size, minted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                m.user_id,
+                m.host_id,
+                m.owner_object_id,
+                m.vm_size,
+                m.minted_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn machine_set_deploy(&self, user_id: i64, d: &MachineDeploy) -> StoreResult<()> {
+        self.exec(
+            "UPDATE machines SET requested_at = ?2, deploy_state = ?3, deploy_checked_at = ?4,
+             deploy_error = ?5 WHERE user_id = ?1",
+            params![
+                user_id,
+                d.requested_at,
+                d.deploy_state,
+                d.deploy_checked_at,
+                d.deploy_error
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn machine_claim_check(&self, user_id: i64, before: &str, at: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE machines SET deploy_checked_at = ?3
+             WHERE user_id = ?1 AND requested_at IS NOT NULL AND minted_at IS NULL
+               AND deploy_error IS NULL AND deleting_at IS NULL
+               AND (deploy_checked_at IS NULL OR deploy_checked_at < ?2)",
+            params![user_id, before, at],
+        )? > 0)
+    }
+
+    fn machine_set_probe(&self, user_id: i64, probe_id: &str) -> StoreResult<()> {
+        self.exec(
+            "UPDATE machines SET probe_id = ?2 WHERE user_id = ?1",
+            params![user_id, probe_id],
+        )?;
+        Ok(())
+    }
+
+    fn machine_set_ready(&self, user_id: i64, at: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE machines SET ready_at = ?2 WHERE user_id = ?1 AND ready_at IS NULL",
+            params![user_id, at],
+        )? > 0)
+    }
+
+    fn machine_set_sign_in(&self, user_id: i64, sign_in: Option<&str>) -> StoreResult<()> {
+        self.exec(
+            "UPDATE machines SET sign_in = ?2 WHERE user_id = ?1",
+            params![user_id, sign_in],
+        )?;
+        Ok(())
+    }
+
+    fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()> {
+        self.exec(
+            "UPDATE machines SET deleting_at = ?2 WHERE user_id = ?1",
+            params![user_id, at],
+        )?;
+        Ok(())
     }
 
     // import

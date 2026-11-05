@@ -99,6 +99,9 @@ on_both!(
     a_notice_pages_the_human_when_the_agent_is_not_reachable,
     service_notify_refuses_a_bad_person_text_or_link,
     the_same_event_id_is_answered_once_without_a_second_message,
+    a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired,
+    the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply_marks_ready,
+    a_service_reads_a_persons_presence_and_nothing_else,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -2176,6 +2179,19 @@ async fn notices(d: &Arc<Dispatcher>) -> Notices {
 }
 
 impl Notices {
+    /// `service.presence {to}` with the service's key.
+    async fn presence(&self, to: &str) -> Value {
+        self.s
+            .rpc(
+                &self.praxia,
+                None,
+                "service.presence",
+                json!({"to": to}),
+                None,
+            )
+            .await
+    }
+
     async fn notify(&self, to: &str, text: &str, link: &str, event: &str) -> Value {
         self.s
             .rpc(
@@ -2364,4 +2380,196 @@ async fn the_same_event_id_is_answered_once_without_a_second_message(d: Arc<Disp
         .notify("levente-szabo", "another line", LINK, "evt-42")
         .await;
     assert_eq!(other["error"]["code"], "conflict", "{other}");
+}
+
+/// A machine record of `user` on `host`, joined (minted), as an adopted host's is; the user id.
+async fn machine_record(d: &Arc<Dispatcher>, user: &str, host: &str) -> i64 {
+    let (d, user, host) = (d.clone(), user.to_string(), host.to_string());
+    blocking(move || {
+        d.with_tx(|t| {
+            let uid = t.user_id(&user)?.unwrap();
+            t.machine_request(&conde::store::NewMachine {
+                user_id: uid,
+                host_id: &host,
+                owner_object_id: "oid-x",
+                vm_size: "Standard_B2as_v2",
+                minted_at: Some("2026-11-05T22:00:00.000Z"),
+            })?;
+            Ok(uid)
+        })
+        .unwrap()
+    })
+    .await
+}
+
+async fn machine_of(d: &Arc<Dispatcher>, uid: i64) -> conde::store::MachineRow {
+    let d = d.clone();
+    blocking(move || d.with_conn(|t| t.machine_of_user(uid)).unwrap().unwrap()).await
+}
+
+/// The reachability rule's sign-in clause: a record that says the Claude sign-in expired makes
+/// the live agent not reachable, so the notice pages the person; no record, a record without
+/// sign-in state, or another flow's expiry change nothing.
+async fn a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let mut ws = n.s.v2(&n.lev, "v2-lev", 4, &[&n.mailbox]).await;
+    // the first routes frame follows the hello's endpoints
+    ws.next("routes").await;
+    assert_eq!(n.ok("levente-szabo").await["via"], "agent", "no record");
+    let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    let cases = [
+        (None, "agent"),
+        (
+            Some(r#"{"claude":"ok","github":"expired","codex":"ok"}"#),
+            "agent",
+        ),
+        (
+            Some(r#"{"claude":"expiring","github":"ok","codex":"ok"}"#),
+            "agent",
+        ),
+        (
+            Some(r#"{"claude":"expired","github":"ok","codex":"ok"}"#),
+            "human",
+        ),
+    ];
+    for (sign_in, via) in cases {
+        let d2 = d.clone();
+        blocking(move || {
+            d2.with_tx(|t| Ok(t.machine_set_sign_in(uid, sign_in)?))
+                .unwrap()
+        })
+        .await;
+        let r = n.ok("levente-szabo").await;
+        assert_eq!(r["via"], via, "{sign_in:?}: {r}");
+    }
+}
+
+/// The startup exchange: the first endpoints listing that has the person's published vm.agent
+/// live on the record's host sends one DM from the person's human row to the agent; a later
+/// listing sends none; the agent's reply to it (allowed to the human for this one message) marks
+/// the machine ready; another agent's reply and another DM to the human do not.
+async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply_marks_ready(
+    d: Arc<Dispatcher>,
+) {
+    let n = notices(&d).await;
+    let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    let mut ws = n.s.v2(&n.lev, "v2-a", 4, &[]).await;
+    // the first routes frame follows the hello's endpoints
+    ws.next("routes").await;
+    assert_eq!(
+        machine_of(&d, uid).await.probe_id,
+        None,
+        "the session is not up"
+    );
+    drop(ws);
+    let mut ws = n.s.v2(&n.lev, "v2-b", 4, &[&n.mailbox]).await;
+    ws.next("routes").await;
+    let probe = machine_of(&d, uid).await.probe_id.expect("the probe");
+    let (d2, id) = (d.clone(), probe.clone());
+    let m = blocking(move || d2.with_conn(|t| t.message_by_id(&id)).unwrap().unwrap()).await;
+    assert_eq!(
+        (m.sender.as_str(), m.text.as_str()),
+        ("levente-szabo/human", conde::ops::machines::PROBE_TEXT)
+    );
+    let notify = ws.notify_for(&probe).await;
+    assert_eq!(
+        notify["endpoint"],
+        json!({"kind": "mailbox", "mailbox_id": n.mailbox})
+    );
+    drop(ws);
+    let mut ws = n.s.v2(&n.lev, "v2-c", 4, &[&n.mailbox]).await;
+    ws.next("routes").await;
+    assert_eq!(machine_of(&d, uid).await.probe_id.as_deref(), Some(&*probe));
+    let d2 = d.clone();
+    assert_eq!(
+        blocking(move || d2.with_conn(|t| t.message_count()).unwrap()).await,
+        1,
+        "one probe"
+    );
+    let me = format!("mailbox:{}", n.mailbox);
+    // a DM to the human that does not answer the probe is refused as before
+    let r =
+        n.s.rpc(
+            &n.lev,
+            Some(&me),
+            "message.send",
+            json!({"to": {"agent": "levente-szabo/human"}, "text": "hello"}),
+            Some("m-1"),
+        )
+        .await;
+    assert_eq!(r["error"]["code"], "forbidden", "{r}");
+    // another agent of the person cannot answer it
+    n.s.ok(&n.lev, None, "mailbox.publish", json!({"name": "desk"}))
+        .await;
+    let desk = n.s.agent("levente-szabo", "desk").await.id;
+    let r =
+        n.s.rpc(
+            &n.lev,
+            Some(&format!("mailbox:{desk}")),
+            "message.send",
+            json!({"to": {"agent": "levente-szabo/human"}, "text": "here", "reply_to": probe}),
+            Some("m-2"),
+        )
+        .await;
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(machine_of(&d, uid).await.ready_at, None);
+    let r = n.presence("levente-szabo").await;
+    assert_eq!(r["result"]["state"], "connected", "{r}");
+    // the agent's own reply marks it ready
+    n.s.ok(
+        &n.lev,
+        Some(&me),
+        "message.send",
+        json!({"to": {"agent": "levente-szabo/human"}, "text": "here", "reply_to": probe}),
+    )
+    .await;
+    assert!(machine_of(&d, uid).await.ready_at.is_some());
+    let r = n.presence("levente-szabo").await;
+    assert_eq!(r["result"]["state"], "ready", "{r}");
+}
+
+/// A service reads a person's presence by board user name or sign-in email: the state and the
+/// sign-in flows, nothing else. A person without a machine, or no such person, is not found; a
+/// key without a service row is refused; `machine.status` takes no bearer request, a service's
+/// included.
+async fn a_service_reads_a_persons_presence_and_nothing_else(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    let flows = r#"{"claude":"expired","github":"ok","codex":"ok"}"#;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| Ok(t.machine_set_sign_in(uid, Some(flows))?))
+            .unwrap()
+    })
+    .await;
+    for to in ["levente-szabo", "Levente.Szabo@dakai.io"] {
+        let r = n.presence(to).await;
+        assert_eq!(r["ok"], true, "{to}: {r}");
+        assert_eq!(
+            r["result"],
+            json!({"state": "up", "sign_in": {"claude": "expired", "github": "ok", "codex": "ok"}}),
+            "{to}"
+        );
+    }
+    for to in ["oliver", "nobody@dakai.io", "nobody"] {
+        let r = n.presence(to).await;
+        assert_eq!(r["error"]["code"], "not_found", "{to}: {r}");
+    }
+    let r =
+        n.s.rpc(
+            &n.lev,
+            None,
+            "service.presence",
+            json!({"to": "levente-szabo"}),
+            None,
+        )
+        .await;
+    assert_eq!(r["error"]["code"], "forbidden", "{r}");
+    for (key, body) in [
+        (&n.praxia, json!({"owner": "levente-szabo"})),
+        (&n.lev, json!({})),
+    ] {
+        let r = n.s.rpc(key, None, "machine.status", body, None).await;
+        assert_eq!(r["error"]["code"], "forbidden", "{r}");
+    }
 }

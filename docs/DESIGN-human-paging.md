@@ -197,6 +197,12 @@ sends as `<display>: <text>`, then `<link|Open in <display>>`, then the board li
 The name people see as the Slack sender is the Slack app's own (its bot user's display name and
 its Display Information, in the app's settings at api.slack.com); the board posts text only.
 
+The same service reads a person's agent machine with `service.presence {to}` (a query; `to` as for
+`service.notify`): `{state, sign_in}`, where `state` is the machine's state word (`requested`,
+`failed`, `not_connected`, `up`, `connected`, `ready`, `disconnected`, `deleting`) and `sign_in` the
+flows the machine last reported, null until it reports them. A person without a machine is
+`not_found`. Nothing else of the record is shown, and the call reads the board only.
+
 ## Migration and rollout
 
 1. Build and test on SQLite and Postgres. New tests: one human per owner, ensure at startup and at

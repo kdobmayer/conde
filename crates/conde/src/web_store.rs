@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 
 use crate::dispatch::Dispatcher;
 use crate::ops::hosts::key_id;
-use crate::store::{CredentialRow, StoreError, Tx, UserRow, WebSessionRow};
+use crate::store::{CredentialRow, MachineDeploy, StoreError, Tx, UserRow, WebSessionRow, topics};
 use crate::util::iso_from_ms;
 
 const LOGIN: &str = "login";
@@ -610,5 +610,59 @@ impl WebStore for WebBoard {
             .to_string();
         let now_ms = self.d.now_ms();
         self.write(|t| crate::welcome::enrolled(t, &board, user_id, host_id, how, now_ms))
+    }
+
+    fn machine_deployed(&self, user_id: i64, error: Option<&str>) -> WebResult<()> {
+        let now = iso_from_ms(self.d.now_ms());
+        self.write(|t| {
+            let Some(m) = t.machine_of_user(user_id)? else {
+                return Ok(());
+            };
+            let deploy = MachineDeploy {
+                requested_at: error.is_none().then_some(now),
+                deploy_error: error.map(str::to_string),
+                ..MachineDeploy::default()
+            };
+            // a record deleted or adopted meanwhile keeps what it says
+            if m.deleting_at.is_none() && m.minted_at.is_none() {
+                t.machine_set_deploy(user_id, &deploy)?;
+                t.announce(topics::MACHINE);
+            }
+            Ok(())
+        })
+    }
+
+    fn machine_check_due(&self, user_id: i64, every: i64) -> WebResult<Option<String>> {
+        let now = self.d.now_ms();
+        let (before, at) = (iso_from_ms(now - every * 1000), iso_from_ms(now));
+        self.write(|t| {
+            if !t.machine_claim_check(user_id, &before, &at)? {
+                return Ok(None);
+            }
+            Ok(t.machine_of_user(user_id)?.map(|m| m.host_id))
+        })
+    }
+
+    fn machine_checked(&self, user_id: i64, state: &str, error: Option<&str>) -> WebResult<()> {
+        self.write(|t| {
+            let Some(m) = t.machine_of_user(user_id)? else {
+                return Ok(());
+            };
+            // a read that raced a retry's clear says nothing about the new PUT
+            if m.requested_at.is_none() || m.deploy_error.is_some() {
+                return Ok(());
+            }
+            t.machine_set_deploy(
+                user_id,
+                &MachineDeploy {
+                    requested_at: m.requested_at,
+                    deploy_state: Some(state.to_string()),
+                    deploy_checked_at: m.deploy_checked_at,
+                    deploy_error: error.map(str::to_string),
+                },
+            )?;
+            t.announce(topics::MACHINE);
+            Ok(())
+        })
     }
 }

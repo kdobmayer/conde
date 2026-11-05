@@ -177,6 +177,7 @@ pub(crate) async fn shell<'a>(state: &WebState, session: &'a Session) -> pages::
         user,
         csrf: &session.record.csrf,
         nav: Nav::new(user, rail.as_ref(), fleet.as_ref()),
+        machines: state.machines().is_some(),
     }
 }
 

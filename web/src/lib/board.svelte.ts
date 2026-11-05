@@ -8,8 +8,8 @@ import { currentSession, loadSession, onSession, rpc, signIn } from './api';
 import { inOrder } from './in-order';
 import type { Fleet, Rail, Session } from './types';
 
-export type Topic = 'messages' | 'delivery' | 'fleet';
-const ALL: Topic[] = ['messages', 'delivery', 'fleet'];
+export type Topic = 'messages' | 'delivery' | 'fleet' | 'machine';
+const ALL: Topic[] = ['messages', 'delivery', 'fleet', 'machine'];
 const POLL_MS = 15_000;
 
 export const board = $state({

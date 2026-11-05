@@ -431,3 +431,26 @@ pub(crate) async fn refresh(state: &WebState, user_id: i64) {
         Err(e) => tracing::warn!(%host, error = %e, "machine deployment not read"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The hand deployment and the template name a person's deployment as the server does
+    /// (`vm-agent-<owner>`, the VM's own name), so both write one deployment record.
+    #[test]
+    fn a_hand_deployment_and_the_server_share_one_deployment_name() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../infra/agent-vm/");
+        let read = |f: &str| std::fs::read_to_string(format!("{root}{f}")).unwrap();
+        let (readme, template) = (read("README.md"), read("template/agent-vm.bicep"));
+        assert!(
+            readme.contains("az deployment group create -g conde-vm -n vm-agent-<owner>"),
+            "the README's hand deployment"
+        );
+        for (file, text) in [("README.md", &readme), ("agent-vm.bicep", &template)] {
+            assert!(
+                !text.contains("agent-vm-<owner>"),
+                "{file} names another deployment"
+            );
+        }
+        assert!(template.contains("one named deployment per person (`vm-agent-<owner>`)"));
+    }
+}

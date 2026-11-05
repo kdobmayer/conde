@@ -1,5 +1,5 @@
 // One person's agent VM. Published as the template spec `agent-vm` in the agent resource group and deployed
-// by the conde server, one named deployment per person (`agent-vm-<owner>`), idempotent on repeat:
+// by the conde server, one named deployment per person (`vm-agent-<owner>`), idempotent on repeat:
 //
 //   az ts create -g conde-vm -n agent-vm -v <version> -f infra/agent-vm/template/agent-vm.bicep
 //

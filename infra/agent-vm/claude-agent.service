@@ -1,13 +1,17 @@
-# The agent's Claude session, as a user unit of the agent user (linger starts it at boot). run-agent execs
-# claude as the pane's only process, so when Claude exits, tmux exits with it and Restart=always starts it again
-# on the same session id.
+# The agent's Claude session, a user unit installed root-owned in /etc/systemd/user and enabled for the agent user
+# only (linger starts it at boot). run-agent, root-owned too, execs claude as the pane's only process, so when
+# Claude exits, tmux exits with it and Restart=always starts it again on the same session id. Nothing the agent can
+# write is run by root, and the agent cannot swap the unit or the script it runs.
+#
+# VMs from before 5 Nov carry a copy in ~/.config/systemd/user, which takes precedence over /etc/systemd/user; the
+# README's "Existing VMs" step removes it.
 [Unit]
 Description=Always-on Claude agent (remote control, conde)
 After=conde.service network-online.target
 
 [Service]
 Type=forking
-ExecStart=/usr/bin/tmux -L agent new-session -d -s agent -x 220 -y 50 %h/.config/agentvm/run-agent
+ExecStart=/usr/bin/tmux -L agent new-session -d -s agent -x 220 -y 50 /usr/local/lib/agentvm/run-agent
 ExecStop=/usr/bin/tmux -L agent kill-server
 Restart=always
 RestartSec=10

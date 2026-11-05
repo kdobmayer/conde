@@ -7,7 +7,9 @@
 #        EOF or SIGTERM                         cancel
 #   out: url <URL> <user_code> <expires_at>     for the page: the person types user_code on GitHub's page
 #        waiting                                polling GitHub until the person has approved
-#        done                                   the token is in gh (gh auth login --with-token, gh auth setup-git)
+#        done                                   the token is in gh (gh auth login --with-token, gh auth setup-git),
+#                                               and git commits as the person: user.name and the id-based noreply
+#                                               address from their GitHub profile
 #        failed <reason>                        expired | denied | busy | process_exited
 #
 # Client id and scopes from /etc/agentvm.conf (GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_SCOPES): the gh CLI's public
@@ -57,11 +59,19 @@ while :; do
     expired_token) say "failed expired"; exit 0 ;;
     access_denied) say "failed denied"; exit 0 ;;
     '')
-      if printf '%s' "$r" | jq -r '.access_token // empty' | gh auth login --hostname github.com --git-protocol https --with-token \
-         && gh auth setup-git --hostname github.com; then
+      if ! { printf '%s' "$r" | jq -r '.access_token // empty' | gh auth login --hostname github.com --git-protocol https --with-token \
+             && gh auth setup-git --hostname github.com; }; then
+        err "gh did not take the token"; say "failed process_exited"; exit 0
+      fi
+      # Commits carry the person's identity. GET /user needs no extra scope for name, login and id.
+      if ! me=$(gh api user --hostname github.com) || ! login=$(jq -er '.login' <<<"$me") || ! id=$(jq -er '.id' <<<"$me"); then
+        err "signed in, but the GitHub profile could not be read"; say "failed process_exited"; exit 0
+      fi
+      name=$(jq -r '.name // empty' <<<"$me")
+      if git config --global user.name "${name:-$login}" && git config --global user.email "$id+$login@users.noreply.github.com"; then
         say done
       else
-        err "gh did not take the token"; say "failed process_exited"
+        err "signed in, but git's identity could not be set"; say "failed process_exited"
       fi
       exit 0 ;;
     *) err "GitHub: $(jq -c '{error, error_description}' <<<"$r")"; say "failed process_exited"; exit 0 ;;

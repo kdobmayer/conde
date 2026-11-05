@@ -14,8 +14,16 @@ until claude auth status --json 2>/dev/null | jq -e '.loggedIn == true' >/dev/nu
 done
 
 transcript="$HOME/.claude/projects/$(printf '%s' "$WORK_DIR" | sed 's|[^A-Za-z0-9]|-|g')/$SESSION_ID.jsonl"
+# A resumed session gets a short recovery prompt: otherwise a session restarted in the middle of a request sits
+# idle, and a conde message it had already read is never answered (conde does not redeliver a read message).
+# Recovery assistance, not completion tracking.
+resume_prompt="This session was restarted (reboot, crash or a new sign-in). Look at the end of this conversation and \
+finish work that was interrupted, without repeating external actions that already completed (messages sent, \
+pushes, deploys). If an external action's outcome is uncertain, check its state before repeating it. Respect any \
+later human stop, pause or cancellation. Then read your conde inbox and answer what needs an answer. If nothing is \
+pending, say so in one line and wait."
 if [ -f "$transcript" ]; then
-  exec claude --remote-control "$RC_NAME" --permission-mode "$PERMISSION_MODE" --resume "$SESSION_ID"
+  exec claude --remote-control "$RC_NAME" --permission-mode "$PERMISSION_MODE" --resume "$SESSION_ID" "$resume_prompt"
 fi
 
 prompt="You are ${OWNER_LABEL:-your human}'s always-on agent: this machine stays on, so you stay reachable when their \

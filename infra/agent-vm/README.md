@@ -28,17 +28,17 @@ page and the relay) is in conde itself.
 | `image/agent-vm.pkr.hcl` | Packer | the image: Ubuntu 24.04 server, `bootstrap.sh image` + `image/provision.sh`, generalized, into `galNativeLanes/agent-vm` |
 | `image/provision.sh` | Packer, root | Chromium (snap), unattended-upgrades for Ubuntu, the git PPA and gh (no automatic reboot), a daily `conde update` user timer, `agentvm-firstboot.service`, clean-up of this build machine's identity |
 | `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde setup`; agent.env with a pinned session id; `claude-agent.service` enabled |
-| `claude-agent.service` | agent user | tmux around `run-agent`; `Restart=always` |
-| `run-agent` | agent user, in tmux | waits for the Claude sign-in; first start `--session-id <uuid>`, every later start `--resume <uuid>`; never `--continue` |
+| `claude-agent.service` | root-owned in `/etc/systemd/user`, enabled for the agent user | tmux around the root-owned `/usr/local/lib/agentvm/run-agent`; `Restart=always` |
+| `run-agent` | agent user, in tmux | waits for the Claude sign-in; first start `--session-id <uuid>`, every later start `--resume <uuid>` with a recovery prompt; never `--continue` |
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped) |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
-| `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource, the bare application id of the Entra app conde). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, vmSize. Output `principalId` = the `oid` the mint call checks |
+| `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, condeResource (required: the conde-machines application id), vmSize (B2as_v2 by default, D2as_v5 for the pilot). Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
 | `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; Azure Policy: only the AADSSHLoginForLinux extension (Deny), since RBAC cannot narrow extension writes. Accepted residual: the identity could create its own VM in the subnet with a copy of a person's OS disk |
 | `azure/agent-network.bicep` | once, conde-vm | NSG: SSH from the VPN pool 172.16.0.0/22, every other inbound from the VNet denied, every outbound into the VNet denied; the agent side of the hub peering (remote gateways), after the rules. DNS stays Azure's default |
 | `azure/hub-peer-access.bicep` | once, conde-vm | custom role Agent VNet Peer (read and peer on vnet-agent-vms) for native-infra's hub deployer, so its Terraform can create the hub side |
-| `azure/image-builder.sh` | once, by hand | Entra app `conde-agent-image` (GitHub OIDC, environment `agent-image` of kdobmayer/conde), build resource group `rg-agent-image`; prints the GitHub side for the repo admin (the environment with a named branch policy for main, its variables) |
+| `azure/image-builder.sh` | once, by hand | Entra app `conde-agent-image` (GitHub OIDC, environment `agent-image` of kdobmayer/conde), build resource group `rg-agent-image`; with `GITHUB=1`, as the repo admin, the environment with main as its only branch policy and its variables, asserted at the end |
 | `../../.github/workflows/agent-image.yml` | GitHub-hosted runner | `packer build`, version `1.<yyyymmdd>.<run>` |
 
 ## Setting up the Azure half (in order; each is a state change outside dev, approved by Konstantin first)
@@ -57,18 +57,38 @@ az ts create -g conde-vm -n agent-vm -v 1 -f infra/agent-vm/template/agent-vm.bi
 The hub side of the peering is native-infra's Terraform (`terraform/hub/network.tf`:
 `peer-hub-to-vnet-agent-vms`, gateway transit). Windows VPN users download their VPN client profile again once
 after the peering. The policy permits only AADSSHLoginForLinux extension resources. The custom role omits both
-run-command permissions; the policy itself does not block operators who hold them.
+run-command permissions; the policy itself does not block operators who hold them. The policy matches the extension's
+type, not its publisher (an accepted residual).
+
+Until the Entra app conde-machines exists (Krisztián's half), the deployment caller passes the token audience:
+`-p condeResource=<conde-machines application id>`. The template has no default.
 
 ## What a person's VM does, start to finish
 
 1. The server deploys the template spec as `agent-vm-<owner>` with the person's name, Entra object id and size, and
-   records the output `principalId` in the machine record.
-2. First boot (`agentvm-firstboot`): `conde setup`, then a token for the VM's identity with the conde application as
-   resource, `POST /v1/machines/enrol` (5xx, network errors and 429 retried for 30 minutes; any other 4xx is
-   final), and `conde enroll` with the key on stdin. The key is never in an argument, a file of ours or the log.
+   records the VM identity's `principalId` in the machine record as soon as the VM resource exists (not from the
+   deployment outputs, which come only after the extension).
+2. First boot (`agentvm-firstboot`): a token for the VM's identity with conde-machines as the resource,
+   `POST /v1/machines/enrol` (network errors, 404, 5xx, and 429 with Retry-After retried for 30 minutes; every other
+   4xx is final), `conde enroll` with the key on stdin, then `conde setup`. The key is never in an argument, a file
+   of ours or the log.
 3. `claude-agent.service` starts and waits for the Claude sign-in (the page relays it).
 4. Once signed in, Claude starts under the pinned session id with remote control on; the SessionStart hook
    registers the name; the server publishes it when the registration arrives from that host.
+5. Every later start (reboot, crash, a new sign-in) resumes the same session with a short recovery prompt: finish
+   interrupted work without repeating completed external actions, then read the conde inbox. Recovery assistance,
+   not completion tracking.
+
+## Existing VMs (made before 5 Nov)
+
+They carry a copy of the agent unit in `~/.config/systemd/user`, which takes precedence over the root-owned
+`/etc/systemd/user/claude-agent.service`. With the new files in place (`/etc/systemd/user/claude-agent.service`,
+`/usr/local/lib/agentvm/run-agent`), as the agent user:
+
+```sh
+rm -f ~/.config/systemd/user/claude-agent.service ~/.config/agentvm/run-agent
+systemctl --user daemon-reload && systemctl --user enable --now claude-agent && systemctl --user restart claude-agent
+```
 
 ## Watching and steering the agent (power users)
 

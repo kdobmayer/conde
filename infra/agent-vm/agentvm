@@ -92,15 +92,9 @@ cmd_agent_start() {
   need_bootstrap
   local name="${1:?usage: agentvm agent-start NAME [PERMISSION_MODE]}" mode="${2:-bypassPermissions}"
   as_agent 'claude auth status --json' | jq -e '.loggedIn == true' >/dev/null || { echo "Claude is not signed in yet"; exit 2; }
-  local sid; sid=$(uuidgen)
-  as_agent "mkdir -p ~/.config/agentvm ~/.config/systemd/user && cat > ~/.config/agentvm/agent.env <<EOF
-AGENT_NAME=$(q "$name")
-SESSION_ID=$sid
-PERMISSION_MODE=$(q "$mode")
-WORK_DIR=\$HOME/$WORK_DIR_NAME
-EOF"
-  install -m 0755 -o "$AGENT_USER" /usr/local/lib/agentvm/run-agent "$home/.config/agentvm/run-agent"
-  install -m 0644 -o "$AGENT_USER" /usr/local/lib/agentvm/claude-agent.service "$home/.config/systemd/user/claude-agent.service"
+  # Written by the agent user itself (never by root into its folders); every value through %q.
+  printf '%s=%q\n' AGENT_NAME "$name" SESSION_ID "$(uuidgen)" PERMISSION_MODE "$mode" WORK_DIR "$home/$WORK_DIR_NAME" \
+    | as_agent 'umask 077 && mkdir -p ~/.config/agentvm && cat > ~/.config/agentvm/agent.env'
   as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent'
   sleep 15
   cmd_agent_log

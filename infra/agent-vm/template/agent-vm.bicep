@@ -20,11 +20,12 @@ param owner string
 @maxLength(36)
 param ownerObjectId string
 
+@description('B2as_v2 by default (the probe: about 0.8 GB used of 8 GB); D2as_v5 is the pilot override.')
 @allowed([
-  'Standard_D2as_v5'
   'Standard_B2as_v2'
+  'Standard_D2as_v5'
 ])
-param vmSize string = 'Standard_D2as_v5'
+param vmSize string = 'Standard_B2as_v2'
 
 @description('Gallery image definition (newest version) or one image version.')
 param imageId string = resourceId('RG-NATIVE-LANES', 'Microsoft.Compute/galleries/images', 'galNativeLanes', 'agent-vm')
@@ -34,8 +35,8 @@ param subnetId string = resourceId('conde-vm', 'Microsoft.Network/virtualNetwork
 @description('The conde server the VM enrols with.')
 param condeServer string = 'https://dakai.conde.cloud'
 
-@description('Resource (audience) of the identity token the VM presents: the conde application\'s bare application id (the app has no identifier URI).')
-param condeResource string = 'd87a5254-3121-4d3b-bd1e-b902b3bcbba0'
+@description('Resource (audience) of the identity token the VM presents at the mint call: the application id of the Entra app conde-machines (no sign-in, no assignment required). No default: until that app exists the deployment caller supplies it. Not the SSO app conde, which requires assignment and refuses the VM\'s token (AADSTS501051).')
+param condeResource string
 
 param location string = resourceGroup().location
 

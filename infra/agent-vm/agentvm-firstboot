@@ -135,21 +135,16 @@ fi
 as_agent 'conde setup' || die "conde setup"
 date -u +%FT%TZ > "$STATE/bootstrap-done"
 
-# --- 6. the agent: pinned session id (kept if this runs again), the unit, enabled; it waits for the sign-in
+# --- 6. the agent: pinned session id (kept if this runs again), the unit enabled; it waits for the sign-in.
+# agent.env is written by the agent itself, never by root into the agent's folders: fixed field names, every value
+# through %q, the work folder from the agent's resolved home.
 . "$STATE/machine.env"
-as_agent "mkdir -p ~/.config/agentvm ~/.config/systemd/user ~/$WORK_DIR_NAME"
+as_agent "mkdir -p ~/$WORK_DIR_NAME"
 if [ ! -f "$home/.config/agentvm/agent.env" ]; then
-  as_agent "cat > ~/.config/agentvm/agent.env <<EOF
-AGENT_NAME=$(q "${FULL_NAME#*/}")
-RC_NAME=$(q "$FULL_NAME")
-OWNER_LABEL=$(q "$OWNER")
-SESSION_ID=$(uuidgen)
-PERMISSION_MODE=$(q "$PERMISSION_MODE")
-WORK_DIR=\$HOME/$WORK_DIR_NAME
-EOF"
+  printf '%s=%q\n' AGENT_NAME "${FULL_NAME#*/}" RC_NAME "$FULL_NAME" OWNER_LABEL "$OWNER" SESSION_ID "$(uuidgen)" \
+    PERMISSION_MODE "$PERMISSION_MODE" WORK_DIR "$home/$WORK_DIR_NAME" \
+    | as_agent 'umask 077 && mkdir -p ~/.config/agentvm && cat > ~/.config/agentvm/agent.env'
 fi
-install -m 0755 -o "$AGENT_USER" /usr/local/lib/agentvm/run-agent "$home/.config/agentvm/run-agent"
-install -m 0644 -o "$AGENT_USER" /usr/local/lib/agentvm/claude-agent.service "$home/.config/systemd/user/claude-agent.service"
 as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent'
 
 date -u +%FT%TZ > "$DONE"

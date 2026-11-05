@@ -9,12 +9,12 @@
 # repo:kdobmayer@22565526/conde@1436388412), its service principal, and the build resource group rg-agent-image
 # (Packer's temporary VM lives there) with Contributor for the app.
 #
-# Then the GitHub side, which needs admin on the repo (its owner): the environment `agent-image` with one named
+# Then, with GITHUB=1 and admin on the repo (its owner), the GitHub side: the environment `agent-image` with one named
 # branch policy, main, so a workflow on any other branch cannot sign in as this app and publish an image every new
 # agent VM boots. A named policy holds whether or not main is protected ("protected branches only" lets every
 # branch deploy while the repo has no protection rule at all); protecting main is the owner's separate step.
-# And the environment's three variables. Run with GITHUB=1 as the repo admin, or have them
-# run the four gh commands printed at the end.
+# And the environment's three variables. Every GitHub call is checked; at the end the script asserts the
+# environment mode and that main is its only branch policy.
 set -euo pipefail
 SUB=60df47fc-ce8f-4f52-a970-43a412d78007
 TENANT=2e51b484-b008-4fc0-8f70-555c1317b555
@@ -39,16 +39,24 @@ az role assignment create --assignee-object-id "$spId" --assignee-principal-type
 
 echo "app $APP: appId $appId, builderPrincipalId $spId"
 
-gh_cmds=(
-  "gh api -X PUT repos/$REPO/environments/agent-image --input - <<<'{\"deployment_branch_policy\":{\"protected_branches\":false,\"custom_branch_policies\":true}}'"
-  "gh api -X POST repos/$REPO/environments/agent-image/deployment-branch-policies -f name=main -f type=branch"
-  "gh variable set AZURE_CLIENT_ID --repo $REPO --env agent-image --body $appId"
-  "gh variable set AZURE_TENANT_ID --repo $REPO --env agent-image --body $TENANT"
-  "gh variable set AZURE_SUBSCRIPTION_ID --repo $REPO --env agent-image --body $SUB"
-)
-if [ "${GITHUB:-0}" = 1 ]; then
-  for c in "${gh_cmds[@]}"; do eval "$c" >/dev/null || true; done   # the branch rule exists already on a re-run
-  gh api "repos/$REPO/environments/agent-image/deployment-branch-policies" --jq '[.branch_policies[].name]'
-else
-  echo "GitHub side, for the repo admin of $REPO:"; printf '  %s\n' "${gh_cmds[@]}"
+ENV="repos/$REPO/environments/agent-image"
+MODE='{"custom_branch_policies":true,"protected_branches":false}'
+MAIN='[{"name":"main","type":"branch"}]'
+policies() { gh api --paginate "$ENV/deployment-branch-policies" --jq '.branch_policies[] | {name, type}' | jq -sc .; }
+if [ "${GITHUB:-0}" != 1 ]; then
+  echo "GitHub side: run this script again with GITHUB=1 as a repo admin of $REPO."; exit 0
 fi
+gh api -X PUT "$ENV" --input - >/dev/null <<<'{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+have=$(policies)
+case "$have" in
+  '[]') gh api -X POST "$ENV/deployment-branch-policies" -f name=main -f type=branch >/dev/null ;;
+  "$MAIN") ;;
+  *) echo "the environment has other branch policies, not changed: $have" >&2; exit 1 ;;
+esac
+gh variable set AZURE_CLIENT_ID --repo "$REPO" --env agent-image --body "$appId"
+gh variable set AZURE_TENANT_ID --repo "$REPO" --env agent-image --body "$TENANT"
+gh variable set AZURE_SUBSCRIPTION_ID --repo "$REPO" --env agent-image --body "$SUB"
+mode=$(gh api "$ENV" --jq '.deployment_branch_policy' | jq -Sc .)
+[ "$mode" = "$MODE" ] || { echo "environment mode is $mode, expected $MODE" >&2; exit 1; }
+[ "$(policies)" = "$MAIN" ] || { echo "branch policies are $(policies), expected $MAIN" >&2; exit 1; }
+echo "environment agent-image: main only, variables set"

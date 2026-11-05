@@ -25,8 +25,14 @@ apt-get -y install ca-certificates curl gnupg software-properties-common \
   tmux jq ripgrep unzip build-essential python3 python3-venv uuid-runtime
 add-apt-repository -y ppa:git-core/ppa
 install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
-chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+# The keyring holds two primary keys: 2C61...6059 (expired 2026-09-05) and 7F38...3325, which signs the current
+# InRelease. The whole primary-key set must be exactly these two, or the bootstrap stops.
+GH_KEYS="2C6106201985B60E6C7AC87323F3D4EA75716059 7F38BBB59D064DBCB3D84D725612B36462313325"
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /tmp/githubcli-archive-keyring.gpg
+got=$(gpg --show-keys --with-colons /tmp/githubcli-archive-keyring.gpg 2>/dev/null \
+      | awk -F: '$1 == "pub" {want = 1; next} $1 == "fpr" && want {print $10; want = 0}' | sort | xargs)
+[ "$got" = "$(tr ' ' '\n' <<<"$GH_KEYS" | sort | xargs)" ] || { echo "gh apt keyring: unexpected primary keys: $got"; exit 1; }
+install -m 0644 /tmp/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
   > /etc/apt/sources.list.d/github-cli.list
 apt-get update
@@ -43,13 +49,18 @@ for _ in $(seq 60); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
 as_agent() {
   sudo -u "$AGENT_USER" -H env XDG_RUNTIME_DIR="/run/user/$uid" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="/home/$AGENT_USER/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-    bash -lc "cd ~ && $1"
+    bash -lc "set -euo pipefail; cd ~ && $1"
 }
 
-# --- User-level tools, each from its own installer (latest release; the conde installer checks SHA256SUMS).
-as_agent 'curl -fsSL https://claude.ai/install.sh | bash'
-as_agent 'curl -LsSf https://astral.sh/uv/install.sh | sh'
-as_agent 'curl -fsSL https://conde.cloud/install.sh | bash'
+# --- User-level tools, each from its own installer (latest release; the conde installer checks SHA256SUMS). Each
+# installer is downloaded first and runs only if the download succeeded; a failed one stops the bootstrap.
+install_from() {  # $1 URL, $2 shell
+  as_agent "d=\$(mktemp -d); trap 'rm -rf \"\$d\"' EXIT; curl -fsSL $(printf '%q' "$1") -o \"\$d/install.sh\" && $2 \"\$d/install.sh\""
+}
+install_from https://claude.ai/install.sh bash
+install_from https://astral.sh/uv/install.sh sh
+install_from https://conde.cloud/install.sh bash
+verify_tools() { as_agent 'echo "claude $(claude --version)"; conde --version; uv --version'; git --version; gh --version | head -1; }
 
 # --- Claude Code state that a terminal would otherwise ask for: onboarding done, the work folder
 # trusted (remote control asks to trust a folder, and there is no terminal to answer), and bypass mode
@@ -68,14 +79,14 @@ as_agent "f=~/.claude/settings.json; [ -f \$f ] || echo '{}' > \$f; \
 # Joining the shared board (dakai) comes later: `agentvm conde-login-*` (test flow) or the mint call at first
 # boot (image VMs). The image build stops before this, because `conde setup` records the host.
 if [ "$MODE" = image ]; then
+  verify_tools
   echo "== bootstrap (image) done $(date -u +%FT%TZ)"
-  as_agent 'echo "claude $(claude --version)"; conde --version; uv --version'; git --version; gh --version | head -1
   exit 0
 fi
 as_agent 'conde setup'
 as_agent 'conde setup --check' || true
 
+verify_tools
 mkdir -p "$(dirname "$DONE")"
 date -u +%FT%TZ > "$DONE"
 echo "== bootstrap done $(date -u +%FT%TZ)"
-as_agent 'echo "claude $(claude --version)"; conde --version; uv --version'; git --version; gh --version | head -1

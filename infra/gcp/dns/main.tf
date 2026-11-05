@@ -213,3 +213,13 @@ import {
   to = cloudflare_dns_record.google_verification
   id = "${local.zone_id}/5c45b868ba5076baa2127c5871828cbf"
 }
+
+# The Dakai board: an explicit record, which takes precedence over the wildcard to the Google load balancer.
+resource "cloudflare_dns_record" "dakai" {
+  zone_id = local.zone_id
+  name    = "dakai.conde.cloud"
+  type    = "CNAME"
+  content = "ca-conde.nicepond-1a6fc04a.westeurope.azurecontainerapps.io"
+  ttl     = 300
+  proxied = false
+}

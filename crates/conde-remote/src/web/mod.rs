@@ -43,7 +43,9 @@ pub use auth::{Oidc, RedeemResponse};
 pub use invite::{InviteConfig, KeycloakAdmin, Resend, SignIn};
 pub use join::{JOIN_TTL, JoinRecord};
 pub use keys::new_host_key;
-pub use machines::{Azure, AzureError, DEFAULT_VM_SIZE, MachinesConfig, ManagedIdentity};
+pub use machines::{
+    ARM_URL, Azure, AzureError, DEFAULT_VM_SIZE, Deployment, MachinesConfig, ManagedIdentity,
+};
 pub use ratelimit::RateLimits;
 
 /// Everything the web surface needs to know about the deployment.
@@ -741,6 +743,22 @@ pub trait WebStore: Send + Sync {
     fn create_service(&self, _user: &str, _name: &str, _display: &str) -> WebResult<ServiceRow> {
         Err(WebStoreError("this board has no services".into()))
     }
+    /// The deployment PUT of the user's machine: accepted (`error` None: requested now) or
+    /// refused (`error`: never issued, shown with the retry). Default: refused.
+    fn machine_deployed(&self, _user_id: i64, _error: Option<&str>) -> WebResult<()> {
+        Err(WebStoreError("this board has no machines".into()))
+    }
+    /// The host of the user's pending machine (accepted, not joined, no error) when its
+    /// deployment was not read in the last `every` seconds, marked read now in the same
+    /// transaction so concurrent calls read it once. Default: none.
+    fn machine_check_due(&self, _user_id: i64, _every: i64) -> WebResult<Option<String>> {
+        Ok(None)
+    }
+    /// The deployment's `provisioningState` as read, and its error when it ended failed.
+    /// Default: refused.
+    fn machine_checked(&self, _user_id: i64, _state: &str, _error: Option<&str>) -> WebResult<()> {
+        Err(WebStoreError("this board has no machines".into()))
+    }
     /// A key was minted for a host new to the board: on the user's first enrollment, the
     /// welcome's greeting and arrival notice, once per user. Default: nothing.
     fn enrolled(
@@ -815,6 +833,8 @@ struct Inner {
     limits: ratelimit::Limiters,
     /// The board, for the masthead's lists on the signed-in pages; none in a bare test setup.
     dispatcher: Option<Arc<dyn crate::Dispatcher>>,
+    /// The agent machines, when configured with an Entra sign-in.
+    machines: Option<Arc<machines::Machines>>,
 }
 
 /// Shared state of the sign-in and keys routes.
@@ -836,7 +856,7 @@ impl WebState {
         registry: Arc<dyn BridgeRegistry>,
         clock: Clock,
     ) -> WebState {
-        WebState::build(config, store, registry, clock, None)
+        WebState::build(config, store, registry, clock, None, None)
     }
 
     fn build(
@@ -845,8 +865,12 @@ impl WebState {
         registry: Arc<dyn BridgeRegistry>,
         clock: Clock,
         dispatcher: Option<Arc<dyn crate::Dispatcher>>,
+        machines: Option<MachinesConfig>,
     ) -> WebState {
         let oidc = Oidc::new(&config);
+        let machines = machines
+            .filter(|_| config.entra_tenant.is_some())
+            .map(|m| Arc::new(machines::Machines::new(m)));
         let limits = ratelimit::Limiters::new(config.limits);
         WebState(Arc::new(Inner {
             core: Core {
@@ -858,11 +882,16 @@ impl WebState {
             oidc,
             limits,
             dispatcher,
+            machines,
         }))
     }
 
     fn dispatcher(&self) -> Option<&Arc<dyn crate::Dispatcher>> {
         self.0.dispatcher.as_ref()
+    }
+
+    fn machines(&self) -> Option<&Arc<machines::Machines>> {
+        self.0.machines.as_ref()
     }
 
     fn core(&self) -> &Core {
@@ -966,6 +995,7 @@ impl WebSetup {
                 registry.clone(),
                 system_clock(),
                 dispatcher,
+                self.machines.clone(),
             );
             app = app.merge(router(web.clone()));
             state = Some(web);

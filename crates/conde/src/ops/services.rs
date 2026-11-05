@@ -16,7 +16,7 @@ use crate::store::UserRow;
 pub const SERVICE: &str = "service";
 
 /// The caller's one sender row.
-fn sender(ctx: &Ctx) -> OpResult<Agent> {
+pub(crate) fn sender(ctx: &Ctx) -> OpResult<Agent> {
     let mut rows: Vec<Agent> = ctx
         .db
         .owner_agents(ctx.p.user_id)?

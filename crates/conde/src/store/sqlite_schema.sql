@@ -195,6 +195,35 @@ CREATE TABLE IF NOT EXISTS mcp_codes(
     resource TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+-- A person's agent machine (Postgres migration 0022).
+CREATE TABLE IF NOT EXISTS machines(
+    user_id INTEGER PRIMARY KEY REFERENCES users(user_id),
+    host_id TEXT NOT NULL UNIQUE,
+    owner_object_id TEXT NOT NULL,
+    vm_size TEXT NOT NULL,
+    requested_at TEXT,
+    deploy_state TEXT,
+    deploy_checked_at TEXT,
+    deploy_error TEXT,
+    principal_id TEXT UNIQUE,
+    minted_at TEXT,
+    probe_id TEXT,
+    ready_at TEXT,
+    session_online_at TEXT,
+    sign_in TEXT,
+    relay_id TEXT,
+    relay_flow TEXT CHECK (relay_flow IN ('claude', 'github', 'codex')),
+    relay_state TEXT CHECK (relay_state IN ('starting', 'url', 'waiting', 'done', 'failed', 'cancelled')),
+    relay_url TEXT,
+    relay_user_code TEXT,
+    relay_expires_at TEXT,
+    relay_reason TEXT,
+    relay_at TEXT,
+    pending_action TEXT CHECK (pending_action IN ('start', 'code', 'cancel')),
+    pending_code TEXT,
+    deleting_at TEXT,
+    delete_error TEXT
+);
 -- Local board only (DESIGN-v2.md §4): publications of local agents on shared boards, and
 -- one operation record per remote mutation, written before the first remote call.
 CREATE TABLE IF NOT EXISTS publications(

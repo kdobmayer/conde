@@ -32,11 +32,11 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use super::{
     Agent, AgentHealth, Attachment, AttachmentMeta, AttemptRow, Channel, ChannelSummary,
     ChannelThread, CredentialRow, Delivery, DmDelivery, DmThread, DueNotification, EndpointRow,
-    EvidenceRow, FeedArg, FeedRange, HostBridge, ImportState, ImportedAgent, McpCodeRow,
-    McpGrantRow, McpRefreshRow, Membership, Message, Mode, NewMessage, NewNotification,
-    NotificationRow, OpenAttempt, PendingSignal, SearchScope, SlackDue, StaleAttempt, Store,
-    StoreError, StoreResult, Tx, UserRow, UserSlack, Wake, Wakes, WebSessionRow, address_of,
-    feed_seqs_sql, problem_seqs_sql, thread_down_sql, thread_up_sql,
+    EvidenceRow, FeedArg, FeedRange, HostBridge, ImportState, ImportedAgent, MachineDeploy,
+    MachineRow, McpCodeRow, McpGrantRow, McpRefreshRow, Membership, Message, Mode, NewMachine,
+    NewMessage, NewNotification, NotificationRow, OpenAttempt, PendingSignal, SearchScope,
+    SlackDue, StaleAttempt, Store, StoreError, StoreResult, Tx, UserRow, UserSlack, Wake, Wakes,
+    WebSessionRow, address_of, feed_seqs_sql, problem_seqs_sql, thread_down_sql, thread_up_sql,
 };
 use crate::address::Address;
 use crate::util::sha256_hex;
@@ -148,6 +148,7 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "actor_kind",
         include_str!("migrations/0021_actor_kind.sql"),
     ),
+    (22, "machines", include_str!("migrations/0022_machines.sql")),
 ];
 
 /// Session lock held while migrating.
@@ -898,6 +899,31 @@ fn user_slack_row(r: &Row) -> UserSlack {
         slack_member_id: r.get(3),
         slack_source: r.get(4),
         done_pages: r.get(5),
+    }
+}
+
+const MACHINE_SELECT: &str = "SELECT user_id, host_id, owner_object_id, vm_size, requested_at,
+    deploy_state, deploy_checked_at, deploy_error, principal_id, minted_at, probe_id, ready_at,
+    session_online_at, sign_in, deleting_at, delete_error FROM machines";
+
+fn machine_row(r: &Row) -> MachineRow {
+    MachineRow {
+        user_id: r.get(0),
+        host_id: r.get(1),
+        owner_object_id: r.get(2),
+        vm_size: r.get(3),
+        requested_at: r.get(4),
+        deploy_state: r.get(5),
+        deploy_checked_at: r.get(6),
+        deploy_error: r.get(7),
+        principal_id: r.get(8),
+        minted_at: r.get(9),
+        probe_id: r.get(10),
+        ready_at: r.get(11),
+        session_online_at: r.get(12),
+        sign_in: r.get(13),
+        deleting_at: r.get(14),
+        delete_error: r.get(15),
     }
 }
 
@@ -3192,6 +3218,94 @@ impl Tx for PgTx {
 
     fn announce(&self, topics: u8) {
         self.wakes.borrow_mut().board |= topics;
+    }
+
+    // agent machines
+
+    fn identity_subject(&self, user_id: i64, issuer: &str) -> StoreResult<Option<String>> {
+        Ok(self
+            .query_opt(
+                "SELECT subject FROM identities WHERE user_id = $1 AND issuer = $2",
+                &[&user_id, &issuer],
+            )?
+            .map(|r| r.get(0)))
+    }
+
+    fn machine_of_user(&self, user_id: i64) -> StoreResult<Option<MachineRow>> {
+        Ok(self
+            .query_opt(&format!("{MACHINE_SELECT} WHERE user_id = $1"), &[&user_id])?
+            .map(|r| machine_row(&r)))
+    }
+
+    fn machine_request(&self, m: &NewMachine) -> StoreResult<()> {
+        self.execute(
+            "INSERT INTO machines(user_id, host_id, owner_object_id, vm_size, minted_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            &[
+                &m.user_id,
+                &m.host_id,
+                &m.owner_object_id,
+                &m.vm_size,
+                &m.minted_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn machine_set_deploy(&self, user_id: i64, d: &MachineDeploy) -> StoreResult<()> {
+        self.execute(
+            "UPDATE machines SET requested_at = $2, deploy_state = $3, deploy_checked_at = $4,
+             deploy_error = $5 WHERE user_id = $1",
+            &[
+                &user_id,
+                &d.requested_at,
+                &d.deploy_state,
+                &d.deploy_checked_at,
+                &d.deploy_error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn machine_claim_check(&self, user_id: i64, before: &str, at: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE machines SET deploy_checked_at = $3
+             WHERE user_id = $1 AND requested_at IS NOT NULL AND minted_at IS NULL
+               AND deploy_error IS NULL AND deleting_at IS NULL
+               AND (deploy_checked_at IS NULL OR deploy_checked_at < $2)",
+            &[&user_id, &before, &at],
+        )? > 0)
+    }
+
+    fn machine_set_probe(&self, user_id: i64, probe_id: &str) -> StoreResult<()> {
+        self.execute(
+            "UPDATE machines SET probe_id = $2 WHERE user_id = $1",
+            &[&user_id, &probe_id],
+        )?;
+        Ok(())
+    }
+
+    fn machine_set_ready(&self, user_id: i64, at: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE machines SET ready_at = $2 WHERE user_id = $1 AND ready_at IS NULL",
+            &[&user_id, &at],
+        )? > 0)
+    }
+
+    fn machine_set_sign_in(&self, user_id: i64, sign_in: Option<&str>) -> StoreResult<()> {
+        self.execute(
+            "UPDATE machines SET sign_in = $2 WHERE user_id = $1",
+            &[&user_id, &sign_in],
+        )?;
+        Ok(())
+    }
+
+    fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()> {
+        self.execute(
+            "UPDATE machines SET deleting_at = $2 WHERE user_id = $1",
+            &[&user_id, &at],
+        )?;
+        Ok(())
     }
 
     // import

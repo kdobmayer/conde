@@ -310,6 +310,7 @@ pub fn endpoints(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     ctx.db
         .replace_endpoints(&ctx.p.host, me, &live, &ctx.now_iso())?;
     ctx.db.announce(topics::FLEET);
+    super::machines::probe(ctx, &live)?;
     let why = if ctx.mailbox_only {
         "recipient offline"
     } else {

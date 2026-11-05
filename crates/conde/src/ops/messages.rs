@@ -229,7 +229,10 @@ pub fn send(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             None => agents::find(ctx, name)?
                 .ok_or_else(|| not_found(format!("no agent registered as '{name}'")))?,
         };
-        if ctx.board.is_some() && rcpt.is_human() {
+        let probe_reply = super::machines::is_probe_reply(ctx, &me, reply_to)?;
+        // the startup probe comes from the owner's human row, so its answer goes there
+        let to_own_human = probe_reply && rcpt.owner_id == me.owner_id;
+        if ctx.board.is_some() && rcpt.is_human() && !to_own_human {
             return Err(forbidden(if rcpt.owner_id == me.owner_id {
                 "use `conde page` to reach your human".to_string()
             } else {
@@ -240,18 +243,19 @@ pub fn send(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             }));
         }
         let to = rcpt.canonical();
-        (
-            insert_message(
-                ctx,
-                &me,
-                Target::Agent(&rcpt),
-                text,
-                reply_to,
-                attachments,
-                None,
-            )?,
-            to,
-        )
+        let inserted = insert_message(
+            ctx,
+            &me,
+            Target::Agent(&rcpt),
+            text,
+            reply_to,
+            attachments,
+            None,
+        )?;
+        if probe_reply {
+            super::machines::mark_ready(ctx, me.owner_id)?;
+        }
+        (inserted, to)
     } else if let Some(raw) = to.get("channel").and_then(Value::as_str) {
         let channel = channels::member_channel(ctx, &me, raw)?;
         let to = format!("#{}", channel.name);

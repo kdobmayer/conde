@@ -181,6 +181,7 @@ on_both!(
     an_sso_invite_opens_its_join_page_for_agents_and_browsers,
     a_password_invite_opens_its_join_page_with_the_password_step_first,
     a_join_link_expires_and_an_unknown_one_says_so,
+    machine_record_round_trip,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -3428,4 +3429,131 @@ async fn a_join_link_expires_and_an_unknown_one_says_so(d: Arc<Dispatcher>) {
         !html.contains("<script nonce="),
         "no copy button on the expired page: {html}"
     );
+}
+
+/// The machine record on the store: created, read back, its deployment columns written and the
+/// on-demand check claimed once per period, the probe, ready once, the sign-in state, deleting,
+/// and the identity subject of an issuer.
+async fn machine_record_round_trip(d: Arc<Dispatcher>) {
+    let board = Arc::new(WebBoard::new(d.clone()));
+    let d2 = d.clone();
+    let uid = blocking(move || {
+        d2.with_tx(|t| {
+            let uid = t.ensure_user("krisztian-dobmayer")?;
+            t.bind_identity(uid, "https://issuer.example/v2.0", "oid-k", None, None)?;
+            assert_eq!(
+                t.identity_subject(uid, "https://issuer.example/v2.0")?
+                    .as_deref(),
+                Some("oid-k")
+            );
+            assert_eq!(t.identity_subject(uid, "https://other.example")?, None);
+            assert_eq!(t.machine_of_user(uid)?, None);
+            t.machine_request(&conde::store::NewMachine {
+                user_id: uid,
+                host_id: "vm-agent-krisztian-dobmayer",
+                owner_object_id: "oid-k",
+                vm_size: "Standard_B2as_v2",
+                minted_at: None,
+            })?;
+            Ok(uid)
+        })
+        .unwrap()
+    })
+    .await;
+    let row = |d: Arc<Dispatcher>| async move {
+        blocking(move || d.with_conn(|t| t.machine_of_user(uid)).unwrap().unwrap()).await
+    };
+    let m = row(d.clone()).await;
+    assert_eq!(
+        (
+            m.host_id.as_str(),
+            m.owner_object_id.as_str(),
+            m.vm_size.as_str()
+        ),
+        ("vm-agent-krisztian-dobmayer", "oid-k", "Standard_B2as_v2")
+    );
+    assert!(m.requested_at.is_none() && m.minted_at.is_none() && m.sign_in.is_none());
+    // never issued: no check is due
+    let b = board.clone();
+    assert_eq!(
+        blocking(move || b.machine_check_due(uid, 30).unwrap()).await,
+        None
+    );
+    let b = board.clone();
+    blocking(move || b.machine_deployed(uid, None).unwrap()).await;
+    let m = row(d.clone()).await;
+    assert!(
+        m.requested_at.is_some() && m.deploy_error.is_none(),
+        "{m:?}"
+    );
+    // accepted: one check per period
+    let b = board.clone();
+    let due = blocking(move || {
+        (
+            b.machine_check_due(uid, 30).unwrap(),
+            b.machine_check_due(uid, 30).unwrap(),
+        )
+    })
+    .await;
+    assert_eq!(due, (Some("vm-agent-krisztian-dobmayer".into()), None));
+    d.advance_clock(31_000);
+    let b = board.clone();
+    assert!(
+        blocking(move || b.machine_check_due(uid, 30).unwrap())
+            .await
+            .is_some()
+    );
+    let b = board.clone();
+    blocking(move || b.machine_checked(uid, "Running", None).unwrap()).await;
+    assert_eq!(
+        row(d.clone()).await.deploy_state.as_deref(),
+        Some("Running")
+    );
+    let b = board.clone();
+    blocking(move || b.machine_checked(uid, "Failed", Some("quota")).unwrap()).await;
+    let m = row(d.clone()).await;
+    assert_eq!(
+        (m.deploy_state.as_deref(), m.deploy_error.as_deref()),
+        (Some("Failed"), Some("quota"))
+    );
+    assert!(m.requested_at.is_some());
+    d.advance_clock(31_000);
+    let b = board.clone();
+    assert_eq!(
+        blocking(move || b.machine_check_due(uid, 30).unwrap()).await,
+        None,
+        "a failed record is not read again"
+    );
+    // a refused PUT: never issued, with its error
+    let b = board.clone();
+    blocking(move || {
+        b.machine_deployed(uid, Some("the deployment PUT answered 403"))
+            .unwrap()
+    })
+    .await;
+    let m = row(d.clone()).await;
+    assert_eq!(
+        (m.requested_at, m.deploy_error.as_deref()),
+        (None, Some("the deployment PUT answered 403"))
+    );
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            t.machine_set_deploy(uid, &conde::store::MachineDeploy::default())?;
+            t.machine_set_probe(uid, "01PROBE")?;
+            assert!(t.machine_set_ready(uid, "2026-11-05T22:00:00.000Z")?);
+            assert!(!t.machine_set_ready(uid, "2026-11-05T23:00:00.000Z")?);
+            t.machine_set_sign_in(uid, Some(r#"{"claude":"expired"}"#))?;
+            t.machine_set_deleting(uid, "2026-11-05T23:30:00.000Z")?;
+            Ok(())
+        })
+        .unwrap()
+    })
+    .await;
+    let m = row(d.clone()).await;
+    assert_eq!(m.deploy_error, None);
+    assert_eq!(m.probe_id.as_deref(), Some("01PROBE"));
+    assert_eq!(m.ready_at.as_deref(), Some("2026-11-05T22:00:00.000Z"));
+    assert_eq!(m.sign_in.as_deref(), Some(r#"{"claude":"expired"}"#));
+    assert_eq!(m.deleting_at.as_deref(), Some("2026-11-05T23:30:00.000Z"));
 }

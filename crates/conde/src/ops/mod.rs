@@ -5,6 +5,7 @@ pub mod agents;
 pub mod bridge;
 pub mod channels;
 pub mod hosts;
+pub mod machines;
 pub mod mailbox;
 pub mod messages;
 pub mod migrate;
@@ -83,6 +84,8 @@ pub static OPS: &[OpSpec] = &[
     op!("owner.search", web::search, query),
     op!("owner.notify", web::notify, mutation),
     op!("fleet.list", web::fleet, query),
+    op!("machine.setup", machines::setup, mutation),
+    op!("machine.status", machines::status, query),
     op!("doctor", misc::doctor, query),
     op!("board.info", mailbox::board_info, query),
     op!("mailbox.publish", mailbox::publish, mutation),

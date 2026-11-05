@@ -95,6 +95,10 @@ on_both!(
     board_info_names_the_board_account_and_host,
     publishing_joins_the_welcomes_lobby,
     a_refused_publish_leaves_the_kind_as_it_was,
+    a_notice_reaches_the_reachable_public_agent,
+    a_notice_pages_the_human_when_the_agent_is_not_reachable,
+    service_notify_refuses_a_bad_person_text_or_link,
+    the_same_event_id_is_answered_once_without_a_second_message,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -2113,4 +2117,251 @@ async fn a_refused_publish_leaves_the_kind_as_it_was(d: Arc<Dispatcher>) {
         kind_of(d.clone(), ids[0].clone()).await.as_deref(),
         Some("claude")
     );
+}
+
+// --- service notices (service.notify) -----------------------------------------------------------
+
+const NOTICE: &str = "New question on the Acme workspace: where is the signed SOW?";
+const LINK: &str = "https://praxia.example/w/acme/q/123";
+
+/// praxia, a service with its sender row praxia/praxy and a key on host praxy; levente-szabo
+/// (levente.szabo@dakai.io, Slack member U0LEV) with `levente-szabo/vm.agent` published on host
+/// vm-agent-levente (migrated, no bridge yet); oliver with no vm.agent.
+struct Notices {
+    s: Srv,
+    praxia: Key,
+    lev: Key,
+    /// The vm.agent's mailbox id.
+    mailbox: String,
+}
+
+async fn notices(d: &Arc<Dispatcher>) -> Notices {
+    use conde_remote::web::WebStore;
+    let s = srv(d, config()).await;
+    let d2 = d.clone();
+    let made = blocking(move || {
+        conde::web_store::WebBoard::new(d2)
+            .create_service("praxia", "praxy", "Praxy")
+            .unwrap()
+    })
+    .await;
+    assert_eq!(
+        made,
+        conde_remote::web::ServiceRow::Created("praxia/praxy".into())
+    );
+    let praxia = s.key("praxia", "praxy").await;
+    let lev = s.key("levente-szabo", "vm-agent-levente").await;
+    s.key("oliver", "desktop").await;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            let uid = t.user_id("levente-szabo")?.unwrap();
+            t.set_user_email(uid, Some("Levente.Szabo@dakai.io"))?;
+            t.set_user_slack(uid, "U0LEV", "admin")?;
+            Ok(())
+        })
+        .unwrap()
+    })
+    .await;
+    s.migrate(&lev, &[], &conde::util::new_ulid()).await;
+    s.ok(&lev, None, "mailbox.publish", json!({"name": "vm.agent"}))
+        .await;
+    let mailbox = s.agent("levente-szabo", "vm.agent").await.id;
+    Notices {
+        s,
+        praxia,
+        lev,
+        mailbox,
+    }
+}
+
+impl Notices {
+    async fn notify(&self, to: &str, text: &str, link: &str, event: &str) -> Value {
+        self.s
+            .rpc(
+                &self.praxia,
+                None,
+                "service.notify",
+                json!({"to": to, "text": text, "link": link}),
+                Some(event),
+            )
+            .await
+    }
+
+    /// A notice that must be accepted: its result.
+    async fn ok(&self, to: &str) -> Value {
+        let r = self
+            .notify(to, NOTICE, LINK, &conde::util::new_ulid())
+            .await;
+        assert_eq!(r["ok"], true, "{r}");
+        r["result"].clone()
+    }
+
+    /// The notifications of the message: (recipient name, kind, status).
+    async fn notifications(&self, message_id: &str) -> Vec<(String, String, String)> {
+        let d = self.s.d.clone();
+        let all = blocking(move || d.with_conn(|t| t.notifications()).unwrap()).await;
+        all.into_iter()
+            .filter(|n| n.message_id == message_id)
+            .map(|n| (n.recipient_name, n.kind, n.status))
+            .collect()
+    }
+
+    /// The message ids the Slack worker would send now.
+    async fn slack_due(&self) -> Vec<String> {
+        let d = self.s.d.clone();
+        blocking(move || {
+            let now = d.now_ms();
+            d.with_conn(|t| t.slack_due(now, now - conde::slack::MAX_AGE_MS, 20))
+                .unwrap()
+        })
+        .await
+        .into_iter()
+        .map(|n| n.message_id)
+        .collect()
+    }
+}
+
+/// A published vm.agent whose bridge heartbeats and lists its mailbox live gets the notice as a
+/// DM from the service row, the line and the link, and its bridge the notify; nothing for the
+/// human, nothing for Slack.
+async fn a_notice_reaches_the_reachable_public_agent(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let mut ws = n.s.v2(&n.lev, "v2-lev", 4, &[&n.mailbox]).await;
+    let r = n.ok("levente.szabo@dakai.io").await;
+    assert_eq!(
+        (r["to"].as_str(), r["via"].as_str()),
+        (Some("levente-szabo/vm.agent"), Some("agent")),
+        "{r}"
+    );
+    let mid = r["message_id"].as_str().unwrap();
+    let notify = ws.notify_for(mid).await;
+    assert_eq!(
+        notify["endpoint"],
+        json!({"kind": "mailbox", "mailbox_id": n.mailbox})
+    );
+    let d2 = d.clone();
+    let id = mid.to_string();
+    let m = blocking(move || d2.with_conn(|t| t.message_by_id(&id)).unwrap().unwrap()).await;
+    assert_eq!(
+        (m.sender.as_str(), m.text.as_str(), m.page.as_deref()),
+        ("praxia/praxy", &*format!("{NOTICE}\n{LINK}"), None)
+    );
+    let rows = n.notifications(mid).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].1.as_str()),
+        ("levente-szabo/vm.agent", "dm")
+    );
+    assert!(n.slack_due().await.is_empty());
+    // the owner name reaches the same agent
+    let r = n.ok("levente-szabo").await;
+    assert_eq!(r["via"], "agent", "{r}");
+}
+
+/// Connected is not reachable: a heartbeat without the mailbox's endpoint, an endpoint whose
+/// bridge stopped heartbeating, and a person with no vm.agent each get a `blocked` page to their
+/// human, which the Slack worker sends.
+async fn a_notice_pages_the_human_when_the_agent_is_not_reachable(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let human = |r: &Value| {
+        assert_eq!(
+            (r["to"].as_str(), r["via"].as_str()),
+            (Some("levente-szabo/human"), Some("human")),
+            "{r}"
+        );
+        r["message_id"].as_str().unwrap().to_string()
+    };
+    // a heartbeat, no endpoint: the session is down
+    let ws = n.s.v2(&n.lev, "v2-lev-a", 4, &[]).await;
+    let first = human(&n.ok("levente.szabo@dakai.io").await);
+    drop(ws);
+    // the endpoint, but no heartbeat within the TTL
+    let _ws = n.s.v2(&n.lev, "v2-lev-b", 4, &[&n.mailbox]).await;
+    d.advance_clock(conde::ops::web::ONLINE_TTL_MS + 1_000);
+    let second = human(&n.ok("levente-szabo").await);
+    for mid in [&first, &second] {
+        let rows = n.notifications(mid).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (rows[0].0.as_str(), rows[0].1.as_str()),
+            ("levente-szabo/human", "dm")
+        );
+        let (d2, id) = (d.clone(), mid.to_string());
+        let m = blocking(move || d2.with_conn(|t| t.message_by_id(&id)).unwrap().unwrap()).await;
+        assert_eq!(m.page.as_deref(), Some("blocked"));
+    }
+    let due = n.slack_due().await;
+    assert!(due.contains(&first) && due.contains(&second), "{due:?}");
+    // no vm.agent at all
+    let r = n.ok("oliver").await;
+    assert_eq!(
+        (r["to"].as_str(), r["via"].as_str()),
+        (Some("oliver/human"), Some("human")),
+        "{r}"
+    );
+}
+
+/// An unknown person, a text that is empty, over 140 characters or not one line, a link that is
+/// not https, and a credential whose user has no service row are refused, and nothing is sent.
+async fn service_notify_refuses_a_bad_person_text_or_link(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let long = "x".repeat(conde::ops::paging::PAGE_CHARS + 1);
+    let cases = [
+        ("nobody@dakai.io", NOTICE, LINK, "not_found"),
+        ("nobody", NOTICE, LINK, "not_found"),
+        ("levente-szabo", "", LINK, "bad_request"),
+        ("levente-szabo", long.as_str(), LINK, "bad_request"),
+        ("levente-szabo", "two\nlines", LINK, "bad_request"),
+        (
+            "levente-szabo",
+            NOTICE,
+            "http://praxia.example/q/1",
+            "bad_request",
+        ),
+        (
+            "levente-szabo",
+            NOTICE,
+            "https://praxia.example/a b",
+            "bad_request",
+        ),
+    ];
+    for (to, text, link, code) in cases {
+        let r = n.notify(to, text, link, &conde::util::new_ulid()).await;
+        assert_eq!(
+            (r["ok"].as_bool(), r["error"]["code"].as_str()),
+            (Some(false), Some(code)),
+            "{to} {text:?} {link}: {r}"
+        );
+    }
+    let r =
+        n.s.rpc(
+            &n.lev,
+            None,
+            "service.notify",
+            json!({"to": "oliver", "text": NOTICE, "link": LINK}),
+            Some("e-1"),
+        )
+        .await;
+    assert_eq!(r["error"]["code"], "forbidden", "{r}");
+    let d2 = d.clone();
+    let count = blocking(move || d2.with_conn(|t| t.message_count()).unwrap()).await;
+    assert_eq!(count, 0, "nothing was sent");
+}
+
+/// Praxia's event id is the idempotency key: a repeat answers the first answer and stores no
+/// second message; the same id with another body is a conflict.
+async fn the_same_event_id_is_answered_once_without_a_second_message(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let first = n.notify("levente-szabo", NOTICE, LINK, "evt-42").await;
+    assert_eq!(first["ok"], true, "{first}");
+    let again = n.notify("levente-szabo", NOTICE, LINK, "evt-42").await;
+    assert_eq!(again["result"], first["result"]);
+    let d2 = d.clone();
+    let count = blocking(move || d2.with_conn(|t| t.message_count()).unwrap()).await;
+    assert_eq!(count, 1);
+    let other = n
+        .notify("levente-szabo", "another line", LINK, "evt-42")
+        .await;
+    assert_eq!(other["error"]["code"], "conflict", "{other}");
 }

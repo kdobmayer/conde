@@ -1,8 +1,8 @@
 //! The admin API under `/v1/admin`, authenticated by the `CONDE_ADMIN_KEY` bearer: mint, list
 //! and revoke host keys, invite users by email (and send the invite email, [`super::invite`]),
 //! bind users to an identity, list, disable and enable users, clear a user's recorded realm
-//! account. The key is compared through its digest in constant time and never logged; every
-//! answer is `no-store`.
+//! account, make a service user. The key is compared through its digest in constant time and
+//! never logged; every answer is `no-store`.
 
 use std::sync::Arc;
 
@@ -22,7 +22,8 @@ use super::invite::{
 use super::keys::{MintError, host_slug, mint};
 use super::session::digest;
 use super::{
-    BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, WebConfig, WebStore,
+    BindUser, Clock, ConfigError, Core, CreateUser, Identity, Invited, ServiceRow, WebConfig,
+    WebStore,
 };
 use super::{BridgeRegistry, SetWelcome, WebUser, WelcomePatch, entra_issuer};
 
@@ -174,6 +175,7 @@ pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/v1/admin/keys", get(list_keys).post(create_key))
         .route("/v1/admin/keys/{id}/revoke", post(revoke_key))
+        .route("/v1/admin/services", post(create_service))
         .route("/v1/admin/users", get(list_users).post(create_user))
         .route("/v1/admin/users/{name}/disable", post(disable_user))
         .route("/v1/admin/users/{name}/enable", post(enable_user))
@@ -292,6 +294,61 @@ async fn revoke_key(State(state): State<AdminState>, Path(id): Path<String>) -> 
             "not_found",
             "no live key has this id",
         ),
+        Err(e) => store_failed(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateService {
+    user: String,
+    name: String,
+    display: String,
+}
+
+/// `POST /v1/admin/services {user, name, display}`: makes `user` a service with its one sender
+/// row `user/name` (unbound, actor kind `service`, shown as `display`); its credential is then a
+/// host key from `POST /v1/admin/keys`.
+async fn create_service(
+    State(state): State<AdminState>,
+    Json(req): Json<CreateService>,
+) -> Response {
+    let Some(user) = owner_name(&req.user) else {
+        return bad_request("user must be [a-z0-9_-], 1 to 40 characters");
+    };
+    let display = req.display.trim().to_string();
+    if display.is_empty()
+        || display.chars().count() > 64
+        || display.chars().any(|c| c.is_control() || is_format(c))
+    {
+        return bad_request("display must be one line of 1 to 64 characters");
+    }
+    let (u, name, d) = (user.clone(), req.name.clone(), display.clone());
+    match state
+        .core()
+        .store(move |s| s.create_service(&u, &name, &d))
+        .await
+    {
+        Ok(ServiceRow::Created(name)) => {
+            tracing::info!(%user, %name, "admin made a service");
+            reply(
+                StatusCode::OK,
+                json!({"name": name, "display": display, "status": "created"}),
+            )
+        }
+        Ok(ServiceRow::Exists(name)) => {
+            reply(StatusCode::OK, json!({"name": name, "status": "exists"}))
+        }
+        Ok(ServiceRow::NameTaken(name)) => fail(
+            StatusCode::CONFLICT,
+            "name_taken",
+            &format!("{name} is another agent of {user}"),
+        ),
+        Ok(ServiceRow::HasService(name)) => fail(
+            StatusCode::CONFLICT,
+            "has_service",
+            &format!("{user} is a service already, as {name}"),
+        ),
+        Ok(ServiceRow::BadName) => bad_request("name must be a valid agent name"),
         Err(e) => store_failed(e),
     }
 }

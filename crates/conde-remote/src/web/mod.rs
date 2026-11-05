@@ -280,6 +280,21 @@ pub enum BindUser {
     NameBound,
 }
 
+/// Result of [`WebStore::create_service`]; each names the row as `owner/name`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServiceRow {
+    /// The user (created on first sight) got its sender row.
+    Created(String),
+    /// The user's sender row of this name exists already; nothing changed.
+    Exists(String),
+    /// The name is another agent of the user.
+    NameTaken(String),
+    /// The user has another sender row; a service has one.
+    HasService(String),
+    /// Not a valid agent name.
+    BadName,
+}
+
 /// Result of [`WebStore::claim_invite`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invite {
@@ -719,6 +734,12 @@ pub trait WebStore: Send + Sync {
     /// on the board. Default: refused.
     fn set_welcome(&self, _change: &WelcomePatch) -> WebResult<SetWelcome> {
         Err(WebStoreError("this board has no welcome".into()))
+    }
+    /// Makes user `user` a service: the user (created without an identity on first sight) and
+    /// its one sender row `name`, unbound, of actor kind `service`, shown as `display`, in one
+    /// transaction. Default: refused.
+    fn create_service(&self, _user: &str, _name: &str, _display: &str) -> WebResult<ServiceRow> {
+        Err(WebStoreError("this board has no services".into()))
     }
     /// A key was minted for a host new to the board: on the user's first enrollment, the
     /// welcome's greeting and arrival notice, once per user. Default: nothing.

@@ -8,7 +8,8 @@ use std::sync::Arc;
 use conde_remote::web::{
     AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrollment, HostKey, Identity,
     Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount,
-    SessionRecord, SetWelcome, WebResult, WebStore, WebStoreError, WebUser, Welcome, WelcomePatch,
+    ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore, WebStoreError, WebUser, Welcome,
+    WelcomePatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -565,6 +566,35 @@ impl WebStore for WebBoard {
         serde_json::from_str(&payload)
             .map(Some)
             .map_err(|e| WebStoreError(e.to_string()))
+    }
+
+    fn create_service(&self, user: &str, name: &str, display: &str) -> WebResult<ServiceRow> {
+        let Some(name) = crate::address::normalize_name(name) else {
+            return Ok(ServiceRow::BadName);
+        };
+        let service = crate::ops::services::SERVICE;
+        self.write(|t| {
+            let user_id = t.ensure_user(user)?;
+            crate::humans::ensure(t, user_id)?;
+            let rows = t.owner_agents(user_id)?;
+            if let Some(row) = rows.iter().find(|a| a.name == name) {
+                return Ok(match row.actor_kind.as_deref() == Some(service) {
+                    true => ServiceRow::Exists(row.canonical()),
+                    false => ServiceRow::NameTaken(row.canonical()),
+                });
+            }
+            if let Some(other) = rows
+                .iter()
+                .find(|a| a.actor_kind.as_deref() == Some(service))
+            {
+                return Ok(ServiceRow::HasService(other.canonical()));
+            }
+            let id = crate::util::new_ulid();
+            t.insert_agent(&id, user_id, &name)?;
+            t.set_actor_kind(&id, service)?;
+            t.set_display(&id, Some(display))?;
+            Ok(ServiceRow::Created(format!("{user}/{name}")))
+        })
     }
 
     fn set_welcome(&self, change: &WelcomePatch) -> WebResult<SetWelcome> {

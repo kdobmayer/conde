@@ -151,6 +151,7 @@ on_both!(
     a_logins_first_confirm_dates_it_past_its_records_purge,
     a_late_confirm_is_told_the_login_expired_whatever_the_session,
     admin_binds_existing_users_and_disables_them,
+    an_admin_creates_a_service_user_and_its_sender_row,
     sign_in_stores_the_email_and_the_admin_sets_the_slack_id,
     the_invite_gate_binds_exactly_one_verified_email_match,
     a_generic_issuer_needs_a_verified_email,
@@ -708,6 +709,108 @@ async fn admin_binds_existing_users_and_disables_them(d: Arc<Dispatcher>) {
     assert_eq!(next_revoked(&mut events).await, "build-box");
     assert!(!authenticates(&d, minted["key"].as_str().unwrap()).await);
     assert!(authenticates(&d, &key).await);
+}
+
+/// The services route makes the user and its one unbound sender row; the keys route gives it a
+/// host key, which runs `service.notify`; a key of a user without a service row is forbidden.
+async fn an_admin_creates_a_service_user_and_its_sender_row(d: Arc<Dispatcher>) {
+    let env = env(&d).await;
+    let k = Some(ADMIN_KEY);
+    let person = admin_cli_key(&d, "krisztian-dobmayer", "laptop").await;
+    let made = json!({"user": "Praxia", "name": "praxy", "display": "Praxy"});
+    let (status, got) = admin(&env, "/v1/admin/services", Some(made.clone()), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{got}");
+    let (status, got) = admin(&env, "/v1/admin/services", Some(made.clone()), k).await;
+    assert_eq!(
+        (status, got["name"].as_str(), got["status"].as_str()),
+        (StatusCode::OK, Some("praxia/praxy"), Some("created")),
+        "{got}"
+    );
+    let (status, got) = admin(&env, "/v1/admin/services", Some(made), k).await;
+    assert_eq!(
+        (status, got["status"].as_str()),
+        (StatusCode::OK, Some("exists"))
+    );
+    for (body, status, code) in [
+        (
+            json!({"user": "praxia", "name": "praxy2", "display": "Praxy"}),
+            StatusCode::CONFLICT,
+            "has_service",
+        ),
+        (
+            json!({"user": "praxia", "name": "human", "display": "Praxy"}),
+            StatusCode::CONFLICT,
+            "name_taken",
+        ),
+        (
+            json!({"user": "praxia", "name": "no/slash", "display": "Praxy"}),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            json!({"user": "praxia", "name": "praxy", "display": "two\nlines"}),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+    ] {
+        let (got_status, got) = admin(&env, "/v1/admin/services", Some(body.clone()), k).await;
+        assert_eq!(
+            (got_status, got["error"].as_str()),
+            (status, Some(code)),
+            "{body}: {got}"
+        );
+    }
+    let d2 = d.clone();
+    let row = blocking(move || {
+        d2.with_conn(|t| {
+            let uid = t.user_id("praxia")?.unwrap();
+            t.agent_by_name(uid, "praxy")
+        })
+        .unwrap()
+        .unwrap()
+    })
+    .await;
+    assert_eq!(
+        (
+            row.address,
+            row.actor_kind.as_deref(),
+            row.display.as_deref()
+        ),
+        (None, Some("service"), Some("Praxy"))
+    );
+
+    let (status, minted) = admin(
+        &env,
+        "/v1/admin/keys",
+        Some(json!({"user": "praxia", "host_label": "praxy"})),
+        k,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{minted}");
+    let notify = |key: String| {
+        let d = d.clone();
+        blocking(move || {
+            let digest = conde_remote::token_digest(&key);
+            let (user_id, host) = d.with_conn(|c| c.authenticate(&digest)).unwrap().unwrap();
+            let p = d.remote_principal(user_id, &host, None).unwrap();
+            let mut req = conde::protocol::Request::new(
+                "r-1",
+                "service.notify",
+                json!({"to": "krisztian-dobmayer", "text": "A new question", "link": "https://praxia.example/q/1"}),
+            );
+            req.idempotency_key = Some(conde::util::new_ulid());
+            serde_json::to_value(d.dispatch(&p, &req)).unwrap()
+        })
+    };
+    let r = notify(minted["key"].as_str().unwrap().to_string()).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        (r["result"]["to"].as_str(), r["result"]["via"].as_str()),
+        (Some("krisztian-dobmayer/human"), Some("human")),
+        "{r}"
+    );
+    let r = notify(person).await;
+    assert_eq!(r["error"]["code"], "forbidden", "{r}");
 }
 
 /// Sign-in stores the verified email (preferred_username, the UPN; the `email` claim only when the

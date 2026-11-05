@@ -177,6 +177,26 @@ One DM per page is the goal, not a guarantee: the post to Slack comes before the
 recorded (`slack.rs:279`). If the server stops between the two, the page is sent again after the
 lease. This is true today and stays so.
 
+### Service notices
+
+A service (an outside system, such as a workspace app that tells people of new questions) is a
+board user with one unbound sender row of actor kind `service` and a host key. The admin makes it
+once: `POST /v1/admin/services {"user": "<service>", "name": "<sender>", "display": "<Shown
+name>"}` (a second call answers `exists`), then `POST /v1/admin/keys {"user": "<service>",
+"host_label": "<sender>"}` for its key. The unbound row receives nothing and appears in no list.
+
+The service sends one request per event, its event id as the idempotency key:
+`service.notify {to, text, link}` on `/v1/rpc` with its key as the bearer. `to` is a board user
+name or a sign-in email; `text` is one line of at most 140 characters; `link` is an https URL.
+When the person's `<owner>/vm.agent` is reachable (published, its host's bridge heartbeat within
+the online TTL, and its mailbox a live endpoint of that bridge), the notice is a DM to that agent,
+`<text>\n<link>`; otherwise it is a `blocked` page to the person's human, which the Slack worker
+sends as `<display>: <text>`, then `<link|Open in <display>>`, then the board link. The answer is
+`{message_id, to, via: "agent" | "human"}`. A service has no hourly page limit.
+
+The name people see as the Slack sender is the Slack app's own (its bot user's display name and
+its Display Information, in the app's settings at api.slack.com); the board posts text only.
+
 ## Migration and rollout
 
 1. Build and test on SQLite and Postgres. New tests: one human per owner, ensure at startup and at

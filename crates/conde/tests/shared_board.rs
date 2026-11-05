@@ -2398,7 +2398,9 @@ async fn machine_of(d: &Arc<Dispatcher>, uid: i64) -> conde::store::MachineRow {
 /// sign-in state, or another flow's expiry change nothing.
 async fn a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired(d: Arc<Dispatcher>) {
     let n = notices(&d).await;
-    let _ws = n.s.v2(&n.lev, "v2-lev", 4, &[&n.mailbox]).await;
+    let mut ws = n.s.v2(&n.lev, "v2-lev", 4, &[&n.mailbox]).await;
+    // the first routes frame follows the hello's endpoints
+    ws.next("routes").await;
     assert_eq!(n.ok("levente-szabo").await["via"], "agent", "no record");
     let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
     let cases = [
@@ -2437,7 +2439,9 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
 ) {
     let n = notices(&d).await;
     let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
-    let ws = n.s.v2(&n.lev, "v2-a", 4, &[]).await;
+    let mut ws = n.s.v2(&n.lev, "v2-a", 4, &[]).await;
+    // the first routes frame follows the hello's endpoints
+    ws.next("routes").await;
     assert_eq!(
         machine_of(&d, uid).await.probe_id,
         None,
@@ -2445,6 +2449,7 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
     );
     drop(ws);
     let mut ws = n.s.v2(&n.lev, "v2-b", 4, &[&n.mailbox]).await;
+    ws.next("routes").await;
     let probe = machine_of(&d, uid).await.probe_id.expect("the probe");
     let (d2, id) = (d.clone(), probe.clone());
     let m = blocking(move || d2.with_conn(|t| t.message_by_id(&id)).unwrap().unwrap()).await;
@@ -2458,7 +2463,8 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
         json!({"kind": "mailbox", "mailbox_id": n.mailbox})
     );
     drop(ws);
-    let _ws = n.s.v2(&n.lev, "v2-c", 4, &[&n.mailbox]).await;
+    let mut ws = n.s.v2(&n.lev, "v2-c", 4, &[&n.mailbox]).await;
+    ws.next("routes").await;
     assert_eq!(machine_of(&d, uid).await.probe_id.as_deref(), Some(&*probe));
     let d2 = d.clone();
     assert_eq!(

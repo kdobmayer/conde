@@ -35,8 +35,8 @@ page and the relay) is in conde itself.
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
 | `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource, the bare application id of the Entra app conde). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, vmSize. Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
-| `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; NSG: SSH from the VPN pool 172.16.0.0/22, every other inbound from the VNet denied; the agent side of the hub peering (remote gateways) |
-| `azure/image-builder.sh` | once, by hand | Entra app `conde-agent-image` (GitHub OIDC, environment `agent-image` of kdobmayer/conde), build resource group `rg-agent-image`; prints the GitHub side for the repo admin (the environment limited to protected branches, its variables) |
+| `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; Azure Policy: only the AADSSHLoginForLinux extension (Deny), since RBAC cannot narrow extension writes; NSG: SSH from the VPN pool 172.16.0.0/22, every other inbound from the VNet denied; the agent side of the hub peering (remote gateways). Accepted residual: the identity could create its own VM in the subnet with a copy of a person's OS disk |
+| `azure/image-builder.sh` | once, by hand | Entra app `conde-agent-image` (GitHub OIDC, environment `agent-image` of kdobmayer/conde), build resource group `rg-agent-image`; prints the GitHub side for the repo admin (the environment with a named branch policy for main, its variables) |
 | `../../.github/workflows/agent-image.yml` | GitHub-hosted runner | `packer build`, version `1.<yyyymmdd>.<run>` |
 
 ## Setting up the Azure half (in order; each is a state change outside dev, approved by Konstantin first)
@@ -45,7 +45,7 @@ page and the relay) is in conde itself.
 infra/agent-vm/azure/image-builder.sh                                     # prints builderPrincipalId and the GitHub side
 az deployment group create -g RG-NATIVE-LANES -f infra/agent-vm/azure/gallery.bicep -p builderPrincipalId=<id>
 az deployment group create -g conde-vm -f infra/agent-vm/azure/agent-rg.bicep -p peerToHub=false
-gh workflow run agent-image.yml --repo kdobmayer/conde                    # the first image version (main must be protected)
+gh workflow run agent-image.yml --repo kdobmayer/conde                    # the first image version, from main
 az ts create -g conde-vm -n agent-vm -v 1 -f infra/agent-vm/template/agent-vm.bicep
 ```
 

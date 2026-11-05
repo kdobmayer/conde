@@ -54,9 +54,10 @@ retry_wait() {  # $1 what failed, $2 optional server hint in seconds (Retry-Afte
   backoff=$(( backoff < 120 ? backoff * 2 : 120 ))
 }
 
-# GET from the metadata service; prints the body. Transient answers are retried, others are final.
-imds_get() {  # $1 path and query, $2 what
-  local out rc code body
+# GET from the metadata service; prints the body. Transient answers are retried, others are final: the script
+# dies, or with $3 = optional the call returns 1 and the caller goes on with its defaults.
+imds_get() {  # $1 path and query, $2 what, $3 optional
+  local out rc code body detail
   backoff=5
   while :; do
     set +e; out=$("${CURL[@]}" -H Metadata:true -w '\n%{http_code}' "$IMDS/$1"); rc=$?; set -e
@@ -65,13 +66,15 @@ imds_get() {  # $1 path and query, $2 what
     case "$code" in
       200) printf '%s' "$body"; return 0 ;;
       404|410|429|5??) retry_wait "$2: metadata service HTTP $code $(printf '%s' "$body" | jq -rc '[.error, .error_description] | map(select(.)) | join(": ")' 2>/dev/null)" ;;
-      *) die "$2: metadata service HTTP $code $(printf '%s' "$body" | jq -rc '[.error, .error_description] | map(select(.)) | join(": ")' 2>/dev/null || printf '%s' "$body" | head -c 300)" ;;
+      *) detail="$2: metadata service HTTP $code $(printf '%s' "$body" | jq -rc '[.error, .error_description] | map(select(.)) | join(": ")' 2>/dev/null || printf '%s' "$body" | head -c 300)"
+         [ "${3:-}" = optional ] && { log "$detail; using the defaults"; return 1; }
+         die "$detail" ;;
     esac
   done
 }
 
 # --- 1. settings: userData from the template, then /etc/agentvm.conf
-ud=$(imds_get "instance/compute/userData?api-version=2021-01-01&format=text" "userData" | base64 -d 2>/dev/null || true)
+ud=$(imds_get "instance/compute/userData?api-version=2021-01-01&format=text" "userData" optional | base64 -d 2>/dev/null || true)
 CONDE_SERVER=$(printf '%s' "$ud" | jq -r '.condeServer // empty' 2>/dev/null || true)
 CONDE_SERVER="${CONDE_SERVER:-${CONDE_SERVER_DEFAULT:-https://dakai.conde.cloud}}"
 CONDE_RESOURCE=$(printf '%s' "$ud" | jq -r '.condeResource // empty' 2>/dev/null || true)

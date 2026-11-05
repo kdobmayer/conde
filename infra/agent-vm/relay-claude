@@ -7,12 +7,14 @@
 #        EOF or SIGTERM      cancel: the login process is killed
 #   out: url <URL>           the authorize URL for the page
 #        waiting             the code was typed in; waiting for the login's answer
-#        done                signed in; the agent session was restarted (--resume) so it uses the new login
+#        done                signed in ("Login successful" and exit 0), and the agent session restarted (--resume) so
+#                            it uses the new login
 #        failed <reason>     process_exited | bad_code | timeout | busy
 #
 # `claude auth login` has no device flow: it prints the URL and waits for the code in the same process (that
 # process holds the PKCE verifier), so it runs in a tmux session of its own until the code is in. No code within
-# 10 minutes is `timeout`. One relay at a time (`busy` otherwise). The code is never in an argument or a log.
+# 10 minutes, or no answer within 60 s of it, is `timeout`. One relay at a time (`busy` otherwise). EOF cancels at
+# any point. The code is never in an argument or a log.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 SOCK=relay-claude; SESSION=login
@@ -53,26 +55,35 @@ if [ "$rc" -ne 0 ]; then
   cleanup; exit 0                                  # EOF: cancelled
 fi
 case "$line" in code\ ?*) code=${line#code } ;; *) err "expected code"; finish failed bad_code ;; esac
-tmux -L "$SOCK" send-keys -t "$SESSION" -l "$code" && tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+# Typed through a tmux paste buffer, so the code is in no process's arguments.
+printf '%s' "$code" | tmux -L "$SOCK" load-buffer -b relay - \
+  && tmux -L "$SOCK" paste-buffer -b relay -d -t "$SESSION" && tmux -L "$SOCK" send-keys -t "$SESSION" Enter \
+  || finish failed process_exited
 unset code line
 say waiting
 
+# Success is the login's own "Login successful" followed by its exit 0, and nothing else: on a renewal the old
+# credential is still on the VM, so `claude auth status` reports signed in before the code has been exchanged.
+# Nothing of the pane is logged from here on: it echoes the typed code.
+ok=0
 for _ in $(seq "$ANSWER_TIMEOUT"); do
   out=$(pane)
-  if grep -q 'Login successful' <<<"$out" || claude auth status --json 2>/dev/null | jq -e '.loggedIn == true' >/dev/null; then
-    cleanup
-    # The running session keeps its old credential until it restarts (whether it picks the new one up without a
-    # restart is a probe item); run-agent resumes the same session id.
-    systemctl --user try-restart claude-agent.service 2>/dev/null || true
-    say done; exit 0
-  fi
+  grep -q 'Login successful' <<<"$out" && ok=1
   if grep -q '__relay_exit' <<<"$out"; then
-    # The pane echoes the typed code, so after it was typed only the login's own error words are logged.
-    err "the login ended: $(grep -oiE '(oauth )?(error|invalid|expired|failed)[a-z :]{0,40}' <<<"$out" | grep -viE 'paste' | tail -n 1)"
-    if grep -qiE 'invalid|expired|error|failed' <<<"$out"; then finish failed bad_code; fi
-    finish failed process_exited
+    rc=$(grep -o '__relay_exit [0-9]*' <<<"$out" | tail -n 1 | cut -d' ' -f2)
+    if [ "$ok" = 1 ] && [ "$rc" = 0 ]; then
+      cleanup
+      # The running session keeps its old credential until it restarts (whether it picks the new one up without
+      # a restart is a probe item); run-agent resumes the same session id.
+      if systemctl --user try-restart claude-agent.service; then say done
+      else err "signed in, but the agent session was not restarted (no user bus?)"; say "failed process_exited"; fi
+      exit 0
+    fi
+    if grep -qiE 'invalid|expired|error|failed' <<<"$out"; then err "the login rejected the code (exit $rc)"; finish failed bad_code; fi
+    err "the login ended (exit $rc)"; finish failed process_exited
   fi
-  sleep 1
+  # A second's wait, ended at once when the bridge closes stdin: cancel.
+  if read -r -t 1 _; then :; else [ $? -gt 128 ] || { cleanup; exit 0; }; fi
 done
 err "no answer from the login within ${ANSWER_TIMEOUT}s"
-finish failed bad_code
+finish failed timeout

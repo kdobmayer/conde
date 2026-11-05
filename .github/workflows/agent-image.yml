@@ -1,8 +1,9 @@
 # Builds the agent VM image (infra/agent-vm/image) into galNativeLanes/agent-vm. Runs on a GitHub-hosted runner:
 # Packer's work happens on a temporary Azure VM, so the runner only drives it. Signs in to Azure with the Entra
 # app conde-agent-image (OIDC, no secret), whose federated credential trusts this repo's `agent-image`
-# environment; set up once with infra/agent-vm/azure/image-builder.sh. The environment admits protected branches
-# only, so main's review is the gate for the image every new agent VM boots. Actions are pinned by commit.
+# environment; set up once with infra/agent-vm/azure/image-builder.sh. The environment admits the branch main
+# only (a named branch policy), so what reaches main is the gate for the image every new agent VM boots.
+# Actions are pinned by commit.
 name: agent-vm image
 
 on:

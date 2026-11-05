@@ -9,10 +9,14 @@
 // The server's identity id-conde gets two roles here, nothing more:
 //   - Agent VM Deployer, a custom role with only what the template spec and the disable route use: VMs, their
 //     extensions, NICs and OS disks; joining the subnet; deployments; reading the template spec. Not Contributor:
-//     that would also give run-command and extension writes (a root shell on every agent VM, so every person's
-//     Claude login and GitHub token), disk export, and writes on the shared VNet, NAT gateway and NSG.
+//     that would also give run-command, disk export, and writes on the shared VNet, NAT gateway and NSG.
 //   - Role Based Access Control Administrator, conditioned so it can only assign or remove one role, Virtual
 //     Machine Administrator Login, and only for users.
+// Extension writes stay in the role (the template installs AADSSHLoginForLinux) and RBAC cannot narrow them, so
+// Azure Policy does: in this resource group only AADSSHLoginForLinux may be installed (Deny), which closes a
+// Custom Script extension as a root shell on an agent VM.
+// What remains, accepted in the design: with VM and disk writes and the subnet join, the server's identity could
+// create a VM of its own in the agent subnet and attach a copy of a person's OS disk to it.
 
 param condePrincipalId string = '9e00850b-c40c-42a9-a58e-e2bc3118a3a2'
 
@@ -84,7 +88,7 @@ resource deployerRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   name: guid(resourceGroup().id, 'agent-vm-deployer')
   properties: {
     roleName: 'Agent VM Deployer (${resourceGroup().name})'
-    description: 'conde server: deploys and deletes agent VMs from the template spec agent-vm. No run-command, no disk export, no network writes beyond NICs.'
+    description: 'conde server: deploys and deletes agent VMs from the template spec agent-vm. No run-command, no disk export, no network writes beyond NICs; extensions limited by policy to AADSSHLoginForLinux.'
     type: 'CustomRole'
     assignableScopes: [resourceGroup().id]
     permissions: [
@@ -117,6 +121,21 @@ resource deployerRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
         notActions: []
       }
     ]
+  }
+}
+
+// Built-in "Only approved VM extensions should be installed", effect Deny, for every VM in this resource group.
+resource onlyEntraSshExtension 'Microsoft.Authorization/policyAssignments@2024-04-01' = {
+  name: 'agent-vm-approved-extensions'
+  properties: {
+    displayName: 'Agent VMs: only the Entra SSH extension'
+    description: 'The conde server may write VM extensions (for AADSSHLoginForLinux); no other extension, so no Custom Script as root.'
+    policyDefinitionId: tenantResourceId('Microsoft.Authorization/policyDefinitions', 'c0e996f8-39cf-4af9-9f45-83fbde810432')
+    enforcementMode: 'Default'
+    parameters: {
+      approvedExtensions: { value: ['AADSSHLoginForLinux'] }
+      effect: { value: 'Deny' }
+    }
   }
 }
 

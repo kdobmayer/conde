@@ -11,13 +11,14 @@
 #        failed <reason>                        expired | denied | busy | process_exited
 #
 # Client id and scopes from /etc/agentvm.conf (GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_SCOPES): the gh CLI's public
-# client id until the Dakai OAuth app exists. Polls every `interval` seconds, 5 more on slow_down. The token is
-# never in an argument or a log: it goes from the response straight into gh's stdin.
+# client id for the pilot (Krisztián's exception of 5 Nov, in the design) until the Dakai OAuth app exists; no
+# fallback here, so the value lives in one place. Polls every `interval` seconds, 5 more on slow_down. The token and
+# the device code are never in an argument or a log: they go through stdin.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 [ -f /etc/agentvm.conf ] && . /etc/agentvm.conf
-CLIENT_ID="${GITHUB_OAUTH_CLIENT_ID:-178c6fc778ccc68e1d6a}"
-SCOPES="${GITHUB_OAUTH_SCOPES:-repo read:org workflow}"
+CLIENT_ID="${GITHUB_OAUTH_CLIENT_ID:-}"     # one place only: /etc/agentvm.conf (image/provision.sh)
+SCOPES="${GITHUB_OAUTH_SCOPES:-}"
 GH="${RELAY_GITHUB_URL:-https://github.com}"
 CURL=(curl -sS --connect-timeout 10 --max-time 30 -H 'Accept: application/json')
 
@@ -29,6 +30,7 @@ exec 9>"${XDG_RUNTIME_DIR:-/tmp}/agentvm-relay-github.lock"
 flock -n 9 || { say "failed busy"; exit 0; }
 
 read -r cmd || exit 0
+[ -n "$CLIENT_ID" ] && [ -n "$SCOPES" ] || { err "GITHUB_OAUTH_CLIENT_ID or GITHUB_OAUTH_SCOPES not set (/etc/agentvm.conf)"; say "failed process_exited"; exit 0; }
 [ "$cmd" = start ] || { err "expected start"; say "failed process_exited"; exit 0; }
 
 dc=$("${CURL[@]}" -X POST "$GH/login/device/code" --data-urlencode "client_id=$CLIENT_ID" --data-urlencode "scope=$SCOPES") \
@@ -45,8 +47,9 @@ while :; do
   # Waits `interval` seconds, or ends at once when the bridge closes stdin (cancel).
   if read -r -t "$interval" _; then :; else [ $? -gt 128 ] || exit 0; fi
   [ "$(date +%s)" -lt "$deadline" ] || { say "failed expired"; exit 0; }
-  r=$("${CURL[@]}" -X POST "$GH/login/oauth/access_token" --data-urlencode "client_id=$CLIENT_ID" \
-        --data-urlencode "device_code=$device_code" \
+  # The device code goes in on stdin: with a public client id it can be exchanged for the token.
+  r=$(printf '%s' "$device_code" | "${CURL[@]}" -X POST "$GH/login/oauth/access_token" --data-urlencode "client_id=$CLIENT_ID" \
+        --data-urlencode device_code@- \
         --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:device_code') || { err "poll failed; retrying"; continue; }
   case "$(jq -r '.error // empty' <<<"$r")" in
     authorization_pending) ;;

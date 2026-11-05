@@ -1269,6 +1269,15 @@ pub trait Tx {
     fn machine_set_ready(&self, user_id: i64, at: &str) -> StoreResult<bool>;
     fn machine_set_sign_in(&self, user_id: i64, sign_in: Option<&str>) -> StoreResult<()>;
     fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()>;
+    /// The record whose VM identity is `principal_id`.
+    fn machine_by_principal(&self, principal_id: &str) -> StoreResult<Option<MachineRow>>;
+    /// The records an enrolment may be waiting for: no principal yet, not minted, no terminal
+    /// error, not deleting.
+    fn machines_without_principal(&self) -> StoreResult<Vec<MachineRow>>;
+    /// Sets the VM identity's object id unless one is set.
+    fn machine_set_principal(&self, user_id: i64, principal_id: &str) -> StoreResult<()>;
+    /// Sets `minted_at` unless set; whether this call set it (the one mint).
+    fn machine_claim_mint(&self, user_id: i64, at: &str) -> StoreResult<bool>;
     /// Every channel membership of the owner's agents, by agent then channel name.
     fn owner_memberships(&self, owner_id: i64) -> StoreResult<Vec<Membership>>;
     /// The newest messages over `ranges` (see [`feed_seqs_sql`]) with `after < seq < before`, at

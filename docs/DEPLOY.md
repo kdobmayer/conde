@@ -211,8 +211,8 @@ variables, all set or none (some set: the server refuses to start and names the 
 - `CONDE_MACHINES_TEMPLATE_SPEC`: the resource id of the template spec version it deploys
   (`/subscriptions/<sub>/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2`).
 - `CONDE_MACHINES_AUDIENCE`: the application id of the Entra app conde-machines (`terraform output machines` in
-  infra/terraform). A VM's token must carry it as `aud`, and every deployment passes it as `condeResource`; a VM
-  deployed by hand passes the same value (`-p condeResource=<CONDE_MACHINES_AUDIENCE>`), never the SSO app's id.
+  infra/terraform). A VM's token must carry it as `aud`, and every deployment passes it as `condeResource`, never
+  the SSO app's id.
 - `CONDE_MACHINES_IDENTITY_CLIENT_ID`: the client id of the server's user-assigned identity (id-conde), which
   deploys the VMs.
 
@@ -232,3 +232,14 @@ out is recorded as an error but is not confirmed unaccepted (Azure may have rece
 is still in flight sends a second one, and if a late failure lands after the other's acceptance it overwrites it,
 clears the request time and stops the reads, until "Try again" sends it again. A service's `service.presence` reads
 the stored state, so it learns of a failed deployment only after the person's page has read it.
+
+The VM joins by itself at first boot: it presents its own identity's Entra token (v1, audience
+`CONDE_MACHINES_AUDIENCE`) to `POST /v1/machines/enrol` and gets its host key, once per VM identity. The server
+checks the token's signature against the tenant's v1 signing keys (`https://login.microsoftonline.com/<tenant>/discovery/keys`,
+cached for an hour and read again for an unknown key id), its issuer `https://sts.windows.net/<tenant>/`, its tenant,
+audience and lifetime, and maps its `oid` to the machine record; while no record has that identity it reads the
+pending records' VMs from Azure for their identity's `principalId` (the VM's own retries drive this). Answers: 401
+`invalid_token` (final), 404 `unknown_machine` (the VM retries), 403 `disabled`, 409 `already_minted` (a second
+call changes nothing), 429 `rate_limited` with `Retry-After` (30 calls a minute per address), 503 `unavailable`
+while the tenant's keys cannot be read. The mint revokes any earlier live key of the VM's host and disconnects its
+bridge.

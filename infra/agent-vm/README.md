@@ -33,7 +33,7 @@ page and the relay) is in conde itself.
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped) |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
-| `pilot-rebuild.sh` | operator, locally, pilot only | the rebuild's steps that are not one command: `inventory`, the manual `join`, `signin` by hand, `publish`; deleted with the enrol route |
+| `pilot-rebuild.sh` | operator, locally, pilot only | the rebuild's steps that are not one command: `inventory`, `signin` by hand, `publish`; deleted with the relay |
 | `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, condeResource (required: the conde-machines application id), vmSize (B2as_v2 by default, D2as_v5 for the pilot). Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
 | `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; Azure Policy: only the AADSSHLoginForLinux extension (Deny), since RBAC cannot narrow extension writes. Accepted residual: the identity could create its own VM in the subnet with a copy of a person's OS disk |
@@ -63,14 +63,13 @@ type, not its publisher (an accepted residual).
 
 The token audience is the Entra app conde-machines (infra/terraform/entra.tf): its application id is the server's
 `CONDE_MACHINES_AUDIENCE` and every deployment's `condeResource` (`terraform output machines` in infra/terraform).
-A deployment by hand passes the same value: `-p condeResource=<CONDE_MACHINES_AUDIENCE>`. The template has no
-default.
+The template has no default.
 
 ## What a person's VM does, start to finish
 
 1. The server deploys the template spec as `vm-agent-<owner>` with the person's name, Entra object id and size, and
-   records the VM identity's `principalId` in the machine record as soon as the VM resource exists (not from the
-   deployment outputs, which come only after the extension).
+   reads the VM identity's `principalId` from the VM resource into the machine record when the VM's enrol call
+   finds no record for its identity (not from the deployment outputs, which come only after the extension).
 2. First boot (`agentvm-firstboot`): a token for the VM's identity with conde-machines as the resource,
    `POST /v1/machines/enrol` (network errors, 404, 5xx, and 429 with Retry-After retried for 30 minutes; every other
    4xx is final), `conde enroll` with the key on stdin, then `conde setup`. The key is never in an argument, a file
@@ -96,24 +95,16 @@ bridge sends `machine_event`, it runs the same script and the timer goes.
 Moves a person from a test-flow VM (`vm-agent-<short>`, user = their short name) onto an image VM
 (`vm-agent-<owner>`, user `agent`). The names differ, so the new VM is staged first. What cannot carry over: the
 old agent's conversation history, and files on the old VM nobody copied out. Each old VM is deleted only on
-Krisztián's go, per VM. Steps 2 and 4 are `pilot-rebuild.sh` until the enrol route and the onboarding page exist;
-then the server does them and the script is deleted.
+Krisztián's go, per VM. Steps 3 and 4 are `pilot-rebuild.sh` until the relay and publication exist; then the
+page and the VM do them and the script is deleted.
 
 1. **Inventory**, and the person copies out what they keep: `./pilot-rebuild.sh inventory <short>`.
-2. **Stage the new VM** (the server's "set up my agent", or by hand):
-
-   ```sh
-   az deployment group create -g conde-vm -n vm-agent-<owner> \
-     --template-spec "$(az ts show -g conde-vm -n agent-vm -v <version> --query id -o tsv)" \
-     -p owner=<owner> ownerObjectId=<Entra object id> condeResource=<CONDE_MACHINES_AUDIENCE> vmSize=Standard_D2as_v5
-   ```
-
-   Until the enrol route exists: `./pilot-rebuild.sh join <owner>` (the person signs in to conde),
-   `./pilot-rebuild.sh join <owner> CODE`.
+2. **Stage the new VM**: the person's first sign-in to the board, or "Set up my agent" on its Machine page. The
+   server deploys `vm-agent-<owner>`, and the VM joins the board by itself at first boot (the enrol call).
 3. **Sign-ins** through the page, or `./pilot-rebuild.sh signin <owner> claude` and `signin <owner> code CODE`,
    then `signin <owner> github`. The hook registers the name locally.
 4. **Move the name**: on the old VM, as its user, `conde unpublish vm.agent --board dakai`; then
-   `./pilot-rebuild.sh publish <owner>` (the server publishes it itself once the enrol route exists).
+   `./pilot-rebuild.sh publish <owner>` (until the session hook on the image publishes it itself).
 5. **Check with a real request**: another host's agent sends `<owner>/vm.agent` a question on dakai and gets the
    answer.
 6. **Retire the old VM**, on Krisztián's go: stop its agent (`systemctl --user disable --now claude-agent` as its

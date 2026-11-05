@@ -10,15 +10,29 @@
 //!   from the template spec version, Incremental; a 200 or 201 is accepted, anything else is the
 //!   record's error (the next setup retries);
 //! - its state: `GET` of the same deployment, at most once every 30 s per pending record; a failed
-//!   read changes nothing (the next read retries).
+//!   read changes nothing (the next read retries);
+//! - the VM: `GET .../providers/Microsoft.Compute/virtualMachines/<host>` for its identity's
+//!   `principalId`, only from an enrol whose identity no record has yet.
+//!
+//! The VM joins through `POST /v1/machines/enrol` ([`enrol`]) with its own identity's v1 token for
+//! the conde-machines audience: the host key is minted once per VM identity.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use openidconnect::JsonWebKey as _;
+use openidconnect::core::{CoreJsonWebKeySet, CoreJwsSigningAlgorithm};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use super::{ConfigError, WebState, WebUser};
+use super::ratelimit::ClientIp;
+use super::session::digest;
+use super::{ConfigError, Enrolled, Enrollment, WebState, WebUser};
 
 /// The VM size a deployment asks for when `CONDE_MACHINES_VM_SIZE` is unset.
 pub const DEFAULT_VM_SIZE: &str = "Standard_B2as_v2";
@@ -30,6 +44,11 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Resource Manager's public endpoint.
 pub const ARM_URL: &str = "https://management.azure.com";
 const DEPLOYMENTS_API_VERSION: &str = "2021-04-01";
+const VM_API_VERSION: &str = "2024-07-01";
+/// Entra's sign-in origin; a tenant's v1 signing keys are at `<origin>/<tenant>/discovery/keys`.
+pub const LOGIN_URL: &str = "https://login.microsoftonline.com";
+/// The tenant's signing keys are read again after this long, and at once for an unknown `kid`.
+const KEYS_MAX_AGE: Duration = Duration::from_secs(3600);
 /// A pending record's deployment is read at most this often (seconds).
 pub const DEPLOY_CHECK_EVERY: i64 = 30;
 /// The longest Azure error text kept on a record.
@@ -58,6 +77,9 @@ pub struct MachinesConfig {
     pub identity: ManagedIdentity,
     /// Resource Manager's base URL ([`ARM_URL`]; a test's fake otherwise).
     pub arm_url: String,
+    /// Entra's sign-in origin, where the tenant's signing keys are read ([`LOGIN_URL`]; a test's
+    /// fake otherwise).
+    pub login_url: String,
 }
 
 /// The server's user-assigned identity as the Container Apps identity endpoint serves it.
@@ -132,6 +154,7 @@ impl MachinesConfig {
             vm_size: vm_size.unwrap_or_else(|| DEFAULT_VM_SIZE.into()),
             identity,
             arm_url: ARM_URL.into(),
+            login_url: LOGIN_URL.into(),
         }))
     }
 }
@@ -316,21 +339,378 @@ impl Azure {
         });
         Ok((state, error))
     }
+
+    /// The VM's identity `principalId`; None while the VM does not exist or has no identity yet.
+    pub async fn vm_principal(
+        &self,
+        config: &MachinesConfig,
+        name: &str,
+    ) -> Result<Option<String>, AzureError> {
+        let token = self.token().await?;
+        let url = format!(
+            "{}/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/virtualMachines/{name}?api-version={VM_API_VERSION}",
+            config.arm_url.trim_end_matches('/'),
+            config.subscription,
+            config.resource_group
+        );
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| AzureError(format!("the VM read failed: {e}")))?;
+        match response.status().as_u16() {
+            404 => return Ok(None),
+            200 => {}
+            _ => return Err(refusal("the VM read", response).await),
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| AzureError(format!("the VM read is not JSON: {e}")))?;
+        Ok(body["identity"]["principalId"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .map(str::to_string))
+    }
 }
 
-/// The agent machines as the web routes use them: the configuration and its Azure client.
+/// Why a VM's token was not accepted.
+#[derive(Debug, Error)]
+pub(crate) enum TokenError {
+    /// The token fails a check: 401, final for the VM.
+    #[error("{0}")]
+    Invalid(String),
+    /// The tenant's signing keys could not be read: 503, the VM retries.
+    #[error("the tenant's signing keys could not be read: {0}")]
+    Keys(String),
+}
+
+fn invalid(why: impl Into<String>) -> TokenError {
+    TokenError::Invalid(why.into())
+}
+
+/// The check of an agent VM's Entra token: a v1 access token of the tenant for the
+/// conde-machines audience, signed with one of the tenant's v1 signing keys (RS256).
+pub(crate) struct VmTokens {
+    http: reqwest::Client,
+    keys_url: String,
+    issuer: String,
+    tenant: String,
+    audience: String,
+    keys: tokio::sync::Mutex<Option<(CoreJsonWebKeySet, std::time::Instant)>>,
+}
+
+impl VmTokens {
+    pub fn new(login_url: &str, tenant: &str, audience: &str) -> VmTokens {
+        VmTokens {
+            http: super::auth::http_client(HTTP_TIMEOUT),
+            keys_url: format!(
+                "{}/{tenant}/discovery/keys",
+                login_url.trim_end_matches('/')
+            ),
+            issuer: format!("https://sts.windows.net/{tenant}/"),
+            tenant: tenant.to_string(),
+            audience: audience.to_string(),
+            keys: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// The tenant's key set, read when none is cached, the cached one is older than
+    /// [`KEYS_MAX_AGE`], or `refresh`.
+    async fn key_set(&self, refresh: bool) -> Result<CoreJsonWebKeySet, TokenError> {
+        let mut cached = self.keys.lock().await;
+        if let Some((set, at)) = cached.as_ref()
+            && !refresh
+            && at.elapsed() < KEYS_MAX_AGE
+        {
+            return Ok(set.clone());
+        }
+        let response = self
+            .http
+            .get(&self.keys_url)
+            .send()
+            .await
+            .map_err(|e| TokenError::Keys(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(TokenError::Keys(format!("answered {}", response.status())));
+        }
+        let set: CoreJsonWebKeySet = response
+            .json()
+            .await
+            .map_err(|e| TokenError::Keys(format!("not a key set: {e}")))?;
+        *cached = Some((set.clone(), std::time::Instant::now()));
+        Ok(set)
+    }
+
+    /// The token's `oid` once its signature, `iss`, `tid`, `aud`, `nbf` and `exp` hold at `now`
+    /// (unix seconds).
+    pub async fn check(&self, token: &str, now: i64) -> Result<String, TokenError> {
+        let mut parts = token.split('.');
+        let (Some(head), Some(body), Some(sig), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(invalid("not a compact JWS"));
+        };
+        let decode = |part: &str| {
+            URL_SAFE_NO_PAD
+                .decode(part)
+                .map_err(|_| invalid("not base64url"))
+        };
+        let header: Value = serde_json::from_slice(&decode(head)?)
+            .map_err(|_| invalid("the header is not JSON"))?;
+        if header["alg"] != "RS256" {
+            return Err(invalid("the algorithm is not RS256"));
+        }
+        let kid = header["kid"]
+            .as_str()
+            .ok_or_else(|| invalid("the header has no kid"))?;
+        let signature = decode(sig)?;
+        let find = |set: &CoreJsonWebKeySet| {
+            set.keys()
+                .iter()
+                .find(|k| k.key_id().is_some_and(|id| id.as_str() == kid))
+                .cloned()
+        };
+        let key = match find(&self.key_set(false).await?) {
+            Some(key) => key,
+            // the tenant rotated its keys: read them once more
+            None => find(&self.key_set(true).await?)
+                .ok_or_else(|| invalid("no signing key of the tenant has this kid"))?,
+        };
+        key.verify_signature(
+            &CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+            format!("{head}.{body}").as_bytes(),
+            &signature,
+        )
+        .map_err(|e| invalid(format!("the signature does not verify: {e}")))?;
+        let claims: Value = serde_json::from_slice(&decode(body)?)
+            .map_err(|_| invalid("the claims are not JSON"))?;
+        if claims["iss"] != self.issuer.as_str() {
+            return Err(invalid("the issuer is not the tenant's v1 issuer"));
+        }
+        if claims["tid"] != self.tenant.as_str() {
+            return Err(invalid("the tenant is not the configured tenant"));
+        }
+        let audience = match &claims["aud"] {
+            Value::String(aud) => aud == &self.audience,
+            Value::Array(auds) => auds.iter().any(|a| a == self.audience.as_str()),
+            _ => false,
+        };
+        if !audience {
+            return Err(invalid("the audience is not conde-machines"));
+        }
+        let exp = claims["exp"]
+            .as_i64()
+            .ok_or_else(|| invalid("the token has no exp"))?;
+        if now >= exp {
+            return Err(invalid("the token expired"));
+        }
+        if claims["nbf"].as_i64().is_some_and(|nbf| now < nbf) {
+            return Err(invalid("the token is not valid yet"));
+        }
+        claims["oid"]
+            .as_str()
+            .filter(|oid| !oid.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| invalid("the token has no oid"))
+    }
+}
+
+/// The agent machines as the web routes use them: the configuration, its Azure client and the
+/// VM token check.
 pub(crate) struct Machines {
     pub config: MachinesConfig,
     pub azure: Azure,
+    pub tokens: VmTokens,
 }
 
 impl Machines {
-    pub fn new(config: MachinesConfig) -> Machines {
+    pub fn new(config: MachinesConfig, tenant: &str) -> Machines {
         Machines {
             azure: Azure::new(config.identity.clone()),
+            tokens: VmTokens::new(&config.login_url, tenant, &config.audience),
             config,
         }
     }
+}
+
+/// An enrol refusal: `{"error", "message"}`, never cached.
+fn answer(status: StatusCode, body: Value) -> Response {
+    let mut r = (status, axum::Json(body)).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
+}
+
+fn refused(status: StatusCode, error: &str, message: &str) -> Response {
+    answer(status, json!({"error": error, "message": message}))
+}
+
+/// Before an enrol looks its identity up again: every record still without a VM identity has its
+/// VM read, and the `principalId` of each VM that exists is stored. A failed read is logged and
+/// leaves its record as it was.
+async fn fill_principals(state: &WebState, machines: &Machines) {
+    let waiting = match state.store(|s| s.machines_awaiting_principal()).await {
+        Ok(waiting) => waiting,
+        Err(e) => {
+            tracing::error!(error = %e, "the machines awaiting their VM were not read");
+            return;
+        }
+    };
+    let reads = waiting.into_iter().map(|(user_id, host)| async move {
+        match machines.azure.vm_principal(&machines.config, &host).await {
+            Ok(Some(principal)) => {
+                if let Err(e) = state
+                    .store(move |s| s.machine_set_principal(user_id, &principal))
+                    .await
+                {
+                    tracing::error!(%host, error = %e, "the VM identity was not stored");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(%host, error = %e, "the VM was not read"),
+        }
+    });
+    futures_util::future::join_all(reads).await;
+}
+
+/// `POST /v1/machines/enrol` with the VM identity's token as the bearer: the host key, once per
+/// identity (the design's contract). 401 `invalid_token`, 404 `unknown_machine` (no record has
+/// the identity, after the VM reads), 403 `disabled`, 409 `already_minted` (nothing changes),
+/// 429 `rate_limited` with `Retry-After`; 503 `unavailable` while the tenant's keys cannot be read.
+/// A replaced key's bridge is closed by the revocation's own announcement, on every replica.
+pub(crate) async fn enrol(
+    State(state): State<WebState>,
+    ClientIp(ip): ClientIp,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(wait) = state.0.limits.machine_enrol(ip) {
+        tracing::info!(client_ip = %ip, wait, endpoint = "machine enrol", "rate limited");
+        let mut r = answer(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error": "rate_limited", "message": format!("too many enrol attempts from this address; retry in {wait} s"),
+                   "retry_after": wait}),
+        );
+        if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
+            r.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        return r;
+    }
+    let Some(machines) = state.machines().cloned() else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            "unknown_machine",
+            "this board has no agent machines",
+        );
+    };
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let checked = match bearer {
+        Some(token) => machines.tokens.check(token.trim(), state.now()).await,
+        None => Err(invalid("no bearer token")),
+    };
+    let oid = match checked {
+        Ok(oid) => oid,
+        Err(TokenError::Invalid(why)) => {
+            tracing::info!(client_ip = %ip, %why, "machine enrol token refused");
+            return refused(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "the token is not a valid machine token of this board's tenant",
+            );
+        }
+        Err(e @ TokenError::Keys(_)) => {
+            tracing::warn!(error = %e, "machine enrol not checked");
+            return refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "the tenant's signing keys could not be read; retry",
+            );
+        }
+    };
+    let key = super::keys::new_host_key();
+    let token_digest = digest(&key);
+    let try_mint = || {
+        let (oid, token_digest) = (oid.clone(), token_digest.clone());
+        state.store(move |s| s.machine_enrol(&oid, &token_digest))
+    };
+    let mut outcome = try_mint().await;
+    if matches!(outcome, Ok(Enrolled::Unknown)) {
+        fill_principals(&state, &machines).await;
+        outcome = try_mint().await;
+    }
+    let (user_id, user, host_id, replaced, new_host) = match outcome {
+        Ok(Enrolled::Minted {
+            user_id,
+            user,
+            host_id,
+            replaced,
+            new_host,
+        }) => (user_id, user, host_id, replaced, new_host),
+        Ok(Enrolled::Unknown) => {
+            return refused(
+                StatusCode::NOT_FOUND,
+                "unknown_machine",
+                "no machine of this board has this identity yet",
+            );
+        }
+        Ok(Enrolled::Disabled) => {
+            return refused(
+                StatusCode::FORBIDDEN,
+                "disabled",
+                "the machine's owner is disabled on this board, or the machine is being removed",
+            );
+        }
+        Ok(Enrolled::AlreadyMinted) => {
+            return refused(
+                StatusCode::CONFLICT,
+                "already_minted",
+                "this machine's key was minted before",
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "machine enrol store failed");
+            return refused(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "the mint failed",
+            );
+        }
+    };
+    tracing::info!(user = %user, host = %host_id, replaced, new_host, "machine key minted");
+    if new_host {
+        let (host, now) = (host_id.clone(), state.now());
+        if let Err(e) = state
+            .store(move |s| s.enrolled(user_id, &host, Enrollment::Machine, now))
+            .await
+        {
+            tracing::error!(host = %host_id, error = %e, "the welcome failed");
+        }
+    }
+    let board = state
+        .store(|s| Ok(s.board_name()))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| super::invite::workspace_of(&state.config().public_url));
+    answer(
+        StatusCode::OK,
+        json!({
+            "v": 1,
+            "server": state.config().public_url,
+            "board": board,
+            "user": user,
+            "host_id": host_id,
+            "label": host_id,
+            "key_id": &token_digest[..12],
+            "key": key,
+            "name": format!("{user}/vm.agent"),
+        }),
+    )
 }
 
 /// Runs one browser request as `user` on a blocking thread.
@@ -434,15 +814,15 @@ pub(crate) async fn refresh(state: &WebState, user_id: i64) {
 
 #[cfg(test)]
 mod tests {
-    /// The hand deployment and the template name a person's deployment as the server does
-    /// (`vm-agent-<owner>`, the VM's own name), so both write one deployment record.
+    /// The server is the one deployer: the README has no hand deployment, and nothing names a
+    /// deployment other than the server's `vm-agent-<owner>` (the VM's own name).
     #[test]
-    fn a_hand_deployment_and_the_server_share_one_deployment_name() {
+    fn the_server_is_the_one_deployer_and_names_the_deployment_after_the_vm() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../infra/agent-vm/");
         let read = |f: &str| std::fs::read_to_string(format!("{root}{f}")).unwrap();
         let (readme, template) = (read("README.md"), read("template/agent-vm.bicep"));
         assert!(
-            readme.contains("az deployment group create -g conde-vm -n vm-agent-<owner>"),
+            !readme.contains("az deployment group create -g conde-vm -n vm-agent"),
             "the README's hand deployment"
         );
         for (file, text) in [("README.md", &readme), ("agent-vm.bicep", &template)] {

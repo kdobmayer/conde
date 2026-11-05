@@ -79,6 +79,8 @@ struct Idp {
     grants: Mutex<HashMap<String, Grant>>,
     discoveries: AtomicUsize,
     jwks_reads: AtomicUsize,
+    /// Reads of the tenant's v1 keys (`/<tenant>/discovery/keys`), which machine tokens use.
+    v1_keys_reads: AtomicUsize,
     authorizations: AtomicUsize,
 }
 
@@ -284,6 +286,7 @@ async fn start_idp() -> Arc<Idp> {
         grants: Mutex::new(HashMap::new()),
         discoveries: AtomicUsize::new(0),
         jwks_reads: AtomicUsize::new(0),
+        v1_keys_reads: AtomicUsize::new(0),
         authorizations: AtomicUsize::new(0),
     });
     let t = TENANT;
@@ -293,6 +296,13 @@ async fn start_idp() -> Arc<Idp> {
             get(discovery),
         )
         .route(&format!("/{t}/discovery/v2.0/keys"), get(jwks))
+        .route(
+            &format!("/{t}/discovery/keys"),
+            get(|State(idp): State<Arc<Idp>>| async move {
+                idp.v1_keys_reads.fetch_add(1, Ordering::SeqCst);
+                jwks(State(idp)).await
+            }),
+        )
         .route(&format!("/{t}/oauth2/v2.0/authorize"), get(authorize))
         .route(&format!("/{t}/oauth2/v2.0/token"), post(token))
         .route(

@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# PILOT ONLY: delete this script when the enrol route and the onboarding page exist. The runbook is README.md,
+# PILOT ONLY: delete this script when the relay and the publication exist. The runbook is README.md,
 # "Rebuilding a person's VM"; this script holds only its steps that are not one command:
 #
 #   ./pilot-rebuild.sh inventory OLD           read-only: what would be lost on vm-agent-OLD (unpushed commits,
 #                                              uncommitted files, ~/work's newest files, the gh login)
-#   ./pilot-rebuild.sh join OWNER              no enrol route yet: conde's own sign-in for the person (prints the URL)
-#   ./pilot-rebuild.sh join OWNER CODE         finishes it, then first boot without the mint (marker, machine.env)
 #   ./pilot-rebuild.sh signin OWNER claude|github|codex   no page yet: the relay helper by hand, input kept open (a FIFO)
 #   ./pilot-rebuild.sh signin OWNER code CODE  the Claude code the person got; prints the relay's outcome
 #   ./pilot-rebuild.sh publish OWNER           publishes vm.agent on dakai (once the old host has unpublished it)
@@ -52,24 +50,6 @@ echo "== gh"; gh auth status 2>&1 | grep -E "Logged in|not logged" | head -2')"
 }
 
 
-
-
-
-# The manual join (no enrol route): conde login as the person, then first boot without the mint. First boot needs the
-# enrolment marker and machine.env supplied; conde login publishes nothing (publish does, later).
-cmd_join() {
-  local owner="${1:?usage: pilot-rebuild.sh join OWNER [CODE]}" code="${2:-}"; name_ok "$owner"
-  if [ -z "$code" ]; then
-    on_vm "vm-agent-$owner" "systemctl stop agentvm-firstboot 2>/dev/null; $(as_user agent 'conde login --server https://dakai.conde.cloud --code 2>&1 | grep -E "https://" | head -1')"
-    return
-  fi
-  [[ $code =~ ^[A-Za-z0-9-]{8,9}$ ]] || { echo "the conde code looks like ABCD-1234" >&2; exit 64; }   # conde validates it
-  on_vm "vm-agent-$owner" "$(as_user agent "conde login --server https://dakai.conde.cloud --code $code 2>&1 | tail -n 1; conde boards | tail -n +2")
-printf '%s=%q\\n' OWNER $(printf '%q' "$owner") FULL_NAME $(printf '%q' "$owner/vm.agent") BOARD dakai > /var/lib/agentvm/machine.env
-date -u +%FT%TZ > /var/lib/agentvm/enrolled
-systemctl start agentvm-firstboot; journalctl -u agentvm-firstboot --no-pager -o cat | grep agentvm-firstboot | tail -2"
-}
-
 # The relay by hand (no onboarding page): the helper reads a FIFO kept open, so it waits across separate
 # run-commands (EOF would cancel it).
 cmd_signin() {
@@ -96,7 +76,7 @@ for i in \$(seq 90); do grep -qE '^(done|failed)' \$d/out && break; sleep 1; don
   esac
 }
 
-# Publishing is the server's once the enrol route exists; until then by hand, after the old host unpublished.
+# Publishing is the session hook's once the image carries it; until then by hand, after the old host unpublished.
 cmd_publish() {
   local owner="${1:?usage: pilot-rebuild.sh publish OWNER}"; name_ok "$owner"
   on_vm "vm-agent-$owner" "$(as_user agent 'conde publish vm.agent --board dakai 2>&1 | head -2; conde boards | tail -n +2')"
@@ -104,8 +84,7 @@ cmd_publish() {
 
 case "${1:-}" in
   inventory) shift; cmd_inventory "$@" ;;
-  join) shift; cmd_join "$@" ;;
   signin) shift; cmd_signin "$@" ;;
   publish) shift; cmd_publish "$@" ;;
-  *) sed -n '2,15p' "$0"; exit 64 ;;
+  *) sed -n '2,11p' "$0"; exit 64 ;;
 esac

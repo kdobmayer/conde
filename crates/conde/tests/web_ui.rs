@@ -135,6 +135,11 @@ on_both!(
     setup_is_refused_while_deleting,
     machine_status_says_requested_failed_not_connected_up_connected_disconnected_and_ready,
     an_adopted_running_machine_is_probed_at_setup_and_its_reply_marks_it_ready,
+    enrol_mints_once_per_oid_and_answers_the_contract,
+    enrol_refuses_a_bad_signature_issuer_tenant_audience_or_expiry_with_401,
+    enrol_answers_404_until_the_vm_resource_has_its_principal,
+    enrol_answers_403_for_a_disabled_owner_or_a_deleting_record,
+    enrol_is_rate_limited_with_retry_after,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -150,13 +155,14 @@ async fn ui(d: &Arc<Dispatcher>) -> Ui {
 }
 
 async fn ui_with(d: &Arc<Dispatcher>, config: ServerConfig) -> Ui {
-    ui_full(d, config, None).await
+    ui_full(d, config, None, |_| {}).await
 }
 
 async fn ui_full(
     d: &Arc<Dispatcher>,
     config: ServerConfig,
     machines: Option<web::MachinesConfig>,
+    tweak: impl FnOnce(&mut WebConfig),
 ) -> Ui {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let idp = start_idp().await;
@@ -172,6 +178,16 @@ async fn ui_full(
     )
     .unwrap();
     entra.issuer = idp.issuer.clone();
+    tweak(&mut entra);
+    // the tenant's v1 signing keys are the fake provider's
+    let login = idp
+        .issuer
+        .trim_end_matches(&format!("/{TENANT}/v2.0"))
+        .to_string();
+    let machines = machines.map(|m| web::MachinesConfig {
+        login_url: login,
+        ..m
+    });
     let store = Arc::new(WebBoard::new(d.clone()));
     let web = WebSetup {
         entra: Some(entra),
@@ -3250,6 +3266,7 @@ const AUDIENCE: &str = "52f027a8-e3d6-4fb8-996c-d2221d38b6d6";
 const TEMPLATE_SPEC: &str = "/subscriptions/sub-1/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2";
 const DEPLOYMENTS: &str =
     "/subscriptions/sub-1/resourceGroups/conde-vm/providers/Microsoft.Resources/deployments/";
+const VMS: &str = "/providers/Microsoft.Compute/virtualMachines/";
 
 /// One request the fake Resource Manager received.
 #[derive(Clone, Debug)]
@@ -3269,6 +3286,8 @@ struct Arm {
     calls: Mutex<Vec<ArmCall>>,
     puts: Mutex<std::collections::VecDeque<(u16, Value)>>,
     gets: Mutex<std::collections::VecDeque<(u16, Value)>>,
+    /// VM reads by VM name; a VM without a script does not exist (404).
+    vms: Mutex<HashMap<String, std::collections::VecDeque<(u16, Value)>>>,
 }
 
 fn running() -> Value {
@@ -3291,6 +3310,7 @@ async fn fake_arm() -> Arc<Arm> {
         calls: Mutex::new(Vec::new()),
         puts: Mutex::new([(201, json!({"name": "d"}))].into()),
         gets: Mutex::new([(200, running())].into()),
+        vms: Mutex::new(HashMap::new()),
     });
     let a = arm.clone();
     let app = Router::new().fallback(
@@ -3320,6 +3340,17 @@ async fn fake_arm() -> Arc<Arm> {
                         json!({"error": {"code": "AuthenticationFailed", "message": "no token"}}),
                     ),
                     "PUT" => next_answer(&a.puts),
+                    _ if uri.path().contains(VMS) => {
+                        let name = uri.path().rsplit('/').next().unwrap().to_string();
+                        match a.vms.lock().unwrap().get_mut(&name) {
+                            Some(q) if q.len() > 1 => q.pop_front().unwrap(),
+                            Some(q) => q[0].clone(),
+                            None => (
+                                404,
+                                json!({"error": {"code": "ResourceNotFound", "message": "no such VM"}}),
+                            ),
+                        }
+                    }
                     _ => next_answer(&a.gets),
                 };
                 (StatusCode::from_u16(status).unwrap(), axum::Json(body))
@@ -3338,6 +3369,22 @@ impl Arm {
             &self.gets
         };
         *q.lock().unwrap() = answers.into();
+    }
+
+    /// The answers of the VM `name`'s reads, each used once and the last one kept.
+    fn vm(&self, name: &str, answers: Vec<(u16, Value)>) {
+        self.vms
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), answers.into());
+    }
+
+    /// The VM reads so far.
+    fn vm_reads(&self) -> Vec<ArmCall> {
+        self.calls("GET")
+            .into_iter()
+            .filter(|c| c.path.contains(VMS))
+            .collect()
     }
 
     fn calls(&self, method: &str) -> Vec<ArmCall> {
@@ -3365,6 +3412,13 @@ impl Arm {
 
 /// The server with agent machines on, against a fake Resource Manager and identity endpoint.
 async fn ui_machines(d: &Arc<Dispatcher>) -> (Ui, Arc<Arm>) {
+    ui_machines_with(d, |_| {}).await
+}
+
+async fn ui_machines_with(
+    d: &Arc<Dispatcher>,
+    tweak: impl FnOnce(&mut WebConfig),
+) -> (Ui, Arc<Arm>) {
     let arm = fake_arm().await;
     let (identity, _) = identity_endpoint(200, 3600).await;
     let machines = web::MachinesConfig {
@@ -3379,9 +3433,10 @@ async fn ui_machines(d: &Arc<Dispatcher>) -> (Ui, Arc<Arm>) {
             client_id: "id-conde".into(),
         },
         arm_url: arm.url.clone(),
+        login_url: web::LOGIN_URL.into(),
     };
     (
-        ui_full(d, ServerConfig::default(), Some(machines)).await,
+        ui_full(d, ServerConfig::default(), Some(machines), tweak).await,
         arm,
     )
 }
@@ -4027,5 +4082,403 @@ async fn an_adopted_running_machine_is_probed_at_setup_and_its_reply_marks_it_re
     let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
     assert_eq!(s["state"], "ready", "{s}");
     drop(ws);
+    ui.server.shutdown().await.unwrap();
+}
+
+// --- the enrol route --------------------------------------------------------------------------
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// The claims of a v1 token of the VM identity `oid` for conde-machines, shaped as IMDS issues it.
+fn vm_claims(oid: &str) -> Value {
+    let now = unix_now();
+    let sts = format!("https://sts.windows.net/{TENANT}/");
+    json!({"aud": AUDIENCE, "iss": sts, "iat": now - 60, "nbf": now - 60, "exp": now + 3600,
+           "aio": "k2BgYJjVfL", "appid": "1f3c9a2e-0000-4000-8000-000000000001", "appidacr": "2",
+           "idp": sts, "idtyp": "app", "oid": oid, "sub": oid, "tid": TENANT, "uti": "u1",
+           "ver": "1.0", "xms_mirid": format!("{VMS}vm-agent-{USER}")})
+}
+
+/// `claims` signed by the test key `i` under `kid`, with `alg` in the header.
+fn signed(claims: &Value, alg: &str, kid: &str, i: usize) -> String {
+    let header = json!({"alg": alg, "typ": "JWT", "kid": kid});
+    let input = format!(
+        "{}.{}",
+        b64(header.to_string().as_bytes()),
+        b64(claims.to_string().as_bytes())
+    );
+    let sig = SigningKey::<Sha256>::new(rsa_key(i))
+        .sign(input.as_bytes())
+        .to_vec();
+    format!("{input}.{}", b64(&sig))
+}
+
+/// A VM's identity as Azure answers the VM read once the VM exists.
+fn vm_with_identity(principal: &str) -> Value {
+    json!({"name": "vm", "identity": {"type": "SystemAssigned", "principalId": principal,
+           "tenantId": TENANT}})
+}
+
+impl Ui {
+    fn vm_token(&self, oid: &str) -> String {
+        self.env.idp.sign(&vm_claims(oid))
+    }
+
+    /// `POST /v1/machines/enrol` as the VM sends it, with `bearer` when given.
+    async fn enrol(&self, bearer: Option<&str>) -> (StatusCode, HeaderMap, Value) {
+        let mut r = reqwest::Client::new()
+            .post(self.env.url("/v1/machines/enrol"))
+            .json(&json!({"v": 1}));
+        if let Some(token) = bearer {
+            r = r.bearer_auth(token);
+        }
+        let r = r.send().await.unwrap();
+        let (status, headers) = (r.status(), r.headers().clone());
+        (status, headers, r.json().await.unwrap_or(Value::Null))
+    }
+
+    /// Whether `key` opens a bridge connection.
+    async fn bridge_opens(&self, key: &str) -> bool {
+        let mut req = format!("{}/v1/bridge", self.env.base.replace("http", "ws"))
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {key}").parse().unwrap());
+        tokio_tungstenite::connect_async(req).await.is_ok()
+    }
+}
+
+/// The VM's token gets the host key once: 200 with exactly the contract's nine fields and
+/// `no-store`; the key opens the bridge. The hand-joined key the host had is revoked and its
+/// bridge disconnected. Two concurrent calls mint once; every later call is 409 and the minted key
+/// keeps working.
+async fn enrol_mints_once_per_oid_and_answers_the_contract(d: Arc<Dispatcher>) {
+    d.share("dakai");
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-k"))]);
+    let _browser = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    // joined by hand before the route existed: a live key and its connected bridge
+    let uid = ui.user_id(USER).await;
+    let old = format!("conde_test_{}", conde::util::new_ulid());
+    let (store, h, digest) = (
+        ui.env.store.clone(),
+        host.clone(),
+        conde_remote::token_digest(&old),
+    );
+    blocking(move || store.mint_host_key(uid, &h, "vm", &digest, START).unwrap()).await;
+    let mut req = format!("{}/v1/bridge", ui.env.base.replace("http", "ws"))
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {old}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let hello = json!({"v": 1, "type": "hello", "host_id": host, "bridge_instance": "inst-old",
+                       "endpoints": [], "proto": 2, "window": 4});
+    ws.send(tungstenite::Message::text(hello.to_string()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let token = ui.vm_token("oid-vm-k");
+    let (a, b) = tokio::join!(ui.enrol(Some(&token)), ui.enrol(Some(&token)));
+    let (minted, other) = if a.0 == StatusCode::OK {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    assert_eq!(minted.0, StatusCode::OK, "{}", minted.2);
+    assert_eq!(other.0, StatusCode::CONFLICT, "{}", other.2);
+    assert_eq!(other.2["error"], "already_minted");
+    assert_eq!(minted.1[header::CACHE_CONTROL], "no-store");
+    let body = minted.2;
+    let mut fields: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "board", "host_id", "key", "key_id", "label", "name", "server", "user", "v"
+        ]
+    );
+    let key = body["key"].as_str().unwrap().to_string();
+    assert!(key.len() == 70 && key.starts_with("conde_"), "a host key");
+    assert_eq!(
+        body,
+        json!({"v": 1, "server": ui.env.base, "board": "dakai", "user": USER, "host_id": host,
+               "label": host, "key_id": &conde_remote::token_digest(&key)[..12], "key": key,
+               "name": format!("{USER}/vm.agent")})
+    );
+    // the hand-joined key is revoked and its bridge closed
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(tungstenite::Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the replaced key's bridge is disconnected");
+    assert!(!ui.bridge_opens(&old).await, "the replaced key is revoked");
+    assert!(
+        ui.bridge_opens(&key).await,
+        "the minted key opens the bridge"
+    );
+    let m = ui.record(USER).await.unwrap();
+    assert_eq!(m.principal_id.as_deref(), Some("oid-vm-k"));
+    assert!(m.minted_at.is_some());
+    // later calls, from anyone holding a token of the identity: 409, nothing changes
+    let (status, _, v) = ui.enrol(Some(&ui.vm_token("oid-vm-k"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("already_minted"))
+    );
+    assert!(
+        ui.bridge_opens(&key).await,
+        "the first key still opens the bridge"
+    );
+    assert_eq!(ui.record(USER).await.unwrap().minted_at, m.minted_at);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Every token that is not the tenant's v1 token for conde-machines, signed with a tenant key and
+/// in its lifetime, is 401 `invalid_token` and mints nothing; the keys come from the v1 keys URL,
+/// cached, and are read again once for an unknown `kid` (a rotated key then verifies).
+async fn enrol_refuses_a_bad_signature_issuer_tenant_audience_or_expiry_with_401(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    arm.vm(
+        &format!("vm-agent-{USER}"),
+        vec![(200, vm_with_identity("oid-vm-k"))],
+    );
+    let _browser = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let idp = &ui.env.idp;
+    let with = |change: &dyn Fn(&mut Value)| {
+        let mut c = vm_claims("oid-vm-k");
+        change(&mut c);
+        idp.sign(&c)
+    };
+    let now = unix_now();
+    let spoiled = {
+        *idp.spoil.lock().unwrap() = Spoil::Signature;
+        let t = ui.vm_token("oid-vm-k");
+        *idp.spoil.lock().unwrap() = Spoil::None;
+        t
+    };
+    let cases: Vec<(&str, Option<String>)> = vec![
+        ("no bearer", None),
+        ("not a JWS", Some("not-a-token".into())),
+        ("a bad signature", Some(spoiled)),
+        (
+            "the v2 issuer",
+            Some(with(&|c| {
+                c["iss"] = json!(format!("https://login.microsoftonline.com/{TENANT}/v2.0"))
+            })),
+        ),
+        (
+            "another tenant",
+            Some(with(&|c| {
+                c["tid"] = json!("72f988bf-86f1-41af-91ab-2d7cd011db47")
+            })),
+        ),
+        (
+            "the SSO app's audience",
+            Some(with(&|c| c["aud"] = json!(CLIENT_ID))),
+        ),
+        (
+            "an api:// audience",
+            Some(with(&|c| c["aud"] = json!(format!("api://{AUDIENCE}")))),
+        ),
+        ("expired", Some(with(&|c| c["exp"] = json!(now - 1)))),
+        (
+            "not valid yet",
+            Some(with(&|c| c["nbf"] = json!(now + 600))),
+        ),
+        (
+            "no exp",
+            Some(with(&|c| {
+                c.as_object_mut().unwrap().remove("exp");
+            })),
+        ),
+        (
+            "no oid",
+            Some(with(&|c| {
+                c.as_object_mut().unwrap().remove("oid");
+            })),
+        ),
+        (
+            "HS256",
+            Some(signed(&vm_claims("oid-vm-k"), "HS256", "kid-1", 0)),
+        ),
+        (
+            "an unknown kid",
+            Some(signed(&vm_claims("oid-vm-k"), "RS256", "kid-x", 1)),
+        ),
+    ];
+    for (case, token) in &cases {
+        let (status, headers, v) = ui.enrol(token.as_deref()).await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::UNAUTHORIZED, Some("invalid_token")),
+            "{case}: {v}"
+        );
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store", "{case}");
+    }
+    assert_eq!(
+        ui.record(USER).await.unwrap().minted_at,
+        None,
+        "nothing minted"
+    );
+    assert!(arm.vm_reads().is_empty(), "a refused token reads no VM");
+    // one read for the first key lookup, one more for the unknown kid
+    assert_eq!(idp.v1_keys_reads.load(Ordering::SeqCst), 2);
+    // the tenant rotates its key: the new kid is read once and verifies
+    idp.rotate();
+    let (status, _, v) = ui.enrol(Some(&ui.vm_token("oid-vm-k"))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(idp.v1_keys_reads.load(Ordering::SeqCst), 3);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// While the VM resource does not exist, or exists without its identity, the enrol is 404
+/// `unknown_machine` and stores nothing; once Azure answers the identity it mints. A record that
+/// has its identity is never read again.
+async fn enrol_answers_404_until_the_vm_resource_has_its_principal(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    arm.vm(
+        &host,
+        vec![
+            (
+                404,
+                json!({"error": {"code": "ResourceNotFound", "message": "no such VM"}}),
+            ),
+            (200, json!({"name": "vm"})),
+            (200, vm_with_identity("oid-vm-k")),
+        ],
+    );
+    let _browser = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let token = ui.vm_token("oid-vm-k");
+    for round in ["no VM yet", "no identity yet"] {
+        let (status, _, v) = ui.enrol(Some(&token)).await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::NOT_FOUND, Some("unknown_machine")),
+            "{round}: {v}"
+        );
+        assert_eq!(ui.record(USER).await.unwrap().principal_id, None, "{round}");
+    }
+    let (status, _, v) = ui.enrol(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let reads = arm.vm_reads();
+    assert_eq!(reads.len(), 3);
+    for r in &reads {
+        assert_eq!(
+            r.path,
+            format!("/subscriptions/sub-1/resourceGroups/conde-vm{VMS}{host}")
+        );
+        assert_eq!(r.query, "api-version=2024-07-01");
+        assert_eq!(r.auth, "Bearer arm-token-1");
+    }
+    // an identity no record has: 404, and the minted record is not read again
+    let (status, _, v) = ui.enrol(Some(&ui.vm_token("oid-stranger"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("unknown_machine")),
+        "{v}"
+    );
+    assert_eq!(arm.vm_reads().len(), 3);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A record being deleted, or one whose owner is disabled, is 403 `disabled` and mints nothing.
+async fn enrol_answers_403_for_a_disabled_owner_or_a_deleting_record(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    arm.vm(
+        &format!("vm-agent-{USER}"),
+        vec![(200, vm_with_identity("oid-vm-k"))],
+    );
+    arm.vm(
+        "vm-agent-levente-szabo",
+        vec![(200, vm_with_identity("oid-vm-l"))],
+    );
+    let _k = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let lev = "levente-szabo";
+    ui.env.invite(lev, "levente.szabo@dakai.example").await;
+    ui.person(
+        "oid-levente",
+        "Levente.Szabo@dakai.example",
+        "Levente Szabó",
+    );
+    let _l = ui.browser_landing().await;
+    ui.record_when(lev, |m| m.requested_at.is_some()).await;
+    // the VM identity was read at an earlier enrol, then the disable route started
+    let uid = ui.user_id(USER).await;
+    ui.write(move |t| {
+        t.machine_set_principal(uid, "oid-vm-k")?;
+        Ok(t.machine_set_deleting(uid, "2026-11-06T09:00:00.000Z")?)
+    })
+    .await;
+    let store = ui.env.store.clone();
+    blocking(move || store.set_disabled(lev, true).unwrap()).await;
+    for (user, oid) in [(USER, "oid-vm-k"), (lev, "oid-vm-l")] {
+        let (status, _, v) = ui.enrol(Some(&ui.vm_token(oid))).await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::FORBIDDEN, Some("disabled")),
+            "{user}: {v}"
+        );
+        let m = ui.record(user).await.unwrap();
+        assert_eq!(
+            (m.principal_id.as_deref(), m.minted_at),
+            (Some(oid), None),
+            "{user}"
+        );
+    }
+    let d2 = d.clone();
+    let keys = blocking(move || d2.with_conn(|t| t.credentials()).unwrap()).await;
+    assert!(
+        keys.iter().all(|k| !k.host.starts_with("vm-agent-")),
+        "no key minted: {keys:?}"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Past its per-address budget the enrol is 429 `rate_limited` with `Retry-After` in seconds,
+/// before the token is looked at.
+async fn enrol_is_rate_limited_with_retry_after(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines_with(&d, |c| c.limits.machine_enrol_per_min = 2).await;
+    for _ in 0..2 {
+        assert_eq!(ui.enrol(None).await.0, StatusCode::UNAUTHORIZED);
+    }
+    let (status, headers, v) = ui.enrol(Some(&ui.vm_token("oid-vm-k"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        "{v}"
+    );
+    let wait: u64 = headers[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
+    assert_eq!(v["retry_after"], wait);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
     ui.server.shutdown().await.unwrap();
 }

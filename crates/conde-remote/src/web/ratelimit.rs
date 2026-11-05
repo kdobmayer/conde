@@ -1,5 +1,5 @@
-//! In-process token buckets for the `conde login` redeem: per client IP, and pasted-code attempts
-//! per account. Each replica keeps its own buckets, so with N replicas a client gets at most N
+//! In-process token buckets for the `conde login` redeem (per client IP, and pasted-code attempts
+//! per account) and for an agent VM's enrol (per client IP). Each replica keeps its own buckets, so with N replicas a client gets at most N
 //! times the rate.
 
 use std::hash::Hash;
@@ -18,6 +18,8 @@ pub struct RateLimits {
     /// Pasted-code attempts per account per hour (burst: the same number). The per-code budget
     /// (5 tries) restarts with every newly issued code; this one does not.
     pub cli_guesses_per_hour: u32,
+    /// `POST /v1/machines/enrol` per client IP per minute (burst: the same number).
+    pub machine_enrol_per_min: u32,
 }
 
 impl Default for RateLimits {
@@ -25,6 +27,7 @@ impl Default for RateLimits {
         RateLimits {
             cli_redeem_per_min: 30,
             cli_guesses_per_hour: 15,
+            machine_enrol_per_min: 30,
         }
     }
 }
@@ -66,6 +69,7 @@ impl<K: Hash + Eq + Clone> Bucket<K> {
 pub(crate) struct Limiters {
     cli_redeem: Bucket<IpAddr>,
     cli_guesses: Bucket<i64>,
+    machine_enrol: Bucket<IpAddr>,
 }
 
 impl Limiters {
@@ -75,6 +79,7 @@ impl Limiters {
             cli_guesses: Bucket::new(
                 Quota::per_hour(n(l.cli_guesses_per_hour)).allow_burst(n(l.cli_guesses_per_hour)),
             ),
+            machine_enrol: Bucket::new(per_minute(l.machine_enrol_per_min)),
         }
     }
 
@@ -84,6 +89,10 @@ impl Limiters {
 
     pub(crate) fn cli_guess(&self, user_id: i64) -> Result<(), u64> {
         self.cli_guesses.check(&user_id)
+    }
+
+    pub(crate) fn machine_enrol(&self, ip: IpAddr) -> Result<(), u64> {
+        self.machine_enrol.check(&ip)
     }
 }
 
@@ -96,6 +105,7 @@ mod tests {
         let l = Limiters::new(RateLimits {
             cli_redeem_per_min: 1,
             cli_guesses_per_hour: 2,
+            machine_enrol_per_min: 1,
         });
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert!(l.cli_redeem(ip).is_ok());

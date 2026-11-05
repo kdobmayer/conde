@@ -171,8 +171,8 @@ pub fn sign_in_json(m: &MachineRow) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Whether the machine joined the board: minted, or (until the enrol route) joined by hand with a
-/// live key of its host.
+/// Whether the machine joined the board: minted, or joined by hand with a live key of its host
+/// (a `conde login` on the VM).
 fn joined(db: &dyn Tx, m: &MachineRow) -> OpResult<bool> {
     if m.minted_at.is_some() {
         return Ok(true);

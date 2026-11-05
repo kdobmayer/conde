@@ -667,6 +667,9 @@ pub fn finish_op(
                                     PublicationState::Published,
                                     &now,
                                 )?;
+                                if let Some(kind) = p.kind {
+                                    tx.set_publication_kind(alias, &agent, kind.as_str())?;
+                                }
                                 tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
                                 return Ok(None);
                             }
@@ -682,6 +685,9 @@ pub fn finish_op(
                             PublicationState::Published,
                             &now,
                         )?;
+                        if let Some(kind) = p.kind {
+                            tx.set_publication_kind(alias, &agent, kind.as_str())?;
+                        }
                         // Only the completion that published the row marks it, and before the
                         // commit, under the store lock reconciliation reads the marks under:
                         // an older snapshot never sees the row published without the mark, and a
@@ -1012,6 +1018,7 @@ mod tests {
             route_generation: None,
             state: PublicationState::Publishing,
             updated_at: "t".into(),
+            kind: None,
         }
     }
 

@@ -4,7 +4,7 @@
 use conde::protocol::v2::{
     BOARD_FIELD, BoardInfo, BoardPart, Evidence, EvidenceSource, LOCAL_BOARD, Manifest,
     ManifestRow, MigrateBody, MigratePreview, Mine, MineMailbox, PreviewRow, PublishBody,
-    Published, UnpublishBody, Unpublished, Via, label, op,
+    Published, PublishedKind, UnpublishBody, Unpublished, Via, label, op,
 };
 use conde::store::local::{BoardOp, BoardOpKind, BoardOpState, PublicationState};
 use conde_remote::Route;
@@ -65,6 +65,7 @@ fn publish_round_trip_with_optional_flags() {
             name: "worker".into(),
             human: false,
             take: false,
+            kind: None,
         },
         json!({"name": "worker"}),
     );
@@ -73,8 +74,18 @@ fn publish_round_trip_with_optional_flags() {
             name: "krisz".into(),
             human: true,
             take: true,
+            kind: None,
         },
         json!({"name": "krisz", "human": true, "take": true}),
+    );
+    round_trip(
+        &PublishBody {
+            name: "worker".into(),
+            human: false,
+            take: false,
+            kind: Some(PublishedKind::Claude),
+        },
+        json!({"name": "worker", "kind": "claude"}),
     );
     round_trip(
         &Published {
@@ -82,12 +93,17 @@ fn publish_round_trip_with_optional_flags() {
             mailbox_id: "01MBX".into(),
             route_generation: 2,
             revision: None,
+            kind: None,
         },
         json!({"name": "worker", "mailbox_id": "01MBX", "route_generation": 2}),
     );
     assert!(
         serde_json::from_value::<PublishBody>(json!({"take": true})).is_err(),
         "name is required"
+    );
+    assert!(
+        serde_json::from_value::<PublishBody>(json!({"name": "praxy", "kind": "service"})).is_err(),
+        "a service kind is never published"
     );
 }
 

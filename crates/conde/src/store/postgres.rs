@@ -143,6 +143,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "membership_notify",
         include_str!("migrations/0020_membership_notify.sql"),
     ),
+    (
+        21,
+        "actor_kind",
+        include_str!("migrations/0021_actor_kind.sql"),
+    ),
 ];
 
 /// Session lock held while migrating.
@@ -819,7 +824,8 @@ type Params<'a> = &'a [&'a (dyn ToSql + Sync)];
 
 const AGENT_SELECT: &str =
     "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
-    a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL
+    a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL,
+    a.actor_kind
     FROM agents a JOIN users u ON u.user_id = a.owner_id";
 
 fn agent_row(r: &Row) -> Agent {
@@ -833,6 +839,7 @@ fn agent_row(r: &Row) -> Agent {
         binding_version: r.get(8),
         pinned: r.get(9),
         retired: r.get(10),
+        actor_kind: r.get(11),
     }
 }
 
@@ -1659,6 +1666,14 @@ impl Tx for PgTx {
         self.execute(
             "UPDATE agents SET pinned_address = $2 WHERE agent_id = $1",
             &[&agent_id, &pinned],
+        )?;
+        Ok(())
+    }
+
+    fn set_actor_kind(&self, agent_id: &str, kind: &str) -> StoreResult<()> {
+        self.execute(
+            "UPDATE agents SET actor_kind = $2 WHERE agent_id = $1",
+            &[&agent_id, &kind],
         )?;
         Ok(())
     }

@@ -68,7 +68,7 @@ pub fn unavailable(ctx: &Ctx, input: &str) -> OpError {
 fn target_free(a: &Agent) -> Value {
     json!({
         "name": a.canonical(),
-        "kind": a.address.as_ref().map(|x| x.kind.as_str()),
+        "kind": a.shown_kind(),
         "host": a.address.as_ref().map(|x| x.host.as_str()),
         "display": a.display,
     })
@@ -149,6 +149,9 @@ pub fn register(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     if agent.address.as_ref() != Some(&own) {
         set_binding(ctx.db, &agent.id, Some(&own))?;
+    }
+    if own.kind != Kind::Mailbox && agent.actor_kind.as_deref() != Some(own.kind.as_str()) {
+        ctx.db.set_actor_kind(&agent.id, own.kind.as_str())?;
     }
     let joined = if agent.binding_version == 0 {
         join_lobby(ctx, &agent)?
@@ -348,8 +351,8 @@ pub fn pin(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 /// (`human.status`).
 pub fn whoami(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     let me = ctx.me()?;
-    let mut out =
-        json!({"name": me.canonical(), "address": me.address.as_ref().map(|a| a.to_string())});
+    let mut out = json!({"name": me.canonical(), "id": me.id,
+                         "address": me.address.as_ref().map(|a| a.to_string())});
     if ctx.board.is_some()
         && !me.is_human()
         && let Ok(human) = super::paging::status_of(ctx)
@@ -374,14 +377,19 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         .db
         .bound_agents()?
         .into_iter()
-        .map(|a| match ctx.board {
-            Some(_) => target_free(&a),
-            None => json!({
-                "name": a.canonical(),
-                "address": a.address.as_ref().map(ToString::to_string),
-                "display": a.display,
-                "pinned": a.pinned,
-            }),
+        .map(|a| {
+            let mut row = match ctx.board {
+                Some(_) => target_free(&a),
+                None => json!({
+                    "name": a.canonical(),
+                    "address": a.address.as_ref().map(ToString::to_string),
+                    "kind": a.shown_kind(),
+                    "display": a.display,
+                    "pinned": a.pinned,
+                }),
+            };
+            row["id"] = json!(a.id);
+            row
         })
         .collect();
     Ok(json!({"agents": agents}))

@@ -112,6 +112,10 @@ const PG_CASES: &[PgCase] = &[
         "users_with_hosts_before_migration_19_count_as_arrived",
         users_with_hosts_before_migration_19_count_as_arrived,
     ),
+    (
+        "the_actor_kind_migration_backfills_bound_rows",
+        the_actor_kind_migration_backfills_bound_rows_pg,
+    ),
 ];
 
 fn main() {
@@ -169,6 +173,12 @@ fn main() {
         report.run(
             "sqlite::old_board_file_keeps_its_entra_identities",
             old_board_file_keeps_its_entra_identities,
+        );
+    }
+    if wanted("sqlite::the_actor_kind_migration_backfills_bound_rows") {
+        report.run(
+            "sqlite::the_actor_kind_migration_backfills_bound_rows",
+            the_actor_kind_migration_backfills_bound_rows_sqlite,
         );
     }
     if wanted("sqlite::deliveries_without_a_settled_time_still_count_as_reached") {
@@ -2160,6 +2170,99 @@ fn users_with_hosts_before_migration_19_count_as_arrived(c: &Cluster) {
         assert!(!tx.mark_user_arrived(1, "2026-10-28T10:00:00.000Z").unwrap());
         assert!(tx.mark_user_arrived(2, "2026-10-28T10:00:00.000Z").unwrap());
     });
+}
+
+/// The actor kinds after the backfill: a bound claude, codex or human row takes its address
+/// kind; a mailbox row and an unbound row stay NULL.
+fn assert_backfilled(store: &dyn Store) {
+    let kinds: Vec<(String, Option<String>)> = read(store, |tx| {
+        let ann = tx.user_id("ann").unwrap().unwrap();
+        ["cc", "cx", "human", "mb", "loose"]
+            .into_iter()
+            .map(|n| {
+                let a = tx.agent_by_name(ann, n).unwrap().unwrap();
+                (a.name, a.actor_kind)
+            })
+            .collect()
+    });
+    assert_eq!(
+        kinds,
+        [
+            ("cc".into(), Some("claude".into())),
+            ("cx".into(), Some("codex".into())),
+            ("human".into(), Some("human".into())),
+            ("mb".into(), None),
+            ("loose".into(), None),
+        ]
+    );
+}
+
+/// Postgres: a board migrated to version 20 gets migration 21 at the next start, its bound rows
+/// backfilled.
+fn the_actor_kind_migration_backfills_bound_rows_pg(c: &Cluster) {
+    let db = c.database();
+    let mut client = c.client(&db);
+    client
+        .batch_execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
+             applied_at TIMESTAMPTZ NOT NULL DEFAULT now());",
+        )
+        .unwrap();
+    let before: Vec<_> = MIGRATIONS.iter().filter(|m| m.0 <= 20).collect();
+    assert_eq!(before.len(), 20);
+    for (version, name, sql) in before {
+        client.batch_execute(sql).unwrap();
+        client
+            .execute(
+                "INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+                &[version, name, &conde::util::sha256_hex(sql.as_bytes())],
+            )
+            .unwrap();
+    }
+    client
+        .batch_execute(
+            "INSERT INTO users(user_id, name) VALUES (1, 'ann');
+             INSERT INTO agents(agent_id, owner_id, name_lower, address_kind, address_target, host_id) VALUES
+                 ('01CC', 1, 'cc', 'claude', 's-1', 'box'),
+                 ('01CX', 1, 'cx', 'codex', 't-1', 'box'),
+                 ('01HU', 1, 'human', 'human', 'ann', 'web'),
+                 ('01MB', 1, 'mb', 'mailbox', '01MB', 'box');
+             INSERT INTO agents(agent_id, owner_id, name_lower) VALUES ('01LO', 1, 'loose');",
+        )
+        .unwrap();
+    let store = PgStore::connect(&c.url(&db)).unwrap();
+    assert_backfilled(&store);
+}
+
+/// SQLite: a board file from before the actor kind gains the column on open, its bound rows
+/// backfilled.
+fn the_actor_kind_migration_backfills_bound_rows_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    {
+        let s = SqliteStore::open(&path).unwrap();
+        write(&s, |tx| {
+            let ann = tx.ensure_user("ann").unwrap();
+            for (id, name, address) in [
+                ("01CC", "cc", Some(addr(Kind::Claude, "s-1", "box"))),
+                ("01CX", "cx", Some(addr(Kind::Codex, "t-1", "box"))),
+                ("01HU", "human", Some(addr(Kind::Human, "ann", "web"))),
+                ("01MB", "mb", Some(addr(Kind::Mailbox, "01MB", "box"))),
+                ("01LO", "loose", None),
+            ] {
+                tx.insert_agent(id, ann, name).unwrap();
+                if let Some(a) = address {
+                    tx.set_binding(id, Some(&a)).unwrap();
+                }
+            }
+        });
+    }
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("ALTER TABLE agents DROP COLUMN actor_kind")
+        .unwrap();
+    let s = SqliteStore::open(&path).unwrap();
+    assert_backfilled(&s);
 }
 
 /// A board file whose identities are keyed by (tid, oid), one per user: opening it rebuilds the

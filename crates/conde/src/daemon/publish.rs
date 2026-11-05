@@ -11,7 +11,8 @@ use super::{Core, Refusal};
 use crate::address::{Address, Kind, normalize_name};
 use crate::boards;
 use crate::protocol::v2::{
-    LOCAL_BOARD, Manifest, ManifestRow, MigrateBody, PublishBody, UnpublishBody, op,
+    LOCAL_BOARD, Manifest, ManifestRow, MigrateBody, PublishBody, Published, PublishedKind,
+    UnpublishBody, op,
 };
 use crate::protocol::{ErrorCode, Request};
 use crate::store::Tx;
@@ -177,6 +178,7 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
             name: shared.clone(),
             human: false,
             take,
+            kind: local_kind(&agent),
         })
         .unwrap_or_default(),
         state: BoardOpState::Pending,
@@ -223,11 +225,17 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
                 route_generation: None,
                 state: PublicationState::Publishing,
                 updated_at: now.clone(),
+                kind: None,
             })?;
             Ok(Ok(None))
         })
         .map_err(internal)??;
     if let Some(p) = existing {
+        if let Some(kind) = local_kind(&agent)
+            && p.kind.as_deref() != Some(kind.as_str())
+        {
+            sync_kind(core, &conn, &p, kind).await;
+        }
         return Ok(
             json!({"board": alias, "agent": agent.name, "name": p.shared_name, "state": "published", "owner": conn.owner(),
                          "mailbox_id": p.mailbox_id, "route_generation": p.route_generation, "unchanged": true}),
@@ -250,6 +258,53 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
               "mailbox_id": p.as_ref().and_then(|p| p.mailbox_id.clone()),
               "route_generation": p.as_ref().and_then(|p| p.route_generation)}),
     )
+}
+
+/// The kind a local row is published with: its actor kind, else its address kind.
+fn local_kind(agent: &crate::store::Agent) -> Option<PublishedKind> {
+    agent.shown_kind().and_then(PublishedKind::parse)
+}
+
+/// Sends the kind of a publication the board has not acknowledged it for, as a publish the board
+/// answers without a binding change; recorded when the answer carries it, else the next publish
+/// sends it again.
+async fn sync_kind(core: &Core, conn: &BoardConn, p: &Publication, kind: PublishedKind) {
+    let body = PublishBody {
+        name: p.shared_name.clone(),
+        human: false,
+        take: false,
+        kind: Some(kind),
+    };
+    let request = json!({"op": op::MAILBOX_PUBLISH, "body": body, "idempotency_key": new_ulid()});
+    let acknowledged = match conn.call_ordered(request, wait(core)).await {
+        Ok((r, _)) if r.ok => r
+            .result
+            .and_then(|v| serde_json::from_value::<Published>(v).ok())
+            .and_then(|a| a.kind),
+        Ok((r, _)) => {
+            let why = r.error.map(|e| e.message).unwrap_or_default();
+            tracing::warn!(
+                board = conn.alias,
+                name = p.shared_name,
+                "kind not synced: {why}"
+            );
+            None
+        }
+        Err(why) => {
+            tracing::warn!(
+                board = conn.alias,
+                name = p.shared_name,
+                "kind not synced: {why}"
+            );
+            None
+        }
+    };
+    if let Some(kind) = acknowledged
+        && let Err(e) =
+            core.local_tx(|tx| Ok(tx.set_publication_kind(&p.board, &p.agent_id, kind.as_str())?))
+    {
+        tracing::warn!(board = conn.alias, "kind not recorded: {e:#}");
+    }
 }
 
 fn wait(core: &Core) -> std::time::Duration {
@@ -695,6 +750,7 @@ pub fn apply_manifest(
                     route_generation: Some(route.route_generation),
                     state: PublicationState::Published,
                     updated_at: now.clone(),
+                    kind: None,
                 };
                 if tx.publication(alias, &agent.id)?.is_some() {
                     tx.update_publication(alias, &agent.id, Some((&route.mailbox_id, route.route_generation)), PublicationState::Published, &now)?;

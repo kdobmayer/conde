@@ -71,6 +71,9 @@ pub struct Agent {
     pub pinned: Option<String>,
     /// Its owner retired it (`conde retire`): unbound, out of the lists, its history kept.
     pub retired: bool,
+    /// What the name stands for (`claude`, `codex`, `human`, `service`); descriptive only,
+    /// routing reads the address.
+    pub actor_kind: Option<String>,
 }
 
 impl Agent {
@@ -81,6 +84,13 @@ impl Agent {
 
     pub fn is_human(&self) -> bool {
         self.address.as_ref().is_some_and(|a| a.kind == Kind::Human)
+    }
+
+    /// The kind the lists show: the actor kind, else the address kind.
+    pub fn shown_kind(&self) -> Option<&str> {
+        self.actor_kind
+            .as_deref()
+            .or(self.address.as_ref().map(|a| a.kind.as_str()))
     }
 }
 
@@ -897,6 +907,7 @@ pub trait Tx {
     fn route_revision(&self, host: &str) -> StoreResult<u64>;
     fn set_pin(&self, agent_id: &str, pinned: Option<&str>) -> StoreResult<()>;
     fn set_display(&self, agent_id: &str, display: Option<&str>) -> StoreResult<()>;
+    fn set_actor_kind(&self, agent_id: &str, kind: &str) -> StoreResult<()>;
     /// Gives the agent a new name in place: id, binding and every reference stay.
     fn rename_agent(&self, agent_id: &str, name: &str) -> StoreResult<()>;
 

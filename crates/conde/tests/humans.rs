@@ -69,6 +69,7 @@ fn every_owner_gets_one_human_name_bound_to_the_web_host() {
         krisz.address,
         Some(Address::new(Kind::Human, "krisz", "web"))
     );
+    assert_eq!(krisz.actor_kind.as_deref(), Some("human"));
     assert_eq!(humans_of(&b.d, "zed").len(), 1);
     // an ensure on a row that is right changes nothing
     let again =

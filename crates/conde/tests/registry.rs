@@ -774,3 +774,34 @@ fn doctor_reports_only_the_callers_own_namespace() {
     assert!(checks.contains("refused: 1 notification(s)"), "{checks}");
     assert_eq!(r["issues"], 2, "{checks}");
 }
+
+#[test]
+fn a_registered_name_carries_its_actor_kind_and_its_id() {
+    let b = Board::new();
+    b.register(CAROL, "role");
+    let id = b.ok(CAROL, "agent.whoami", json!({}))["id"]
+        .as_str()
+        .expect("whoami answers the id")
+        .to_string();
+    assert_eq!(id.len(), 26, "a ULID: {id}");
+    let row = |b: &Board| {
+        rows(&b.ok(BOB, "agent.list", json!({})), "agents")
+            .into_iter()
+            .find(|a| a["name"] == "krisz/role")
+            .expect("listed")
+    };
+    let listed = row(&b);
+    assert_eq!(
+        (listed["kind"].as_str(), listed["id"].as_str()),
+        (Some("claude"), Some(id.as_str()))
+    );
+    // the name moves to a Codex thread: same row, the kind follows the holder
+    b.register(ALICE, "role");
+    let listed = row(&b);
+    assert_eq!(
+        (listed["kind"].as_str(), listed["id"].as_str()),
+        (Some("codex"), Some(id.as_str()))
+    );
+    let stored = b.d.with_conn(|tx| tx.agent_by_id(&id)).unwrap().unwrap();
+    assert_eq!(stored.actor_kind.as_deref(), Some("codex"));
+}

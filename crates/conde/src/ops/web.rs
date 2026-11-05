@@ -82,7 +82,7 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     {
         agents.insert(
             a.id.clone(),
-            json!({"name": a.canonical(), "kind": a.address.as_ref().map(|x| x.kind.as_str()),
+            json!({"name": a.canonical(), "kind": a.shown_kind(),
                    "address": a.address.as_ref().map(ToString::to_string), "dms": [], "channels": []}),
         );
     }
@@ -162,8 +162,10 @@ pub fn history(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         let rows = ctx
             .db
             .owner_dm_history(owner, &agent.id, &partner.id, before, limit + 1)?;
-        let kind = partner.address.as_ref().map(|a| a.kind.as_str());
-        (rows, json!({"with": partner.canonical(), "kind": kind}))
+        (
+            rows,
+            json!({"with": partner.canonical(), "kind": partner.shown_kind()}),
+        )
     } else {
         return Err(bad_request(
             "name the conversation: {\"agent\", \"with\": \"owner/name\"} or {\"agent\", \"channel\": \"#name\"}",
@@ -671,7 +673,7 @@ pub fn fleet(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
             None => (json!(address.to_string()), json!(a.pinned)),
         };
         agents.push(json!({
-            "name": a.canonical(), "owner": a.owner, "display": a.display, "kind": address.kind.as_str(),
+            "name": a.canonical(), "owner": a.owner, "display": a.display, "kind": a.shown_kind(),
             "host": address.host, "address": shown_address, "pinned": pinned,
             "discovered": discovered,
             "held": own.then(|| h.map_or(0, |h| h.held)),

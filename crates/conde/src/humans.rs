@@ -88,6 +88,9 @@ pub fn ensure(tx: &dyn Tx, user_id: i64) -> StoreResult<Option<Ensured>> {
         if row.pinned.is_some() {
             tx.set_pin(&row.id, None)?;
         }
+        if row.actor_kind.as_deref() != Some(Kind::Human.as_str()) {
+            tx.set_actor_kind(&row.id, Kind::Human.as_str())?;
+        }
         if row.address.as_ref() == Some(&address) {
             return Ok(Some(Ensured::Kept(name)));
         }
@@ -108,6 +111,7 @@ pub fn ensure(tx: &dyn Tx, user_id: i64) -> StoreResult<Option<Ensured>> {
                 tx.delete_membership(&m.channel_id, &taken.id)?;
             }
             tx.set_binding(&taken.id, Some(&address))?;
+            tx.set_actor_kind(&taken.id, Kind::Human.as_str())?;
             tracing::info!(owner = %user.name, name = %taken.canonical(), "unbound name became the human name");
             return Ok(Some(Ensured::Rebound(taken.canonical())));
         }
@@ -117,6 +121,7 @@ pub fn ensure(tx: &dyn Tx, user_id: i64) -> StoreResult<Option<Ensured>> {
     let id = new_ulid();
     tx.insert_agent(&id, user_id, HUMAN_NAME)?;
     tx.set_binding(&id, Some(&address))?;
+    tx.set_actor_kind(&id, Kind::Human.as_str())?;
     let name = format!("{}/{HUMAN_NAME}", user.name);
     tracing::info!(owner = %user.name, %name, "human name made");
     Ok(Some(Ensured::Created(name)))

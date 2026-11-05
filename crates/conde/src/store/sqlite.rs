@@ -57,6 +57,12 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
         "notify",
         "TEXT NOT NULL DEFAULT 'mentions' CHECK (notify IN ('mentions', 'all'))",
     ),
+    (
+        "agents",
+        "actor_kind",
+        "TEXT CHECK (actor_kind IN ('claude', 'codex', 'human', 'service'))",
+    ),
+    ("publications", "kind", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -135,6 +141,13 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
                 return Ok(());
             }
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+            if *column == "actor_kind" {
+                // as Postgres migration 0021: a bound row takes its address kind
+                return conn.execute_batch(
+                    "UPDATE agents SET actor_kind = address_kind
+                     WHERE address_kind IN ('claude', 'codex', 'human')",
+                );
+            }
             if *column != "arrived_at" {
                 return Ok(());
             }
@@ -311,7 +324,8 @@ impl Drop for SqliteTx<'_> {
 
 const AGENT_SELECT: &str =
     "SELECT a.agent_id, a.owner_id, u.name, a.name_lower, a.display, a.address_kind,
-    a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL
+    a.address_target, a.host_id, a.binding_version, a.pinned_address, a.retired_at IS NOT NULL,
+    a.actor_kind
     FROM agents a JOIN users u ON u.user_id = a.owner_id";
 
 fn agent_row(r: &Row) -> rusqlite::Result<Agent> {
@@ -325,6 +339,7 @@ fn agent_row(r: &Row) -> rusqlite::Result<Agent> {
         binding_version: r.get(8)?,
         pinned: r.get(9)?,
         retired: r.get(10)?,
+        actor_kind: r.get(11)?,
     })
 }
 
@@ -1117,6 +1132,14 @@ impl Tx for SqliteTx<'_> {
         self.exec(
             "UPDATE agents SET pinned_address = ?2 WHERE agent_id = ?1",
             params![agent_id, pinned],
+        )?;
+        Ok(())
+    }
+
+    fn set_actor_kind(&self, agent_id: &str, kind: &str) -> StoreResult<()> {
+        self.exec(
+            "UPDATE agents SET actor_kind = ?2 WHERE agent_id = ?1",
+            params![agent_id, kind],
         )?;
         Ok(())
     }

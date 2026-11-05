@@ -162,6 +162,26 @@ impl Cloud {
         );
     }
 
+    /// The kind and host `fleet.list` shows for `owner/name` on the board.
+    fn fleet_kind(&self, owner: &str, host: &str, name: &str) -> (String, String) {
+        let p = self.d.principal(owner, host, false).unwrap();
+        let req = conde::protocol::Request::new(conde::util::new_ulid(), "fleet.list", json!({}));
+        let resp = self.d.dispatch(&p, &req);
+        assert!(resp.ok, "fleet.list: {:?}", resp.error);
+        let fleet = resp.result.unwrap();
+        let row = fleet["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == format!("{owner}/{name}"))
+            .unwrap_or_else(|| panic!("{owner}/{name} not in {fleet}"))
+            .clone();
+        (
+            row["kind"].as_str().unwrap_or_default().into(),
+            row["host"].as_str().unwrap_or_default().into(),
+        )
+    }
+
     /// The v1 bridge of a host that is not migrated (`conde daemon --v1-bridge`).
     fn bridge_v1(&self, h: &mut Host, log: &str, sock: &std::path::Path) -> u32 {
         let url = self.url();
@@ -896,4 +916,96 @@ fn a_human_retires_a_name_on_a_shared_board() {
     assert!(out.contains("retired ann/alice"), "{out}");
     let dir = a.ok(None, &[], &["agents", "--board", "shared"]);
     assert!(!dir.contains("ann/alice"), "{dir}");
+}
+
+/// A published name shows its harness kind on the shared board, not `mailbox`; a takeover by
+/// another host's session carries the new holder's kind.
+#[cfg(unix)]
+#[test]
+fn a_published_name_keeps_its_harness_kind_on_the_shared_board() {
+    let cloud = Cloud::start(test_config());
+    let mut a = Host::new("ann", "host-a");
+    cloud.enroll(&a);
+    let sa = a.sock();
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    a.ok(Some("claude"), CAROL, &["register", "carol"]);
+    cloud.publish(&a, &sa, "carol");
+    assert_eq!(
+        cloud.fleet_kind("ann", "host-a", "carol"),
+        ("claude".into(), "host-a".into())
+    );
+    let dir = a.ok(Some("claude"), CAROL, &["agents", "--board", "shared"]);
+    assert!(dir.contains("ann/carol\tclaude on host-a"), "{dir}");
+
+    let mut b = Host::new("ann", "host-b");
+    cloud.enroll(&b);
+    let sb = b.sock();
+    cloud.join(&mut b, "daemon.log", &sb, &[]);
+    b.ok(Some("codex"), ALICE, &["register", "carol"]);
+    let r = human_call(
+        &b,
+        &sb,
+        "mailbox.publish",
+        json!({"agent": "carol", "name": "carol", "take": true}),
+    );
+    assert_eq!(r["state"], "published", "{r}");
+    assert_eq!(
+        cloud.fleet_kind("ann", "host-b", "carol"),
+        ("codex".into(), "host-b".into())
+    );
+}
+
+/// A name published before the board kept kinds (NULL on the board, nothing acknowledged
+/// locally): publishing it again answers `unchanged` and the board then shows its kind.
+#[cfg(unix)]
+#[test]
+fn a_republish_of_an_existing_publication_syncs_the_kind() {
+    let database = pg::fresh_database();
+    let cloud = Cloud::replica(database.as_deref(), test_config());
+    let mut a = Host::new("ann", "host-a");
+    cloud.enroll(&a);
+    let sa = a.sock();
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    a.ok(Some("claude"), CAROL, &["register", "carol"]);
+    cloud.publish(&a, &sa, "carol");
+    let forget = "UPDATE agents SET actor_kind = NULL WHERE name_lower = 'carol'";
+    match &database {
+        Some(url) => {
+            postgres::Client::connect(url, postgres::NoTls)
+                .unwrap()
+                .batch_execute(forget)
+                .unwrap();
+        }
+        None => cloud
+            .d
+            .store()
+            .as_any()
+            .downcast_ref::<conde::store::sqlite::SqliteStore>()
+            .unwrap()
+            .with_connection(|c| c.execute_batch(forget))
+            .unwrap(),
+    }
+    rusqlite::Connection::open(a.root.join("data/conde.db"))
+        .unwrap()
+        .execute_batch("UPDATE publications SET kind = NULL")
+        .unwrap();
+    assert_eq!(cloud.fleet_kind("ann", "host-a", "carol").0, "mailbox");
+
+    let r = human_call(
+        &a,
+        &sa,
+        "mailbox.publish",
+        json!({"agent": "carol", "name": "carol"}),
+    );
+    assert_eq!(
+        (r["state"].as_str(), r["unchanged"].as_bool()),
+        (Some("published"), Some(true)),
+        "{r}"
+    );
+    assert_eq!(cloud.fleet_kind("ann", "host-a", "carol").0, "claude");
+    let acknowledged: Option<String> = rusqlite::Connection::open(a.root.join("data/conde.db"))
+        .unwrap()
+        .query_row("SELECT kind FROM publications", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(acknowledged.as_deref(), Some("claude"));
 }

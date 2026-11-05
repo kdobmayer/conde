@@ -159,6 +159,7 @@ async fn ui_with(d: &Arc<Dispatcher>, config: ServerConfig) -> Ui {
     let web = WebSetup {
         entra: Some(entra),
         admin_key: None,
+        machines: None,
         store: store.clone(),
     };
     let server = conde::cloud::start_on(

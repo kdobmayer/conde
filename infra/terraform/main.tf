@@ -300,7 +300,19 @@ locals {
     CONDE_JOIN_SIGN_IN   = "microsoft"
     CONDE_WORKSPACE_NAME = "Dakai"
     # Slack DM notifications: owner=Slack user id pairs; the worker runs only with this and the token both set.
-  }, var.slack_notify != "" ? { CONDE_SLACK_NOTIFY = var.slack_notify } : {}, var.moved_to != "" ? { CONDE_MOVED_TO = var.moved_to } : {})
+  }, var.slack_notify != "" ? { CONDE_SLACK_NOTIFY = var.slack_notify } : {}, var.moved_to != "" ? { CONDE_MOVED_TO = var.moved_to } : {}, local.machines_env)
+}
+
+# The agent VMs: deployed by the server as id-conde into conde-vm from the template spec (infra/agent-vm), their
+# tokens checked against conde-machines (entra.tf). The VM size stays the server's default (CONDE_MACHINES_VM_SIZE).
+locals {
+  machines_env = {
+    CONDE_MACHINES_SUBSCRIPTION       = local.subscription_id
+    CONDE_MACHINES_RESOURCE_GROUP     = "conde-vm"
+    CONDE_MACHINES_TEMPLATE_SPEC      = "/subscriptions/${local.subscription_id}/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2"
+    CONDE_MACHINES_AUDIENCE           = azuread_application.machines.client_id
+    CONDE_MACHINES_IDENTITY_CLIENT_ID = azurerm_user_assigned_identity.app.client_id
+  }
 }
 
 # ── The server: public HTTPS + WebSocket ingress, one replica until the app is proven stateless ────────────────────

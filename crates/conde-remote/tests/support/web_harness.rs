@@ -601,3 +601,54 @@ async fn admin<S>(
     (status, r.json().await.unwrap_or(Value::Null))
 }
 
+
+/// One request the fake managed identity endpoint received: its query and its `X-IDENTITY-HEADER`.
+#[derive(Clone, Debug)]
+struct IdentityCall {
+    query: HashMap<String, String>,
+    header: Option<String>,
+}
+
+/// The fake Container Apps identity endpoint: answers `status`, and on 200 the token
+/// `arm-token-<n>` (n counts the requests) expiring `ttl` seconds from now, `expires_on` as the
+/// string of epoch seconds the platform sends.
+async fn identity_endpoint(
+    status: u16,
+    ttl: i64,
+) -> (String, Arc<Mutex<Vec<IdentityCall>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/msi/token", listener.local_addr().unwrap());
+    let seen: Arc<Mutex<Vec<IdentityCall>>> = Arc::new(Mutex::new(Vec::new()));
+    let s = seen.clone();
+    let app = Router::new().route(
+        "/msi/token",
+        get(
+            move |Query(query): Query<HashMap<String, String>>, headers: HeaderMap| {
+                let s = s.clone();
+                async move {
+                    let header = headers
+                        .get("x-identity-header")
+                        .map(|v| v.to_str().unwrap().to_string());
+                    let n = {
+                        let mut seen = s.lock().unwrap();
+                        seen.push(IdentityCall { query, header });
+                        seen.len()
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                    let body = json!({
+                        "access_token": format!("arm-token-{n}"),
+                        "expires_on": (now + ttl).to_string(),
+                        "resource": "https://management.azure.com/",
+                        "token_type": "Bearer",
+                    });
+                    (StatusCode::from_u16(status).unwrap(), axum::Json(body))
+                }
+            },
+        ),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, seen)
+}

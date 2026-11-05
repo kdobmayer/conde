@@ -63,6 +63,21 @@ resource "azuread_app_role_assignment" "sso_users" {
   resource_object_id  = azuread_service_principal.sso.object_id
 }
 
+# The agent VMs' token audience: a VM asks IMDS for a token with this app's client id as the resource and the
+# server checks `aud` against it. Assignment is not required, since a managed identity gets no token for an app that
+# requires it (AADSTS501051, the reason the SSO app cannot be the audience). No sign-in, no redirect, and no api block,
+# so the token stays v1 (issuer https://sts.windows.net/<tenant>/).
+resource "azuread_application" "machines" {
+  display_name     = "conde-machines"
+  sign_in_audience = "AzureADMyOrg"
+  notes            = "Token audience of conde's agent VMs (POST /v1/machines/enrol); no sign-in."
+}
+
+resource "azuread_service_principal" "machines" {
+  client_id                    = azuread_application.machines.client_id
+  app_role_assignment_required = false
+}
+
 # Placeholder the app's reference needs from the first apply; the real value is written by hand (README).
 resource "azurerm_key_vault_secret" "entra_client_secret" {
   name             = "entra-client-secret"
@@ -85,5 +100,12 @@ output "sso" {
     redirect_uri = local.sso_redirect
     issuer       = "https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0"
     users        = keys(local.sso_users)
+  }
+}
+
+# CONDE_MACHINES_AUDIENCE, and the condeResource every agent VM deployment passes.
+output "machines" {
+  value = {
+    client_id = azuread_application.machines.client_id
   }
 }

@@ -2316,6 +2316,7 @@ async fn revoking_a_key_or_disabling_its_user_closes_the_live_bridge() {
         web: Some(web::WebSetup {
             entra: None,
             admin_key: Some(ADMIN_KEY.into()),
+            machines: None,
             store: store.clone(),
         }),
         ..conde_remote::ServerConfig::default()
@@ -2463,6 +2464,7 @@ async fn a_revoked_socket_holding_its_hello_cannot_fence_the_valid_replacement()
         web: Some(web::WebSetup {
             entra: None,
             admin_key: Some(ADMIN_KEY.into()),
+            machines: None,
             store: store.clone(),
         }),
         ..conde_remote::ServerConfig::default()
@@ -2980,4 +2982,54 @@ async fn joined_and_empty_states_match_nothing() {
         b.peek(&second).await,
         (StatusCode::SEE_OTHER, "/keys".to_string())
     );
+}
+
+fn managed_identity(endpoint: &str) -> web::ManagedIdentity {
+    web::ManagedIdentity {
+        endpoint: endpoint.into(),
+        header: "identity-header-value".into(),
+        client_id: "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d".into(),
+    }
+}
+
+/// The machines' Azure calls carry a Resource Manager token of the server's identity (id-conde),
+/// asked of the platform's identity endpoint and reused until five minutes before it expires.
+#[tokio::test]
+async fn a_token_for_a_machine_comes_from_the_identity_endpoint_and_is_cached() {
+    let (url, seen) = identity_endpoint(200, 3600).await;
+    let azure = web::Azure::new(managed_identity(&url));
+    assert_eq!(azure.token().await.unwrap(), "arm-token-1");
+    assert_eq!(azure.token().await.unwrap(), "arm-token-1", "cached");
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let q = &calls[0].query;
+    assert_eq!(
+        (
+            q["api-version"].as_str(),
+            q["resource"].as_str(),
+            q["client_id"].as_str()
+        ),
+        (
+            "2019-08-01",
+            "https://management.azure.com/",
+            "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+        )
+    );
+    assert_eq!(calls[0].header.as_deref(), Some("identity-header-value"));
+
+    // A token within five minutes of its expiry is asked for again.
+    let (url, seen) = identity_endpoint(200, 299).await;
+    let azure = web::Azure::new(managed_identity(&url));
+    assert_eq!(azure.token().await.unwrap(), "arm-token-1");
+    assert_eq!(azure.token().await.unwrap(), "arm-token-2");
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    // A refusal is an error naming the status, never the header; nothing is cached.
+    let (url, seen) = identity_endpoint(500, 3600).await;
+    let azure = web::Azure::new(managed_identity(&url));
+    let e = azure.token().await.unwrap_err().to_string();
+    assert!(e.contains("500"), "{e}");
+    assert!(!e.contains("identity-header-value"), "{e}");
+    assert!(azure.token().await.is_err());
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }

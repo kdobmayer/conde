@@ -21,6 +21,7 @@ locals {
   host            = "conde"
   domain          = "nativeai.space"
   fqdn            = "${local.host}.${local.domain}"
+  public_host     = "dakai.conde.cloud"                    # the board's address (Cloudflare CNAME to this app); fqdn stays bound beside it
   owner_object_id = "da79aae8-c6e1-4f10-9826-42aeeab0c371" # krisztian.dobmayer@dakai.io: writes vault secrets by hand
   tags = {
     project = "conde"
@@ -267,29 +268,37 @@ resource "azurerm_key_vault_secret" "admin_key" {
 }
 
 locals {
-  # The Slack bot token is written by hand (README) and referenced by name only, so its value never enters this state.
+  # The Slack bot token and the Resend key are written by hand (README) and referenced by name only, so their values
+  # never enter this state.
   slack_token_secret = "conde-slack-bot-token"
+  resend_secret      = "resend-api-key"
 
   app_secrets = {
     (azurerm_key_vault_secret.database_url.name)        = azurerm_key_vault_secret.database_url.versionless_id
     (azurerm_key_vault_secret.admin_key.name)           = azurerm_key_vault_secret.admin_key.versionless_id
     (azurerm_key_vault_secret.entra_client_secret.name) = azurerm_key_vault_secret.entra_client_secret.versionless_id
     (local.slack_token_secret)                          = "${azurerm_key_vault.this.vault_uri}secrets/${local.slack_token_secret}"
+    (local.resend_secret)                               = "${azurerm_key_vault.this.vault_uri}secrets/${local.resend_secret}"
   }
   secret_env = {
     DATABASE_URL          = azurerm_key_vault_secret.database_url.name
     CONDE_ADMIN_KEY       = azurerm_key_vault_secret.admin_key.name
     ENTRA_CLIENT_SECRET   = azurerm_key_vault_secret.entra_client_secret.name
     CONDE_SLACK_BOT_TOKEN = local.slack_token_secret
+    RESEND_API_KEY        = local.resend_secret
   }
   plain_env = merge({
-    RUST_LOG            = "info"
-    CONDE_BOARD_NAME    = var.board_name
-    CONDE_MIN_PROTO     = tostring(var.min_proto)
-    CONDE_DIST_BASE_URL = "${azurerm_storage_account.dist.primary_blob_endpoint}${azurerm_storage_container.dist.name}"
+    RUST_LOG         = "info"
+    CONDE_BOARD_NAME = var.board_name
+    CONDE_MIN_PROTO  = tostring(var.min_proto)
+    # The release bucket every workspace installs and updates from (/install.sh, `conde update`).
+    CONDE_DIST_BASE_URL = "https://storage.googleapis.com/conde-cloud-dist"
     ENTRA_TENANT_ID     = data.azurerm_client_config.current.tenant_id
     ENTRA_CLIENT_ID     = azuread_application.sso.client_id
-    ENTRA_REDIRECT_URI  = local.sso_redirect
+    # The server derives its public URL (join links, cookie origin, Slack links) from this redirect.
+    ENTRA_REDIRECT_URI   = "https://${local.public_host}/auth/callback"
+    CONDE_JOIN_SIGN_IN   = "microsoft"
+    CONDE_WORKSPACE_NAME = "Dakai"
     # Slack DM notifications: owner=Slack user id pairs; the worker runs only with this and the token both set.
   }, var.slack_notify != "" ? { CONDE_SLACK_NOTIFY = var.slack_notify } : {}, var.moved_to != "" ? { CONDE_MOVED_TO = var.moved_to } : {})
 }

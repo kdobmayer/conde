@@ -53,6 +53,16 @@ resource "cloudflare_dns_record" "clearscale" {
   proxied = false
 }
 
+# The Dakai board runs on Azure Container Apps (ca-conde in infra/terraform): the app's domain verification id, which
+# Azure checks before it accepts dakai.conde.cloud as a custom domain. The CNAME to the app is added with the switch.
+resource "cloudflare_dns_record" "dakai_asuid" {
+  zone_id = local.zone_id
+  name    = "asuid.dakai.conde.cloud"
+  type    = "TXT"
+  content = "\"9F37591C7559C5416F350F8B456DFDC3A187987B419F18055DEEFF3D0D3E9AAD\""
+  ttl     = 300
+}
+
 output "records" {
   value = { for k, r in merge({ auth = cloudflare_dns_record.certificate_authorization }, cloudflare_dns_record.gateway) : k => "${r.name} ${r.type} ${r.content}" }
 }

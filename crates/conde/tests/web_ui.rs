@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 use sha2::Digest;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 include!("../../conde-remote/tests/support/web_harness.rs");
 
@@ -133,6 +134,7 @@ on_both!(
     a_hand_joined_host_is_adopted_without_a_deploy,
     setup_is_refused_while_deleting,
     machine_status_says_requested_failed_not_connected_up_connected_disconnected_and_ready,
+    an_adopted_running_machine_is_probed_at_setup_and_its_reply_marks_it_ready,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -3885,4 +3887,117 @@ impl Ui {
         let s = self.session(&b).await;
         (b, s["csrf"].as_str().unwrap().to_string())
     }
+}
+
+/// A pilot VM already running when its owner adopts it: its bridge announced the published
+/// vm.agent's live endpoint before the record existed and announces nothing new after. Setup
+/// sends the probe at adoption, once, from the endpoints on record, and the running bridge gets it
+/// without a reconnect; the agent's reply marks the machine ready; a repeated setup and a repeated
+/// endpoints frame send no second probe.
+async fn an_adopted_running_machine_is_probed_at_setup_and_its_reply_marks_it_ready(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, _arm) = ui_machines(&d).await;
+    ui.bound(USER, "oid-krisztian", INVITED.1).await;
+    let (b, csrf) = ui.browser().await;
+    let host = format!("vm-agent-{USER}");
+    let vm = ui.principal(USER, &host).await;
+    let uid = vm.user_id;
+    let key = format!("conde_test_{}", conde::util::new_ulid());
+    let (store, h, digest) = (
+        ui.env.store.clone(),
+        host.clone(),
+        conde_remote::token_digest(&key),
+    );
+    blocking(move || store.mint_host_key(uid, &h, "vm", &digest, START).unwrap()).await;
+    // published: vm.agent bound to its mailbox on the migrated host
+    let h = host.clone();
+    ui.write(move |t| {
+        t.set_host_mailbox_only(&h)?;
+        t.insert_agent("agent-k", uid, "vm.agent")?;
+        let address = format!("mailbox:mbx-k@{h}");
+        t.set_binding(
+            "agent-k",
+            Some(&conde::address::Address::parse(&address, "-").unwrap()),
+        )?;
+        Ok(())
+    })
+    .await;
+    // announced: the running bridge's hello lists the live mailbox
+    let mut req = format!("{}/v1/bridge", ui.env.base.replace("http", "ws"))
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let mailbox = json!([{"kind": "mailbox", "mailbox_id": "mbx-k"}]);
+    let hello = json!({"v": 1, "type": "hello", "host_id": host, "bridge_instance": "inst-k",
+                       "endpoints": mailbox, "proto": 2, "window": 4});
+    ws.send(tungstenite::Message::text(hello.to_string()))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let d2 = d.clone();
+        let rows = blocking(move || d2.with_conn(|t| t.endpoint_rows()).unwrap()).await;
+        if rows.iter().any(|e| e.target == "mbx-k") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let messages = || {
+        let d2 = d.clone();
+        async move { blocking(move || d2.with_conn(|t| t.message_count()).unwrap()).await }
+    };
+    assert_eq!(messages().await, 0, "no record yet, no probe");
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(r["state"], "connected", "{r}");
+    let probe = ui
+        .record(USER)
+        .await
+        .unwrap()
+        .probe_id
+        .expect("the probe at adoption");
+    let (d2, id) = (d.clone(), probe.clone());
+    let m = blocking(move || d2.with_conn(|t| t.message_by_id(&id)).unwrap().unwrap()).await;
+    assert_eq!(
+        (m.sender.as_str(), m.text.as_str()),
+        (&*format!("{USER}/human"), conde::ops::machines::PROBE_TEXT)
+    );
+    // the running bridge gets it, no reconnect and no endpoint change
+    let notify = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = ws.next().await.unwrap().unwrap();
+            let Ok(text) = frame.to_text() else { continue };
+            let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+            if v["type"] == "notify" && v["message_id"] == probe.as_str() {
+                return v;
+            }
+        }
+    })
+    .await
+    .expect("the probe reaches the running bridge");
+    assert_eq!(
+        notify["endpoint"],
+        json!({"kind": "mailbox", "mailbox_id": "mbx-k"})
+    );
+    // a repeated setup and a repeated endpoints frame send no second probe
+    ui.setup(&b, &csrf).await;
+    let again = json!({"v": 1, "type": "endpoints", "added": mailbox, "removed": []});
+    ws.send(tungstenite::Message::text(again.to_string()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(ui.record(USER).await.unwrap().probe_id, Some(probe.clone()));
+    assert_eq!(messages().await, 1, "one probe");
+    ui.op(
+        &vm,
+        "mailbox:mbx-k",
+        "message.send",
+        json!({"to": {"agent": format!("{USER}/human")}, "text": "here", "reply_to": probe}),
+    )
+    .await;
+    let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(s["state"], "ready", "{s}");
+    drop(ws);
+    ui.server.shutdown().await.unwrap();
 }

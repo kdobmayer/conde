@@ -92,6 +92,19 @@ pub fn setup(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
                     vm_size: &settings.vm_size,
                     minted_at: Some(&ctx.now_iso()),
                 })?;
+                // a running VM's endpoints may never change again: probe from those on record
+                let stored: Vec<(String, String)> = ctx
+                    .db
+                    .endpoint_rows()?
+                    .into_iter()
+                    .filter(|e| e.host == host)
+                    .map(|e| (e.kind, e.target))
+                    .collect();
+                let live: Vec<(&str, &str)> = stored
+                    .iter()
+                    .map(|(k, t)| (k.as_str(), t.as_str()))
+                    .collect();
+                probe_host(ctx, uid, &host, &live)?;
                 false
             }
             None => {
@@ -224,13 +237,18 @@ pub fn claude_expired(db: &dyn Tx, owner_id: i64) -> OpResult<bool> {
         .is_some_and(|v| v["claude"] == "expired"))
 }
 
-/// After a host's endpoints were replaced: the startup probe, once per record, when the list
-/// carries the mailbox of the owner's `vm.agent` published on the record's host.
+/// After a host's endpoints were replaced: the startup probe of the host's owner.
 pub fn probe(ctx: &Ctx, live: &[(&str, &str)]) -> OpResult<()> {
-    let Some(m) = ctx.db.machine_of_user(ctx.p.user_id)? else {
+    probe_host(ctx, ctx.p.user_id, &ctx.p.host, live)
+}
+
+/// The startup probe, once per record: when `live` (the endpoints of `host`) carries the mailbox
+/// of the owner's `vm.agent` published on `host`, the record's host.
+fn probe_host(ctx: &Ctx, owner_id: i64, host: &str, live: &[(&str, &str)]) -> OpResult<()> {
+    let Some(m) = ctx.db.machine_of_user(owner_id)? else {
         return Ok(());
     };
-    if m.host_id != ctx.p.host || m.probe_id.is_some() || m.deleting_at.is_some() {
+    if m.host_id != host || m.probe_id.is_some() || m.deleting_at.is_some() {
         return Ok(());
     }
     let Some(agent) = public_agent(ctx.db, m.user_id)? else {

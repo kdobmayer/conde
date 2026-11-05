@@ -52,6 +52,38 @@ pub struct PublishBody {
     /// Take the name over from another host of the same owner.
     #[serde(default, skip_serializing_if = "is_false")]
     pub take: bool,
+    /// What the name stands for, shown in the board's lists; None from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PublishedKind>,
+}
+
+/// The kind a publish may carry; `service` is never published (an admin sets it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PublishedKind {
+    Claude,
+    Codex,
+    Human,
+}
+
+impl PublishedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PublishedKind::Claude => "claude",
+            PublishedKind::Codex => "codex",
+            PublishedKind::Human => "human",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PublishedKind> {
+        [
+            PublishedKind::Claude,
+            PublishedKind::Codex,
+            PublishedKind::Human,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == s)
+    }
 }
 
 /// `mailbox.publish` result.
@@ -63,6 +95,10 @@ pub struct Published {
     /// The host's route revision after the publish (see [`conde_remote::Routes::revision`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
+    /// The kind the board holds after this publish; None from an older board, or when the body
+    /// carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PublishedKind>,
 }
 
 /// `mailbox.unpublish` body: unbind only if bound to the calling host at this generation,

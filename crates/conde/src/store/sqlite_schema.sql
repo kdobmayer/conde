@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS agents(
     binding_version INTEGER NOT NULL DEFAULT 0,
     pinned_address TEXT,
     retired_at TEXT,
+    actor_kind TEXT CHECK (actor_kind IN ('claude', 'codex', 'human', 'service')),
     UNIQUE (owner_id, name_lower)
 );
 CREATE INDEX IF NOT EXISTS agents_by_address ON agents(address_kind, address_target, host_id);
@@ -204,6 +205,7 @@ CREATE TABLE IF NOT EXISTS publications(
     route_generation INTEGER,
     state TEXT NOT NULL CHECK (state IN ('publishing', 'published', 'unpublishing')),
     updated_at TEXT NOT NULL,
+    kind TEXT,
     PRIMARY KEY (board, agent_id),
     UNIQUE (board, mailbox_id),
     UNIQUE (board, shared_name),

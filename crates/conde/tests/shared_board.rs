@@ -94,6 +94,7 @@ on_both!(
     a_mailbox_row_is_reached_only_when_delivered,
     board_info_names_the_board_account_and_host,
     publishing_joins_the_welcomes_lobby,
+    a_refused_publish_leaves_the_kind_as_it_was,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -1554,9 +1555,10 @@ async fn listings_show_kind_and_host_never_a_target(d: Arc<Dispatcher>) {
         .iter()
         .find(|a| a["name"] == "kd/desk")
         .unwrap();
+    // the mailbox keeps the kind its registration gave it
     assert_eq!(
         (desk["kind"].as_str(), desk["host"].as_str()),
-        (Some("mailbox"), Some("homepc"))
+        (Some("claude"), Some("homepc"))
     );
     assert!(
         !list.to_string().contains(&ids[0]),
@@ -2075,5 +2077,40 @@ async fn publishing_joins_the_welcomes_lobby(d: Arc<Dispatcher>) {
     assert!(
         member.is_some(),
         "kd/scribe joined #team on its first publish"
+    );
+}
+
+/// A publish refused for a name bound on another host (no take) writes nothing: the kind it
+/// carried is not kept.
+async fn a_refused_publish_leaves_the_kind_as_it_was(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (_home, ids) = migrated(&fx, &["desk"], 4).await;
+    let kind_of = |d: Arc<Dispatcher>, id: String| {
+        blocking(move || {
+            d.with_conn(|tx| tx.agent_by_id(&id))
+                .unwrap()
+                .unwrap()
+                .actor_kind
+        })
+    };
+    assert_eq!(
+        kind_of(d.clone(), ids[0].clone()).await.as_deref(),
+        Some("claude")
+    );
+    let laptop = s.key("kd", "laptop").await;
+    s.migrate(&laptop, &[], &conde::util::new_ulid()).await;
+    let (code, _) = s
+        .err(
+            &laptop,
+            None,
+            "mailbox.publish",
+            json!({"name": "desk", "kind": "codex"}),
+        )
+        .await;
+    assert_eq!(code, "conflict", "published on homepc: --take is needed");
+    assert_eq!(
+        kind_of(d.clone(), ids[0].clone()).await.as_deref(),
+        Some("claude")
     );
 }

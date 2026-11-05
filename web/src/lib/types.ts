@@ -31,9 +31,12 @@ export interface RailChannel {
 /** A channel member's push setting: `mentions` (the default) or `all` posts. */
 export type Notify = 'mentions' | 'all';
 
+/** What a name stands for: its actor kind, else its address kind (`mailbox` until a publish sets it). */
+export type AgentKind = 'claude' | 'codex' | 'human' | 'service' | 'mailbox';
+
 export interface OwnerAgent {
 	name: string;
-	kind: 'claude' | 'codex' | 'human' | null;
+	kind: AgentKind | null;
 	address: string | null;
 	dms: RailDm[];
 	channels: RailChannel[];
@@ -107,7 +110,7 @@ export interface FleetAgent {
 	name: string;
 	owner: string;
 	display: string | null;
-	kind: 'claude' | 'codex' | 'human';
+	kind: AgentKind;
 	host: string;
 	address: string | null;
 	pinned: string | null;

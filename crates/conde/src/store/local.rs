@@ -24,6 +24,8 @@ pub struct Publication {
     pub route_generation: Option<u64>,
     pub state: PublicationState,
     pub updated_at: String,
+    /// The actor kind the board last acknowledged for the mailbox; None until it did.
+    pub kind: Option<String>,
 }
 
 /// Only `Published` admits inbound notifies and outbound use.
@@ -171,6 +173,7 @@ pub trait LocalTx {
         at: &str,
     ) -> StoreResult<()>;
     fn delete_publication(&self, board: &str, agent_id: &str) -> StoreResult<bool>;
+    fn set_publication_kind(&self, board: &str, agent_id: &str, kind: &str) -> StoreResult<()>;
     fn insert_op(&self, op: &BoardOp) -> StoreResult<()>;
     fn op(&self, op_id: &str) -> StoreResult<Option<BoardOp>>;
     fn finish_op(
@@ -189,7 +192,7 @@ pub trait LocalTx {
     fn forget_board(&self, board: &str) -> StoreResult<(usize, usize)>;
 }
 
-const PUB_SELECT: &str = "SELECT board, agent_id, shared_name, mailbox_id, route_generation, state, updated_at FROM publications";
+const PUB_SELECT: &str = "SELECT board, agent_id, shared_name, mailbox_id, route_generation, state, updated_at, kind FROM publications";
 const OP_SELECT: &str = "SELECT op_id, board, kind, agent_id, request_json, state, result_json, created_at, updated_at FROM board_ops";
 
 fn pub_row(r: &rusqlite::Row) -> rusqlite::Result<Publication> {
@@ -203,6 +206,7 @@ fn pub_row(r: &rusqlite::Row) -> rusqlite::Result<Publication> {
         route_generation: generation.map(|g| g as u64),
         state: PublicationState::parse(&state).unwrap_or(PublicationState::Unpublishing),
         updated_at: r.get(6)?,
+        kind: r.get(7)?,
     })
 }
 
@@ -273,8 +277,8 @@ impl LocalTx for SqliteTx<'_> {
 
     fn insert_publication(&self, p: &Publication) -> StoreResult<()> {
         self.guard(self.raw().execute(
-            "INSERT INTO publications(board, agent_id, shared_name, mailbox_id, route_generation, state, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO publications(board, agent_id, shared_name, mailbox_id, route_generation, state, updated_at, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 p.board,
                 p.agent_id,
@@ -282,7 +286,8 @@ impl LocalTx for SqliteTx<'_> {
                 p.mailbox_id,
                 p.route_generation.map(|g| g as i64),
                 p.state.as_str(),
-                p.updated_at
+                p.updated_at,
+                p.kind
             ],
         ))?;
         Ok(())
@@ -310,6 +315,14 @@ impl LocalTx for SqliteTx<'_> {
             params![board, agent_id],
         ))?;
         Ok(n > 0)
+    }
+
+    fn set_publication_kind(&self, board: &str, agent_id: &str, kind: &str) -> StoreResult<()> {
+        self.guard(self.raw().execute(
+            "UPDATE publications SET kind = ?3 WHERE board = ?1 AND agent_id = ?2",
+            params![board, agent_id, kind],
+        ))?;
+        Ok(())
     }
 
     fn insert_op(&self, op: &BoardOp) -> StoreResult<()> {

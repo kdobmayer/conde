@@ -10,7 +10,7 @@ use super::agents::{self, Agent};
 use crate::address::{Address, Kind};
 use crate::dispatch::{Ctx, OpResult, bad_request, conflict, forbidden, not_found};
 use crate::protocol::v2::{
-    BoardInfo, Mine, MineMailbox, PublishBody, Published, UnpublishBody, Unpublished,
+    BoardInfo, Mine, MineMailbox, PublishBody, Published, PublishedKind, UnpublishBody, Unpublished,
 };
 
 pub(crate) fn parse<T: DeserializeOwned>(body: &Value) -> OpResult<T> {
@@ -58,10 +58,11 @@ pub fn board_info(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
     })
 }
 
-/// `mailbox.publish {name, take?}`: binds `<caller>/name` on the calling host and bumps its
-/// generation. Publishing again as the same mailbox is a no-op; a name bound on another host is
-/// a conflict unless `take`, which moves it here (the old host's routes are pushed). A human
-/// name is never published (`human: true` is refused): each owner's is the board's own.
+/// `mailbox.publish {name, take?, kind?}`: binds `<caller>/name` on the calling host and bumps its
+/// generation. Publishing again as the same mailbox changes only the kind; a name bound on
+/// another host is a conflict unless `take`, which moves it here (the old host's routes are
+/// pushed). A human name is never published (`human: true` is refused): each owner's is the
+/// board's own.
 pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     ctx.migrated()?;
     let b: PublishBody = parse(body)?;
@@ -78,9 +79,15 @@ pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     }
     agents::may_bind(ctx, &name)?;
     let row = agents::ensure_row(ctx, &name)?;
+    // before the unchanged-binding return, so a republish always carries the kind
+    if let Some(kind) = b.kind
+        && row.actor_kind.as_deref() != Some(kind.as_str())
+    {
+        ctx.db.set_actor_kind(&row.id, kind.as_str())?;
+    }
     let target = Address::new(Kind::Mailbox, &row.id, &ctx.p.host);
     match &row.address {
-        Some(a) if *a == target => return published(ctx, &row),
+        Some(a) if *a == target => return published(ctx, &row, b.kind),
         Some(a) if a.host != ctx.p.host && !b.take => {
             return Err(conflict(format!(
                 "{} is published on host '{}'; take it over with --take",
@@ -99,7 +106,7 @@ pub fn publish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         agents::join_lobby(ctx, &row)?;
     }
     let row = agents::by_id(ctx.db, &row.id)?.ok_or_else(|| not_found(name.clone()))?;
-    published(ctx, &row)
+    published(ctx, &row, b.kind)
 }
 
 /// The calling host's route revision, read in the op's own transaction.
@@ -107,12 +114,13 @@ pub fn revision(ctx: &Ctx) -> OpResult<u64> {
     Ok(ctx.db.route_revision(&ctx.p.host)?)
 }
 
-fn published(ctx: &Ctx, a: &Agent) -> OpResult<Value> {
+fn published(ctx: &Ctx, a: &Agent, kind: Option<PublishedKind>) -> OpResult<Value> {
     json(&Published {
         name: a.name.clone(),
         mailbox_id: a.id.clone(),
         route_generation: generation(a),
         revision: Some(revision(ctx)?),
+        kind,
     })
 }
 

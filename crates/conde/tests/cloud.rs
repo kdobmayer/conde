@@ -968,27 +968,7 @@ fn a_republish_of_an_existing_publication_syncs_the_kind() {
     cloud.join(&mut a, "daemon.log", &sa, &[]);
     a.ok(Some("claude"), CAROL, &["register", "carol"]);
     cloud.publish(&a, &sa, "carol");
-    let forget = "UPDATE agents SET actor_kind = NULL WHERE name_lower = 'carol'";
-    match &database {
-        Some(url) => {
-            postgres::Client::connect(url, postgres::NoTls)
-                .unwrap()
-                .batch_execute(forget)
-                .unwrap();
-        }
-        None => cloud
-            .d
-            .store()
-            .as_any()
-            .downcast_ref::<conde::store::sqlite::SqliteStore>()
-            .unwrap()
-            .with_connection(|c| c.execute_batch(forget))
-            .unwrap(),
-    }
-    rusqlite::Connection::open(a.root.join("data/conde.db"))
-        .unwrap()
-        .execute_batch("UPDATE publications SET kind = NULL")
-        .unwrap();
+    forget_kinds(&cloud, database.as_deref(), &a);
     assert_eq!(cloud.fleet_kind("ann", "host-a", "carol").0, "mailbox");
 
     let r = human_call(
@@ -1008,4 +988,59 @@ fn a_republish_of_an_existing_publication_syncs_the_kind() {
         .query_row("SELECT kind FROM publications", [], |r| r.get(0))
         .unwrap();
     assert_eq!(acknowledged.as_deref(), Some("claude"));
+}
+
+/// What a publication made before kinds looks like: no kind on the board, none acknowledged in
+/// `h`'s local board.
+fn forget_kinds(cloud: &Cloud, database: Option<&str>, h: &Host) {
+    let forget = "UPDATE agents SET actor_kind = NULL WHERE name_lower = 'carol'";
+    match database {
+        Some(url) => {
+            postgres::Client::connect(url, postgres::NoTls)
+                .unwrap()
+                .batch_execute(forget)
+                .unwrap();
+        }
+        None => cloud
+            .d
+            .store()
+            .as_any()
+            .downcast_ref::<conde::store::sqlite::SqliteStore>()
+            .unwrap()
+            .with_connection(|c| c.execute_batch(forget))
+            .unwrap(),
+    }
+    rusqlite::Connection::open(h.root.join("data/conde.db"))
+        .unwrap()
+        .execute_batch("UPDATE publications SET kind = NULL")
+        .unwrap();
+}
+
+/// A daemon holding a publication made before kinds syncs it when it connects, with no publish.
+#[cfg(unix)]
+#[test]
+fn a_connecting_daemon_syncs_the_kind_of_its_existing_publications() {
+    let database = pg::fresh_database();
+    let cloud = Cloud::replica(database.as_deref(), test_config());
+    let mut a = Host::new("ann", "host-a");
+    cloud.enroll(&a);
+    let sa = a.sock();
+    let pid = cloud.join(&mut a, "daemon.log", &sa, &[]);
+    a.ok(Some("claude"), CAROL, &["register", "carol"]);
+    cloud.publish(&a, &sa, "carol");
+    a.terminate(pid);
+    forget_kinds(&cloud, database.as_deref(), &a);
+    assert_eq!(cloud.fleet_kind("ann", "host-a", "carol").0, "mailbox");
+
+    a.daemon("daemon2.log", &sa, &[]);
+    wait_for("the board shows carol's kind", || {
+        (cloud.fleet_kind("ann", "host-a", "carol").0 == "claude").then_some(())
+    });
+    wait_for("the kind recorded as acknowledged", || {
+        let kind: Option<String> = rusqlite::Connection::open(a.root.join("data/conde.db"))
+            .unwrap()
+            .query_row("SELECT kind FROM publications", [], |r| r.get(0))
+            .unwrap();
+        (kind.as_deref() == Some("claude")).then_some(())
+    });
 }

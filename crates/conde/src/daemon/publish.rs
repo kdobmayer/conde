@@ -260,6 +260,34 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
     )
 }
 
+/// One pass per board connect: syncs the kind of every publication on the board whose
+/// acknowledged kind is unset or differs from its local row's, so names published before kinds
+/// existed show theirs without a publish.
+pub(super) async fn sync_kinds(core: Arc<Core>, conn: Arc<BoardConn>) {
+    let due = core.local_tx(|tx| {
+        let mut due = Vec::new();
+        for p in tx.publications(Some(&conn.alias))? {
+            if p.state != PublicationState::Published {
+                continue;
+            }
+            if let Some(kind) = tx.agent_by_id(&p.agent_id)?.as_ref().and_then(local_kind)
+                && p.kind.as_deref() != Some(kind.as_str())
+            {
+                due.push((p, kind));
+            }
+        }
+        Ok(due)
+    });
+    match due {
+        Ok(due) => {
+            for (p, kind) in due {
+                sync_kind(&core, &conn, &p, kind).await;
+            }
+        }
+        Err(e) => tracing::warn!(board = conn.alias, "kinds not synced: {e:#}"),
+    }
+}
+
 /// The kind a local row is published with: its actor kind, else its address kind.
 fn local_kind(agent: &crate::store::Agent) -> Option<PublishedKind> {
     agent.shown_kind().and_then(PublishedKind::parse)

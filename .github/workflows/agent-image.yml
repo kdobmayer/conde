@@ -1,0 +1,63 @@
+# Builds the agent VM image (infra/agent-vm/image) into galNativeLanes/agent-vm. Runs on a GitHub-hosted runner:
+# Packer's work happens on a temporary Azure VM, so the runner only drives it. Signs in to Azure with the Entra
+# app conde-agent-image (OIDC, no secret), whose federated credential trusts this repo's `agent-image`
+# environment; set up once with infra/agent-vm/azure/image-builder.sh.
+name: agent-vm image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - infra/agent-vm/bootstrap.sh
+      - infra/agent-vm/agentvm
+      - infra/agent-vm/run-agent
+      - infra/agent-vm/conde-register-hook
+      - infra/agent-vm/claude-agent.service
+      - infra/agent-vm/agentvm-firstboot
+      - infra/agent-vm/agentvm-firstboot.service
+      - infra/agent-vm/image/**
+      - .github/workflows/agent-image.yml
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: agent-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: agent-image
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-packer@v3
+        with:
+          version: 1.11.2
+
+      - name: packer init and validate
+        run: |
+          packer init infra/agent-vm/image
+          packer validate -var subscription_id=x -var image_version=1.0.0 infra/agent-vm/image
+
+      - name: packer build
+        env:
+          SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ip=$(curl -fsS https://api.ipify.org)
+          version="1.$(date -u +%Y%m%d).${{ github.run_number }}"
+          echo "image version $version, build VM reachable from $ip only"
+          packer build -color=false \
+            -var subscription_id="$SUBSCRIPTION_ID" -var image_version="$version" -var allowed_ip="$ip" \
+            infra/agent-vm/image
+          echo "### agent-vm image $version" >> "$GITHUB_STEP_SUMMARY"

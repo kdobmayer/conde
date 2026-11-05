@@ -1,0 +1,16 @@
+# The agent's Claude session, as a user unit of the agent user (linger starts it at boot). run-agent execs
+# claude as the pane's only process, so when Claude exits, tmux exits with it and Restart=always starts it again
+# on the same session id.
+[Unit]
+Description=Always-on Claude agent (remote control, conde)
+After=conde.service network-online.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/tmux -L agent new-session -d -s agent -x 220 -y 50 %h/.config/agentvm/run-agent
+ExecStop=/usr/bin/tmux -L agent kill-server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -86,7 +86,7 @@ cmd_conde_login_finish() {
 }
 
 # The first agent: an interactive Claude session with remote control on, in a tmux session owned by a
-# user service, so it starts at boot and comes back after a crash. Its first prompt has it register its
+# user service, so it starts at boot and comes back after a crash. The SessionStart hook registers its
 # name on conde; afterwards the same conversation is resumed (same session id), never a new one.
 cmd_agent_start() {
   need_bootstrap
@@ -100,22 +100,8 @@ PERMISSION_MODE=$(q "$mode")
 WORK_DIR=\$HOME/$WORK_DIR_NAME
 EOF"
   install -m 0755 -o "$AGENT_USER" /usr/local/lib/agentvm/run-agent "$home/.config/agentvm/run-agent"
-  as_agent 'cat > ~/.config/systemd/user/claude-agent.service <<EOF
-[Unit]
-Description=First Claude agent (remote control, conde)
-After=conde.service network-online.target
-
-[Service]
-Type=forking
-ExecStart=/usr/bin/tmux -L agent new-session -d -s agent -x 220 -y 50 %h/.config/agentvm/run-agent
-ExecStop=/usr/bin/tmux -L agent kill-server
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-EOF
-systemctl --user daemon-reload && systemctl --user enable --now claude-agent'
+  install -m 0644 -o "$AGENT_USER" /usr/local/lib/agentvm/claude-agent.service "$home/.config/systemd/user/claude-agent.service"
+  as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent'
   sleep 15
   cmd_agent_log
 }

@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent VM first boot: join the conde board with the VM identity, set up the agent
+Wants=network-online.target
+After=network-online.target cloud-final.service
+ConditionPathExists=!/var/lib/agentvm/firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/agentvm/agentvm-firstboot
+RemainAfterExit=yes
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target

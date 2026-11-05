@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# First boot of a VM made from the agent image (agentvm-firstboot.service, root, once). Joins the board without
+# a person: the VM's own system-assigned identity is the proof (the mint call, design section "The two seam
+# contracts", 1). Then it sets the agent up, and the session starts as soon as the person has signed in to
+# Claude through the page.
+#
+#   1. conde setup as the agent user: bridge service, skill and MCP entries (per machine, so not on the image)
+#   2. an Entra token for this VM's identity, resource the conde application, from the instance metadata service
+#   3. POST /v1/machines/enrol with it: the host key, once per identity
+#   4. conde enroll with that key on stdin; the key is never in an argument, a file of ours or the log
+#   5. agent.env with a pinned session id, and claude-agent.service enabled (it waits for the Claude sign-in)
+#
+# Settings: /etc/agentvm.conf (the image's defaults), overridden by the VM's userData (JSON from the template:
+# condeServer, condeResource). The outcome goes to the journal: journalctl -u agentvm-firstboot.
+set -euo pipefail
+
+CONF=/etc/agentvm.conf
+[ -f "$CONF" ] && . "$CONF"
+AGENT_USER="${AGENT_USER:-agent}"
+WORK_DIR_NAME="${WORK_DIR_NAME:-work}"
+PERMISSION_MODE="${PERMISSION_MODE:-bypassPermissions}"
+DONE=/var/lib/agentvm/firstboot-done
+IMDS="${AGENTVM_IMDS:-http://169.254.169.254/metadata}"
+DEADLINE=$(( $(date +%s) + 30 * 60 ))   # 5xx and network errors are retried for 30 minutes
+
+log() { echo "agentvm-firstboot: $*"; }
+die() { log "FAILED: $*"; exit 1; }
+
+uid=$(id -u "$AGENT_USER")
+home=$(getent passwd "$AGENT_USER" | cut -d: -f6)
+for _ in $(seq 120); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+as_agent() {
+  sudo -u "$AGENT_USER" -H env XDG_RUNTIME_DIR="/run/user/$uid" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    bash -lc "cd ~ && $1"
+}
+q() { printf '%q' "$1"; }
+
+# --- settings from userData (empty when the VM was created without it)
+ud=$(curl -fsS -H Metadata:true "$IMDS/instance/compute/userData?api-version=2021-01-01&format=text" 2>/dev/null | base64 -d 2>/dev/null || true)
+CONDE_SERVER=$(printf '%s' "$ud" | jq -r '.condeServer // empty' 2>/dev/null || true)
+CONDE_SERVER="${CONDE_SERVER:-${CONDE_SERVER_DEFAULT:-https://dakai.conde.cloud}}"
+CONDE_RESOURCE=$(printf '%s' "$ud" | jq -r '.condeResource // empty' 2>/dev/null || true)
+CONDE_RESOURCE="${CONDE_RESOURCE:-${CONDE_RESOURCE_DEFAULT:-}}"
+[ -n "$CONDE_RESOURCE" ] || die "no conde resource (userData condeResource or CONDE_RESOURCE_DEFAULT)"
+log "server $CONDE_SERVER, resource $CONDE_RESOURCE"
+
+# --- 1. conde on this machine
+as_agent 'conde setup' || die "conde setup"
+mkdir -p /var/lib/agentvm && date -u +%FT%TZ > /var/lib/agentvm/bootstrap-done
+
+# --- 2 and 3. token, then the mint call. Retried: network, 5xx, 429 (Retry-After). Final: every other 4xx.
+backoff=5
+wait_or_die() {  # $1 seconds, $2 what failed
+  [ "$(date +%s)" -lt "$DEADLINE" ] || die "$2, still failing after 30 minutes"
+  log "$2; retrying in $1 s"; sleep "$1"
+}
+
+enrolled() { as_agent 'conde boards' 2>/dev/null | awk -v s="$CONDE_SERVER" '$0 ~ s {f=1} END {exit !f}'; }
+
+if enrolled; then
+  log "already enrolled with $CONDE_SERVER (a reboot during first boot); skipping the mint"
+else
+  while :; do
+    tok=$(curl -fsS -H Metadata:true --get "$IMDS/identity/oauth2/token" \
+            --data-urlencode api-version=2018-02-01 --data-urlencode "resource=$CONDE_RESOURCE" 2>/dev/null \
+          | jq -r '.access_token // empty' || true)
+    [ -n "$tok" ] && break
+    wait_or_die "$backoff" "no identity token from the metadata service"; backoff=$(( backoff < 120 ? backoff * 2 : 120 ))
+  done
+
+  backoff=5
+  hdrs=$(mktemp); trap 'rm -f "$hdrs"' EXIT
+  while :; do
+    set +e
+    resp=$(curl -sS -D "$hdrs" -w '\n%{http_code}' -X POST "$CONDE_SERVER/v1/machines/enrol" \
+             -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' --data '{"v":1}')
+    rc=$?; set -e
+    code=${resp##*$'\n'}; body=${resp%$'\n'*}
+    if [ "$rc" -ne 0 ]; then wait_or_die "$backoff" "enrol: network error (curl $rc)"; backoff=$(( backoff < 120 ? backoff * 2 : 120 )); continue; fi
+    case "$code" in
+      200) break ;;
+      429) ra=$(awk 'tolower($1)=="retry-after:" {print $2+0}' "$hdrs"); wait_or_die "${ra:-30}" "enrol: rate limited" ;;
+      5??) wait_or_die "$backoff" "enrol: HTTP $code"; backoff=$(( backoff < 120 ? backoff * 2 : 120 )) ;;
+      *)   die "enrol: HTTP $code $(printf '%s' "$body" | jq -c '{error, message}' 2>/dev/null || echo '(no JSON body)')" ;;
+    esac
+  done
+  unset tok
+
+  # --- 4. enrol the host with the key on stdin
+  field() { printf '%s' "$body" | jq -r --arg k "$1" '.[$k] // empty'; }
+  server=$(field server); board=$(field board); host_id=$(field host_id); name=$(field name); owner=$(field user)
+  [ -n "$server" ] && [ -n "$board" ] && [ -n "$host_id" ] && [ -n "$name" ] || die "enrol: 200 without server, board, host_id or name"
+  printf 'OWNER=%q\nFULL_NAME=%q\n' "$owner" "$name" > /var/lib/agentvm/machine.env
+  field key | as_agent "conde enroll --server $(q "$server") --host $(q "$host_id") --board $(q "$board") --key-stdin" \
+    || die "conde enroll"
+  unset body
+  as_agent 'systemctl --user restart conde' || true
+  log "enrolled as $host_id on $board ($server); agent name $name"
+fi
+
+# --- 5. the agent: pinned session id (kept if this runs again), the unit, enabled; it waits for the sign-in
+. /var/lib/agentvm/machine.env
+as_agent "mkdir -p ~/.config/agentvm ~/.config/systemd/user ~/$WORK_DIR_NAME"
+if [ ! -f "$home/.config/agentvm/agent.env" ]; then
+  as_agent "cat > ~/.config/agentvm/agent.env <<EOF
+AGENT_NAME=$(q "${FULL_NAME#*/}")
+RC_NAME=$(q "$FULL_NAME")
+OWNER_LABEL=$(q "$OWNER")
+SESSION_ID=$(uuidgen)
+PERMISSION_MODE=$(q "$PERMISSION_MODE")
+WORK_DIR=\$HOME/$WORK_DIR_NAME
+EOF"
+fi
+install -m 0755 -o "$AGENT_USER" /usr/local/lib/agentvm/run-agent "$home/.config/agentvm/run-agent"
+install -m 0644 -o "$AGENT_USER" /usr/local/lib/agentvm/claude-agent.service "$home/.config/systemd/user/claude-agent.service"
+as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent'
+
+date -u +%FT%TZ > "$DONE"
+log "done; the agent starts when the person has signed in to Claude"

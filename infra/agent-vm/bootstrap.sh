@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# First-boot setup of a person's agent VM (Ubuntu 24.04), run once by cloud-init as root.
-# Everything is installed here, at deploy time, from the vendors' current releases, so a new VM
-# never starts on an outdated image. Nothing here signs in: the sign-ins need the person and run
-# later through `agentvm` (installed by cloud-init next to this script).
+# Installs an agent VM (Ubuntu 24.04), as root, from the vendors' current releases.
+#
+#   bootstrap.sh          the test flow: cloud-init runs it at first boot (install, then `conde setup`)
+#   bootstrap.sh image    the Packer build: install only. `conde setup` is per machine (it records this
+#                         host), so on image VMs it runs at first boot, in agentvm-firstboot
+#
+# Nothing here signs in: the sign-ins need the person and come later.
 set -euo pipefail
+MODE="${1:-full}"
 
 [ -f /etc/agentvm.conf ] && . /etc/agentvm.conf
 AGENT_USER="${AGENT_USER:-agent}"
@@ -56,10 +60,18 @@ as_agent "f=~/.claude.json; [ -f \$f ] || echo '{}' > \$f; \
      | .projects[\$d].hasTrustDialogAccepted = true
      | .projects[\$d].hasCompletedProjectOnboarding = true' \$f > \$f.new && mv \$f.new \$f"
 as_agent "f=~/.claude/settings.json; [ -f \$f ] || echo '{}' > \$f; \
-  jq '.skipDangerousModePermissionPrompt = true' \$f > \$f.new && mv \$f.new \$f"
+  jq '.skipDangerousModePermissionPrompt = true
+     | .hooks.SessionStart = [{hooks: [{type: \"command\", command: \"/usr/local/lib/agentvm/conde-register-hook\"}]}]' \
+  \$f > \$f.new && mv \$f.new \$f"
 
 # --- conde: the bridge as a user service, the skill and MCP entry for Claude Code, receiver policy accept.
-# Joining the shared board (dakai) is a sign-in, done later by `agentvm conde-login-*`.
+# Joining the shared board (dakai) comes later: `agentvm conde-login-*` (test flow) or the mint call at first
+# boot (image VMs). The image build stops before this, because `conde setup` records the host.
+if [ "$MODE" = image ]; then
+  echo "== bootstrap (image) done $(date -u +%FT%TZ)"
+  as_agent 'echo "claude $(claude --version)"; conde --version; uv --version'; git --version; gh --version | head -1
+  exit 0
+fi
 as_agent 'conde setup'
 as_agent 'conde setup --check' || true
 

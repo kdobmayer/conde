@@ -55,6 +55,14 @@ write_files:
     permissions: "0755"
     encoding: b64
     content: $(b64 "$HERE/run-agent")
+  - path: /usr/local/lib/agentvm/conde-register-hook
+    permissions: "0755"
+    encoding: b64
+    content: $(b64 "$HERE/conde-register-hook")
+  - path: /usr/local/lib/agentvm/claude-agent.service
+    permissions: "0644"
+    encoding: b64
+    content: $(b64 "$HERE/claude-agent.service")
   - path: /usr/local/bin/agentvm
     permissions: "0755"
     encoding: b64

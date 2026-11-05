@@ -415,6 +415,18 @@ resource "azurerm_container_app_custom_domain" "conde" {
   depends_on = [azurerm_dns_cname_record.conde, azurerm_dns_txt_record.conde_asuid]
 }
 
+# The board's address. Its CNAME and asuid TXT are Cloudflare records in infra/gcp/dns, so this is applied only once
+# the CNAME points here; the managed certificate is then bound by hand with CNAME validation
+# (docs/CUTOVER-dakai-azure.md step 17), hence the ignored binding.
+resource "azurerm_container_app_custom_domain" "dakai" {
+  name             = local.public_host
+  container_app_id = azurerm_container_app.server.id
+
+  lifecycle {
+    ignore_changes = [certificate_binding_type, container_app_environment_certificate_id]
+  }
+}
+
 output "conde" {
   value = {
     url            = "https://${local.fqdn}"

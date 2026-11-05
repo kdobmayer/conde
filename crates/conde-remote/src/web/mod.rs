@@ -18,6 +18,7 @@ mod auth;
 pub mod invite;
 pub mod join;
 mod keys;
+mod machines;
 mod nav;
 mod pages;
 mod ratelimit;
@@ -42,6 +43,7 @@ pub use auth::{Oidc, RedeemResponse};
 pub use invite::{InviteConfig, KeycloakAdmin, Resend, SignIn};
 pub use join::{JOIN_TTL, JoinRecord};
 pub use keys::new_host_key;
+pub use machines::{Azure, AzureError, DEFAULT_VM_SIZE, MachinesConfig, ManagedIdentity};
 pub use ratelimit::RateLimits;
 
 /// Everything the web surface needs to know about the deployment.
@@ -881,6 +883,8 @@ pub struct WebSetup {
     pub entra: Option<WebConfig>,
     /// The admin API's bearer key; the admin API is off without it.
     pub admin_key: Option<String>,
+    /// Where the people's agent VMs are deployed; off without it.
+    pub machines: Option<MachinesConfig>,
     pub store: Arc<dyn WebStore>,
 }
 
@@ -889,15 +893,18 @@ impl std::fmt::Debug for WebSetup {
         f.debug_struct("WebSetup")
             .field("entra", &self.entra)
             .field("admin", &self.admin_key.is_some())
+            .field("machines", &self.machines)
             .finish_non_exhaustive()
     }
 }
 
 impl WebSetup {
     /// Sign-in from `OIDC_*` (or `ENTRA_*`), the admin API from `CONDE_ADMIN_KEY` (or
-    /// `CONDE_ADMIN_KEY_FILE`); `Ok(None)` when neither is configured.
+    /// `CONDE_ADMIN_KEY_FILE`), the agent machines from `CONDE_MACHINES_*`; `Ok(None)` when
+    /// neither sign-in nor the admin API is configured.
     pub fn from_env(store: Arc<dyn WebStore>) -> Result<Option<WebSetup>, ConfigError> {
         let entra = WebConfig::from_env()?;
+        let machines = MachinesConfig::from_env()?;
         let admin_key = crate::secret_env("CONDE_ADMIN_KEY")?;
         if admin_key
             .as_ref()
@@ -911,6 +918,7 @@ impl WebSetup {
         Ok(Some(WebSetup {
             entra,
             admin_key,
+            machines,
             store,
         }))
     }

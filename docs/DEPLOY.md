@@ -200,3 +200,23 @@ board move <alias> <url>`. `conde board move` keeps the host's key, account and 
 sends the host key to the new address only after the old server answered, without the key, that
 the board moved exactly there (scheme, host and port), unless `--trust-new-address` is given, and
 saves it only after the new address answers `board.info` with that key as the same board.
+
+## Agent machines
+
+A workspace on Azure can deploy each person's agent VM (infra/agent-vm) itself. The server reads where from five
+variables, all set or none (some set: the server refuses to start and names the first missing one):
+
+- `CONDE_MACHINES_SUBSCRIPTION`: the subscription of the VMs (60df47fc-ce8f-4f52-a970-43a412d78007).
+- `CONDE_MACHINES_RESOURCE_GROUP`: their resource group (conde-vm).
+- `CONDE_MACHINES_TEMPLATE_SPEC`: the resource id of the template spec version it deploys
+  (`/subscriptions/<sub>/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2`).
+- `CONDE_MACHINES_AUDIENCE`: the application id of the Entra app conde-machines (`terraform output machines` in
+  infra/terraform). A VM's token must carry it as `aud`, and every deployment passes it as `condeResource`; a VM
+  deployed by hand passes the same value (`-p condeResource=<CONDE_MACHINES_AUDIENCE>`), never the SSO app's id.
+- `CONDE_MACHINES_IDENTITY_CLIENT_ID`: the client id of the server's user-assigned identity (id-conde), which
+  deploys the VMs.
+
+`CONDE_MACHINES_VM_SIZE` is optional (default `Standard_B2as_v2`). The server gets its Azure token from the
+managed identity endpoint Container Apps provides (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`); without it the machines
+variables are refused. The Terraform sets all five on ca-conde (`machines_env` in infra/terraform/main.tf). The
+startup log line `web surface enabled` shows the configuration, without the identity header.

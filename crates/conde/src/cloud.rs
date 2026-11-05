@@ -695,6 +695,7 @@ pub fn run(d: Arc<Dispatcher>, listen: SocketAddr) -> anyhow::Result<()> {
                 entra = w.entra.is_some(),
                 admin = w.admin_key.is_some(),
                 invite = ?w.entra.as_ref().map(|c| &c.invite),
+                machines = ?w.machines,
                 "web surface enabled"
             );
         }

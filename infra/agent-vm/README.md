@@ -61,8 +61,10 @@ after the peering. The policy permits only AADSSHLoginForLinux extension resourc
 run-command permissions; the policy itself does not block operators who hold them. The policy matches the extension's
 type, not its publisher (an accepted residual).
 
-Until the Entra app conde-machines exists (Krisztián's half), the deployment caller passes the token audience:
-`-p condeResource=<conde-machines application id>`. The template has no default.
+The token audience is the Entra app conde-machines (infra/terraform/entra.tf): its application id is the server's
+`CONDE_MACHINES_AUDIENCE` and every deployment's `condeResource` (`terraform output machines` in infra/terraform).
+A deployment by hand passes the same value: `-p condeResource=<CONDE_MACHINES_AUDIENCE>`. The template has no
+default.
 
 ## What a person's VM does, start to finish
 
@@ -103,7 +105,7 @@ then the server does them and the script is deleted.
    ```sh
    az deployment group create -g conde-vm -n agent-vm-<owner> \
      --template-spec "$(az ts show -g conde-vm -n agent-vm -v <version> --query id -o tsv)" \
-     -p owner=<owner> ownerObjectId=<Entra object id> condeResource=<conde-machines app id> vmSize=Standard_D2as_v5
+     -p owner=<owner> ownerObjectId=<Entra object id> condeResource=<CONDE_MACHINES_AUDIENCE> vmSize=Standard_D2as_v5
    ```
 
    Until the enrol route exists: `./pilot-rebuild.sh join <owner>` (the person signs in to conde),

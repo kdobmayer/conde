@@ -838,6 +838,7 @@ fn revocation_closes_a_bridge_on_another_replica() {
                 web: Some(web::WebSetup {
                     entra: None,
                     admin_key: Some(ADMIN_KEY.into()),
+                    machines: None,
                     store: Arc::new(WebBoard::new(d.clone())),
                 }),
                 ..conde_remote::ServerConfig::default()

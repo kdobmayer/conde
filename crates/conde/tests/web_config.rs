@@ -1,5 +1,6 @@
 //! The server's web configuration from its environment (`OIDC_*` or the older `ENTRA_*`,
-//! `CONDE_ADMIN_KEY`, each secret also from a `*_FILE`; the retired
+//! `CONDE_ADMIN_KEY`, each secret also from a `*_FILE`; `CONDE_MACHINES_*` with the managed identity's
+//! `IDENTITY_*`; the retired
 //! remote MCP's `CONDE_MCP_*` are ignored), as the container sets it. It changes the process environment, so the
 //! binary runs without the libtest harness (`harness = false`): its cases run on the main thread.
 
@@ -9,9 +10,9 @@ use std::sync::Arc;
 
 use conde::dispatch::Dispatcher;
 use conde::web_store::WebBoard;
-use conde_remote::web::{WebConfig, WebSetup};
+use conde_remote::web::{MachinesConfig, WebConfig, WebSetup};
 
-const VARS: [&str; 18] = [
+const VARS: [&str; 26] = [
     "CONDE_MOVED_TO",
     "CONDE_SLACK_BOT_TOKEN",
     "CONDE_SLACK_BOT_TOKEN_FILE",
@@ -30,6 +31,14 @@ const VARS: [&str; 18] = [
     "CONDE_ADMIN_KEY",
     "CONDE_ADMIN_KEY_FILE",
     "ENTRA_CLIENT_SECRET_FILE",
+    "CONDE_MACHINES_SUBSCRIPTION",
+    "CONDE_MACHINES_RESOURCE_GROUP",
+    "CONDE_MACHINES_TEMPLATE_SPEC",
+    "CONDE_MACHINES_AUDIENCE",
+    "CONDE_MACHINES_IDENTITY_CLIENT_ID",
+    "CONDE_MACHINES_VM_SIZE",
+    "IDENTITY_ENDPOINT",
+    "IDENTITY_HEADER",
 ];
 
 /// Sets exactly `vars` among [`VARS`] (the rest unset).
@@ -96,6 +105,10 @@ fn main() {
             (
                 "conde_moved_to_names_an_http_url",
                 conde_moved_to_names_an_http_url,
+            ),
+            (
+                "machines_config_is_all_or_none",
+                machines_config_is_all_or_none,
             ),
         ],
     );
@@ -465,5 +478,136 @@ fn conde_moved_to_names_an_http_url() {
         env(&[("CONDE_MOVED_TO", bad)]);
         assert!(conde::cloud::moved_to().is_err(), "{bad}");
     }
+    env(&[]);
+}
+
+const MACHINES: [(&str, &str); 7] = [
+    (
+        "CONDE_MACHINES_SUBSCRIPTION",
+        "60df47fc-ce8f-4f52-a970-43a412d78007",
+    ),
+    ("CONDE_MACHINES_RESOURCE_GROUP", "conde-vm"),
+    (
+        "CONDE_MACHINES_TEMPLATE_SPEC",
+        "/subscriptions/60df47fc-ce8f-4f52-a970-43a412d78007/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2",
+    ),
+    (
+        "CONDE_MACHINES_AUDIENCE",
+        "7f3e2a10-0c4b-4d8e-9a61-2b5c8d9e0f11",
+    ),
+    (
+        "CONDE_MACHINES_IDENTITY_CLIENT_ID",
+        "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    ),
+    ("IDENTITY_ENDPOINT", "http://localhost:42356/msi/token"),
+    ("IDENTITY_HEADER", "identity-header-value-from-the-platform"),
+];
+
+/// `CONDE_MACHINES_*` turn the server's machine side on only when all five are set (the VM size
+/// is optional), and only on a platform that gives the server a managed identity; some of them
+/// refuse the whole setup, naming the first missing one.
+fn machines_config_is_all_or_none() {
+    let store = Arc::new(WebBoard::new(Arc::new(
+        Dispatcher::open_in_memory().unwrap(),
+    )));
+    let machines_error = || MachinesConfig::from_env().expect_err("refused").to_string();
+
+    // None set (or only the platform's identity variables): off, and sign-in is unchanged.
+    env(&[]);
+    assert!(MachinesConfig::from_env().unwrap().is_none());
+    env(&with(&[
+        ("IDENTITY_ENDPOINT", "http://localhost:42356/msi/token"),
+        ("IDENTITY_HEADER", "h"),
+        ("CONDE_MACHINES_AUDIENCE", ""),
+    ]));
+    assert!(MachinesConfig::from_env().unwrap().is_none());
+    let setup = WebSetup::from_env(store.clone()).unwrap().unwrap();
+    assert!(setup.entra.is_some() && setup.machines.is_none());
+
+    // All seven: the values as set, the default size.
+    env(&MACHINES);
+    let m = MachinesConfig::from_env().unwrap().unwrap();
+    assert_eq!(
+        (
+            m.subscription.as_str(),
+            m.resource_group.as_str(),
+            m.audience.as_str(),
+            m.vm_size.as_str()
+        ),
+        (
+            "60df47fc-ce8f-4f52-a970-43a412d78007",
+            "conde-vm",
+            "7f3e2a10-0c4b-4d8e-9a61-2b5c8d9e0f11",
+            "Standard_B2as_v2"
+        )
+    );
+    assert!(
+        m.template_spec
+            .ends_with("/templateSpecs/agent-vm/versions/2")
+    );
+    assert_eq!(
+        (
+            m.identity.endpoint.as_str(),
+            m.identity.client_id.as_str(),
+            m.identity.header.as_str()
+        ),
+        (
+            "http://localhost:42356/msi/token",
+            "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+            "identity-header-value-from-the-platform"
+        )
+    );
+    // Printed, the configuration never shows the platform's identity header.
+    let shown = format!("{m:?}");
+    assert!(shown.contains("conde-vm"), "{shown}");
+    assert!(!shown.contains("identity-header-value"), "{shown}");
+    let mut sized = MACHINES.to_vec();
+    sized.push(("CONDE_MACHINES_VM_SIZE", "Standard_D2as_v5"));
+    env(&sized);
+    assert_eq!(
+        MachinesConfig::from_env().unwrap().unwrap().vm_size,
+        "Standard_D2as_v5"
+    );
+
+    // Any one of the five missing: the first missing one is named; the size alone is not a config.
+    for (i, (name, _)) in MACHINES[..5].iter().enumerate() {
+        let mut partial = MACHINES.to_vec();
+        partial.remove(i);
+        env(&partial);
+        assert_eq!(machines_error(), format!("{name} is not set"));
+    }
+    env(&[("CONDE_MACHINES_VM_SIZE", "Standard_D2as_v5")]);
+    assert_eq!(machines_error(), "CONDE_MACHINES_SUBSCRIPTION is not set");
+
+    // Without the managed identity endpoint (a server not on Container Apps) the machines cannot deploy.
+    for name in ["IDENTITY_ENDPOINT", "IDENTITY_HEADER"] {
+        let mut partial = MACHINES.to_vec();
+        partial.retain(|(n, _)| *n != name);
+        env(&partial);
+        assert_eq!(
+            machines_error(),
+            format!(
+                "{name} (the server's managed identity, which CONDE_MACHINES_* needs) is not set"
+            )
+        );
+    }
+
+    // In the setup: carried beside sign-in, and a partial machines config refuses the whole setup.
+    let mut both = ENTRA.to_vec();
+    both.extend(MACHINES);
+    env(&both);
+    let setup = WebSetup::from_env(store.clone()).unwrap().unwrap();
+    assert_eq!(
+        setup.machines.as_ref().map(|m| m.audience.as_str()),
+        Some("7f3e2a10-0c4b-4d8e-9a61-2b5c8d9e0f11")
+    );
+    let shown = format!("{setup:?}");
+    assert!(!shown.contains("identity-header-value"), "{shown}");
+    both.retain(|(n, _)| *n != "CONDE_MACHINES_AUDIENCE");
+    env(&both);
+    assert_eq!(
+        WebSetup::from_env(store).unwrap_err().to_string(),
+        "CONDE_MACHINES_AUDIENCE is not set"
+    );
     env(&[]);
 }

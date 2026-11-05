@@ -17,10 +17,13 @@ secrets are write-only into the vault, the Entra client secret is created by han
 | dist | stconde / container dist | anonymous blob read; release binaries; https://stconde.blob.core.windows.net/dist |
 | release identity | Entra app conde-github-release | GitHub OIDC, subject `repo:DakaiGroup@65165889/conde@1411036719:environment:release`, Storage Blob Data Contributor on dist |
 | SSO | Entra app `conde` (client d87a5254-…) | OIDC code+PKCE, redirect https://conde.nativeai.space/auth/callback and http://localhost/auth/cli; assignment required; users in entra.tf |
+| machines | Entra app `conde-machines` | the agent VMs' token audience (CONDE_MACHINES_AUDIENCE); no sign-in, assignment not required |
 
 Env of the server: PORT, RUST_LOG, DATABASE_URL (secret), CONDE_ADMIN_KEY (secret), CONDE_DIST_BASE_URL,
 CONDE_BOARD_NAME, CONDE_MIN_PROTO (1 until every host runs v2, then 2: `min_proto`), ENTRA_TENANT_ID,
-ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET (secret), ENTRA_REDIRECT_URI.
+ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET (secret), ENTRA_REDIRECT_URI, and the agent machines' CONDE_MACHINES_SUBSCRIPTION,
+CONDE_MACHINES_RESOURCE_GROUP, CONDE_MACHINES_TEMPLATE_SPEC, CONDE_MACHINES_AUDIENCE (the conde-machines app's client
+id), CONDE_MACHINES_IDENTITY_CLIENT_ID (id-conde's), as docs/DEPLOY.md "Agent machines" says.
 
 Slack DMs for people (off unless both are set): CONDE_SLACK_BOT_TOKEN (secret; a bot token with `chat:write`) and
 CONDE_SLACK_NOTIFY, comma-separated `<owner>=<Slack member id>` (owner = the board user name, as in `owner/name`;

@@ -75,8 +75,16 @@ for _ in $(seq "$ANSWER_TIMEOUT"); do
       cleanup
       # The running session keeps its old credential until it restarts (whether it picks the new one up without
       # a restart is a probe item); run-agent resumes the same session id.
-      if systemctl --user try-restart claude-agent.service; then say done
-      else err "signed in, but the agent session was not restarted (no user bus?)"; say "failed process_exited"; fi
+      # A checked query: is-active is nonzero for inactive, absent, activating, failed and a failed query alike.
+      if ! state=$(systemctl --user show -p ActiveState --value claude-agent.service 2>/dev/null) || [ -z "$state" ]; then
+        err "signed in, but the user's systemd could not be asked about the agent"; say "failed process_exited"; exit 0
+      fi
+      case "$state" in
+        active|activating|reloading)
+          if systemctl --user restart claude-agent.service; then say done
+          else err "signed in, but the agent session did not restart"; say "failed process_exited"; fi ;;
+        *) say done ;;   # inactive or not installed yet (the first sign-in, before first boot set the agent up)
+      esac
       exit 0
     fi
     if grep -qiE 'invalid|expired|error|failed' <<<"$out"; then err "the login rejected the code (exit $rc)"; finish failed bad_code; fi

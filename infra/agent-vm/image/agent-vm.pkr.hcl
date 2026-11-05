@@ -5,8 +5,10 @@
 #   packer init infra/agent-vm/image
 #   packer build -var subscription_id=<id> -var image_version=1.<yyyymmdd>.<n> -var allowed_ip=<your IP> infra/agent-vm/image
 #
+# (by hand the plugin uses the az CLI session; in the workflow, GitHub OIDC)
+#
 # The build VM is temporary, in the build resource group, reachable over SSH from allowed_ip only. The
-# provisioner is ../bootstrap.sh in image mode plus provision.sh (Chromium, the update timers, first boot).
+# provisioner is ../bootstrap.sh in image mode plus provision.sh (Chrome, the update timers, first boot).
 
 packer {
   required_plugins {
@@ -19,6 +21,29 @@ packer {
 
 variable "subscription_id" {
   type = string
+}
+
+# GitHub OIDC, straight to the azure plugin, which asks GitHub for a fresh assertion for every new Azure token (an
+# az session from azure/login cannot renew and ran out an hour into a build). Empty: a manual build after az login.
+variable "client_id" {
+  type    = string
+  default = ""
+}
+
+variable "tenant_id" {
+  type    = string
+  default = ""
+}
+
+variable "oidc_request_url" {
+  type    = string
+  default = env("ACTIONS_ID_TOKEN_REQUEST_URL")
+}
+
+variable "oidc_request_token" {
+  type      = string
+  default   = env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+  sensitive = true
 }
 
 variable "image_version" {
@@ -47,7 +72,11 @@ variable "build_vm_size" {
 }
 
 source "azure-arm" "agent" {
-  use_azure_cli_auth        = true
+  use_azure_cli_auth        = var.oidc_request_url == ""
+  client_id                 = var.client_id
+  tenant_id                 = var.tenant_id
+  oidc_request_url          = var.oidc_request_url
+  oidc_request_token        = var.oidc_request_token
   subscription_id           = var.subscription_id
   build_resource_group_name = var.build_resource_group
 

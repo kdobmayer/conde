@@ -10,3 +10,5 @@ oidc:
 # How an invite reaches the person: one email from the server (docs/DEPLOY.md, invites).
 invite:
   signIn: microsoft
+# Frozen for the move to Azure (docs/CUTOVER-dakai-azure.md); the board runs on ca-conde.
+replicas: 0

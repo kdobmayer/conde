@@ -18,9 +18,13 @@ install -d -m 0755 /usr/local/lib/agentvm
 install -m 0755 "$SRC/bootstrap.sh" "$SRC/run-agent" "$SRC/conde-register-hook" "$SRC/agentvm-firstboot" /usr/local/lib/agentvm/
 install -m 0644 "$SRC/claude-agent.service" /usr/local/lib/agentvm/
 install -m 0755 "$SRC/agentvm" /usr/local/bin/agentvm
+# GITHUB_*: the relay's GitHub device flow. The pilot uses the gh CLI's public OAuth client id until the
+# Dakai OAuth app exists (Krisztián, 5 Nov); switching is this one value.
 cat > /etc/agentvm.conf <<CONF
 AGENT_USER=$AGENT_USER
 CONDE_SERVER_DEFAULT=https://dakai.conde.cloud
+GITHUB_OAUTH_CLIENT_ID=178c6fc778ccc68e1d6a
+GITHUB_OAUTH_SCOPES="repo read:org workflow"
 CONF
 
 bash /usr/local/lib/agentvm/bootstrap.sh image

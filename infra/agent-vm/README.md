@@ -26,32 +26,32 @@ page and the relay) is in conde itself.
 |---|---|---|
 | `bootstrap.sh` | root; Packer (`image`) or cloud-init | installs from current releases: Ubuntu updates, git (git-core PPA), gh, Claude Code, uv, conde; the agent user with linger; `~/work` trusted, onboarding and bypass-mode prompt pre-answered, the SessionStart hook. Without `image` it also runs `conde setup` |
 | `image/agent-vm.pkr.hcl` | Packer | the image: Ubuntu 24.04 server, `bootstrap.sh image` + `image/provision.sh`, generalized, into `galNativeLanes/agent-vm` |
-| `image/provision.sh` | Packer, root | Chromium (snap), unattended-upgrades for Ubuntu, the git PPA and gh with a 03:30 reboot window, a daily `conde update` user timer, `agentvm-firstboot.service`, clean-up of this build machine's identity |
-| `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | `conde setup`; identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin`; agent.env with a pinned session id; `claude-agent.service` enabled |
+| `image/provision.sh` | Packer, root | Chromium (snap), unattended-upgrades for Ubuntu, the git PPA and gh (no automatic reboot), a daily `conde update` user timer, `agentvm-firstboot.service`, clean-up of this build machine's identity |
+| `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde setup`; agent.env with a pinned session id; `claude-agent.service` enabled |
 | `claude-agent.service` | agent user | tmux around `run-agent`; `Restart=always` |
 | `run-agent` | agent user, in tmux | waits for the Claude sign-in; first start `--session-id <uuid>`, every later start `--resume <uuid>`; never `--continue` |
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped) |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
-| `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource). Output `principalId` = the `oid` the mint call checks |
+| `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource, the bare application id of the Entra app conde). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, vmSize. Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
-| `azure/agent-rg.bicep` | once, conde-vm | id-conde: Contributor, and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; NSG rule SSH from the VPN pool 172.16.0.0/22; peering to the hub with remote gateways |
-| `azure/hub-peering.bicep` | once, rg-native-hub | the hub side of that peering, with gateway transit |
-| `azure/image-builder.sh` | once, by hand | Entra app `conde-agent-image` (GitHub OIDC, environment `agent-image`), build resource group `rg-agent-image`, the environment's variables |
+| `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; NSG: SSH from the VPN pool 172.16.0.0/22, every other inbound from the VNet denied; the agent side of the hub peering (remote gateways) |
+| `azure/image-builder.sh` | once, by hand | Entra app `conde-agent-image` (GitHub OIDC, environment `agent-image` of kdobmayer/conde), build resource group `rg-agent-image`; prints the GitHub side for the repo admin (the environment limited to protected branches, its variables) |
 | `../../.github/workflows/agent-image.yml` | GitHub-hosted runner | `packer build`, version `1.<yyyymmdd>.<run>` |
 
 ## Setting up the Azure half (in order; each is a state change outside dev, approved by Konstantin first)
 
 ```sh
-infra/agent-vm/azure/image-builder.sh                                     # prints builderPrincipalId
+infra/agent-vm/azure/image-builder.sh                                     # prints builderPrincipalId and the GitHub side
 az deployment group create -g RG-NATIVE-LANES -f infra/agent-vm/azure/gallery.bicep -p builderPrincipalId=<id>
-az deployment group create -g rg-native-hub   -f infra/agent-vm/azure/hub-peering.bicep
-az deployment group create -g conde-vm        -f infra/agent-vm/azure/agent-rg.bicep
-gh workflow run agent-image.yml                                           # the first image version
+az deployment group create -g conde-vm -f infra/agent-vm/azure/agent-rg.bicep -p peerToHub=false
+gh workflow run agent-image.yml --repo kdobmayer/conde                    # the first image version (main must be protected)
 az ts create -g conde-vm -n agent-vm -v 1 -f infra/agent-vm/template/agent-vm.bicep
 ```
 
-After the peering, Windows VPN users download their VPN client profile again once.
+The hub side of the peering is native-infra's Terraform (`terraform/network.tf`, `hub_to_this`, as for every
+spoke: `peer-hub-to-vnet-agent-vms`, gateway transit). Once it exists, deploy `agent-rg.bicep` again without
+`peerToHub=false`. Windows VPN users then download their VPN client profile again once.
 
 ## What a person's VM does, start to finish
 
@@ -63,6 +63,15 @@ After the peering, Windows VPN users download their VPN client profile again onc
 3. `claude-agent.service` starts and waits for the Claude sign-in (the page relays it).
 4. Once signed in, Claude starts under the pinned session id with remote control on; the SessionStart hook
    registers the name; the server publishes it when the registration arrives from that host.
+
+## Watching and steering the agent (power users)
+
+Over the hub VPN, with your Entra account (`az ssh vm -g conde-vm -n vm-agent-<owner>`), then:
+
+```sh
+sudo -u agent tmux -L agent attach -t agent      # the agent's own session; detach with Ctrl-b d
+journalctl -u agentvm-firstboot                  # how the VM joined the board
+```
 
 ## Test flow (manual, `vm-conde-test`)
 
@@ -78,8 +87,21 @@ After the peering, Windows VPN users download their VPN client profile again onc
 
 `AGENTVM_RG` and `AGENTVM_SIZE` override the resource group (`vm-conde-test`) and size (`Standard_B2s`).
 
+## The relay helpers
+
+The bridge (conde's code) handles the relay frames and the machine events, and execs one of two helpers per
+relay, as the agent user, with a line protocol on stdin and stdout:
+
+| helper | in | out |
+|---|---|---|
+| `relay-claude` | `start`, then `code <code>`; EOF or SIGTERM cancels | `url <authorize URL>`, `waiting`, `done`, `failed <reason>` |
+| `relay-github` | `start`; EOF or SIGTERM cancels | `url <verification URL> <user_code> <expires_at>`, `waiting`, `done`, `failed <reason>` |
+
+Reasons are the contract's: `expired`, `denied`, `bad_code`, `process_exited`, `timeout`, `busy`. Until the bridge
+side exists the pilot runs them by hand, keeping stdin open (closing it cancels):
+`{ echo start; sleep 900; } | relay-github`.
+
 ## Not here yet
 
-- The bridge's half of the relay (Claude login and GitHub device flow) and the machine events (`online`,
-  `needs_sign_in`): they are frames on the bridge's WebSocket, so they are code in conde's bridge.
+- The bridge's handling of the relay frames and the machine events (`online`, `needs_sign_in`): conde's half.
 - The probe: a test VM from the image first, then Levente's and Oliver's VMs rebuilt from it.

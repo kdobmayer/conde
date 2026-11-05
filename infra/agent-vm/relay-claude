@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# The Claude sign-in for the relay (design section "The two seam contracts", 2), as the agent user. The bridge
+# execs it per relay and speaks a line protocol on stdin/stdout (until then the pilot runs it by hand):
+#
+#   in:  start               start `claude auth login`
+#        code <code>         the code the person pasted on the page; typed into that same process
+#        EOF or SIGTERM      cancel: the login process is killed
+#   out: url <URL>           the authorize URL for the page
+#        waiting             the code was typed in; waiting for the login's answer
+#        done                signed in; the agent session was restarted (--resume) so it uses the new login
+#        failed <reason>     process_exited | bad_code | timeout | busy
+#
+# `claude auth login` has no device flow: it prints the URL and waits for the code in the same process (that
+# process holds the PKCE verifier), so it runs in a tmux session of its own until the code is in. No code within
+# 10 minutes is `timeout`. One relay at a time (`busy` otherwise). The code is never in an argument or a log.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+SOCK=relay-claude; SESSION=login
+CODE_TIMEOUT="${RELAY_CODE_TIMEOUT:-600}"; ANSWER_TIMEOUT="${RELAY_ANSWER_TIMEOUT:-60}"
+
+say() { printf '%s\n' "$*"; }
+err() { printf 'relay-claude: %s\n' "$*" >&2; }
+cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; }
+finish() { cleanup; say "$@"; exit 0; }
+trap 'cleanup; exit 0' TERM INT
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/agentvm-relay-claude.lock"
+flock -n 9 || { say "failed busy"; exit 0; }
+
+read -r cmd || exit 0
+[ "$cmd" = start ] || { err "expected start, got: ${cmd%% *}"; finish failed process_exited; }
+
+cleanup
+# The marker line tells the login's own exit status apart from tmux going away.
+tmux -L "$SOCK" new-session -d -s "$SESSION" -x 2000 -y 50 \
+  "claude auth login; echo \"__relay_exit \$?\"; sleep $(( CODE_TIMEOUT + ANSWER_TIMEOUT + 60 ))" \
+  || finish failed process_exited
+pane() { tmux -L "$SOCK" capture-pane -p -J -t "$SESSION" 2>/dev/null; }
+
+url=""
+for _ in $(seq 60); do
+  url=$(pane | grep -o 'https://claude\.com/cai/oauth/authorize[^ ]*' | head -1)
+  [ -n "$url" ] && break
+  pane | grep -q '__relay_exit' && break
+  sleep 1
+done
+[ -n "$url" ] || { err "no authorize URL; the login printed: $(pane | grep -v '^\s*$' | tail -n 5 | tr '\n' ' ')"; finish failed process_exited; }
+say "url $url"
+
+read -r -t "$CODE_TIMEOUT" line; rc=$?
+if [ "$rc" -ne 0 ]; then
+  [ "$rc" -gt 128 ] && finish failed timeout
+  cleanup; exit 0                                  # EOF: cancelled
+fi
+case "$line" in code\ ?*) code=${line#code } ;; *) err "expected code"; finish failed bad_code ;; esac
+tmux -L "$SOCK" send-keys -t "$SESSION" -l "$code" && tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+unset code line
+say waiting
+
+for _ in $(seq "$ANSWER_TIMEOUT"); do
+  out=$(pane)
+  if grep -q 'Login successful' <<<"$out" || claude auth status --json 2>/dev/null | jq -e '.loggedIn == true' >/dev/null; then
+    cleanup
+    # The running session keeps its old credential until it restarts (whether it picks the new one up without a
+    # restart is a probe item); run-agent resumes the same session id.
+    systemctl --user try-restart claude-agent.service 2>/dev/null || true
+    say done; exit 0
+  fi
+  if grep -q '__relay_exit' <<<"$out"; then
+    # The pane echoes the typed code, so after it was typed only the login's own error words are logged.
+    err "the login ended: $(grep -oiE '(oauth )?(error|invalid|expired|failed)[a-z :]{0,40}' <<<"$out" | grep -viE 'paste' | tail -n 1)"
+    if grep -qiE 'invalid|expired|error|failed' <<<"$out"; then finish failed bad_code; fi
+    finish failed process_exited
+  fi
+  sleep 1
+done
+err "no answer from the login within ${ANSWER_TIMEOUT}s"
+finish failed bad_code

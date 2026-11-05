@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# The GitHub sign-in for the relay (design section "The two seam contracts", 2): OAuth device flow, as the agent
+# user. The bridge execs it per relay and speaks a line protocol on stdin/stdout (until then the pilot runs it by
+# hand):
+#
+#   in:  start                                  request a device code
+#        EOF or SIGTERM                         cancel
+#   out: url <URL> <user_code> <expires_at>     for the page: the person types user_code on GitHub's page
+#        waiting                                polling GitHub until the person has approved
+#        done                                   the token is in gh (gh auth login --with-token, gh auth setup-git)
+#        failed <reason>                        expired | denied | busy | process_exited
+#
+# Client id and scopes from /etc/agentvm.conf (GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_SCOPES): the gh CLI's public
+# client id until the Dakai OAuth app exists. Polls every `interval` seconds, 5 more on slow_down. The token is
+# never in an argument or a log: it goes from the response straight into gh's stdin.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+[ -f /etc/agentvm.conf ] && . /etc/agentvm.conf
+CLIENT_ID="${GITHUB_OAUTH_CLIENT_ID:-178c6fc778ccc68e1d6a}"
+SCOPES="${GITHUB_OAUTH_SCOPES:-repo read:org workflow}"
+GH="${RELAY_GITHUB_URL:-https://github.com}"
+CURL=(curl -sS --connect-timeout 10 --max-time 30 -H 'Accept: application/json')
+
+say() { printf '%s\n' "$*"; }
+err() { printf 'relay-github: %s\n' "$*" >&2; }
+trap 'exit 0' TERM INT
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/agentvm-relay-github.lock"
+flock -n 9 || { say "failed busy"; exit 0; }
+
+read -r cmd || exit 0
+[ "$cmd" = start ] || { err "expected start"; say "failed process_exited"; exit 0; }
+
+dc=$("${CURL[@]}" -X POST "$GH/login/device/code" --data-urlencode "client_id=$CLIENT_ID" --data-urlencode "scope=$SCOPES") \
+  || { err "device code request failed"; say "failed process_exited"; exit 0; }
+device_code=$(jq -r '.device_code // empty' <<<"$dc"); user_code=$(jq -r '.user_code // empty' <<<"$dc")
+uri=$(jq -r '.verification_uri // empty' <<<"$dc"); expires_in=$(jq -r '.expires_in // 900' <<<"$dc")
+interval=$(jq -r '.interval // 5' <<<"$dc")
+[ -n "$device_code" ] && [ -n "$user_code" ] || { err "no device code: $(jq -c '{error, error_description}' <<<"$dc" 2>/dev/null)"; say "failed process_exited"; exit 0; }
+deadline=$(( $(date +%s) + expires_in ))
+say "url $uri $user_code $(date -u -d "@$deadline" +%FT%TZ)"
+say waiting
+
+while :; do
+  # Waits `interval` seconds, or ends at once when the bridge closes stdin (cancel).
+  if read -r -t "$interval" _; then :; else [ $? -gt 128 ] || exit 0; fi
+  [ "$(date +%s)" -lt "$deadline" ] || { say "failed expired"; exit 0; }
+  r=$("${CURL[@]}" -X POST "$GH/login/oauth/access_token" --data-urlencode "client_id=$CLIENT_ID" \
+        --data-urlencode "device_code=$device_code" \
+        --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:device_code') || { err "poll failed; retrying"; continue; }
+  case "$(jq -r '.error // empty' <<<"$r")" in
+    authorization_pending) ;;
+    slow_down) interval=$(( $(jq -r ".interval // $interval" <<<"$r") > interval + 5 ? $(jq -r ".interval // $interval" <<<"$r") : interval + 5 )) ;;
+    expired_token) say "failed expired"; exit 0 ;;
+    access_denied) say "failed denied"; exit 0 ;;
+    '')
+      if printf '%s' "$r" | jq -r '.access_token // empty' | gh auth login --hostname github.com --git-protocol https --with-token \
+         && gh auth setup-git --hostname github.com; then
+        say done
+      else
+        err "gh did not take the token"; say "failed process_exited"
+      fi
+      exit 0 ;;
+    *) err "GitHub: $(jq -c '{error, error_description}' <<<"$r")"; say "failed process_exited"; exit 0 ;;
+  esac
+done

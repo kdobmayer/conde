@@ -1,7 +1,10 @@
+# Not ordered after cloud-final.service: cloud-final is After=multi-user.target, and this unit is wanted by
+# multi-user.target, so that would be an ordering cycle. Nothing here needs cloud-init's final stage: the agent
+# user is on the image and userData is read from the metadata service.
 [Unit]
 Description=Agent VM first boot: join the conde board with the VM identity, set up the agent
 Wants=network-online.target
-After=network-online.target cloud-final.service
+After=network-online.target
 ConditionPathExists=!/var/lib/agentvm/firstboot-done
 
 [Service]

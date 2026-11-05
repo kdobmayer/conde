@@ -12,7 +12,7 @@ packer {
   required_plugins {
     azure = {
       source  = "github.com/hashicorp/azure"
-      version = "~> 2.1"
+      version = "= 2.3.3"
     }
   }
 }
@@ -33,8 +33,12 @@ variable "build_resource_group" {
 
 variable "allowed_ip" {
   type        = string
-  default     = ""
-  description = "The only address that may reach the build VM over SSH (the runner's public IP)"
+  description = "The only address that may reach the build VM over SSH (the runner's public IP). Required: without it Packer would leave SSH open to the internet"
+
+  validation {
+    condition     = can(cidrhost("${var.allowed_ip}/32", 0))
+    error_message = "The allowed_ip must be one IPv4 address."
+  }
 }
 
 variable "build_vm_size" {
@@ -54,7 +58,7 @@ source "azure-arm" "agent" {
   vm_size         = var.build_vm_size
   os_disk_size_gb = 64
 
-  allowed_inbound_ip_addresses = var.allowed_ip == "" ? [] : [var.allowed_ip]
+  allowed_inbound_ip_addresses = [var.allowed_ip]
 
   shared_image_gallery_destination {
     subscription         = var.subscription_id
@@ -87,6 +91,8 @@ build {
       "${path.root}/../claude-agent.service",
       "${path.root}/../agentvm-firstboot",
       "${path.root}/../agentvm-firstboot.service",
+      "${path.root}/../relay-claude",
+      "${path.root}/../relay-github",
       "${path.root}/provision.sh",
     ]
     destination = "/tmp/agentvm/"

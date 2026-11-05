@@ -16,6 +16,8 @@
 param owner string
 
 @description('The person\'s Entra object id: gets Virtual Machine Administrator Login on this VM (Entra SSH).')
+@minLength(36)
+@maxLength(36)
 param ownerObjectId string
 
 @allowed([
@@ -32,21 +34,21 @@ param subnetId string = resourceId('conde-vm', 'Microsoft.Network/virtualNetwork
 @description('The conde server the VM enrols with.')
 param condeServer string = 'https://dakai.conde.cloud'
 
-@description('Resource (audience) of the identity token the VM presents: the conde application\'s id URI.')
-param condeResource string = 'api://d87a5254-3121-4d3b-bd1e-b902b3bcbba0'
-
-@description('Public key for the image\'s admin user. Azure requires one; nobody needs its private half (people log in with Entra SSH), so the server may pass a throwaway key.')
-param adminSshPublicKey string
+@description('Resource (audience) of the identity token the VM presents: the conde application\'s bare application id (the app has no identifier URI).')
+param condeResource string = 'd87a5254-3121-4d3b-bd1e-b902b3bcbba0'
 
 param location string = resourceGroup().location
 
-param createdAt string = utcNow('u')
-
 var vmName = 'vm-agent-${owner}'
+
+// Azure requires an SSH key for the admin user. This one is fixed and its private half was destroyed when it was
+// made (5 Nov 2026), so nobody holds SSH outside Entra, and every deployment of a VM is identical (a key that
+// changed between deployments would be refused on an existing VM).
+var adminSshPublicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA00qLYqNL4JJCdpBvzP/qi2yHw+EWWh8wBFac1ZEgwB agent-vm fixed admin key, private half destroyed 2026-11-05'
 var vmAdminLoginRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '1c0163c0-47e6-4577-8991-ea5c82e286e4')
+// No creation time here: a repeat deployment would rewrite it. The deployments list keeps the history.
 var tags = {
   'agentvm-person': owner
-  'agentvm-created': createdAt
 }
 
 resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = {

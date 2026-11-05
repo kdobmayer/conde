@@ -1,7 +1,8 @@
 # Builds the agent VM image (infra/agent-vm/image) into galNativeLanes/agent-vm. Runs on a GitHub-hosted runner:
 # Packer's work happens on a temporary Azure VM, so the runner only drives it. Signs in to Azure with the Entra
 # app conde-agent-image (OIDC, no secret), whose federated credential trusts this repo's `agent-image`
-# environment; set up once with infra/agent-vm/azure/image-builder.sh.
+# environment; set up once with infra/agent-vm/azure/image-builder.sh. The environment admits protected branches
+# only, so main's review is the gate for the image every new agent VM boots. Actions are pinned by commit.
 name: agent-vm image
 
 on:
@@ -16,6 +17,8 @@ on:
       - infra/agent-vm/claude-agent.service
       - infra/agent-vm/agentvm-firstboot
       - infra/agent-vm/agentvm-firstboot.service
+      - infra/agent-vm/relay-claude
+      - infra/agent-vm/relay-github
       - infra/agent-vm/image/**
       - .github/workflows/agent-image.yml
 
@@ -33,22 +36,22 @@ jobs:
     environment: agent-image
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: azure/login@v2
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - uses: hashicorp/setup-packer@v3
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
         with:
           version: 1.11.2
 
       - name: packer init and validate
         run: |
           packer init infra/agent-vm/image
-          packer validate -var subscription_id=x -var image_version=1.0.0 infra/agent-vm/image
+          packer validate -var subscription_id=x -var image_version=1.0.0 -var allowed_ip=192.0.2.1 infra/agent-vm/image
 
       - name: packer build
         env:

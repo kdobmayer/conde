@@ -4,8 +4,8 @@
 #   - everything bootstrap.sh installs, for the fixed user `agent` (linger, ~/work trusted, Claude state seeded,
 #     the SessionStart hook in its settings), but no `conde setup`: that records the host, so it runs at first boot
 #   - headless Chromium
-#   - updates in place: unattended-upgrades for Ubuntu, the git PPA and gh (with a nightly reboot window when a
-#     kernel needs one; the agent resumes its session after a reboot), a daily `conde update`, Claude's own updater
+#   - updates in place: unattended-upgrades for Ubuntu, the git PPA and gh (no automatic reboot: a reboot would kill
+#     the agent's work in progress; a kernel update waits for a planned one), a daily `conde update`, Claude's own updater
 #   - agentvm-firstboot.service, which joins the board with the VM's identity and starts the agent
 set -euo pipefail
 SRC=/tmp/agentvm
@@ -15,7 +15,8 @@ export DEBIAN_FRONTEND=noninteractive
 cloud-init status --wait >/dev/null || true   # its apt run holds the lock
 
 install -d -m 0755 /usr/local/lib/agentvm
-install -m 0755 "$SRC/bootstrap.sh" "$SRC/run-agent" "$SRC/conde-register-hook" "$SRC/agentvm-firstboot" /usr/local/lib/agentvm/
+install -m 0755 "$SRC/bootstrap.sh" "$SRC/run-agent" "$SRC/conde-register-hook" "$SRC/agentvm-firstboot" \
+  "$SRC/relay-claude" "$SRC/relay-github" /usr/local/lib/agentvm/
 install -m 0644 "$SRC/claude-agent.service" /usr/local/lib/agentvm/
 install -m 0755 "$SRC/agentvm" /usr/local/bin/agentvm
 # GITHUB_*: the relay's GitHub device flow. The pilot uses the gh CLI's public OAuth client id until the
@@ -23,6 +24,7 @@ install -m 0755 "$SRC/agentvm" /usr/local/bin/agentvm
 cat > /etc/agentvm.conf <<CONF
 AGENT_USER=$AGENT_USER
 CONDE_SERVER_DEFAULT=https://dakai.conde.cloud
+CONDE_RESOURCE_DEFAULT=d87a5254-3121-4d3b-bd1e-b902b3bcbba0
 GITHUB_OAUTH_CLIENT_ID=178c6fc778ccc68e1d6a
 GITHUB_OAUTH_SCOPES="repo read:org workflow"
 CONF
@@ -43,8 +45,6 @@ Unattended-Upgrade::Origins-Pattern {
   "origin=LP-PPA-git-core";
   "site=cli.github.com";
 };
-Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "03:30";
 CONF
 
 # --- conde updates itself daily (a user timer of the agent user; `conde update` restarts the bridge)

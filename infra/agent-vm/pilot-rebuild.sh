@@ -78,11 +78,19 @@ cmd_signin() {
     claude|github)
       on_vm "vm-agent-$owner" "$(as_user agent "d=\$HOME/.relay-$what; systemctl --user stop relay-$what-byhand 2>/dev/null; rm -rf \$d; mkdir -p \$d; mkfifo \$d/in
 systemd-run --user --quiet --unit=relay-$what-byhand bash -c \"exec 3<>\$d/in; /usr/local/lib/agentvm/relay-$what <&3 >\$d/out 2>\$d/err\"
-echo start > \$d/in; for i in \$(seq 40); do grep -q '^url ' \$d/out 2>/dev/null && break; sleep 1; done; cat \$d/out \$d/err")" ;;
+timeout 10 bash -c 'echo start > \"\$1\"' _ \$d/in || { echo 'relay did not start'; exit 1; }
+for i in \$(seq 40); do grep -q '^url ' \$d/out 2>/dev/null && break; sleep 1; done; cat \$d/out \$d/err
+if [ $what = claude ]; then echo \"the code is accepted until \$(date -u -d '+10 min' +%H:%M) UTC (10 minutes); after that run signin $owner claude again\"; fi")" ;;
     code)
       local code="${3:?usage: pilot-rebuild.sh signin OWNER code CODE}"
       [[ $code =~ ^[A-Za-z0-9_#-]+$ ]] || { echo "unexpected characters in the code" >&2; exit 64; }
-      on_vm "vm-agent-$owner" "$(as_user agent "d=\$HOME/.relay-claude; printf 'code %s\\n' '$code' > \$d/in
+      # The relay gives up 10 minutes after its URL; a write into the FIFO with no reader would block for good (and
+      # every later run-command with it), so check the relay first and bound the write.
+      on_vm "vm-agent-$owner" "$(as_user agent "d=\$HOME/.relay-claude
+if ! systemctl --user is-active --quiet relay-claude-byhand; then
+  echo 'relay gone (its 10-minute code window passed?): run signin $owner claude again'; grep -hv '^url ' \$d/out \$d/err 2>/dev/null; exit 1
+fi
+timeout 10 bash -c 'printf \"code %s\\n\" \"\$2\" > \"\$1\"' _ \$d/in '$code' || { echo 'relay not reading: run signin $owner claude again'; exit 1; }
 for i in \$(seq 90); do grep -qE '^(done|failed)' \$d/out && break; sleep 1; done; grep -v '^url ' \$d/out; cat \$d/err")" ;;
     *) exit 64 ;;
   esac

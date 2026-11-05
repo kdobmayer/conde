@@ -1554,9 +1554,10 @@ async fn listings_show_kind_and_host_never_a_target(d: Arc<Dispatcher>) {
         .iter()
         .find(|a| a["name"] == "kd/desk")
         .unwrap();
+    // the mailbox keeps the kind its registration gave it
     assert_eq!(
         (desk["kind"].as_str(), desk["host"].as_str()),
-        (Some("mailbox"), Some("homepc"))
+        (Some("claude"), Some("homepc"))
     );
     assert!(
         !list.to_string().contains(&ids[0]),

@@ -377,19 +377,17 @@ pub fn list(ctx: &Ctx, _body: &Value) -> OpResult<Value> {
         .db
         .bound_agents()?
         .into_iter()
-        .map(|a| {
-            let mut row = match ctx.board {
-                Some(_) => target_free(&a),
-                None => json!({
-                    "name": a.canonical(),
-                    "address": a.address.as_ref().map(ToString::to_string),
-                    "kind": a.shown_kind(),
-                    "display": a.display,
-                    "pinned": a.pinned,
-                }),
-            };
-            row["id"] = json!(a.id);
-            row
+        .map(|a| match ctx.board {
+            // no id: a mailbox's id is its address target
+            Some(_) => target_free(&a),
+            None => json!({
+                "name": a.canonical(),
+                "id": a.id,
+                "address": a.address.as_ref().map(ToString::to_string),
+                "kind": a.shown_kind(),
+                "display": a.display,
+                "pinned": a.pinned,
+            }),
         })
         .collect();
     Ok(json!({"agents": agents}))

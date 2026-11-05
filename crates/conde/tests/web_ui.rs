@@ -3261,8 +3261,9 @@ struct ArmCall {
     body: Value,
 }
 
-/// A fake Resource Manager: records every request and answers deployment PUTs and GETs from
-/// scripts, each answer used once and the last one kept.
+/// A fake Resource Manager: records every request, refuses one without the identity's bearer
+/// token (401), and answers deployment PUTs and GETs from scripts, each answer used once and the
+/// last one kept.
 struct Arm {
     url: String,
     calls: Mutex<Vec<ArmCall>>,
@@ -3309,7 +3310,15 @@ async fn fake_arm() -> Arc<Arm> {
                         .unwrap_or_default(),
                     body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                 });
+                let bearer = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.starts_with("Bearer arm-token-"));
                 let (status, body) = match method.as_str() {
+                    _ if !bearer => (
+                        401,
+                        json!({"error": {"code": "AuthenticationFailed", "message": "no token"}}),
+                    ),
                     "PUT" => next_answer(&a.puts),
                     _ => next_answer(&a.gets),
                 };
@@ -3614,14 +3623,19 @@ async fn a_refused_put_is_never_issued_and_the_setup_step_issues_it(d: Arc<Dispa
     ui.server.shutdown().await.unwrap();
 }
 
-/// A pending deployment is read when the page asks, at most once in 30 s: `Running`, then
-/// `Failed` with its error, which the page shows; setup clears it and PUTs again.
+/// A pending deployment is read when the page asks, at most once in 30 s, with the identity's
+/// token: `Running`; then a read Azure fails (503), which changes nothing stored; then, 30 s
+/// later, `Failed` with its error, which the page shows; setup clears it and PUTs again.
 async fn a_failed_deployment_is_read_on_demand_throttled_and_retried_by_setup(d: Arc<Dispatcher>) {
     let (ui, arm) = ui_machines(&d).await;
     arm.script(
         "GET",
         vec![
             (200, running()),
+            (
+                503,
+                json!({"error": {"code": "ServiceUnavailable", "message": "try later"}}),
+            ),
             (
                 200,
                 json!({"properties": {"provisioningState": "Failed", "error": {
@@ -3647,6 +3661,20 @@ async fn a_failed_deployment_is_read_on_demand_throttled_and_retried_by_setup(d:
     assert_eq!(gets.len(), 1, "one read in 30 s");
     assert_eq!(gets[0].path, format!("{DEPLOYMENTS}vm-agent-{USER}"));
     assert_eq!(gets[0].query, "api-version=2021-04-01");
+    assert_eq!(gets[0].auth, "Bearer arm-token-1");
+    // a failed read changes nothing stored; the next one, after the interval, reads again
+    d.advance_clock(31_000);
+    let unread = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(
+        (
+            unread["state"].as_str(),
+            unread["deploy_state"].as_str(),
+            unread["deploy_error"].clone()
+        ),
+        (Some("requested"), Some("Running"), Value::Null),
+        "{unread}"
+    );
+    assert_eq!(arm.calls("GET").len(), 2);
     d.advance_clock(31_000);
     let failed = ui.ok(&b, &csrf, "machine.status", json!({})).await;
     assert_eq!(

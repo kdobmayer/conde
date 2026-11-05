@@ -1169,6 +1169,8 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
             let name = body["name"].as_str().unwrap_or_default().to_string();
             let human = body["human"].as_bool().unwrap_or(false);
             let take = body["take"].as_bool().unwrap_or(false);
+            // as the board does: the kind it now holds is echoed
+            let kind = body.get("kind").cloned();
             let existing = s
                 .mailboxes
                 .iter()
@@ -1187,8 +1189,11 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
                     m.host = Some(host.into());
                     m.generation += 1;
                     m.human = human;
-                    let result =
+                    let mut result =
                         json!({"name": name, "mailbox_id": m.id, "route_generation": m.generation});
+                    if let Some(k) = &kind {
+                        result["kind"] = k.clone();
+                    }
                     if let Some(old) = old.filter(|o| o != host) {
                         s.abandon_stale();
                         let f = s.routes_frame(&old);
@@ -1210,10 +1215,12 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
                     });
                     let f = s.routes_frame(host);
                     s.send_to(host, f);
-                    ok(
-                        &id,
-                        json!({"name": name, "mailbox_id": mid, "route_generation": 1}),
-                    )
+                    let mut result =
+                        json!({"name": name, "mailbox_id": mid, "route_generation": 1});
+                    if let Some(k) = &kind {
+                        result["kind"] = k.clone();
+                    }
+                    ok(&id, result)
                 }
             }
         }

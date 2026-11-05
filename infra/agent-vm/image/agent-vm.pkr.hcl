@@ -93,6 +93,9 @@ build {
       "${path.root}/../agentvm-firstboot.service",
       "${path.root}/../relay-claude",
       "${path.root}/../relay-github",
+      "${path.root}/../agentvm-signin-check",
+      "${path.root}/../agentvm-signin-check.service",
+      "${path.root}/../agentvm-signin-check.timer",
       "${path.root}/provision.sh",
     ]
     destination = "/tmp/agentvm/"

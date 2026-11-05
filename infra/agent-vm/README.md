@@ -79,6 +79,14 @@ Until the Entra app conde-machines exists (Krisztián's half), the deployment ca
    interrupted work without repeating completed external actions, then read the conde inbox. Recovery assistance,
    not completion tracking.
 
+## Sign-in expiry (pilot)
+
+`agentvm-signin-check` prints `claude ok|expiring|expired|unknown <loginExpiresAt>` and `github ok|expired`. Its
+hourly user timer runs it with `--notify`, which pages the human through conde (`conde page`, as the agent's own
+session) when the Claude sign-in has under three days left or has ended: once a day per condition, retried next
+hour if the page failed or was stored without reaching Slack (the board needs the person's Slack id). When the
+bridge sends `machine_event`, it runs the same script and the timer goes.
+
 ## Existing VMs (made before 5 Nov)
 
 They carry a copy of the agent unit in `~/.config/systemd/user`, which takes precedence over the root-owned

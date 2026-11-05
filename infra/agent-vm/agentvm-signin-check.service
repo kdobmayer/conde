@@ -1,0 +1,7 @@
+# Pilot only: removed when the bridge runs agentvm-signin-check itself (machine_event).
+[Unit]
+Description=Agent VM: page the human when the Claude sign-in is about to end
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/agentvm/agentvm-signin-check --notify

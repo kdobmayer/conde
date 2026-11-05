@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# The VM-side half of the design's needs-sign-in state, as the agent user. Prints one line per flow:
+#
+#   claude ok|expiring|expired|unknown <loginExpiresAt>     (expiring: under 3 days left)
+#   github ok|expired
+#
+# With --notify (the pilot's hourly timer, agentvm-signin-check.timer) it pages the human through conde when the
+# Claude sign-in is expiring or expired: once per day per condition, so "expired" still pages after an "expiring"
+# page the same day. A page that failed, or was stored but not sent to Slack, leaves no stamp and is tried again
+# next hour. When the bridge's machine_event exists, the bridge runs this script without --notify and the timer goes.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+WARN_DAYS=3
+STATE="$HOME/.local/state/agentvm"
+
+claude_state() {  # prints "<state> <loginExpiresAt or ->"
+  local js exp end now
+  js=$(claude auth status --json 2>/dev/null) || { echo "unknown -"; return; }
+  [ "$(jq -r '.loggedIn' <<<"$js" 2>/dev/null)" = true ] || { echo "expired -"; return; }
+  exp=$(jq -r '.loginExpiresAt // empty' <<<"$js" 2>/dev/null)
+  [ -n "$exp" ] || { echo "unknown -"; return; }                       # missing: unknown, not expiry
+  end=$(date -d "$exp" +%s 2>/dev/null) || { echo "unknown $exp"; return; }   # malformed: the same
+  now=$(date +%s)
+  if [ "$end" -le "$now" ]; then echo "expired $exp"
+  elif [ $(( end - now )) -lt $(( WARN_DAYS * 86400 )) ]; then echo "expiring $exp"
+  else echo "ok $exp"; fi
+}
+
+read -r c_state c_exp < <(claude_state)
+if gh auth status --hostname github.com >/dev/null 2>&1; then g_state=ok; else g_state=expired; fi
+echo "claude $c_state $c_exp"
+echo "github $g_state"
+
+[ "${1:-}" = --notify ] || exit 0
+case "$c_state" in expiring|expired) ;; *) exit 0 ;; esac
+stamp="$STATE/paged-claude-$c_state-$(date -u +%F)"
+[ -e "$stamp" ] && exit 0
+
+# conde page from a timer: as the agent's own registered session (a plain timer would be the human, and refused).
+[ -f "$HOME/.config/agentvm/agent.env" ] || { echo "no agent.env yet: not paged" >&2; exit 0; }
+. "$HOME/.config/agentvm/agent.env"
+if [ "$c_state" = expired ]; then text="Your agent VM's Claude sign-in has expired: sign in again on the onboarding page"
+else text="Your agent VM's Claude sign-in ends $(date -u -d "$c_exp" '+%a %d %b %H:%M UTC'): sign in again on the onboarding page"; fi
+out=$(CLAUDE_CODE_SESSION_ID="$SESSION_ID" conde page --board dakai "$text" 2>&1); rc=$?
+echo "$out" >&2
+if [ "$rc" -eq 0 ] && grep -q 'paged' <<<"$out" && ! grep -q 'not paged' <<<"$out"; then
+  mkdir -p "$STATE" && touch "$stamp"
+fi
+exit 0

@@ -20,6 +20,7 @@ on:
       - infra/agent-vm/agentvm-firstboot.service
       - infra/agent-vm/relay-claude
       - infra/agent-vm/relay-github
+      - infra/agent-vm/agentvm-signin-check*
       - infra/agent-vm/image/**
       - .github/workflows/agent-image.yml
 

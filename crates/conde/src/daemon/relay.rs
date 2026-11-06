@@ -4,9 +4,11 @@
 //! process group) and spawns the new one with `start` on its stdin; `code` writes `code <code>`;
 //! `cancel` closes its stdin (the helpers' EOF rule). A new connection or a stop of the board's
 //! connection stops the running helper as well. The pasted code is written to the helper's stdin
-//! and nowhere else.
+//! and nowhere else. The machine's sign-in check (`agentvm-signin-check`) runs on connect, after a
+//! relay's `done` and hourly; each flow it finds expiring or expired goes up as a `needs_sign_in`
+//! `machine_event`, and a check with none as one `signed_in` when the flows changed.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,14 +16,19 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use conde_remote::RelayEvent;
+use serde_json::{Value, json};
 
 /// Where the machine image installs the helpers.
 pub const HELPER_DIR: &str = "/usr/local/lib/agentvm";
 /// How long a stopped helper may take to exit before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// The machine's sign-in check, in [`HELPER_DIR`]; it prints one line per flow.
+pub const SIGNIN_CHECK: &str = "agentvm-signin-check";
 
 /// Sends one `relay_event` up the board's connection.
 pub type Emit = Arc<dyn Fn(&RelayEvent) + Send + Sync>;
+/// Sends one `machine_event` up the board's connection.
+pub type EmitMachine = Arc<dyn Fn(&Value) + Send + Sync>;
 
 enum Cmd {
     Frame(conde_remote::Relay),
@@ -306,6 +313,149 @@ fn parse(relay_id: &str, line: &str) -> Option<RelayEvent> {
     Some(event)
 }
 
+/// One board connection's sign-in check: a worker of its own that runs the check when asked and
+/// `every` after its last run, started only where the machine has the script.
+#[derive(Default)]
+pub struct SignInCheck {
+    /// Each request says whether it is a new connection.
+    worker: Mutex<Option<mpsc::Sender<bool>>>,
+}
+
+impl SignInCheck {
+    /// Checks now, starting the worker when `dir` has the script (a new connection).
+    pub fn start(&self, dir: &Path, every: Duration, limit: Duration, emit: EmitMachine) {
+        let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
+        if worker.is_none() {
+            let path = dir.join(SIGNIN_CHECK);
+            if !path.is_file() {
+                return;
+            }
+            let (tx, rx) = mpsc::channel();
+            std::thread::Builder::new()
+                .name("conde-signin-check".into())
+                .spawn(move || check_loop(&rx, &path, every, limit, &emit))
+                .expect("spawn the sign-in check");
+            *worker = Some(tx);
+        }
+        if let Some(tx) = worker.as_ref() {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// Checks now if the worker runs (a relay ended `done`).
+    pub fn now(&self) {
+        if let Some(tx) = self
+            .worker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            let _ = tx.send(false);
+        }
+    }
+
+    /// The board's connection stops: the worker ends after its running check.
+    pub fn stop(&self) {
+        self.worker.lock().unwrap_or_else(|p| p.into_inner()).take();
+    }
+}
+
+fn check_loop(
+    rx: &mpsc::Receiver<bool>,
+    path: &Path,
+    every: Duration,
+    limit: Duration,
+    emit: &EmitMachine,
+) {
+    // the flows this connection last sent
+    let mut sent = None;
+    loop {
+        match rx.recv_timeout(every) {
+            Ok(mut new) => {
+                while let Ok(n) = rx.try_recv() {
+                    new |= n;
+                }
+                if new {
+                    sent = None;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+        if let Some(out) = run_check(path, limit) {
+            for event in sign_in_events(&out, &mut sent) {
+                emit(&event);
+            }
+        }
+    }
+}
+
+/// The check's output; None when it did not start or ran past `limit`, when its process group is
+/// stopped as a helper's is and the round reports nothing.
+fn run_check(path: &Path, limit: Duration) -> Option<String> {
+    let mut cmd = Command::new(path);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("sign-in check not started: {e}");
+            return None;
+        }
+    };
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
+    let deadline = Instant::now() + limit;
+    while matches!(child.try_wait(), Ok(None)) {
+        if Instant::now() >= deadline {
+            tracing::warn!("sign-in check ran over {limit:?}; stopped");
+            terminate(&mut child);
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    reader.join().ok()
+}
+
+/// The check's lines (`claude ok|expiring|expired|unknown <at>`, `github ok|expired`, `codex
+/// ok|expired`) as the contract's events, each with every flow's state: one `needs_sign_in` per
+/// flow that is expiring or expired; with none, one `signed_in` unless `sent` already has these
+/// flows. `sent` becomes the flows sent.
+fn sign_in_events(out: &str, sent: &mut Option<serde_json::Map<String, Value>>) -> Vec<Value> {
+    let mut flows = serde_json::Map::new();
+    for line in out.lines() {
+        let mut words = line.split_whitespace();
+        if let (Some(flow), Some(state)) = (words.next(), words.next())
+            && crate::ops::machines::RELAY_FLOWS.contains(&flow)
+        {
+            flows.insert(flow.to_string(), json!(state));
+        }
+    }
+    if flows.is_empty() {
+        return Vec::new();
+    }
+    let mut events: Vec<Value> = flows
+        .iter()
+        .filter(|(_, state)| *state == "expiring" || *state == "expired")
+        .map(|(flow, _)| json!({"state": "needs_sign_in", "flow": flow, "flows": flows}))
+        .collect();
+    if events.is_empty() {
+        if sent.as_ref() == Some(&flows) {
+            return events;
+        }
+        events.push(json!({"state": "signed_in", "flows": flows}));
+    }
+    *sent = Some(flows);
+    events
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +486,38 @@ mod tests {
         assert!(parse("r", "done now").is_none());
         assert!(parse("r", "hello").is_none());
         assert!(parse("r", "").is_none());
+    }
+
+    #[test]
+    fn check_lines_are_one_needs_sign_in_per_flow_that_needs_the_person() {
+        let mut sent = None;
+        let out = "claude expiring 2026-11-08T10:00:00Z\ngithub expired\ncodex ok\n";
+        let flows = json!({"claude": "expiring", "github": "expired", "codex": "ok"});
+        assert_eq!(
+            sign_in_events(out, &mut sent),
+            [
+                json!({"state": "needs_sign_in", "flow": "claude", "flows": flows}),
+                json!({"state": "needs_sign_in", "flow": "github", "flows": flows}),
+            ]
+        );
+        assert_eq!(
+            sign_in_events(out, &mut sent).len(),
+            2,
+            "sent on every check"
+        );
+        let ok = "claude ok 2026-12-01T00:00:00Z\ngithub ok\ncodex ok\n";
+        let fine = json!({"claude": "ok", "github": "ok", "codex": "ok"});
+        assert_eq!(
+            sign_in_events(ok, &mut sent),
+            [json!({"state": "signed_in", "flows": fine})]
+        );
+        assert!(sign_in_events(ok, &mut sent).is_empty(), "unchanged");
+        let unknown = "claude unknown -\ngithub ok\ncodex ok\n";
+        assert_eq!(sign_in_events(unknown, &mut sent)[0]["state"], "signed_in");
+        assert!(sign_in_events("", &mut sent).is_empty());
+        assert!(
+            sign_in_events(unknown, &mut sent).is_empty(),
+            "nothing parsed changes nothing"
+        );
     }
 }

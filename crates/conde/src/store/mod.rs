@@ -1302,6 +1302,9 @@ pub trait Tx {
     /// Sets `ready_at` unless set; whether this call set it.
     fn machine_set_ready(&self, user_id: i64, at: &str) -> StoreResult<bool>;
     fn machine_set_sign_in(&self, user_id: i64, sign_in: Option<&str>) -> StoreResult<()>;
+    fn machine_set_session_online(&self, user_id: i64, at: &str) -> StoreResult<()>;
+    /// The record of the machine whose host is `host`.
+    fn machine_of_host(&self, host: &str) -> StoreResult<Option<MachineRow>>;
     fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()>;
     /// The record whose VM identity is `principal_id`.
     fn machine_by_principal(&self, principal_id: &str) -> StoreResult<Option<MachineRow>>;

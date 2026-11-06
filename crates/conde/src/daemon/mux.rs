@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use crate::address::{Address, Kind};
 use crate::dispatch::{Dispatcher, Principal};
 use crate::notify::{Notifier, NotifyOutcome, ReceiptStatus};
+use crate::ops::agents::PUBLIC_AGENT;
 use crate::protocol::Request;
 use crate::protocol::v2::LOCAL_BOARD;
 use crate::store::Tx;
@@ -77,6 +78,10 @@ pub struct Tuning {
     /// Tests only: where the sign-in relay's helpers are (the image's directory when `None`).
     #[doc(hidden)]
     pub relay_dir: Option<std::path::PathBuf>,
+    /// How often a machine's sign-in check runs on its own.
+    pub signin_every: Duration,
+    /// How long one sign-in check may run before it is stopped.
+    pub signin_limit: Duration,
 }
 
 impl Default for Tuning {
@@ -97,6 +102,8 @@ impl Default for Tuning {
             routes_delay: None,
             reload_delay: None,
             relay_dir: None,
+            signin_every: Duration::from_secs(3600),
+            signin_limit: Duration::from_secs(60),
         }
     }
 }
@@ -176,6 +183,8 @@ struct Origin {
     reconciled: bool,
     stopped: Option<String>,
     client: Option<BridgeClient>,
+    /// The published `vm.agent`'s session was live at the last endpoint scan of this connection.
+    public_live: bool,
 }
 
 impl Origin {
@@ -190,6 +199,7 @@ impl Origin {
             reconciled,
             stopped: None,
             client: None,
+            public_live: false,
         }
     }
 }
@@ -263,7 +273,16 @@ impl Mux {
     pub fn connected(&self, alias: &str) {
         if let Some(o) = self.lock().origins.get_mut(alias) {
             o.reconciled = false;
+            o.public_live = false;
         }
+    }
+
+    /// Records whether the published `vm.agent`'s session is live; true when it just went live.
+    fn public_went_live(&self, alias: &str, live: bool) -> bool {
+        self.lock()
+            .origins
+            .get_mut(alias)
+            .is_some_and(|o| !std::mem::replace(&mut o.public_live, live) && live)
     }
 
     /// The connection's routes are applied: its jobs may be injected again.
@@ -991,19 +1010,27 @@ impl Delivery {
                 }
                 let address = tx.agent_by_id(&p.agent_id)?.and_then(|a| a.address);
                 if let (Some(mailbox_id), Some(address)) = (p.mailbox_id, address) {
-                    out.push((mailbox_id, address));
+                    out.push((mailbox_id, address, p.shared_name == PUBLIC_AGENT));
                 }
             }
             Ok::<_, crate::store::StoreError>(out)
         })();
         match rows {
             Ok(rows) => {
+                let mut public_live = false;
                 let live: Vec<Endpoint> = rows
                     .into_iter()
-                    .filter(|(_, a)| a.kind == Kind::Human || notifier.is_live(a))
-                    .map(|(mailbox_id, _)| Endpoint::Mailbox { mailbox_id })
+                    .filter(|(_, a, _)| a.kind == Kind::Human || notifier.is_live(a))
+                    .map(|(mailbox_id, _, public)| {
+                        public_live |= public;
+                        Endpoint::Mailbox { mailbox_id }
+                    })
                     .collect();
                 client.set_endpoints(live);
+                // the machine's `online` (session up and registered); its end is the endpoints'
+                if self.mux.public_went_live(alias, public_live) {
+                    client.send_frame("machine_event", &json!({"state": "online"}));
+                }
             }
             Err(e) => tracing::warn!(board = alias, "endpoint scan failed: {e}"),
         }

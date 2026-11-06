@@ -93,8 +93,11 @@ default.
 `codex ok|expired` (a cached Codex credential, which renews itself; that it still refreshes is not checked). Its
 hourly user timer runs it with `--notify`, which pages the human through conde (`conde page`, as the agent's own
 session) when the Claude sign-in has under three days left or has ended: once a day per condition, retried next
-hour if the page failed or was stored without reaching Slack (the board needs the person's Slack id). When the
-bridge sends `machine_event`, it runs the same script and the timer goes.
+hour if the page failed or was stored without reaching Slack (the board needs the person's Slack id). conde's
+bridge runs the same script without `--notify` when it connects, every hour and after a sign-in on the page ends
+`done`, and reports each expiring or expired flow to the board (the Machine page's needs-sign-in line), or that
+every flow is signed in; the timer
+keeps paging until a later image rebuild drops it.
 
 ## Rebuilding a person's VM (pilot: Levente, Oliver)
 
@@ -229,5 +232,5 @@ one work on a VM, keep stdin open (closing it cancels): `{ echo start; sleep 900
 
 ## Not here yet
 
-- The bridge's machine events (`online`, `needs_sign_in`): conde's half, next.
+- Dropping the pilot sign-in timer (`agentvm-signin-check.timer`): at a later image rebuild.
 - The rebuild of Levente's and Oliver's VMs (above), after the probe passed on 5 Nov.

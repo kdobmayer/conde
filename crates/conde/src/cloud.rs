@@ -581,6 +581,9 @@ impl NotificationSource for Board {
         let applied = self.d.with_tx(|tx| {
             let applied = tx.machine_relay_update(host_id, &update, &at)?;
             if applied {
+                if e.event == "done" {
+                    ops::machines::relay_signed_in(tx, host_id)?;
+                }
                 tx.announce(topics::MACHINE);
             }
             Ok(applied)
@@ -611,6 +614,32 @@ impl NotificationSource for Board {
         });
         if let Err(e) = expired {
             tracing::warn!(host = host_id, relay = relay_id, "relay not expired: {e}");
+        }
+    }
+
+    /// `online` sets the record's `session_online_at`; `needs_sign_in` and `signed_in` its
+    /// sign-in flows.
+    fn machine_event(&self, host_id: &str, e: &Value) {
+        let at = iso_from_ms(self.d.now_ms());
+        let state = e["state"].as_str().unwrap_or_default();
+        let taken = self.d.with_tx(|tx| {
+            let taken = match state {
+                "online" => ops::machines::session_online(tx, host_id, &at)?,
+                "needs_sign_in" => {
+                    ops::machines::needs_sign_in(tx, host_id, e["flow"].as_str(), e.get("flows"))?
+                }
+                "signed_in" => ops::machines::needs_sign_in(tx, host_id, None, e.get("flows"))?,
+                _ => false,
+            };
+            if taken {
+                tx.announce(topics::MACHINE);
+            }
+            Ok(taken)
+        });
+        match taken {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(host = host_id, state, "machine event not taken"),
+            Err(err) => tracing::warn!(host = host_id, state, "machine event not recorded: {err}"),
         }
     }
 

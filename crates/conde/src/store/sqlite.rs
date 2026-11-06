@@ -2716,6 +2716,22 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
+    fn machine_set_session_online(&self, user_id: i64, at: &str) -> StoreResult<()> {
+        self.exec(
+            "UPDATE machines SET session_online_at = ?2 WHERE user_id = ?1",
+            params![user_id, at],
+        )?;
+        Ok(())
+    }
+
+    fn machine_of_host(&self, host: &str) -> StoreResult<Option<MachineRow>> {
+        self.opt(
+            &format!("{MACHINE_SELECT} WHERE host_id = ?1"),
+            [host],
+            machine_row,
+        )
+    }
+
     fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()> {
         self.exec(
             "UPDATE machines SET deleting_at = ?2 WHERE user_id = ?1",

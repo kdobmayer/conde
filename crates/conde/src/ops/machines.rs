@@ -17,7 +17,7 @@ use crate::dispatch::{
     Ctx, MachineSettings, OpResult, bad_request, conflict, forbidden, not_found, opt_str, str_param,
 };
 use crate::humans;
-use crate::store::{MachineDeploy, MachineRow, NewMachine, Tx, topics};
+use crate::store::{MachineDeploy, MachineRow, NewMachine, StoreResult, Tx, topics};
 use crate::util::{iso_from_ms, ms_from_iso};
 
 /// A deployment accepted this long ago whose machine never joined the board is not connected.
@@ -261,6 +261,61 @@ pub fn sign_in_json(m: &MachineRow) -> Value {
         .as_deref()
         .and_then(|s| serde_json::from_str::<Value>(s).ok())
         .unwrap_or(Value::Null)
+}
+
+/// Rewrites the sign-in flows of `host`'s record with `change`; false without a record.
+fn change_flows(
+    db: &dyn Tx,
+    host: &str,
+    change: impl FnOnce(&MachineRow, &mut serde_json::Map<String, Value>),
+) -> StoreResult<bool> {
+    let Some(m) = db.machine_of_host(host)? else {
+        return Ok(false);
+    };
+    let mut flows = match sign_in_json(&m) {
+        Value::Object(o) => o,
+        _ => serde_json::Map::new(),
+    };
+    change(&m, &mut flows);
+    db.machine_set_sign_in(m.user_id, Some(&Value::Object(flows).to_string()))?;
+    Ok(true)
+}
+
+/// The machine's `needs_sign_in` for `flow`, or its `signed_in` (no flow): its `flows` map
+/// replaces the record's, and a `needs_sign_in` without the map marks `flow` expired. Whether a
+/// record took it.
+pub fn needs_sign_in(
+    db: &dyn Tx,
+    host: &str,
+    flow: Option<&str>,
+    flows: Option<&Value>,
+) -> StoreResult<bool> {
+    match (flows.and_then(Value::as_object), flow) {
+        (Some(all), _) => change_flows(db, host, |_, f| *f = all.clone()),
+        (None, Some(flow)) => change_flows(db, host, |_, f| {
+            f.insert(flow.to_string(), json!("expired"));
+        }),
+        (None, None) => Ok(false),
+    }
+}
+
+/// A relay of `host` ended `done`: its flow is signed in until the machine's next check says
+/// otherwise.
+pub fn relay_signed_in(db: &dyn Tx, host: &str) -> StoreResult<bool> {
+    change_flows(db, host, |m, f| {
+        if let Some(flow) = &m.relay_flow {
+            f.insert(flow.clone(), json!("ok"));
+        }
+    })
+}
+
+/// The machine's `online`: the `vm.agent` session went live. Whether a record took it.
+pub fn session_online(db: &dyn Tx, host: &str, at: &str) -> StoreResult<bool> {
+    let Some(m) = db.machine_of_host(host)? else {
+        return Ok(false);
+    };
+    db.machine_set_session_online(m.user_id, at)?;
+    Ok(true)
 }
 
 /// Whether the machine joined the board: minted, or joined by hand with a live key of its host

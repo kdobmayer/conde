@@ -23,13 +23,62 @@ impl Harness {
         }
     }
 
+    /// A program name or path: `claude` or `codex` (npm's native `claude.exe` too), or
+    /// Claude Code's native install, a binary named after its version in `claude/versions/`.
     fn from_program(name: &str) -> Option<Harness> {
-        match name.rsplit('/').next().unwrap_or(name) {
+        let mut parts = name.rsplit('/');
+        let base = parts.next().unwrap_or(name);
+        match base.strip_suffix(".exe").unwrap_or(base) {
             "claude" => Some(Harness::Claude),
             "codex" => Some(Harness::Codex),
-            _ => None,
+            _ => (!base.is_empty()
+                && parts.next() == Some("versions")
+                && parts.next() == Some("claude"))
+            .then_some(Harness::Claude),
         }
     }
+
+    /// The harness whose npm package a path lies in, either separator, any case.
+    fn from_npm_path(path: &str) -> Option<Harness> {
+        let path = path.to_lowercase().replace('\\', "/");
+        [
+            ("/@anthropic-ai/claude-code/", Harness::Claude),
+            ("/@openai/codex/", Harness::Codex),
+        ]
+        .into_iter()
+        .find_map(|(package, h)| path.contains(package).then_some(h))
+    }
+}
+
+/// `node` or `bun`, by name or path: a process whose script decides what it is.
+fn is_script_host(name: &str) -> bool {
+    matches!(name.rsplit(['/', '\\']).next(), Some("node" | "bun"))
+}
+
+/// argv0, the given program names, and for a script host the harness its script is: an
+/// npm package path in an argument, or a script named `claude`/`codex` (an npm bin link
+/// run through its `#!/usr/bin/env node` shebang).
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn unix_names(argv: &[String], others: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = argv
+        .first()
+        .filter(|a| !a.is_empty())
+        .cloned()
+        .into_iter()
+        .collect();
+    names.extend(others.into_iter().filter(|n| !n.is_empty()));
+    if names.iter().any(|n| is_script_host(n)) {
+        let script = argv.iter().skip(1).find(|a| !a.starts_with('-'));
+        if let Some(h) = argv
+            .iter()
+            .skip(1)
+            .find_map(|a| Harness::from_npm_path(a))
+            .or_else(|| script.and_then(|s| Harness::from_program(s)))
+        {
+            names.push(h.as_str().to_string());
+        }
+    }
+    names
 }
 
 /// What the walk up the process tree found.
@@ -196,13 +245,19 @@ impl ProcessTable for SystemTable {
     fn entry(&self, pid: u32) -> Option<ProcEntry> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
-        linux_entry(&stat, cmdline.as_deref())
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        linux_entry(
+            &stat,
+            cmdline.as_deref(),
+            exe.as_deref().map(|p| p.to_string_lossy()).as_deref(),
+        )
     }
 }
 
-/// `/proc/<pid>/stat` (comm, ppid) plus argv0 from `/proc/<pid>/cmdline`.
+/// `/proc/<pid>/stat` (comm, ppid), argv from `/proc/<pid>/cmdline` and the
+/// `/proc/<pid>/exe` target, which names a binary an update replaced `... (deleted)`.
 #[cfg(any(target_os = "linux", test))]
-fn linux_entry(stat: &str, cmdline: Option<&[u8]>) -> Option<ProcEntry> {
+fn linux_entry(stat: &str, cmdline: Option<&[u8]>, exe: Option<&str>) -> Option<ProcEntry> {
     let (open, close) = (stat.find('(')?, stat.rfind(')')?);
     let comm = stat.get(open + 1..close)?.to_string();
     let ppid = stat
@@ -211,15 +266,20 @@ fn linux_entry(stat: &str, cmdline: Option<&[u8]>) -> Option<ProcEntry> {
         .nth(1)?
         .parse()
         .ok()?;
-    let mut names = Vec::new();
-    if let Some(argv0) = cmdline
-        .and_then(|raw| raw.split(|b| *b == 0).next())
-        .filter(|a| !a.is_empty())
-    {
-        names.push(String::from_utf8_lossy(argv0).into_owned());
-    }
-    names.push(comm);
-    Some(ProcEntry { ppid, names })
+    let argv: Vec<String> = cmdline
+        .map(|raw| {
+            raw.strip_suffix(&[0])
+                .unwrap_or(raw)
+                .split(|b| *b == 0)
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let exe = exe.map(|e| e.strip_suffix(" (deleted)").unwrap_or(e).to_string());
+    Some(ProcEntry {
+        ppid,
+        names: unix_names(&argv, exe.into_iter().chain([comm])),
+    })
 }
 
 // --- Windows: a Toolhelp snapshot --------------------------------------------
@@ -290,16 +350,10 @@ fn windows_entry(ppid: u32, image: &str, cmdline: Option<&str>) -> ProcEntry {
         {
             names.push(argv0);
         }
-        if names.iter().any(|n| n == "node" || n == "bun") {
-            let line = line.to_lowercase().replace('\\', "/");
-            for (package, harness) in [
-                ("/@anthropic-ai/claude-code/", "claude"),
-                ("/@openai/codex/", "codex"),
-            ] {
-                if line.contains(package) {
-                    names.push(harness.to_string());
-                }
-            }
+        if names.iter().any(|n| is_script_host(n))
+            && let Some(h) = Harness::from_npm_path(line)
+        {
+            names.push(h.as_str().to_string());
         }
     }
     ProcEntry { ppid, names }
@@ -374,34 +428,35 @@ impl ProcessTable for SystemTable {
 /// MAXCOMLEN), `proc_pidpath` and the raw `KERN_PROCARGS2` buffer.
 #[cfg(any(target_os = "macos", test))]
 fn darwin_entry(ppid: u32, comm: &[u8], path: Option<&str>, procargs2: &[u8]) -> ProcEntry {
-    let mut names = Vec::new();
-    if let Some(argv0) = darwin_argv0(procargs2) {
-        names.push(argv0);
-    }
-    if let Some(p) = path.filter(|p| !p.is_empty()) {
-        names.push(p.to_string());
-    }
     let comm = comm.split(|b| *b == 0).next().unwrap_or_default();
-    if !comm.is_empty() {
-        names.push(String::from_utf8_lossy(comm).into_owned());
+    let others = [
+        path.map(str::to_string),
+        Some(String::from_utf8_lossy(comm).into_owned()),
+    ];
+    ProcEntry {
+        ppid,
+        names: unix_names(&darwin_argv(procargs2), others.into_iter().flatten()),
     }
-    ProcEntry { ppid, names }
 }
 
-/// argv0 from a `KERN_PROCARGS2` buffer: argc (native i32), the exec path,
-/// NUL padding, then argv.
+/// argv from a `KERN_PROCARGS2` buffer: argc (native i32), the exec path,
+/// NUL padding, then argv, then the environment.
 #[cfg(any(target_os = "macos", test))]
-fn darwin_argv0(buf: &[u8]) -> Option<String> {
-    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
-    if argc < 1 {
-        return None;
-    }
-    let rest = &buf[4..];
-    let exec_end = rest.iter().position(|b| *b == 0)?;
-    let after = &rest[exec_end..];
-    let start = after.iter().position(|b| *b != 0)?;
-    let argv0 = after[start..].split(|b| *b == 0).next()?;
-    (!argv0.is_empty()).then(|| String::from_utf8_lossy(argv0).into_owned())
+fn darwin_argv(buf: &[u8]) -> Vec<String> {
+    let parse = || {
+        let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
+        let rest = &buf[4..];
+        let after = &rest[rest.iter().position(|b| *b == 0)?..];
+        let start = after.iter().position(|b| *b != 0)?;
+        Some(
+            after[start..]
+                .split(|b| *b == 0)
+                .take(usize::try_from(argc).unwrap_or(0))
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect(),
+        )
+    };
+    parse().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -601,14 +656,14 @@ mod tests {
     }
 
     #[test]
-    fn darwin_argv0_parsing() {
+    fn darwin_argv_parsing() {
         assert_eq!(
-            darwin_argv0(&procargs2("/x/y", &["codex", "exec"])).as_deref(),
-            Some("codex")
+            darwin_argv(&procargs2("/x/y", &["codex", "exec"])),
+            ["codex", "exec"]
         );
-        assert_eq!(darwin_argv0(&procargs2("/x/y", &[])), None);
-        assert_eq!(darwin_argv0(&[1, 0]), None);
-        assert_eq!(darwin_argv0(&[]), None);
+        assert!(darwin_argv(&procargs2("/x/y", &[])).is_empty());
+        assert!(darwin_argv(&[1, 0]).is_empty());
+        assert!(darwin_argv(&[]).is_empty());
     }
 
     #[test]
@@ -616,16 +671,153 @@ mod tests {
         let e = linux_entry(
             "123 (my (odd) comm) S 77 1 1 0",
             Some(b"/home/k/.local/bin/claude\0--x\0"),
+            None,
         )
         .unwrap();
         assert_eq!(e.ppid, 77);
         assert_eq!(e.names, ["/home/k/.local/bin/claude", "my (odd) comm"]);
-        assert_eq!(linux_entry("garbage", None), None);
+        assert_eq!(linux_entry("garbage", None, None), None);
         let t = Fake(HashMap::from([
-            (9, linux_entry("9 (conde) S 8", None).unwrap()),
-            (8, linux_entry("8 (bash) S 1", Some(b"-bash\0")).unwrap()),
+            (9, linux_entry("9 (conde) S 8", None, None).unwrap()),
+            (
+                8,
+                linux_entry("8 (bash) S 1", Some(b"-bash\0"), None).unwrap(),
+            ),
         ]));
         assert_eq!(walk(&t, 9), Ancestry::NoHarness);
+    }
+
+    const NATIVE: &str = "/home/konstantin/.local/share/claude/versions/2.1.312";
+
+    fn linux_harness(stat: &str, cmdline: Option<&[u8]>, exe: Option<&str>) -> Ancestry {
+        let e = linux_entry(stat, cmdline, exe).unwrap();
+        let pid = stat.split_whitespace().next().unwrap().parse().unwrap();
+        walk(&Fake(HashMap::from([(pid, e)])), pid)
+    }
+
+    #[test]
+    fn linux_native_claude_by_exe_after_an_update_deleted_it() {
+        // the reported shell: bash <- 2.1.312 <- 2.1.312 <- init, argv unreadable
+        let deleted = format!("{NATIVE} (deleted)");
+        let t = Fake(HashMap::from([
+            (
+                3829759,
+                linux_entry(
+                    "3829759 (bash) S 3526",
+                    Some(b"/usr/bin/bash\0"),
+                    Some("/usr/bin/bash"),
+                )
+                .unwrap(),
+            ),
+            (
+                3526,
+                linux_entry("3526 (2.1.312) S 3514", None, Some(&deleted)).unwrap(),
+            ),
+            (
+                3514,
+                linux_entry("3514 (2.1.312) S 1", None, Some(&deleted)).unwrap(),
+            ),
+        ]));
+        assert_eq!(walk(&t, 3829759), CLAUDE);
+    }
+
+    #[test]
+    fn linux_native_claude_by_versioned_argv0() {
+        // exec'd by its versioned path: comm and argv0 name the version
+        let argv = format!("{NATIVE}\0--resume\0");
+        assert_eq!(
+            linux_harness("3526 (2.1.312) S 1", Some(argv.as_bytes()), None),
+            CLAUDE
+        );
+    }
+
+    #[test]
+    fn linux_npm_native_claude_exe() {
+        // npm's Claude Code is a native bin/claude.exe, also on Linux
+        let exe = "/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe";
+        assert_eq!(
+            linux_harness("40 (claude.exe) S 1", Some(b"claude.exe\0"), Some(exe)),
+            CLAUDE
+        );
+    }
+
+    #[test]
+    fn linux_script_host_claude() {
+        let argv = b"node\0/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\0--resume\0";
+        assert_eq!(
+            linux_harness("40 (node) S 1", Some(argv), Some("/usr/bin/node")),
+            CLAUDE
+        );
+        let argv = b"/home/k/.bun/bin/bun\0/home/k/.bun/install/global/node_modules/@anthropic-ai/claude-code/cli.js\0";
+        assert_eq!(linux_harness("40 (bun) S 1", Some(argv), None), CLAUDE);
+    }
+
+    #[test]
+    fn linux_script_host_codex() {
+        let argv = b"node\0/home/k/.nvm/versions/node/v22.20.0/lib/node_modules/@openai/codex/bin/codex.js\0exec\0";
+        assert_eq!(linux_harness("40 (node) S 1", Some(argv), None), CODEX);
+        // the npm bin link run through its `#!/usr/bin/env node` shebang
+        let argv = b"node\0/home/k/.nvm/versions/node/v22.20.0/bin/codex\0";
+        assert_eq!(linux_harness("40 (node) S 1", Some(argv), None), CODEX);
+    }
+
+    #[test]
+    fn linux_lookalikes_are_no_harness() {
+        // a script host running something else, a package path outside a script host
+        let argv = b"node\0--inspect\0server.js\0claude\0";
+        assert_eq!(
+            linux_harness("40 (node) S 1", Some(argv), None),
+            Ancestry::NoHarness
+        );
+        let argv = b"vim\0/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\0";
+        assert_eq!(
+            linux_harness("40 (vim) S 1", Some(argv), Some("/usr/bin/vim")),
+            Ancestry::NoHarness
+        );
+        assert_eq!(
+            linux_harness("40 (2.1.312) S 1", None, Some("/opt/tool/versions/2.1.312")),
+            Ancestry::NoHarness
+        );
+    }
+
+    #[test]
+    fn darwin_native_claude_by_versioned_path_and_argv0() {
+        let mac = "/Users/k/.local/share/claude/versions/2.1.312";
+        // exec'd by its versioned path, proc_pidpath unreadable: argv0 decides
+        let t = darwin_table(&[(500, 1, "2.1.312", None, procargs2(mac, &[mac]))]);
+        assert_eq!(walk(&t, 500), CLAUDE);
+        // argv unreadable: the executable path decides
+        let t = darwin_table(&[(500, 1, "2.1.312", Some(mac), vec![])]);
+        assert_eq!(walk(&t, 500), CLAUDE);
+    }
+
+    #[test]
+    fn darwin_script_host_claude_and_codex() {
+        let cli = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js";
+        let t = darwin_table(&[(
+            500,
+            1,
+            "node",
+            Some("/opt/homebrew/bin/node"),
+            procargs2("/opt/homebrew/bin/node", &["node", cli]),
+        )]);
+        assert_eq!(walk(&t, 500), CLAUDE);
+        let t = darwin_table(&[(
+            500,
+            1,
+            "node",
+            Some("/opt/homebrew/bin/node"),
+            procargs2(
+                "/opt/homebrew/bin/node",
+                &["node", "/opt/homebrew/bin/codex"],
+            ),
+        )]);
+        assert_eq!(walk(&t, 500), CODEX);
+        // the environment after argv is not the command line
+        let mut args = procargs2("/opt/homebrew/bin/node", &["node", "server.js"]);
+        args.extend_from_slice(format!("NODE_PATH={cli}\0").as_bytes());
+        let t = darwin_table(&[(500, 1, "node", None, args)]);
+        assert_eq!(walk(&t, 500), Ancestry::NoHarness);
     }
 
     #[test]

@@ -171,3 +171,40 @@ test('a finished sign-in says how it ended above the buttons; a cancelled one sa
 	assert.equal(outcome('claude', 'cancelled'), null);
 	assert.equal(signInView(machine('connected'), NOW).outcome, null);
 });
+
+const row = (m, flow) => {
+	const r = signInView(m, NOW).start.find((f) => f.flow === flow);
+	return r && { label: r.label, status: r.status, warn: r.warn, again: r.again };
+};
+const signedIn = (sign_in, o = {}) => machine('ready', { sign_in, ...o });
+
+test('a signed-in flow says so and offers a quiet sign-in again in place of its button', () => {
+	assert.deepEqual(row(signedIn({ claude: 'ok', github: 'ok', codex: 'expired' }), 'claude'), { label: 'Sign in again', status: 'Signed in', warn: false, again: true });
+	assert.deepEqual(row(signedIn({ claude: 'ok', github: 'ok', codex: 'expired' }), 'github'), { label: 'Sign in again', status: 'Signed in', warn: false, again: true });
+});
+
+test('an expiring Claude sign-in warns and keeps the sign-in button', () => {
+	assert.deepEqual(row(signedIn({ claude: 'expiring' }), 'claude'), { label: 'Sign in to Claude', status: 'Sign-in expires within 3 days', warn: true, again: false });
+});
+
+test('an expired flow says it expired and keeps the sign-in button', () => {
+	assert.deepEqual(row(signedIn({ claude: 'expired', github: 'expired', codex: 'expired' }), 'codex'), { label: 'Sign in to Codex', status: 'Sign-in expired', warn: true, again: false });
+	assert.deepEqual(row(signedIn({ github: 'expired' }), 'github'), { label: 'Sign in to GitHub', status: 'Sign-in expired', warn: true, again: false });
+});
+
+test('an unknown or unreported flow shows the sign-in button alone', () => {
+	const plain = (flow, name) => ({ label: `Sign in to ${name}`, status: null, warn: false, again: false });
+	assert.deepEqual(row(signedIn({ claude: 'unknown' }), 'claude'), plain('claude', 'Claude'));
+	assert.deepEqual(row(signedIn(null), 'github'), plain('github', 'GitHub'));
+	assert.deepEqual(row(signedIn({ claude: 'ok' }), 'codex'), plain('codex', 'Codex'));
+});
+
+test('a finished sign-in reads signed in at once; a later report that it needs the person wins', () => {
+	const done = (flow, sign_in) => signedIn(sign_in, { relay: relay(flow, 'done') });
+	assert.equal(row(done('github', null), 'github').status, 'Signed in', 'before any report');
+	assert.equal(row(done('claude', { claude: 'unknown' }), 'claude').status, 'Signed in');
+	assert.equal(row(done('claude', { claude: 'ok' }), 'claude').again, true, 'the server set it ok');
+	assert.equal(row(done('github', null), 'claude').status, null, 'only its own flow');
+	assert.equal(row(done('claude', { claude: 'expired' }), 'claude').status, 'Sign-in expired');
+	assert.equal(row(signedIn(null, { relay: relay('claude', 'failed', { reason: 'timeout' }) }), 'claude').status, null);
+});

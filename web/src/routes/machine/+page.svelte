@@ -139,16 +139,23 @@
 				{#if signIn.outcome}
 					<p class="line outcome">{signIn.outcome}</p>
 				{/if}
-				<div class="flows">
+				<ul class="flows">
 					{#each signIn.start as f (f.flow)}
-						<button type="button" disabled={busy} onclick={() => start(f.flow)}>{f.label}</button>
+						<li data-flow={f.flow}>
+							<p class="what"><span class="name">{f.name}</span>{#if f.status}<span class="status" class:warn={f.warn}>{f.status}</span>{/if}</p>
+							{#if f.again}
+								<button type="button" class="quiet again" disabled={busy} aria-label="Sign in to {f.name} again" onclick={() => start(f.flow)}>{f.label}</button>
+							{:else}
+								<button type="button" disabled={busy} onclick={() => start(f.flow)}>{f.label}</button>
+							{/if}
+						</li>
 					{/each}
-				</div>
+				</ul>
 			{/if}
 			{#if relayError}
 				<ErrorLine error={relayError} what="Could not sign in" retry={() => { relayError = ''; void read(); }} />
 			{/if}
-			{#if view.signIn.length > 0}
+			{#if view.signIn.length > 0 && signIn.start.length === 0}
 				<p class="line">Needs sign-in: {view.signIn.join(', ')}.</p>
 			{/if}
 			{#if view.setup}
@@ -216,9 +223,47 @@ sudo -u agent tmux -L agent attach -t agent</pre>
 		margin-top: 18px;
 	}
 	.flows {
+		max-width: 560px;
+		margin-bottom: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.flows li {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		min-height: 34px;
+		padding: 8px 0;
+		border-top: 1px solid var(--line);
+	}
+	.flows li:last-child {
+		border-bottom: 1px solid var(--line);
+	}
+	.what {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 10px;
+		column-gap: 12px;
+		margin: 0;
+		min-width: 0;
+		font-size: 15px;
+		line-height: 1.4;
+	}
+	.name {
+		font-weight: 600;
+	}
+	.status {
+		color: var(--muted);
+	}
+	.status.warn {
+		color: var(--warn);
+	}
+	.flows button {
+		flex: none;
+	}
+	.again {
+		padding: 3px 10px;
+		font-size: 13px;
 	}
 	.link {
 		margin: 10px 0 0;

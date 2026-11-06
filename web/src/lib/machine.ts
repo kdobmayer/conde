@@ -146,8 +146,10 @@ export function machineView(m: Machine | null, now: number, lastSeen: string | n
 
 /** What the sign-in part of the page shows. */
 export interface SignInView {
-	/** The flows the person can start now: none while one runs or the machine cannot run one. */
-	start: { flow: Flow; label: string }[];
+	/** The flows the person can start now, each with what the machine last reported of it: none
+	 * while one runs or the machine cannot run one. A signed-in flow's button is the quiet
+	 * `again`; `status` is null while the flow's state is not known. */
+	start: { flow: Flow; name: string; label: string; status: string | null; warn: boolean; again: boolean }[];
 	/** The running sign-in: its line, its link, the device code to type there, and whether the
 	 * page takes the code Claude shows. */
 	running: null | { relay_id: string; flow: Flow; text: string; url: string | null; link: string; userCode: string | null; paste: boolean };
@@ -205,5 +207,29 @@ export function signInView(m: Machine | null, now: number): SignInView {
 		};
 	}
 	const outcome = !r ? null : r.state === 'done' ? `Signed in to ${f}.` : r.state === 'failed' ? failure(r.flow, r.reason) : null;
-	return { start: ORDER.map((flow) => ({ flow, label: `Sign in to ${FLOWS[flow]}` })), running: null, outcome };
+	return { start: ORDER.map((flow) => row(flow, reported(m, flow))), running: null, outcome };
+}
+
+/** `flow`'s state: the last report's, except that a relay of it that ended `done` reads ok unless
+ * a later report says the person is needed (the server sets ok on `done`, so such a report is newer). */
+function reported(m: Machine, flow: Flow): string | undefined {
+	const said = m.sign_in?.[flow];
+	if (said === 'expiring' || said === 'expired') return said;
+	return m.relay?.flow === flow && m.relay.state === 'done' ? 'ok' : said;
+}
+
+function row(flow: Flow, state: string | undefined): SignInView['start'][number] {
+	const name = FLOWS[flow] ?? flow;
+	const start: SignInView['start'][number] = { flow, name, label: `Sign in to ${name}`, status: null, warn: false, again: false };
+	switch (state) {
+		case 'ok':
+			return { ...start, label: 'Sign in again', status: 'Signed in', again: true };
+		case 'expiring':
+			// the board keeps the state word, not the check's expiry; expiring is under 3 days left (agentvm-signin-check)
+			return { ...start, status: 'Sign-in expires within 3 days', warn: true };
+		case 'expired':
+			return { ...start, status: 'Sign-in expired', warn: true };
+		default:
+			return start;
+	}
 }

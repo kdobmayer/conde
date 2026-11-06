@@ -3,7 +3,7 @@
 // agent list's resize handle and per-channel push setting, and markdown in message bodies, by
 // keyboard at 1440×900 (and the overlay layout at 1180×820) and by touch at 390×844. Exits
 // non-zero when a check fails. Serves the built app through mock-server.mjs.
-// Usage: node scripts/design/interact.mjs [build-dir]
+// Usage: [SHOTS=<dir>] node scripts/design/interact.mjs [build-dir]
 // Needs playwright-core 1.64.0 (npm i --no-save) and a Chromium headless shell (CHROME, as in
 // shoot.mjs).
 
@@ -1628,9 +1628,11 @@ for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) 
 			await page.reload({ waitUntil: 'networkidle' });
 		}
 		await page.locator('.machine .state[data-state=connected]').waitFor({ timeout: 2000 });
+		// the phone pass comes after the desktop's Claude sign-in: Claude reads signed in
 		const flows = await page.locator('.machine .flows button').allTextContents();
-		expect(flows.join('|') === 'Sign in to Claude|Sign in to GitHub|Sign in to Codex', flows.join('|'));
-		await page.getByRole('button', { name: 'Sign in to Claude' }).click();
+		const claude = phone ? 'Sign in again' : 'Sign in to Claude';
+		expect(flows.join('|') === `${claude}|Sign in to GitHub|Sign in to Codex`, flows.join('|'));
+		await page.getByRole('button', { name: phone ? 'Sign in to Claude again' : 'Sign in to Claude', exact: true }).click();
 		const link = page.locator('.machine .relay .link a');
 		await link.waitFor({ timeout: 2000 });
 		expect((await link.textContent()) === 'Open the Claude sign-in', await link.textContent());
@@ -1653,6 +1655,9 @@ for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) 
 		await page.locator('.machine .outcome').waitFor({ timeout: 2000 });
 		expect((await page.locator('.machine .outcome').textContent()) === 'Signed in to Claude.', await page.locator('.machine .outcome').textContent());
 		expect((await page.locator('.machine .relay').count()) === 0, 'the sign-in part closes');
+		const row = page.locator('.machine .flows li[data-flow=claude]');
+		expect((await row.locator('.status').textContent()) === 'Signed in', 'Claude reads signed in at once after done');
+		expect((await row.locator('button').textContent()) === 'Sign in again', await row.locator('button').textContent());
 		await page.getByRole('button', { name: 'Sign in to GitHub' }).click();
 		// the helper printed its code and then `waiting`: the code stays while the person types it
 		await page.locator('.machine .relay .line', { hasText: /Waiting for/ }).waitFor({ timeout: 2000 });
@@ -1664,6 +1669,32 @@ for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) 
 		await page.locator('.machine .flows').waitFor({ timeout: 2000 });
 		expect((await page.locator('.machine .outcome').count()) === 0, 'a cancel says nothing');
 		await fits('connected');
+	});
+	await context.close();
+}
+
+// ---- the Machine page once the bridge reported its sign-ins: a signed-in flow says so with a
+// quiet "Sign in again", an expired one keeps its button and says it expired; SHOTS=<dir> saves
+// machine-signedin-<width>.png there, dark theme ----
+for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+	where = `machine signed in ${size.width}`;
+	const phone = size.width < 720;
+	const context = await browser.newContext({ viewport: size, ...(phone ? { isMobile: true, hasTouch: true } : {}), locale: 'en-GB', colorScheme: 'dark' });
+	const page = await context.newPage();
+	await check('machine: signed-in flows say so and offer a quiet sign-in again; an expired one keeps its button', async () => {
+		await page.request.post(`${FEED}mock/machine-signed-in`, { data: { claude: 'ok', github: 'ok', codex: 'expired' } });
+		await page.goto(`${FEED}#/machine`, { waitUntil: 'networkidle' });
+		await page.locator('.machine .state[data-state=ready]').waitFor({ timeout: 2000 });
+		const rows = await page.locator('.machine .flows li').evaluateAll((ls) =>
+			ls.map((l) => [l.querySelector('.name')?.textContent, l.querySelector('.status')?.textContent ?? '', l.querySelector('button')?.textContent, l.querySelector('button')?.classList.contains('quiet')].join(' / '))
+		);
+		const want = ['Claude / Signed in / Sign in again / true', 'GitHub / Signed in / Sign in again / true', 'Codex / Sign-in expired / Sign in to Codex / false'];
+		expect(rows.join('|') === want.join('|'), rows.join('|'));
+		expect((await page.getByRole('button', { name: 'Sign in to GitHub again', exact: true }).count()) === 1, 'each quiet button names its flow');
+		expect((await page.locator('.machine .line', { hasText: 'Needs sign-in' }).count()) === 0, 'the rows carry what needs sign-in');
+		const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+		expect(!overflow, 'the page scrolls sideways');
+		if (process.env.SHOTS) await page.screenshot({ path: join(process.env.SHOTS, `machine-signedin-${size.width}.png`), fullPage: true });
 	});
 	await context.close();
 }

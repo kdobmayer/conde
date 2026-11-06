@@ -10,7 +10,9 @@
 // /v1/events (a WebSocket that sends the hello frame), /keys (the server's layout, masthead and
 // keys templates from crates/conde-remote/src/web/pages.rs, filled with the fixture) and
 // /join/<anything> (the join page's template from crates/conde-remote/src/web/join.rs in the
-// same layout, signed out). POST /mock/machine-joined makes the machine connected (it joined).
+// same layout, signed out). POST /mock/machine-joined makes the machine connected (it joined);
+// POST /mock/machine-signed-in with a sign-in map (`{"claude": "ok", ...}`) makes it ready with
+// that map as its bridge's last report.
 
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
@@ -236,6 +238,8 @@ function answer(raw, res) {
 				return json(res, 200, { ok: false, error: { code: 'conflict', message: code ? 'this sign-in is not waiting for a code' : 'this sign-in is not running' } });
 			}
 			machine.relay = { ...machine.relay, state: code ? 'done' : 'cancelled', at: new Date().toISOString() };
+			// as the server: a relay's done signs its flow in until the machine's next report
+			if (code) machine.sign_in = { ...machine.sign_in, [machine.relay.flow]: 'ok' };
 			result = { relay_id: b.relay_id };
 			break;
 		}
@@ -385,6 +389,15 @@ const http = createServer((req, res) => {
 	if (url.pathname === '/mock/machine-joined' && req.method === 'POST') {
 		if (machine) machine = { ...machine, state: 'connected', minted_at: new Date().toISOString(), deploy_state: 'Succeeded' };
 		return json(res, 200, { ok: Boolean(machine) });
+	}
+	if (url.pathname === '/mock/machine-signed-in' && req.method === 'POST') {
+		let body = '';
+		req.on('data', (c) => (body += c));
+		req.on('end', () => {
+			if (machine) machine = { ...machine, state: 'ready', ready_at: new Date().toISOString(), sign_in: JSON.parse(body || 'null'), relay: null };
+			json(res, 200, { ok: Boolean(machine) });
+		});
+		return;
 	}
 	if (url.pathname === '/keys') {
 		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp(true) });

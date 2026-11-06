@@ -104,6 +104,7 @@ on_both!(
     a_service_reads_a_persons_presence_and_nothing_else,
     the_relay_ops_take_no_bearer_key_a_services_included,
     a_service_reads_the_sign_in_its_machine_reported,
+    a_signed_in_report_clears_an_expired_sign_in_and_the_person_is_reachable_again,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -2601,6 +2602,51 @@ async fn a_service_reads_the_sign_in_its_machine_reported(d: Arc<Dispatcher>) {
         2,
         "state and sign_in only: {last}"
     );
+}
+
+/// `service.presence` until its `sign_in` is `flows`.
+async fn presence_with(n: &Notices, flows: &Value) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..100 {
+        last = n.presence("levente-szabo").await;
+        if last["result"]["sign_in"] == *flows {
+            return last["result"].clone();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("presence: {last}");
+}
+
+/// An `expired` Claude report makes the live agent unreachable; the machine's next check, all
+/// fine, reports `signed_in` with every flow `ok`, and the person is reachable again: presence
+/// reads `ready` and a notice goes to the agent.
+async fn a_signed_in_report_clears_an_expired_sign_in_and_the_person_is_reachable_again(
+    d: Arc<Dispatcher>,
+) {
+    let n = notices(&d).await;
+    let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| Ok(t.machine_set_ready(uid, "2026-11-06T09:00:00.000Z")?))
+            .unwrap()
+    })
+    .await;
+    let mut ws = n.s.v2(&n.lev, "v2-lev", 4, &[&n.mailbox]).await;
+    ws.next("routes").await;
+    let expired = json!({"claude": "expired", "github": "ok", "codex": "ok"});
+    ws.send(
+        json!({"v": 1, "type": "machine_event", "state": "needs_sign_in", "flow": "claude",
+                   "flows": expired}),
+    )
+    .await;
+    assert_eq!(presence_with(&n, &expired).await["state"], "connected");
+    assert_eq!(n.ok("levente-szabo").await["via"], "human");
+
+    let fine = json!({"claude": "ok", "github": "ok", "codex": "ok"});
+    ws.send(json!({"v": 1, "type": "machine_event", "state": "signed_in", "flows": fine}))
+        .await;
+    assert_eq!(presence_with(&n, &fine).await["state"], "ready");
+    assert_eq!(n.ok("levente-szabo").await["via"], "agent");
 }
 
 /// The sign-in relay is the person's page only: a bearer key is refused for every relay op, a

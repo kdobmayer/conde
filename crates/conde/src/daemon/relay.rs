@@ -5,7 +5,8 @@
 //! `cancel` closes its stdin (the helpers' EOF rule). A new connection or a stop of the board's
 //! connection stops the running helper as well. The pasted code is written to the helper's stdin
 //! and nowhere else. The machine's sign-in check (`agentvm-signin-check`) runs on connect, after a
-//! relay's `done` and hourly; each flow it finds expiring or expired goes up as a `machine_event`.
+//! relay's `done` and hourly; each flow it finds expiring or expired goes up as a `needs_sign_in`
+//! `machine_event`, and a check with none as one `signed_in` when the flows changed.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -316,7 +317,8 @@ fn parse(relay_id: &str, line: &str) -> Option<RelayEvent> {
 /// `every` after its last run, started only where the machine has the script.
 #[derive(Default)]
 pub struct SignInCheck {
-    worker: Mutex<Option<mpsc::Sender<()>>>,
+    /// Each request says whether it is a new connection.
+    worker: Mutex<Option<mpsc::Sender<bool>>>,
 }
 
 impl SignInCheck {
@@ -336,7 +338,7 @@ impl SignInCheck {
             *worker = Some(tx);
         }
         if let Some(tx) = worker.as_ref() {
-            let _ = tx.send(());
+            let _ = tx.send(true);
         }
     }
 
@@ -348,7 +350,7 @@ impl SignInCheck {
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
         {
-            let _ = tx.send(());
+            let _ = tx.send(false);
         }
     }
 
@@ -358,15 +360,24 @@ impl SignInCheck {
     }
 }
 
-fn check_loop(rx: &mpsc::Receiver<()>, path: &Path, every: Duration, emit: &EmitMachine) {
+fn check_loop(rx: &mpsc::Receiver<bool>, path: &Path, every: Duration, emit: &EmitMachine) {
+    // the flows this connection last sent
+    let mut sent = None;
     loop {
         match rx.recv_timeout(every) {
-            Ok(()) => while rx.try_recv().is_ok() {},
+            Ok(mut new) => {
+                while let Ok(n) = rx.try_recv() {
+                    new |= n;
+                }
+                if new {
+                    sent = None;
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
         if let Some(out) = run_check(path) {
-            for event in sign_in_events(&out) {
+            for event in sign_in_events(&out, &mut sent) {
                 emit(&event);
             }
         }
@@ -389,9 +400,10 @@ fn run_check(path: &Path) -> Option<String> {
 }
 
 /// The check's lines (`claude ok|expiring|expired|unknown <at>`, `github ok|expired`, `codex
-/// ok|expired`) as the contract's `needs_sign_in` events: one per flow that is expiring or
-/// expired, each with every flow's state; none when no flow needs the person.
-fn sign_in_events(out: &str) -> Vec<Value> {
+/// ok|expired`) as the contract's events, each with every flow's state: one `needs_sign_in` per
+/// flow that is expiring or expired; with none, one `signed_in` unless `sent` already has these
+/// flows. `sent` becomes the flows sent.
+fn sign_in_events(out: &str, sent: &mut Option<serde_json::Map<String, Value>>) -> Vec<Value> {
     let mut flows = serde_json::Map::new();
     for line in out.lines() {
         let mut words = line.split_whitespace();
@@ -401,11 +413,22 @@ fn sign_in_events(out: &str) -> Vec<Value> {
             flows.insert(flow.to_string(), json!(state));
         }
     }
-    flows
+    if flows.is_empty() {
+        return Vec::new();
+    }
+    let mut events: Vec<Value> = flows
         .iter()
         .filter(|(_, state)| *state == "expiring" || *state == "expired")
         .map(|(flow, _)| json!({"state": "needs_sign_in", "flow": flow, "flows": flows}))
-        .collect()
+        .collect();
+    if events.is_empty() {
+        if sent.as_ref() == Some(&flows) {
+            return events;
+        }
+        events.push(json!({"state": "signed_in", "flows": flows}));
+    }
+    *sent = Some(flows);
+    events
 }
 
 #[cfg(test)]
@@ -442,18 +465,34 @@ mod tests {
 
     #[test]
     fn check_lines_are_one_needs_sign_in_per_flow_that_needs_the_person() {
+        let mut sent = None;
         let out = "claude expiring 2026-11-08T10:00:00Z\ngithub expired\ncodex ok\n";
         let flows = json!({"claude": "expiring", "github": "expired", "codex": "ok"});
         assert_eq!(
-            sign_in_events(out),
+            sign_in_events(out, &mut sent),
             [
                 json!({"state": "needs_sign_in", "flow": "claude", "flows": flows}),
                 json!({"state": "needs_sign_in", "flow": "github", "flows": flows}),
             ]
         );
+        assert_eq!(
+            sign_in_events(out, &mut sent).len(),
+            2,
+            "sent on every check"
+        );
         let ok = "claude ok 2026-12-01T00:00:00Z\ngithub ok\ncodex ok\n";
-        assert!(sign_in_events(ok).is_empty());
-        assert!(sign_in_events("claude unknown -\ngithub ok\ncodex ok\n").is_empty());
-        assert!(sign_in_events("").is_empty());
+        let fine = json!({"claude": "ok", "github": "ok", "codex": "ok"});
+        assert_eq!(
+            sign_in_events(ok, &mut sent),
+            [json!({"state": "signed_in", "flows": fine})]
+        );
+        assert!(sign_in_events(ok, &mut sent).is_empty(), "unchanged");
+        let unknown = "claude unknown -\ngithub ok\ncodex ok\n";
+        assert_eq!(sign_in_events(unknown, &mut sent)[0]["state"], "signed_in");
+        assert!(sign_in_events("", &mut sent).is_empty());
+        assert!(
+            sign_in_events(unknown, &mut sent).is_empty(),
+            "nothing parsed changes nothing"
+        );
     }
 }

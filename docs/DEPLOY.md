@@ -251,8 +251,9 @@ never logged. A sign-in ends as `expired` when the bridge connection that carrie
 its start within 60 s. The VM needs a conde release with the relay; it updates itself daily.
 
 The VM's bridge also runs the image's `agentvm-signin-check` when it connects, every hour and after a sign-in ends
-`done`, and sends the board one `needs_sign_in` for each flow that is expiring or expired, with every flow's state;
-the record keeps them as its sign-in flows, a `done` marks its flow signed in at once, and the Machine page and
-`service.presence` show them. A VM whose flows are all fine sends nothing, so a sign-in renewed outside the page (over
-SSH) stays as last reported until a sign-in on the page or a later report replaces it. When the agent's `vm.agent` session goes live (and again on a new connection
+`done`, and sends the board one `needs_sign_in` for each flow that is expiring or expired, or, when no flow needs
+the person, one `signed_in` whenever the flows differ from what that connection last sent (a new connection always
+sends it); each carries every flow's state. The record keeps them as its sign-in flows, so a sign-in renewed outside
+the page also clears an earlier report; a `done` marks its flow signed in at once; the Machine page and
+`service.presence` show them. When the agent's `vm.agent` session goes live (and again on a new connection
 while it is), the bridge sends `online`, which the record keeps as `session_online_at`.

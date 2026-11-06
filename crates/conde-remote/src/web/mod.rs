@@ -45,7 +45,7 @@ pub use join::{JOIN_TTL, JoinRecord};
 pub use keys::new_host_key;
 pub use machines::{
     ARM_URL, Azure, AzureError, DEFAULT_VM_SIZE, Deployment, LOGIN_URL, MachinesConfig,
-    ManagedIdentity,
+    ManagedIdentity, POLL_EVERY,
 };
 pub use ratelimit::RateLimits;
 
@@ -612,6 +612,20 @@ pub enum Enrolled {
     },
 }
 
+/// A disabled user's machine record the disable route removes ([`WebStore::machine_deleting`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineCleanup {
+    pub user_id: i64,
+    /// The VM, the deployment and the host: `vm-agent-<owner>`, or an adopted host's own name.
+    pub host_id: String,
+    /// The owner's Entra object id: the principal of the template's one login assignment.
+    pub owner_object_id: String,
+    /// Why the cleanup's last run stopped, when it did.
+    pub delete_error: Option<String>,
+    /// The deleting mark this cleanup runs for: a record with another mark, or none, is not its.
+    pub deleting_at: String,
+}
+
 /// The board's storage as the web surface needs it. Implemented over the board's store
 /// (SQLite locally, Postgres in the cloud); every method is one transaction and is called
 /// from a blocking thread. Times are unix seconds.
@@ -798,6 +812,26 @@ pub trait WebStore: Send + Sync {
     fn machine_enrol(&self, _principal_id: &str, _token_digest: &str) -> WebResult<Enrolled> {
         Err(WebStoreError("this board has no machines".into()))
     }
+    /// The record of user `name`, marked deleting (an earlier mark's time kept), when the user is
+    /// disabled and has one; in one transaction. Default: none.
+    fn machine_deleting(&self, _name: &str) -> WebResult<Option<MachineCleanup>> {
+        Ok(None)
+    }
+    /// Whether the cleanup `m` is still the record's: the user's record is on its host and
+    /// deleting since its mark. Default: no.
+    fn machine_still_deleting(&self, _m: &MachineCleanup) -> WebResult<bool> {
+        Ok(false)
+    }
+    /// The cleanup `m` stopped with `error`, written only while the record is still its.
+    /// Default: refused.
+    fn machine_delete_failed(&self, _m: &MachineCleanup, _error: &str) -> WebResult<()> {
+        Err(WebStoreError("this board has no machines".into()))
+    }
+    /// The VM is gone: the record of the cleanup `m`, while still its, is deleted and, when the
+    /// board host is that user's, its live keys revoked, in one transaction. Default: refused.
+    fn machine_deleted(&self, _m: &MachineCleanup) -> WebResult<()> {
+        Err(WebStoreError("this board has no machines".into()))
+    }
     /// A key was minted for a host new to the board: on the user's first enrollment, the
     /// welcome's greeting and arrival notice, once per user. Default: nothing.
     fn enrolled(
@@ -904,13 +938,9 @@ impl WebState {
         registry: Arc<dyn BridgeRegistry>,
         clock: Clock,
         dispatcher: Option<Arc<dyn crate::Dispatcher>>,
-        machines: Option<MachinesConfig>,
+        machines: Option<Arc<machines::Machines>>,
     ) -> WebState {
         let oidc = Oidc::new(&config);
-        let machines = machines.and_then(|m| {
-            let tenant = config.entra_tenant.as_deref()?;
-            Some(Arc::new(machines::Machines::new(m, tenant)))
-        });
         let limits = ratelimit::Limiters::new(config.limits);
         WebState(Arc::new(Inner {
             core: Core {
@@ -1028,6 +1058,11 @@ impl WebSetup {
     ) -> (Router, Option<WebState>) {
         let mut app = Router::new();
         let mut state = None;
+        // one client for the sign-in routes and the admin's disable: one cached token
+        let machines = self.machines.clone().and_then(|m| {
+            let tenant = self.entra.as_ref()?.entra_tenant.as_deref()?;
+            Some(Arc::new(machines::Machines::new(m, tenant)))
+        });
         if let Some(config) = &self.entra {
             let web = WebState::build(
                 config.clone(),
@@ -1035,7 +1070,7 @@ impl WebSetup {
                 registry.clone(),
                 system_clock(),
                 dispatcher,
-                self.machines.clone(),
+                machines.clone(),
             );
             app = app.merge(router(web.clone()));
             state = Some(web);
@@ -1050,6 +1085,7 @@ impl WebSetup {
                 core,
                 &key,
                 self.entra.as_ref(),
+                machines,
             )));
         }
         (app, state)

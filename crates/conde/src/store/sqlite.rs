@@ -2734,10 +2734,31 @@ impl Tx for SqliteTx<'_> {
 
     fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()> {
         self.exec(
-            "UPDATE machines SET deleting_at = ?2 WHERE user_id = ?1",
+            "UPDATE machines SET deleting_at = COALESCE(deleting_at, ?2) WHERE user_id = ?1",
             params![user_id, at],
         )?;
         Ok(())
+    }
+
+    fn machine_set_delete_error(
+        &self,
+        user_id: i64,
+        host_id: &str,
+        deleting_at: &str,
+        error: &str,
+    ) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE machines SET delete_error = ?4
+             WHERE user_id = ?1 AND host_id = ?2 AND deleting_at = ?3",
+            params![user_id, host_id, deleting_at, error],
+        )? > 0)
+    }
+
+    fn machine_delete(&self, user_id: i64, host_id: &str, deleting_at: &str) -> StoreResult<bool> {
+        Ok(self.exec(
+            "DELETE FROM machines WHERE user_id = ?1 AND host_id = ?2 AND deleting_at = ?3",
+            params![user_id, host_id, deleting_at],
+        )? > 0)
     }
 
     fn machine_by_principal(&self, principal_id: &str) -> StoreResult<Option<MachineRow>> {

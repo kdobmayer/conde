@@ -258,3 +258,25 @@ the page also clears an earlier report; a `done` marks its flow signed in at onc
 `service.presence` show them. A check still running after 60 s is stopped with its processes and reports
 nothing that round; the next one runs as usual. When the agent's `vm.agent` session goes live (and again on a new connection
 while it is), the bridge sends `online`, which the record keeps as `session_online_at`.
+
+Disabling a person who has a machine (`POST /v1/admin/users/<name>/disable`) also removes the machine; nothing else
+removes one. The answer says `"machine": "deleting"`, and the server then works in the background with id-conde's
+token. First it proves from Azure that the VM is the person's: the deployment named as the VM (or `agent-vm-<x>`,
+the name hand deployments had before) must carry the person's object id as `ownerObjectId` and must be the one that
+made this VM, either by listing the VM among its resources or by being the configured template spec deployed for the
+owner name the VM is named after. When no such deployment exists and the VM is gone too, only the record is removed;
+any other failed proof stops the removal before any change in Azure. Then it cancels that deployment while it is
+`Accepted` or `Running` and reads it until it ended; deletes the template's one role assignment on the VM (Virtual
+Machine Administrator Login to the person's object id, at the VM's own scope; every other assignment stays); deletes
+the VM, whose NIC and OS disk go with it; reads the VM every 15 s until Azure answers 404; and then deletes the
+record and revokes the VM host's keys, so an enable and the setup that follows deploy a new machine. Each step is
+skipped when Azure shows it done, and each wait ends after 10 minutes. The first failure stops the removal and is
+kept on the record; the next disable of the same person answers it as `machine_error` and runs the removal again
+from where it stopped. While the record is being removed, the person's setup is refused. Before each change in Azure
+the removal reads the record again, and it ends without one once the record is no longer the one it started for
+(removed, or replaced by a new setup after an enable). Two overlaps remain unfenced: two disables close together run
+the same removal twice at once, and a deployment still in flight from a setup before the disable can create the VM
+after the removal has read it as absent. So disable a person only once their deployment has ended, and run a rebuild
+(disable, enable, setup) one step at a time, after the record is gone. Azure's side of the limit: id-conde's role
+assignment in infra/agent-vm/azure/agent-rg.bicep lets it delete only Virtual Machine Administrator Login
+assignments of users; which person and which VM is checked by the server.

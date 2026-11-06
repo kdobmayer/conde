@@ -173,6 +173,15 @@ on_both!(
     a_relay_op_is_refused_for_another_owner_or_a_dead_relay_id,
     a_cancel_reaches_the_bridge_and_ends_the_relay,
     a_needs_sign_in_event_sets_the_flows_a_relay_done_clears_one_and_online_is_a_separate_fact,
+    disabling_a_user_sets_deleting_cancels_a_running_deployment_deletes_the_one_login_assignment_and_the_vm_and_waits_for_404,
+    an_absent_vm_counts_as_deleted,
+    a_failed_step_is_recorded_and_the_next_disable_call_resumes_from_it,
+    a_resume_after_the_login_assignment_was_deleted_still_proves_and_deletes_the_vm,
+    a_vm_stuck_deleting_ends_the_wait_and_the_next_disable_only_waits,
+    after_a_removal_an_enable_and_setup_deploy_a_new_machine_and_the_old_vm_key_stays_dead,
+    an_adopted_host_name_is_removed_only_when_azure_shows_it_is_the_owners_vm,
+    a_removal_never_revokes_the_keys_of_another_users_host_of_the_same_name,
+    a_removal_whose_record_was_replaced_meanwhile_sends_no_cancel_and_no_delete,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -224,7 +233,7 @@ async fn ui_full(
     let store = Arc::new(WebBoard::new(d.clone()));
     let web = WebSetup {
         entra: Some(entra),
-        admin_key: None,
+        admin_key: Some(ADMIN_KEY.into()),
         machines,
         store: store.clone(),
     };
@@ -3301,6 +3310,9 @@ const DEPLOYMENTS: &str =
     "/subscriptions/sub-1/resourceGroups/conde-vm/providers/Microsoft.Resources/deployments/";
 const VMS: &str = "/providers/Microsoft.Compute/virtualMachines/";
 
+/// Scripted answers, each used once and the last one kept.
+type Answers = std::collections::VecDeque<(u16, Value)>;
+
 /// One request the fake Resource Manager received.
 #[derive(Clone, Debug)]
 struct ArmCall {
@@ -3321,6 +3333,10 @@ struct Arm {
     gets: Mutex<std::collections::VecDeque<(u16, Value)>>,
     /// VM reads by VM name; a VM without a script does not exist (404).
     vms: Mutex<HashMap<String, std::collections::VecDeque<(u16, Value)>>>,
+    /// Answers by method and exact path, before every other script.
+    routes: Mutex<HashMap<(String, String), Answers>>,
+    /// How long the answer to a method and exact path is held back.
+    delays: Mutex<HashMap<(String, String), Duration>>,
 }
 
 fn running() -> Value {
@@ -3344,6 +3360,8 @@ async fn fake_arm() -> Arc<Arm> {
         puts: Mutex::new([(201, json!({"name": "d"}))].into()),
         gets: Mutex::new([(200, running())].into()),
         vms: Mutex::new(HashMap::new()),
+        routes: Mutex::new(HashMap::new()),
+        delays: Mutex::new(HashMap::new()),
     });
     let a = arm.clone();
     let app = Router::new().fallback(
@@ -3367,11 +3385,27 @@ async fn fake_arm() -> Arc<Arm> {
                     .get(header::AUTHORIZATION)
                     .and_then(|v| v.to_str().ok())
                     .is_some_and(|v| v.starts_with("Bearer arm-token-"));
+                let routed = a
+                    .routes
+                    .lock()
+                    .unwrap()
+                    .get_mut(&(method.to_string(), uri.path().to_string()))
+                    .map(|q| if q.len() > 1 { q.pop_front().unwrap() } else { q[0].clone() });
+                let delay = a
+                    .delays
+                    .lock()
+                    .unwrap()
+                    .get(&(method.to_string(), uri.path().to_string()))
+                    .copied();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
                 let (status, body) = match method.as_str() {
                     _ if !bearer => (
                         401,
                         json!({"error": {"code": "AuthenticationFailed", "message": "no token"}}),
                     ),
+                    _ if routed.is_some() => routed.unwrap(),
                     "PUT" => next_answer(&a.puts),
                     _ if uri.path().contains(VMS) => {
                         let name = uri.path().rsplit('/').next().unwrap().to_string();
@@ -3410,6 +3444,30 @@ impl Arm {
             .lock()
             .unwrap()
             .insert(name.to_string(), answers.into());
+    }
+
+    /// The answers of `method` on exactly `path`, each used once and the last one kept.
+    /// Holds back the answer to `method` on exactly `path` by `delay`.
+    fn delay(&self, method: &str, path: &str, delay: Duration) {
+        self.delays
+            .lock()
+            .unwrap()
+            .insert((method.to_string(), path.to_string()), delay);
+    }
+
+    fn route(&self, method: &str, path: &str, answers: Vec<(u16, Value)>) {
+        self.routes
+            .lock()
+            .unwrap()
+            .insert((method.to_string(), path.to_string()), answers.into());
+    }
+
+    /// The `method` calls on exactly `path` so far.
+    fn on(&self, method: &str, path: &str) -> Vec<ArmCall> {
+        self.calls(method)
+            .into_iter()
+            .filter(|c| c.path == path)
+            .collect()
     }
 
     /// The VM reads so far.
@@ -3467,6 +3525,7 @@ async fn ui_machines_with(
         },
         arm_url: arm.url.clone(),
         login_url: web::LOGIN_URL.into(),
+        poll_every: Duration::from_millis(20),
     };
     (
         ui_full(d, ServerConfig::default(), Some(machines), tweak).await,
@@ -5340,6 +5399,715 @@ async fn a_needs_sign_in_event_sets_the_flows_a_relay_done_clears_one_and_online
         s["sign_in"],
         json!({"claude": "ok", "github": "expired", "codex": "ok"}),
         "the session is not the sign-in"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+// --- disable removes the machine (unit 9) ---------------------------------------------------
+
+const RG: &str = "/subscriptions/sub-1/resourceGroups/conde-vm";
+const LOGIN_ROLE_ID: &str = "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/1c0163c0-47e6-4577-8991-ea5c82e286e4";
+const MINE: &str = "6f8d1b6e-4c7a-5d2e-9a31-0b7e5c4d3a21";
+
+fn vm_path(host: &str) -> String {
+    format!("{RG}/providers/Microsoft.Compute/virtualMachines/{host}")
+}
+
+fn roles_path(host: &str) -> String {
+    format!(
+        "{}/providers/Microsoft.Authorization/roleAssignments",
+        vm_path(host)
+    )
+}
+
+fn assignment(name: &str, scope: &str, principal: &str, role: &str) -> Value {
+    json!({"id": format!("{scope}/providers/Microsoft.Authorization/roleAssignments/{name}"),
+           "name": name, "type": "Microsoft.Authorization/roleAssignments",
+           "properties": {"scope": scope, "principalId": principal, "principalType": "User",
+                          "roleDefinitionId": role}})
+}
+
+/// The deployment of the configured template spec for `owner` (`ownerObjectId` `oid`), which
+/// makes `vm-agent-<owner>`; once it succeeded it lists that VM among its resources.
+fn owned(state: &str, owner: &str, oid: &str) -> Value {
+    let mut d = json!({"name": format!("vm-agent-{owner}"), "properties": {
+        "provisioningState": state,
+        "templateLink": {"id": TEMPLATE_SPEC},
+        "parameters": {"owner": {"type": "String", "value": owner},
+                       "ownerObjectId": {"type": "String", "value": oid}}}});
+    if state == "Succeeded" {
+        d["properties"]["outputResources"] = json!([
+            {"id": format!("{RG}/providers/Microsoft.Network/networkInterfaces/nic-vm-agent-{owner}")},
+            {"id": vm_path(&format!("vm-agent-{owner}"))},
+        ]);
+    }
+    d
+}
+
+fn vm(state: &str) -> Value {
+    json!({"name": "vm", "properties": {"provisioningState": state}})
+}
+
+fn not_found() -> Value {
+    json!({"error": {"code": "ResourceNotFound", "message": "gone"}})
+}
+
+impl Ui {
+    /// A minted machine record of `user` (created when new) on `host` for owner `oid`.
+    async fn machine(&self, user: &str, host: &str, oid: &str) {
+        let (user, host, oid) = (user.to_string(), host.to_string(), oid.to_string());
+        self.write(move |t| {
+            let uid = t.ensure_user(&user)?;
+            t.machine_request(&conde::store::NewMachine {
+                user_id: uid,
+                host_id: &host,
+                owner_object_id: &oid,
+                vm_size: web::DEFAULT_VM_SIZE,
+                minted_at: Some("2026-11-06T08:00:00.000Z"),
+            })?;
+            Ok(())
+        })
+        .await;
+    }
+
+    /// The admin's disable (or enable) of `user`.
+    async fn admin_set(&self, user: &str, action: &str) -> Value {
+        let (status, v) = admin(
+            &self.env,
+            &format!("/v1/admin/users/{user}/{action}"),
+            Some(json!({})),
+            Some(ADMIN_KEY),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        v
+    }
+
+    /// Waits until `user` has no machine record.
+    async fn record_gone(&self, user: &str) {
+        for _ in 0..200 {
+            if self.record(user).await.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("{user}: {:?}", self.record(user).await);
+    }
+}
+
+/// An admin's disable removes the owner's machine and nothing else: the running deployment is
+/// cancelled once and read until it ended; of the four assignments listed at the VM (the
+/// owner's login one, a foreign principal's login one at the same scope, the owner's other role
+/// there, the owner's login one inherited from the resource group) only the first is deleted;
+/// the VM's DELETE answers 202, its reads 200 until 404, then the record is gone. An enable
+/// calls nothing, and another person's machine is never named.
+async fn disabling_a_user_sets_deleting_cancels_a_running_deployment_deletes_the_one_login_assignment_and_the_vm_and_waits_for_404(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = "vm-agent-krisztian-dobmayer";
+    ui.machine(USER, host, "oid-krisztian").await;
+    ui.machine("levente-szabo", "vm-agent-levente-szabo", "oid-levente")
+        .await;
+    let deploy = format!("{DEPLOYMENTS}{host}");
+    arm.route(
+        "GET",
+        &deploy,
+        vec![
+            (200, owned("Running", USER, "oid-krisztian")),
+            (200, owned("Running", USER, "oid-krisztian")),
+            (200, owned("Canceled", USER, "oid-krisztian")),
+        ],
+    );
+    arm.route(
+        "POST",
+        &format!("{deploy}/cancel"),
+        vec![(204, Value::Null)],
+    );
+    let vm_id = vm_path(host);
+    let reader = "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/acdd72a7-3385-48ef-bd42-f606fba81ae7";
+    arm.route(
+        "GET",
+        &roles_path(host),
+        vec![(
+            200,
+            json!({"value": [
+                assignment(MINE, &vm_id, "oid-krisztian", LOGIN_ROLE_ID),
+                assignment("1d4e7a90-2b3c-4d5e-8f60-718293a4b5c6", &vm_id, "oid-levente", LOGIN_ROLE_ID),
+                assignment("2e5f8b01-3c4d-5e6f-9071-8293a4b5c6d7", &vm_id, "oid-krisztian", reader),
+                assignment("3f6091c2-4d5e-6f70-a182-93a4b5c6d7e8", RG, "oid-krisztian", LOGIN_ROLE_ID),
+            ]}),
+        )],
+    );
+    let mine = format!("{}/{MINE}", roles_path(host));
+    arm.route("DELETE", &mine, vec![(200, json!({}))]);
+    arm.route("DELETE", &vm_id, vec![(202, Value::Null)]);
+    arm.vm(
+        host,
+        vec![
+            (200, vm("Succeeded")),
+            (200, vm("Deleting")),
+            (404, not_found()),
+        ],
+    );
+
+    let v = ui.admin_set(USER, "enable").await;
+    assert!(v.get("machine").is_none(), "{v}");
+    assert!(
+        arm.calls.lock().unwrap().is_empty(),
+        "an enable calls Azure"
+    );
+
+    let v = ui.admin_set(USER, "disable").await;
+    assert_eq!(
+        (v["disabled"].as_bool(), v["machine"].as_str()),
+        (Some(true), Some("deleting")),
+        "{v}"
+    );
+    assert!(v.get("machine_error").is_none(), "{v}");
+    ui.record_gone(USER).await;
+
+    let calls = arm.calls.lock().unwrap().clone();
+    let at = |method: &str, path: &str| {
+        calls
+            .iter()
+            .position(|c| c.method == method && c.path == path)
+            .unwrap_or_else(|| panic!("{method} {path}: {calls:#?}"))
+    };
+    assert_eq!(
+        arm.on("POST", &format!("{deploy}/cancel")).len(),
+        1,
+        "one cancel"
+    );
+    assert_eq!(arm.on("GET", &deploy).len(), 3, "read until it ended");
+    let list = &arm.on("GET", &roles_path(host))[0];
+    assert!(list.query.contains("$filter=atScope()"), "{}", list.query);
+    let deletes: Vec<String> = arm.calls("DELETE").into_iter().map(|c| c.path).collect();
+    assert_eq!(
+        deletes,
+        vec![mine.clone(), vm_id.clone()],
+        "exactly the owner's login and the VM"
+    );
+    let ended = calls
+        .iter()
+        .rposition(|c| c.method == "GET" && c.path == deploy)
+        .unwrap();
+    assert!(
+        ended < at("GET", &roles_path(host)),
+        "the deployment ended first"
+    );
+    assert!(
+        at("DELETE", &mine) < at("DELETE", &vm_id),
+        "the login before the VM"
+    );
+    assert_eq!(
+        arm.on("GET", &vm_id).len(),
+        3,
+        "read before the DELETE, then until 404"
+    );
+    for c in &calls {
+        assert!(
+            c.path.starts_with(&format!("{RG}/")),
+            "outside the resource group: {c:?}"
+        );
+        assert!(
+            !c.path.contains("levente"),
+            "another person's machine: {c:?}"
+        );
+        assert!(c.auth.starts_with("Bearer arm-token-"), "{c:?}");
+    }
+    assert!(
+        ui.record("levente-szabo").await.is_some(),
+        "the other machine stays"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Nothing left in Azure is a removal done: no deployment, no VM to list assignments at, no VM;
+/// and a VM whose DELETE answers 404 is gone without a wait. Neither deletes anything else.
+async fn an_absent_vm_counts_as_deleted(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let (gone, late) = ("vm-agent-krisztian-dobmayer", "vm-agent-levente-szabo");
+    ui.machine(USER, gone, "oid-krisztian").await;
+    ui.machine("levente-szabo", late, "oid-levente").await;
+    for name in [gone, "agent-vm-krisztian-dobmayer"] {
+        arm.route(
+            "GET",
+            &format!("{DEPLOYMENTS}{name}"),
+            vec![(404, not_found())],
+        );
+    }
+    arm.route(
+        "GET",
+        &format!("{DEPLOYMENTS}{late}"),
+        vec![(200, owned("Succeeded", "levente-szabo", "oid-levente"))],
+    );
+    arm.route("GET", &roles_path(late), vec![(404, not_found())]);
+    arm.vm(late, vec![(200, vm("Succeeded"))]);
+    arm.route("DELETE", &vm_path(late), vec![(404, not_found())]);
+
+    let v = ui.admin_set(USER, "disable").await;
+    assert_eq!(v["machine"], "deleting", "{v}");
+    ui.record_gone(USER).await;
+    assert!(arm.calls("DELETE").is_empty(), "{:?}", arm.calls("DELETE"));
+    assert!(arm.calls("POST").is_empty());
+    assert_eq!(arm.on("GET", &vm_path(gone)).len(), 1);
+
+    let v = ui.admin_set("levente-szabo", "disable").await;
+    assert_eq!(v["machine"], "deleting", "{v}");
+    ui.record_gone("levente-szabo").await;
+    let deletes: Vec<String> = arm.calls("DELETE").into_iter().map(|c| c.path).collect();
+    assert_eq!(deletes, vec![vm_path(late)]);
+    assert_eq!(
+        arm.on("GET", &vm_path(late)).len(),
+        1,
+        "no wait after a 404"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A refused step is the record's `delete_error` and ends the task, the record still deleting
+/// and the VM untouched; the next disable answers that error, keeps the first deleting time and
+/// runs from where it stopped: the ended deployment is not cancelled again.
+async fn a_failed_step_is_recorded_and_the_next_disable_call_resumes_from_it(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = "vm-agent-krisztian-dobmayer";
+    ui.machine(USER, host, "oid-krisztian").await;
+    let deploy = format!("{DEPLOYMENTS}{host}");
+    arm.route(
+        "GET",
+        &deploy,
+        vec![
+            (200, owned("Running", USER, "oid-krisztian")),
+            (200, owned("Canceled", USER, "oid-krisztian")),
+        ],
+    );
+    arm.route(
+        "POST",
+        &format!("{deploy}/cancel"),
+        vec![(204, Value::Null)],
+    );
+    arm.route(
+        "GET",
+        &roles_path(host),
+        vec![(
+            200,
+            json!({"value": [assignment(MINE, &vm_path(host), "oid-krisztian", LOGIN_ROLE_ID)]}),
+        )],
+    );
+    let mine = format!("{}/{MINE}", roles_path(host));
+    arm.route(
+        "DELETE",
+        &mine,
+        vec![(
+            403,
+            json!({"error": {"code": "AuthorizationFailed", "message": "not allowed"}}),
+        )],
+    );
+    arm.vm(host, vec![(200, vm("Succeeded"))]);
+
+    let v = ui.admin_set(USER, "disable").await;
+    assert_eq!(v["machine"], "deleting", "{v}");
+    let m = ui.record_when(USER, |m| m.delete_error.is_some()).await;
+    let error = m.delete_error.clone().unwrap();
+    assert!(
+        error.contains("403") && error.contains("AuthorizationFailed"),
+        "{error}"
+    );
+    let first = m.deleting_at.clone().expect("deleting");
+    assert!(
+        arm.on("DELETE", &vm_path(host)).is_empty(),
+        "the VM is untouched"
+    );
+    assert_eq!(arm.on("DELETE", &mine).len(), 1);
+
+    arm.route("DELETE", &mine, vec![(204, Value::Null)]);
+    arm.route("DELETE", &vm_path(host), vec![(202, Value::Null)]);
+    arm.vm(host, vec![(200, vm("Succeeded")), (404, not_found())]);
+    let v = ui.admin_set(USER, "disable").await;
+    assert_eq!(v["machine"], "deleting", "{v}");
+    assert_eq!(v["machine_error"], error.as_str(), "{v}");
+    assert_eq!(
+        ui.record(USER).await.and_then(|m| m.deleting_at),
+        Some(first),
+        "the first deleting time is kept"
+    );
+    ui.record_gone(USER).await;
+    assert_eq!(
+        arm.on("POST", &format!("{deploy}/cancel")).len(),
+        1,
+        "cancelled once"
+    );
+    assert_eq!(arm.on("DELETE", &mine).len(), 2);
+    assert_eq!(arm.on("DELETE", &vm_path(host)).len(), 1);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The deployment proves the VM on a resume too: the first run deletes the login assignment and
+/// stops at the VM's DELETE; the next lists no assignment, still finds the owner's deployment, and
+/// deletes the VM.
+async fn a_resume_after_the_login_assignment_was_deleted_still_proves_and_deletes_the_vm(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = "vm-agent-krisztian-dobmayer";
+    ui.machine(USER, host, "oid-krisztian").await;
+    let deploy = format!("{DEPLOYMENTS}{host}");
+    arm.route(
+        "GET",
+        &deploy,
+        vec![(200, owned("Succeeded", USER, "oid-krisztian"))],
+    );
+    let listed =
+        json!({"value": [assignment(MINE, &vm_path(host), "oid-krisztian", LOGIN_ROLE_ID)]});
+    arm.route("GET", &roles_path(host), vec![(200, listed)]);
+    let mine = format!("{}/{MINE}", roles_path(host));
+    arm.route("DELETE", &mine, vec![(204, Value::Null)]);
+    arm.route(
+        "DELETE",
+        &vm_path(host),
+        vec![(
+            500,
+            json!({"error": {"code": "InternalError", "message": "try later"}}),
+        )],
+    );
+    arm.vm(host, vec![(200, vm("Succeeded"))]);
+    ui.admin_set(USER, "disable").await;
+    let m = ui.record_when(USER, |m| m.delete_error.is_some()).await;
+    assert!(m.delete_error.unwrap().contains("InternalError"));
+    assert_eq!(arm.on("DELETE", &mine).len(), 1);
+
+    arm.route("GET", &roles_path(host), vec![(200, json!({"value": []}))]);
+    arm.route("DELETE", &vm_path(host), vec![(202, Value::Null)]);
+    arm.vm(host, vec![(200, vm("Succeeded")), (404, not_found())]);
+    ui.admin_set(USER, "disable").await;
+    ui.record_gone(USER).await;
+    assert_eq!(
+        arm.on("DELETE", &mine).len(),
+        1,
+        "no second assignment DELETE"
+    );
+    assert_eq!(arm.on("DELETE", &vm_path(host)).len(), 2);
+    assert_eq!(arm.on("GET", &deploy).len(), 2, "one proving read per run");
+    assert!(
+        arm.calls("POST").is_empty(),
+        "an ended deployment is not cancelled"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A VM that stays `Deleting` ends the wait with `delete_error`; the next disable reads it still
+/// `Deleting` and only waits, without a second DELETE, until it is gone.
+async fn a_vm_stuck_deleting_ends_the_wait_and_the_next_disable_only_waits(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = "vm-agent-krisztian-dobmayer";
+    ui.machine(USER, host, "oid-krisztian").await;
+    arm.route(
+        "GET",
+        &format!("{DEPLOYMENTS}{host}"),
+        vec![(200, owned("Succeeded", USER, "oid-krisztian"))],
+    );
+    arm.route("GET", &roles_path(host), vec![(200, json!({"value": []}))]);
+    arm.route("DELETE", &vm_path(host), vec![(202, Value::Null)]);
+    arm.vm(host, vec![(200, vm("Succeeded")), (200, vm("Deleting"))]);
+    ui.admin_set(USER, "disable").await;
+    let m = ui.record_when(USER, |m| m.delete_error.is_some()).await;
+    let error = m.delete_error.unwrap();
+    assert!(error.contains("was not gone"), "{error}");
+    assert_eq!(arm.on("DELETE", &vm_path(host)).len(), 1);
+    assert_eq!(
+        arm.on("GET", &vm_path(host)).len(),
+        41,
+        "the read before, then 40 waits"
+    );
+
+    arm.vm(host, vec![(200, vm("Deleting")), (404, not_found())]);
+    let v = ui.admin_set(USER, "disable").await;
+    assert_eq!(v["machine_error"], error.as_str(), "{v}");
+    ui.record_gone(USER).await;
+    assert_eq!(arm.on("DELETE", &vm_path(host)).len(), 1, "no fresh DELETE");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The rebuild: a VM that really enrolled is removed with its key; after the enable the key
+/// stays dead, setup deploys a new machine instead of adopting the old host, and the new VM's
+/// identity mints a new key.
+async fn after_a_removal_an_enable_and_setup_deploy_a_new_machine_and_the_old_vm_key_stays_dead(
+    d: Arc<Dispatcher>,
+) {
+    d.share("dakai");
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-1"))]);
+    let _first = ui.browser_landing().await;
+    let oid = ui
+        .record_when(USER, |m| m.requested_at.is_some())
+        .await
+        .owner_object_id;
+    let (status, _, minted) = ui.enrol(Some(&ui.vm_token("oid-vm-1"))).await;
+    assert_eq!(status, StatusCode::OK, "{minted}");
+    let old_key = minted["key"].as_str().unwrap().to_string();
+    assert!(ui.bridge_opens(&old_key).await);
+    assert_eq!(arm.calls("PUT").len(), 1);
+
+    arm.route(
+        "GET",
+        &format!("{DEPLOYMENTS}{host}"),
+        vec![(200, owned("Succeeded", USER, &oid))],
+    );
+    let listed = json!({"value": [assignment(MINE, &vm_path(&host), &oid, LOGIN_ROLE_ID)]});
+    arm.route("GET", &roles_path(&host), vec![(200, listed)]);
+    arm.route(
+        "DELETE",
+        &format!("{}/{MINE}", roles_path(&host)),
+        vec![(204, Value::Null)],
+    );
+    arm.route("DELETE", &vm_path(&host), vec![(202, Value::Null)]);
+    arm.vm(&host, vec![(200, vm("Succeeded")), (404, not_found())]);
+    ui.admin_set(USER, "disable").await;
+    ui.record_gone(USER).await;
+
+    ui.admin_set(USER, "enable").await;
+    assert!(
+        !ui.bridge_opens(&old_key).await,
+        "the removed VM's key after the enable"
+    );
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-2"))]);
+    let (b, csrf) = ui.browser().await;
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(
+        r["deploy"]["host_id"],
+        host.as_str(),
+        "a new deployment: {r}"
+    );
+    arm.wait("PUT", 2).await;
+    ui.record_when(USER, |m| m.requested_at.is_some() && m.minted_at.is_none())
+        .await;
+    let (status, _, minted) = ui.enrol(Some(&ui.vm_token("oid-vm-2"))).await;
+    assert_eq!(status, StatusCode::OK, "the new VM enrols: {minted}");
+    let new_key = minted["key"].as_str().unwrap().to_string();
+    assert!(ui.bridge_opens(&new_key).await);
+    assert!(!ui.bridge_opens(&old_key).await, "the old key stays dead");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// An adopted host name is not proof of the Azure VM. A member adopts, by a key and the
+/// published vm.agent, a host named as another person's unjoined VM: its deployment is that
+/// person's and still running, and the disable cancels nothing, deletes nothing and records why.
+/// A deployment with the owner's own object id that made another VM proves nothing for this
+/// host either. A pilot adopted under its hand deployment (the older `agent-vm-<x>` name, another
+/// template version, the VM among its resources) is removed.
+async fn an_adopted_host_name_is_removed_only_when_azure_shows_it_is_the_owners_vm(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let foreign = "vm-agent-oliver-gajer";
+    arm.route(
+        "GET",
+        &format!("{DEPLOYMENTS}{foreign}"),
+        vec![(200, owned("Running", "oliver-gajer", "oid-oliver"))],
+    );
+    arm.vm(foreign, vec![(200, vm("Succeeded"))]);
+    ui.bound(USER, "oid-krisztian", INVITED.1).await;
+    let (b, csrf) = ui.browser().await;
+    let uid = ui.user_id(USER).await;
+    let store = ui.env.store.clone();
+    blocking(move || {
+        store
+            .mint_host_key(uid, foreign, "vm", "digest-f", START)
+            .unwrap()
+    })
+    .await;
+    ui.write(move |t| {
+        t.insert_agent("agent-k", uid, "vm.agent")?;
+        t.set_binding(
+            "agent-k",
+            Some(
+                &conde::address::Address::parse(&format!("mailbox:mbx-k@{foreign}"), "-").unwrap(),
+            ),
+        )?;
+        Ok(())
+    })
+    .await;
+    let r = ui.setup(&b, &csrf).await;
+    assert_eq!(
+        (r["host_id"].as_str(), r["deploy"].clone()),
+        (Some(foreign), Value::Null),
+        "{r}"
+    );
+
+    let v = ui.admin_set(USER, "disable").await;
+    assert_eq!(v["machine"], "deleting", "{v}");
+    let m = ui.record_when(USER, |m| m.delete_error.is_some()).await;
+    let error = m.delete_error.unwrap();
+    assert!(error.contains("not the owner's VM"), "{error}");
+    assert!(m.deleting_at.is_some());
+
+    // the owner's own object id, but the deployment made vm-agent-levente-szabo
+    let other = "vm-agent-lev-pilot";
+    ui.machine("levente-szabo", other, "oid-levente").await;
+    arm.route(
+        "GET",
+        &format!("{DEPLOYMENTS}{other}"),
+        vec![(200, owned("Succeeded", "levente-szabo", "oid-levente"))],
+    );
+    arm.vm(other, vec![(200, vm("Succeeded"))]);
+    ui.admin_set("levente-szabo", "disable").await;
+    let m = ui
+        .record_when("levente-szabo", |m| m.delete_error.is_some())
+        .await;
+    assert!(m.delete_error.unwrap().contains("not the owner's VM"));
+
+    let calls = arm.calls.lock().unwrap().clone();
+    assert!(
+        calls.iter().all(|c| c.method == "GET"),
+        "a destructive call on a VM not proven the owner's: {calls:#?}"
+    );
+
+    // a pilot: its hand deployment under the older name, of template version 1
+    let pilot = "vm-agent-oliver";
+    ui.machine("oliver", pilot, "oid-oliver").await;
+    let mut hand = owned("Succeeded", "oliver", "oid-oliver");
+    hand["properties"]["templateLink"]["id"] =
+        json!(TEMPLATE_SPEC.replace("versions/2", "versions/1"));
+    arm.route(
+        "GET",
+        &format!("{DEPLOYMENTS}{pilot}"),
+        vec![(404, not_found())],
+    );
+    arm.route(
+        "GET",
+        &format!("{DEPLOYMENTS}agent-vm-oliver"),
+        vec![(200, hand)],
+    );
+    arm.route("GET", &roles_path(pilot), vec![(200, json!({"value": []}))]);
+    arm.route("DELETE", &vm_path(pilot), vec![(202, Value::Null)]);
+    arm.vm(pilot, vec![(200, vm("Succeeded")), (404, not_found())]);
+    ui.admin_set("oliver", "disable").await;
+    ui.record_gone("oliver").await;
+    let deletes: Vec<String> = arm.calls("DELETE").into_iter().map(|c| c.path).collect();
+    assert_eq!(deletes, vec![vm_path(pilot)], "only the pilot's own VM");
+    assert!(arm.calls("POST").is_empty());
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The record's host name can be a board host of someone else: Bob holds `vm-agent-<jane>` by
+/// an ordinary key before Jane's first sign-in sets her machine up under that name. Jane's
+/// removal, with nothing in Azure, deletes her record and leaves Bob's key and host as they were.
+async fn a_removal_never_revokes_the_keys_of_another_users_host_of_the_same_name(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    let bob = blocking({
+        let store = ui.env.store.clone();
+        move || store.ensure_user("bob").unwrap().user_id
+    })
+    .await;
+    let key = format!("conde_test_{}", conde::util::new_ulid());
+    let (store, h, digest) = (
+        ui.env.store.clone(),
+        host.clone(),
+        conde_remote::token_digest(&key),
+    );
+    blocking(move || {
+        store
+            .mint_host_key(bob, &h, "laptop", &digest, START)
+            .unwrap()
+    })
+    .await;
+    assert!(ui.bridge_opens(&key).await);
+
+    let _jane = ui.browser_landing().await;
+    let m = ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    assert_eq!(m.host_id, host);
+    for name in [host.clone(), format!("agent-vm-{USER}")] {
+        arm.route(
+            "GET",
+            &format!("{DEPLOYMENTS}{name}"),
+            vec![(404, not_found())],
+        );
+    }
+    ui.admin_set(USER, "disable").await;
+    ui.record_gone(USER).await;
+    assert!(
+        ui.bridge_opens(&key).await,
+        "Bob's key after Jane's removal"
+    );
+    let (d2, h) = (ui.d.clone(), host.clone());
+    let owner = blocking(move || d2.with_conn(|t| t.host_owner(&h)).unwrap()).await;
+    assert_eq!(owner.map(|(o, _)| o), Some(bob), "Bob's host stays his");
+    assert!(arm.calls("DELETE").is_empty() && arm.calls("POST").is_empty());
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A removal holds its record from the disable on: one held back after its proof finds the
+/// record replaced (the record removed meanwhile, the person enabled, a new machine set up with
+/// the same owner and name) and ends without a cancel, a DELETE or a write; the new record stays
+/// as it is.
+async fn a_removal_whose_record_was_replaced_meanwhile_sends_no_cancel_and_no_delete(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = "vm-agent-krisztian-dobmayer";
+    ui.machine(USER, host, "oid-krisztian").await;
+    let deploy = format!("{DEPLOYMENTS}{host}");
+    arm.route(
+        "GET",
+        &deploy,
+        vec![(200, owned("Running", USER, "oid-krisztian"))],
+    );
+    arm.delay("GET", &deploy, Duration::from_millis(1500));
+    arm.route(
+        "POST",
+        &format!("{deploy}/cancel"),
+        vec![(204, Value::Null)],
+    );
+    let listed =
+        json!({"value": [assignment(MINE, &vm_path(host), "oid-krisztian", LOGIN_ROLE_ID)]});
+    arm.route("GET", &roles_path(host), vec![(200, listed)]);
+    arm.route(
+        "DELETE",
+        &format!("{}/{MINE}", roles_path(host)),
+        vec![(204, Value::Null)],
+    );
+    arm.route("DELETE", &vm_path(host), vec![(202, Value::Null)]);
+    arm.vm(host, vec![(200, vm("Succeeded")), (404, not_found())]);
+
+    ui.admin_set(USER, "disable").await;
+    // the proof's read is in flight; meanwhile the record is replaced
+    for _ in 0..100 {
+        if !arm.on("GET", &deploy).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(arm.on("GET", &deploy).len(), 1, "the proof is reading");
+    let at = ui.record(USER).await.unwrap().deleting_at.unwrap();
+    let uid = ui.user_id(USER).await;
+    ui.write(move |t| {
+        assert!(t.machine_delete(uid, host, &at)?);
+        t.machine_request(&conde::store::NewMachine {
+            user_id: uid,
+            host_id: host,
+            owner_object_id: "oid-krisztian",
+            vm_size: web::DEFAULT_VM_SIZE,
+            minted_at: None,
+        })?;
+        Ok(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let calls = arm.calls.lock().unwrap().clone();
+    assert!(
+        calls.iter().all(|c| c.method == "GET"),
+        "a destructive call for a replaced record: {calls:#?}"
+    );
+    let m = ui.record(USER).await.expect("the new record");
+    assert_eq!(
+        (m.deleting_at, m.delete_error),
+        (None, None),
+        "nothing written"
     );
     ui.server.shutdown().await.unwrap();
 }

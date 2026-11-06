@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use conde_remote::web::{
     AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrolled, Enrollment, HostKey,
-    Identity, Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, Minted,
-    RealmAccount, ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore, WebStoreError,
-    WebUser, Welcome, WelcomePatch,
+    Identity, Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, MachineCleanup,
+    Minted, RealmAccount, ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore,
+    WebStoreError, WebUser, Welcome, WelcomePatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -681,6 +681,63 @@ impl WebStore for WebBoard {
                 replaced,
                 new_host,
             })
+        })
+    }
+
+    fn machine_deleting(&self, name: &str) -> WebResult<Option<MachineCleanup>> {
+        let at = iso_from_ms(self.d.now_ms());
+        self.write(|t| {
+            let Some(u) = t.user_by_name(name)? else {
+                return Ok(None);
+            };
+            // only a disable removes a machine: an enable that raced it leaves the record
+            if !u.disabled {
+                return Ok(None);
+            }
+            let Some(m) = t.machine_of_user(u.user_id)? else {
+                return Ok(None);
+            };
+            t.machine_set_deleting(u.user_id, &at)?;
+            t.announce(topics::MACHINE);
+            Ok(Some(MachineCleanup {
+                user_id: u.user_id,
+                host_id: m.host_id,
+                owner_object_id: m.owner_object_id,
+                delete_error: m.delete_error,
+                deleting_at: m.deleting_at.unwrap_or(at),
+            }))
+        })
+    }
+
+    fn machine_still_deleting(&self, m: &MachineCleanup) -> WebResult<bool> {
+        let row = self.read(|t| t.machine_of_user(m.user_id))?;
+        Ok(row.is_some_and(|r| {
+            r.host_id == m.host_id && r.deleting_at.as_deref() == Some(m.deleting_at.as_str())
+        }))
+    }
+
+    fn machine_delete_failed(&self, m: &MachineCleanup, error: &str) -> WebResult<()> {
+        self.write(|t| {
+            if t.machine_set_delete_error(m.user_id, &m.host_id, &m.deleting_at, error)? {
+                t.announce(topics::MACHINE);
+            }
+            Ok(())
+        })
+    }
+
+    fn machine_deleted(&self, m: &MachineCleanup) -> WebResult<()> {
+        let at = iso_from_ms(self.d.now_ms());
+        let (user_id, host_id) = (m.user_id, m.host_id.as_str());
+        self.write(|t| {
+            if t.machine_delete(user_id, host_id, &m.deleting_at)? {
+                // the VM's keys go with it, when the board host is the user's: after an enable,
+                // setup deploys anew instead of adopting; another user's host of that name stays
+                if matches!(t.host_owner(host_id)?, Some((owner, _)) if owner == user_id) {
+                    t.revoke_host_credentials(host_id, &at)?;
+                }
+                t.announce(topics::MACHINE);
+            }
+            Ok(())
         })
     }
 

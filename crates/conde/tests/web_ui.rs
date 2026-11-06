@@ -97,6 +97,11 @@ fn run<F: std::future::Future<Output = ()>>(on_pg: bool, case: impl FnOnce(Arc<D
     };
     rt.block_on(case(d.clone()));
     drop(rt);
+    // keyed by address: gone before the address can be reused
+    pg_urls()
+        .lock()
+        .unwrap()
+        .remove(&(Arc::as_ptr(&d) as usize));
     drop(d);
 }
 
@@ -4687,11 +4692,14 @@ impl Ui {
     /// The record's `pending_code` column itself, read with SQL on either store.
     async fn pending_code_column(&self, host: &str) -> Option<String> {
         let (d, h) = (self.d.clone(), host.to_string());
-        let url = pg_urls()
-            .lock()
-            .unwrap()
-            .get(&(Arc::as_ptr(&self.d) as usize))
-            .cloned();
+        let url = match self.d.sqlite() {
+            Some(_) => None,
+            None => pg_urls()
+                .lock()
+                .unwrap()
+                .get(&(Arc::as_ptr(&self.d) as usize))
+                .cloned(),
+        };
         blocking(move || match url {
             Some(url) => ::postgres::Client::connect(&url, ::postgres::NoTls)
                 .unwrap()

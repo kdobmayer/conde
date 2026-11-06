@@ -44,7 +44,8 @@ pub use invite::{InviteConfig, KeycloakAdmin, Resend, SignIn};
 pub use join::{JOIN_TTL, JoinRecord};
 pub use keys::new_host_key;
 pub use machines::{
-    ARM_URL, Azure, AzureError, DEFAULT_VM_SIZE, Deployment, MachinesConfig, ManagedIdentity,
+    ARM_URL, Azure, AzureError, DEFAULT_VM_SIZE, Deployment, LOGIN_URL, MachinesConfig,
+    ManagedIdentity,
 };
 pub use ratelimit::RateLimits;
 
@@ -73,7 +74,7 @@ pub struct WebConfig {
     pub login_ttl: Duration,
     /// Lifetime of a one-time `conde login` code.
     pub cli_code_ttl: Duration,
-    /// The rate limits of the `conde login` redeem.
+    /// The rate limits of the `conde login` redeem and the machine enrol.
     pub limits: RateLimits,
     /// How the admin API's invites reach the invited person.
     pub invite: InviteConfig,
@@ -460,6 +461,8 @@ pub enum Enrollment {
     KeysPage,
     /// The admin API.
     Admin,
+    /// An agent VM's own identity (`POST /v1/machines/enrol`).
+    Machine,
 }
 
 impl Enrollment {
@@ -468,6 +471,7 @@ impl Enrollment {
             Enrollment::Login => "conde login",
             Enrollment::KeysPage => "keys page",
             Enrollment::Admin => "admin key",
+            Enrollment::Machine => "agent VM",
         }
     }
 }
@@ -586,6 +590,26 @@ pub enum Minted {
     HostTaken,
     /// The user is disabled (checked in the same transaction as the mint).
     Disabled,
+}
+
+/// Result of [`WebStore::machine_enrol`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Enrolled {
+    /// No machine record has the identity.
+    Unknown,
+    /// The owner is disabled or the record is being deleted.
+    Disabled,
+    /// The record minted before; nothing changed.
+    AlreadyMinted,
+    /// The key's digest is stored for the record's host; `replaced` live keys of the host were
+    /// revoked in the same transaction; `new_host`: the host did not exist before.
+    Minted {
+        user_id: i64,
+        user: String,
+        host_id: String,
+        replaced: u64,
+        new_host: bool,
+    },
 }
 
 /// The board's storage as the web surface needs it. Implemented over the board's store
@@ -759,6 +783,21 @@ pub trait WebStore: Send + Sync {
     fn machine_checked(&self, _user_id: i64, _state: &str, _error: Option<&str>) -> WebResult<()> {
         Err(WebStoreError("this board has no machines".into()))
     }
+    /// `(user_id, host_id)` of every record an enrolment may wait for: no VM identity yet, not
+    /// minted, no terminal error, not deleting. Default: none.
+    fn machines_awaiting_principal(&self) -> WebResult<Vec<(i64, String)>> {
+        Ok(Vec::new())
+    }
+    /// The VM identity's object id as Azure reads it, stored unless one is. Default: refused.
+    fn machine_set_principal(&self, _user_id: i64, _principal_id: &str) -> WebResult<()> {
+        Err(WebStoreError("this board has no machines".into()))
+    }
+    /// The one mint of the record whose VM identity is `principal_id`, in one transaction: the
+    /// claim of `minted_at`, the host's earlier live keys revoked and the key's digest stored, or
+    /// nothing at all. Default: refused.
+    fn machine_enrol(&self, _principal_id: &str, _token_digest: &str) -> WebResult<Enrolled> {
+        Err(WebStoreError("this board has no machines".into()))
+    }
     /// A key was minted for a host new to the board: on the user's first enrollment, the
     /// welcome's greeting and arrival notice, once per user. Default: nothing.
     fn enrolled(
@@ -868,9 +907,10 @@ impl WebState {
         machines: Option<MachinesConfig>,
     ) -> WebState {
         let oidc = Oidc::new(&config);
-        let machines = machines
-            .filter(|_| config.entra_tenant.is_some())
-            .map(|m| Arc::new(machines::Machines::new(m)));
+        let machines = machines.and_then(|m| {
+            let tenant = config.entra_tenant.as_deref()?;
+            Some(Arc::new(machines::Machines::new(m, tenant)))
+        });
         let limits = ratelimit::Limiters::new(config.limits);
         WebState(Arc::new(Inner {
             core: Core {
@@ -1018,7 +1058,11 @@ impl WebSetup {
 
 /// The sign-in and keys routes, ready to merge into the server's router (which serves `/`).
 pub fn router(state: WebState) -> Router {
-    Router::new()
+    let mut routes = Router::new();
+    if state.machines().is_some() {
+        routes = routes.route("/v1/machines/enrol", post(machines::enrol));
+    }
+    routes
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))

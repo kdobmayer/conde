@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# PILOT ONLY: delete this script when the enrol route and the onboarding page exist. The runbook is README.md,
-# "Rebuilding a person's VM"; this script holds only its steps that are not one command:
+# PILOT ONLY: delete this script when the relay and the publication exist, and its `join` after the two pilot joins.
+# The runbook is README.md, "Rebuilding a person's VM"; this script holds only its steps that are not one command:
 #
 #   ./pilot-rebuild.sh inventory OLD           read-only: what would be lost on vm-agent-OLD (unpushed commits,
 #                                              uncommitted files, ~/work's newest files, the gh login)
-#   ./pilot-rebuild.sh join OWNER              no enrol route yet: conde's own sign-in for the person (prints the URL)
+#   ./pilot-rebuild.sh join OWNER              pilot migration only (Levente, Oliver; remove after both joins):
+#                                              conde's own sign-in for the person on vm-agent-OWNER (prints the URL)
 #   ./pilot-rebuild.sh join OWNER CODE         finishes it, then first boot without the mint (marker, machine.env)
 #   ./pilot-rebuild.sh signin OWNER claude|github|codex   no page yet: the relay helper by hand, input kept open (a FIFO)
 #   ./pilot-rebuild.sh signin OWNER code CODE  the Claude code the person got; prints the relay's outcome
@@ -55,8 +56,9 @@ echo "== gh"; gh auth status 2>&1 | grep -E "Logged in|not logged" | head -2')"
 
 
 
-# The manual join (no enrol route): conde login as the person, then first boot without the mint. First boot needs the
-# enrolment marker and machine.env supplied; conde login publishes nothing (publish does, later).
+# The manual join, the pilot migration's path (README, "Rebuilding a person's VM"; remove after Levente's and Oliver's
+# joins): conde login as the person, then first boot without the mint. First boot needs the enrolment marker and
+# machine.env supplied; conde login publishes nothing (publish does, later).
 cmd_join() {
   local owner="${1:?usage: pilot-rebuild.sh join OWNER [CODE]}" code="${2:-}"; name_ok "$owner"
   if [ -z "$code" ]; then
@@ -96,7 +98,7 @@ for i in \$(seq 90); do grep -qE '^(done|failed)' \$d/out && break; sleep 1; don
   esac
 }
 
-# Publishing is the server's once the enrol route exists; until then by hand, after the old host unpublished.
+# Publishing is the session hook's once the image carries it; until then by hand, after the old host unpublished.
 cmd_publish() {
   local owner="${1:?usage: pilot-rebuild.sh publish OWNER}"; name_ok "$owner"
   on_vm "vm-agent-$owner" "$(as_user agent 'conde publish vm.agent --board dakai 2>&1 | head -2; conde boards | tail -n +2')"
@@ -107,5 +109,5 @@ case "${1:-}" in
   join) shift; cmd_join "$@" ;;
   signin) shift; cmd_signin "$@" ;;
   publish) shift; cmd_publish "$@" ;;
-  *) sed -n '2,15p' "$0"; exit 64 ;;
+  *) sed -n '2,14p' "$0"; exit 64 ;;
 esac

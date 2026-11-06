@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use conde_remote::web::{
-    AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrollment, HostKey, Identity,
-    Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, Minted, RealmAccount,
-    ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore, WebStoreError, WebUser, Welcome,
-    WelcomePatch,
+    AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrolled, Enrollment, HostKey,
+    Identity, Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, Minted,
+    RealmAccount, ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore, WebStoreError,
+    WebUser, Welcome, WelcomePatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -640,6 +640,47 @@ impl WebStore for WebBoard {
                 return Ok(None);
             }
             Ok(t.machine_of_user(user_id)?.map(|m| m.host_id))
+        })
+    }
+
+    fn machines_awaiting_principal(&self) -> WebResult<Vec<(i64, String)>> {
+        let rows = self.read(|t| t.machines_without_principal())?;
+        Ok(rows.into_iter().map(|m| (m.user_id, m.host_id)).collect())
+    }
+
+    fn machine_set_principal(&self, user_id: i64, principal_id: &str) -> WebResult<()> {
+        self.write(|t| Ok(t.machine_set_principal(user_id, principal_id)?))
+    }
+
+    fn machine_enrol(&self, principal_id: &str, token_digest: &str) -> WebResult<Enrolled> {
+        let at = iso_from_ms(self.d.now_ms());
+        self.write(|t| {
+            let Some(m) = t.machine_by_principal(principal_id)? else {
+                return Ok(Enrolled::Unknown);
+            };
+            let Some(owner) = t.user_by_id(m.user_id)? else {
+                return Ok(Enrolled::Unknown);
+            };
+            if owner.disabled || m.deleting_at.is_some() {
+                return Ok(Enrolled::Disabled);
+            }
+            if !t.machine_claim_mint(m.user_id, &at)? {
+                return Ok(Enrolled::AlreadyMinted);
+            }
+            let new_host = t.host_owner(&m.host_id)?.is_none();
+            if t.ensure_host(&m.host_id, m.user_id)? != m.user_id {
+                anyhow::bail!("host {} belongs to another user", m.host_id);
+            }
+            let replaced = t.revoke_host_credentials(&m.host_id, &at)?;
+            t.insert_credential(token_digest, m.user_id, &m.host_id, &m.host_id, &at)?;
+            t.announce(topics::MACHINE);
+            Ok(Enrolled::Minted {
+                user_id: m.user_id,
+                user: owner.name,
+                host_id: m.host_id,
+                replaced,
+                new_host,
+            })
         })
     }
 

@@ -249,3 +249,14 @@ record and the VM's bridge connection, on whichever replica it is, sends it on i
 that at once) and clears it. The code the person pastes for Claude is in the record only until that send, and is
 never logged. A sign-in ends as `expired` when the bridge connection that carried it ends, or when no bridge took
 its start within 60 s. The VM needs a conde release with the relay; it updates itself daily.
+
+Disabling a person who has a machine (`POST /v1/admin/users/<name>/disable`) also removes the machine; nothing else
+removes one. The answer says `"machine": "deleting"`, and the server then, in the background and with id-conde's
+token: cancels the deployment named as the VM (`vm-agent-<owner>`) while it is `Accepted` or `Running`, reads it
+until it ended; deletes the template's one role assignment on the VM (Virtual Machine Administrator Login to the
+person's object id, at the VM's own scope; every other assignment stays); deletes the VM, whose NIC and OS disk go
+with it; and reads the VM every 15 s until Azure answers 404, then deletes the record. Each step is skipped when
+Azure shows it done, and each wait ends after 10 minutes. The first Azure failure stops the removal and is kept on
+the record; the next disable of the same person answers it as `machine_error` and runs the removal again from where
+it stopped. While the record is being removed, the person's setup is refused; enable and setup after it is gone
+deploys a new machine. id-conde's two roles in infra/agent-vm/azure/agent-rg.bicep cover these calls.

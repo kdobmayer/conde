@@ -66,6 +66,8 @@ pub struct BoardConn {
     pub forgotten: AtomicBool,
     /// The sign-in relay's helper on this connection's host.
     relay: super::relay::Relay,
+    /// The host's sign-in check.
+    signin: super::relay::SignInCheck,
 }
 
 impl BoardConn {
@@ -88,6 +90,7 @@ impl BoardConn {
             snapshot: Mutex::new(None),
             forgotten: AtomicBool::new(false),
             relay: super::relay::Relay::default(),
+            signin: super::relay::SignInCheck::default(),
         }
     }
 
@@ -134,6 +137,7 @@ impl BoardConn {
             c.shutdown();
         }
         self.relay.stop();
+        self.signin.stop();
     }
 
     /// One request over the connection, with the board's answer as a response object.
@@ -235,6 +239,7 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
         .relay_dir
         .clone()
         .unwrap_or_else(|| super::relay::HELPER_DIR.into());
+    let signin_every = tuning.signin_every;
     let _rt = core.rt.enter();
     let client = BridgeClient::start_events(config, move |event| {
         let Some(core) = weak.upgrade() else { return };
@@ -246,14 +251,26 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
             Inbound::Relay(frame) => {
                 let up = Arc::downgrade(&this);
                 let emit: super::relay::Emit = Arc::new(move |e| {
-                    if let Some(c) = up.upgrade().and_then(|c| c.client()) {
+                    let Some(conn) = up.upgrade() else { return };
+                    if let Some(c) = conn.client() {
                         c.send_frame("relay_event", e);
+                    }
+                    // a sign-in just made is checked at once
+                    if e.event == "done" {
+                        conn.signin.now();
                     }
                 });
                 this.relay.frame(frame, &relay_dir, emit);
             }
             Inbound::Connected => {
                 this.relay.reset();
+                let up = Arc::downgrade(&this);
+                let emit: super::relay::EmitMachine = Arc::new(move |e| {
+                    if let Some(c) = up.upgrade().and_then(|c| c.client()) {
+                        c.send_frame("machine_event", e);
+                    }
+                });
+                this.signin.start(&relay_dir, signin_every, emit);
                 // In callback order: the reset, then the request that reconciles this connection.
                 core.mux.connected(&alias);
                 if let Some(conn) = core.board(&alias) {

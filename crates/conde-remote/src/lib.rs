@@ -158,6 +158,9 @@ pub trait NotificationSource: Send + Sync {
     fn relay_event(&self, _host_id: &str, _event: &RelayEvent) {}
     /// The connection that carried relay `relay_id` ended: the helper went with it.
     fn relay_lost(&self, _host_id: &str, _relay_id: &str) {}
+    /// A `machine_event` from the host's bridge (`online`, `needs_sign_in`), in the order the
+    /// bridge sent it among its relay events. Default: ignored.
+    fn machine_event(&self, _host_id: &str, _event: &serde_json::Value) {}
 }
 
 /// A `relay` frame (server to bridge): `start` a sign-in `flow`, type the pasted `code` into it,

@@ -172,6 +172,7 @@ on_both!(
     a_relay_stuck_in_starting_reads_as_expired_after_60_s,
     a_relay_op_is_refused_for_another_owner_or_a_dead_relay_id,
     a_cancel_reaches_the_bridge_and_ends_the_relay,
+    a_needs_sign_in_event_sets_the_flows_a_relay_done_clears_one_and_online_is_a_separate_fact,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -5204,5 +5205,141 @@ async fn a_cancel_reaches_the_bridge_and_ends_the_relay(d: Arc<Dispatcher>) {
     let r = ui.ok(&b, &csrf, "machine.status", json!({})).await["relay"].clone();
     assert_eq!(state(&r), ("cancelled", ""));
     assert!(ui.pending(&host).await.is_none());
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The bridge reports a `machine_event`.
+async fn machine_event(ws: &mut Ws, event: Value) {
+    let mut f = event;
+    f["v"] = json!(1);
+    f["type"] = json!("machine_event");
+    ws.send(tungstenite::Message::text(f.to_string()))
+        .await
+        .unwrap();
+}
+
+impl Ui {
+    /// `machine.status` once `ready` holds for it.
+    async fn status_when(&self, b: &Browser, csrf: &str, ready: impl Fn(&Value) -> bool) -> Value {
+        let mut last = Value::Null;
+        for _ in 0..100 {
+            last = self.ok(b, csrf, "machine.status", json!({})).await;
+            if ready(&last) {
+                return last;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("status: {last}");
+    }
+}
+
+/// A `needs_sign_in` stores its `flows` map as the record's sign-in (a frame without the map marks
+/// its one flow expired), a relay's `done` sets its flow `ok` at once, and `online` sets
+/// `session_online_at` and nothing else; each tells the page's socket `machine`. Another
+/// machine's bridge writes only its own record.
+async fn a_needs_sign_in_event_sets_the_flows_a_relay_done_clears_one_and_online_is_a_separate_fact(
+    d: Arc<Dispatcher>,
+) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-s").await;
+    let mut events = events_socket(&ui, &b).await;
+    let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(
+        (&s["sign_in"], &s["session_online_at"]),
+        (&Value::Null, &Value::Null)
+    );
+    while quiet_frame(&mut events).await.is_some() {}
+
+    machine_event(&mut ws, json!({"state": "needs_sign_in", "flow": "codex"})).await;
+    let changed = next_frame(&mut events).await.expect("the event's change");
+    assert!(
+        changed["topics"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("machine")),
+        "{changed}"
+    );
+    let s = ui.status_when(&b, &csrf, |s| !s["sign_in"].is_null()).await;
+    assert_eq!(s["sign_in"], json!({"codex": "expired"}));
+
+    let flows = json!({"claude": "expired", "github": "expired", "codex": "ok"});
+    for flow in ["claude", "github"] {
+        machine_event(
+            &mut ws,
+            json!({"state": "needs_sign_in", "flow": flow, "flows": flows}),
+        )
+        .await;
+    }
+    let s = ui.status_when(&b, &csrf, |s| s["sign_in"] == flows).await;
+    assert_eq!(
+        s["session_online_at"],
+        Value::Null,
+        "sign-in is not the session"
+    );
+
+    let other = vm_key(&ui, "levente-szabo", "vm-agent-levente").await;
+    let mut theirs = vm_bridge(&ui, "vm-agent-levente", &other, "inst-l").await;
+    machine_event(
+        &mut theirs,
+        json!({"state": "needs_sign_in", "flow": "claude", "flows": {"claude": "ok"}}),
+    )
+    .await;
+    machine_event(&mut theirs, json!({"state": "online"})).await;
+    let theirs_row = {
+        let d = ui.d.clone();
+        let mut row = None;
+        for _ in 0..100 {
+            let d = d.clone();
+            let r = blocking(move || {
+                d.with_conn(|t| t.machine_of_host("vm-agent-levente"))
+                    .unwrap()
+                    .unwrap()
+            })
+            .await;
+            if r.session_online_at.is_some() {
+                row = Some(r);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        row.expect("the other machine's online")
+    };
+    assert_eq!(theirs_row.sign_in.as_deref(), Some(r#"{"claude":"ok"}"#));
+    let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert_eq!(
+        (&s["sign_in"], &s["session_online_at"]),
+        (&flows, &Value::Null)
+    );
+
+    let id = ui.relay_start(&b, &csrf, "claude").await;
+    relay_frame(&mut ws).await;
+    relay_event(&mut ws, json!({"relay_id": id, "event": "done"})).await;
+    let s = ui
+        .status_when(&b, &csrf, |s| s["sign_in"]["claude"] == "ok")
+        .await;
+    assert_eq!(
+        s["sign_in"],
+        json!({"claude": "ok", "github": "expired", "codex": "ok"})
+    );
+
+    while quiet_frame(&mut events).await.is_some() {}
+    machine_event(&mut ws, json!({"state": "online"})).await;
+    let changed = next_frame(&mut events).await.expect("the online change");
+    assert!(
+        changed["topics"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("machine")),
+        "{changed}"
+    );
+    let s = ui
+        .status_when(&b, &csrf, |s| s["session_online_at"].is_string())
+        .await;
+    assert_eq!(
+        s["sign_in"],
+        json!({"claude": "ok", "github": "expired", "codex": "ok"}),
+        "the session is not the sign-in"
+    );
     ui.server.shutdown().await.unwrap();
 }

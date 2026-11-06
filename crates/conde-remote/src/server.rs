@@ -886,6 +886,8 @@ enum Work {
     Endpoints(Vec<Endpoint>),
     /// A sign-in relay's event, recorded in the order the helper reported them.
     Relay(RelayEvent),
+    /// A `machine_event`, in order with the relay's events.
+    Machine(Value),
 }
 
 /// Records one connection's outcomes and endpoint snapshots in arrival order, one transaction at
@@ -906,6 +908,11 @@ async fn record_outcomes(
             Work::Relay(event) => {
                 let (source, h) = (shared.source.clone(), host.clone());
                 let _ = tokio::task::spawn_blocking(move || source.relay_event(&h, &event)).await;
+                continue;
+            }
+            Work::Machine(event) => {
+                let (source, h) = (shared.source.clone(), host.clone());
+                let _ = tokio::task::spawn_blocking(move || source.machine_event(&h, &event)).await;
                 continue;
             }
             Work::Endpoints(all) => {
@@ -1318,6 +1325,10 @@ impl Conn {
                     }
                 };
                 self.enqueue(outcome_tx, stop_tx, Work::Relay(event));
+                None
+            }
+            "machine_event" => {
+                self.enqueue(outcome_tx, stop_tx, Work::Machine(value));
                 None
             }
             "request" => {

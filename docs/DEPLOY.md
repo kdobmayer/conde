@@ -263,9 +263,11 @@ the VM, whose NIC and OS disk go with it; reads the VM every 15 s until Azure an
 record and revokes the VM host's keys, so an enable and the setup that follows deploy a new machine. Each step is
 skipped when Azure shows it done, and each wait ends after 10 minutes. The first failure stops the removal and is
 kept on the record; the next disable of the same person answers it as `machine_error` and runs the removal again
-from where it stopped. While the record is being removed, the person's setup is refused. Removals are not fenced
-against each other or against a deployment: two disables close together, an enable and setup while an earlier
-removal still runs, or a setup's deployment still in flight when the removal reads 404 can each act on the same VM
-name; do a rebuild (disable, enable, setup) only after the record is gone, one step at a time. Azure's side of the
-limit: id-conde's role assignment in infra/agent-vm/azure/agent-rg.bicep lets it delete only Virtual Machine
-Administrator Login assignments of users; which person and which VM is checked by the server.
+from where it stopped. While the record is being removed, the person's setup is refused. Before each change in Azure
+the removal reads the record again, and it ends without one once the record is no longer the one it started for
+(removed, or replaced by a new setup after an enable). Two overlaps remain unfenced: two disables close together run
+the same removal twice at once, and a deployment still in flight from a setup before the disable can create the VM
+after the removal has read it as absent. So disable a person only once their deployment has ended, and run a rebuild
+(disable, enable, setup) one step at a time, after the record is gone. Azure's side of the limit: id-conde's role
+assignment in infra/agent-vm/azure/agent-rg.bicep lets it delete only Virtual Machine Administrator Login
+assignments of users; which person and which VM is checked by the server.

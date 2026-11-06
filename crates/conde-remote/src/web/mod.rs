@@ -622,6 +622,8 @@ pub struct MachineCleanup {
     pub owner_object_id: String,
     /// Why the cleanup's last run stopped, when it did.
     pub delete_error: Option<String>,
+    /// The deleting mark this cleanup runs for: a record with another mark, or none, is not its.
+    pub deleting_at: String,
 }
 
 /// The board's storage as the web surface needs it. Implemented over the board's store
@@ -815,14 +817,19 @@ pub trait WebStore: Send + Sync {
     fn machine_deleting(&self, _name: &str) -> WebResult<Option<MachineCleanup>> {
         Ok(None)
     }
-    /// The cleanup of the deleting record of `user_id` on `host_id` stopped with `error`.
+    /// Whether the cleanup `m` is still the record's: the user's record is on its host and
+    /// deleting since its mark. Default: no.
+    fn machine_still_deleting(&self, _m: &MachineCleanup) -> WebResult<bool> {
+        Ok(false)
+    }
+    /// The cleanup `m` stopped with `error`, written only while the record is still its.
     /// Default: refused.
-    fn machine_delete_failed(&self, _user_id: i64, _host_id: &str, _error: &str) -> WebResult<()> {
+    fn machine_delete_failed(&self, _m: &MachineCleanup, _error: &str) -> WebResult<()> {
         Err(WebStoreError("this board has no machines".into()))
     }
-    /// The VM is gone: the deleting record of `user_id` on `host_id` is deleted and, when the
+    /// The VM is gone: the record of the cleanup `m`, while still its, is deleted and, when the
     /// board host is that user's, its live keys revoked, in one transaction. Default: refused.
-    fn machine_deleted(&self, _user_id: i64, _host_id: &str) -> WebResult<()> {
+    fn machine_deleted(&self, _m: &MachineCleanup) -> WebResult<()> {
         Err(WebStoreError("this board has no machines".into()))
     }
     /// A key was minted for a host new to the board: on the user's first enrollment, the

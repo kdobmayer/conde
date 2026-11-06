@@ -180,6 +180,7 @@ on_both!(
     after_a_removal_an_enable_and_setup_deploy_a_new_machine_and_the_old_vm_key_stays_dead,
     an_adopted_host_name_is_removed_only_when_azure_shows_it_is_the_owners_vm,
     a_removal_never_revokes_the_keys_of_another_users_host_of_the_same_name,
+    a_removal_whose_record_was_replaced_meanwhile_sends_no_cancel_and_no_delete,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -3333,6 +3334,8 @@ struct Arm {
     vms: Mutex<HashMap<String, std::collections::VecDeque<(u16, Value)>>>,
     /// Answers by method and exact path, before every other script.
     routes: Mutex<HashMap<(String, String), Answers>>,
+    /// How long the answer to a method and exact path is held back.
+    delays: Mutex<HashMap<(String, String), Duration>>,
 }
 
 fn running() -> Value {
@@ -3357,6 +3360,7 @@ async fn fake_arm() -> Arc<Arm> {
         gets: Mutex::new([(200, running())].into()),
         vms: Mutex::new(HashMap::new()),
         routes: Mutex::new(HashMap::new()),
+        delays: Mutex::new(HashMap::new()),
     });
     let a = arm.clone();
     let app = Router::new().fallback(
@@ -3386,6 +3390,15 @@ async fn fake_arm() -> Arc<Arm> {
                     .unwrap()
                     .get_mut(&(method.to_string(), uri.path().to_string()))
                     .map(|q| if q.len() > 1 { q.pop_front().unwrap() } else { q[0].clone() });
+                let delay = a
+                    .delays
+                    .lock()
+                    .unwrap()
+                    .get(&(method.to_string(), uri.path().to_string()))
+                    .copied();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
                 let (status, body) = match method.as_str() {
                     _ if !bearer => (
                         401,
@@ -3433,6 +3446,14 @@ impl Arm {
     }
 
     /// The answers of `method` on exactly `path`, each used once and the last one kept.
+    /// Holds back the answer to `method` on exactly `path` by `delay`.
+    fn delay(&self, method: &str, path: &str, delay: Duration) {
+        self.delays
+            .lock()
+            .unwrap()
+            .insert((method.to_string(), path.to_string()), delay);
+    }
+
     fn route(&self, method: &str, path: &str, answers: Vec<(u16, Value)>) {
         self.routes
             .lock()
@@ -5880,5 +5901,76 @@ async fn a_removal_never_revokes_the_keys_of_another_users_host_of_the_same_name
     let owner = blocking(move || d2.with_conn(|t| t.host_owner(&h)).unwrap()).await;
     assert_eq!(owner.map(|(o, _)| o), Some(bob), "Bob's host stays his");
     assert!(arm.calls("DELETE").is_empty() && arm.calls("POST").is_empty());
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A removal holds its record from the disable on: one held back after its proof finds the
+/// record replaced (the record removed meanwhile, the person enabled, a new machine set up with
+/// the same owner and name) and ends without a cancel, a DELETE or a write; the new record stays
+/// as it is.
+async fn a_removal_whose_record_was_replaced_meanwhile_sends_no_cancel_and_no_delete(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = "vm-agent-krisztian-dobmayer";
+    ui.machine(USER, host, "oid-krisztian").await;
+    let deploy = format!("{DEPLOYMENTS}{host}");
+    arm.route(
+        "GET",
+        &deploy,
+        vec![(200, owned("Running", USER, "oid-krisztian"))],
+    );
+    arm.delay("GET", &deploy, Duration::from_millis(1500));
+    arm.route(
+        "POST",
+        &format!("{deploy}/cancel"),
+        vec![(204, Value::Null)],
+    );
+    let listed =
+        json!({"value": [assignment(MINE, &vm_path(host), "oid-krisztian", LOGIN_ROLE_ID)]});
+    arm.route("GET", &roles_path(host), vec![(200, listed)]);
+    arm.route(
+        "DELETE",
+        &format!("{}/{MINE}", roles_path(host)),
+        vec![(204, Value::Null)],
+    );
+    arm.route("DELETE", &vm_path(host), vec![(202, Value::Null)]);
+    arm.vm(host, vec![(200, vm("Succeeded")), (404, not_found())]);
+
+    ui.admin_set(USER, "disable").await;
+    // the proof's read is in flight; meanwhile the record is replaced
+    for _ in 0..100 {
+        if !arm.on("GET", &deploy).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(arm.on("GET", &deploy).len(), 1, "the proof is reading");
+    let at = ui.record(USER).await.unwrap().deleting_at.unwrap();
+    let uid = ui.user_id(USER).await;
+    ui.write(move |t| {
+        assert!(t.machine_delete(uid, host, &at)?);
+        t.machine_request(&conde::store::NewMachine {
+            user_id: uid,
+            host_id: host,
+            owner_object_id: "oid-krisztian",
+            vm_size: web::DEFAULT_VM_SIZE,
+            minted_at: None,
+        })?;
+        Ok(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let calls = arm.calls.lock().unwrap().clone();
+    assert!(
+        calls.iter().all(|c| c.method == "GET"),
+        "a destructive call for a replaced record: {calls:#?}"
+    );
+    let m = ui.record(USER).await.expect("the new record");
+    assert_eq!(
+        (m.deleting_at, m.delete_error),
+        (None, None),
+        "nothing written"
+    );
     ui.server.shutdown().await.unwrap();
 }

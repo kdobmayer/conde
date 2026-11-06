@@ -645,42 +645,84 @@ impl Azure {
     }
 }
 
+/// How a removal run ended.
+enum Removal {
+    Done,
+    Failed(AzureError),
+    /// The record is no longer this run's (deleted, replaced, or marked again): nothing written.
+    Stale,
+}
+
 /// An admin disabled the machine's owner: the proof that the VM is the owner's
 /// ([`Azure::owners_deployment`]), then the four steps, each skipped when Azure shows it done,
-/// then the record is deleted (with its host's keys). The first failure, a failed proof
-/// included, is the record's `delete_error` and ends the task; the next disable of the owner
-/// runs it again.
+/// then the record is deleted (with its host's keys). Before each destructive step the record
+/// is read again, and a record no longer deleting since this run's mark ends the run without a
+/// write. The first failure, a failed proof included, is the record's `delete_error` and ends the
+/// task; the next disable of the owner runs it again.
 pub(crate) async fn remove(core: super::Core, machines: Arc<Machines>, m: super::MachineCleanup) {
     let (config, azure) = (&machines.config, &machines.azure);
     let host = m.host_id.clone();
+    let mine = || {
+        let m = m.clone();
+        let core = core.clone();
+        async move {
+            match core.store(move |s| s.machine_still_deleting(&m)).await {
+                Ok(mine) => mine,
+                Err(e) => {
+                    tracing::warn!(error = %e, "the machine record was not read again");
+                    false
+                }
+            }
+        }
+    };
     let outcome = async {
         if !plain_name(&host) {
-            return Err(AzureError(format!("the host id {host:?} is not a VM name")));
+            return Removal::Failed(AzureError(format!("the host id {host:?} is not a VM name")));
         }
-        let Some((deployment, read)) = azure
+        let (deployment, read) = match azure
             .owners_deployment(config, &host, &m.owner_object_id)
-            .await?
-        else {
-            return Ok(());
+            .await
+        {
+            Ok(Some(found)) => found,
+            Ok(None) => return Removal::Done,
+            Err(e) => return Removal::Failed(e),
         };
-        azure.end_deployment(config, &deployment, read).await?;
-        azure
-            .delete_login(config, &host, &m.owner_object_id)
-            .await?;
-        azure.delete_vm(config, &host).await
+        if !mine().await {
+            return Removal::Stale;
+        }
+        if let Err(e) = azure.end_deployment(config, &deployment, read).await {
+            return Removal::Failed(e);
+        }
+        if !mine().await {
+            return Removal::Stale;
+        }
+        if let Err(e) = azure.delete_login(config, &host, &m.owner_object_id).await {
+            return Removal::Failed(e);
+        }
+        if !mine().await {
+            return Removal::Stale;
+        }
+        match azure.delete_vm(config, &host).await {
+            Ok(()) => Removal::Done,
+            Err(e) => Removal::Failed(e),
+        }
     }
     .await;
-    let (user_id, h) = (m.user_id, host.clone());
+    let c = m.clone();
     let stored = match outcome {
-        Ok(()) => {
+        Removal::Done => {
             tracing::info!(%host, "machine removed");
-            core.store(move |s| s.machine_deleted(user_id, &h)).await
+            core.store(move |s| s.machine_deleted(&c)).await
         }
-        Err(e) => {
+        Removal::Failed(e) => {
             tracing::warn!(%host, error = %e, "machine removal stopped");
             let error = e.to_string();
-            core.store(move |s| s.machine_delete_failed(user_id, &h, &error))
+            core.store(move |s| s.machine_delete_failed(&c, &error))
                 .await
+        }
+        Removal::Stale => {
+            tracing::info!(%host, "machine removal ended: the record is no longer this removal's");
+            return;
         }
     };
     if let Err(e) = stored {

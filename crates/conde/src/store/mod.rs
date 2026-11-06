@@ -1304,15 +1304,17 @@ pub trait Tx {
     fn machine_set_sign_in(&self, user_id: i64, sign_in: Option<&str>) -> StoreResult<()>;
     /// Marks the record deleting at `at`, unless it was marked before (that time is kept).
     fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()>;
-    /// The deleting record's last removal failure; whether a deleting record of that host was there.
+    /// The last removal failure of the record of that host deleting since `deleting_at`; whether
+    /// that record was there.
     fn machine_set_delete_error(
         &self,
         user_id: i64,
         host_id: &str,
+        deleting_at: &str,
         error: &str,
     ) -> StoreResult<bool>;
-    /// Deletes the deleting record of that host; whether there was one.
-    fn machine_delete(&self, user_id: i64, host_id: &str) -> StoreResult<bool>;
+    /// Deletes the record of that host deleting since `deleting_at`; whether there was one.
+    fn machine_delete(&self, user_id: i64, host_id: &str, deleting_at: &str) -> StoreResult<bool>;
     /// The record whose VM identity is `principal_id`.
     fn machine_by_principal(&self, principal_id: &str) -> StoreResult<Option<MachineRow>>;
     /// The records an enrolment may be waiting for: no principal yet, not minted, no terminal

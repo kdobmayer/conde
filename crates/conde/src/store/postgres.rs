@@ -3328,19 +3328,20 @@ impl Tx for PgTx {
         &self,
         user_id: i64,
         host_id: &str,
+        deleting_at: &str,
         error: &str,
     ) -> StoreResult<bool> {
         Ok(self.execute(
-            "UPDATE machines SET delete_error = $3
-             WHERE user_id = $1 AND host_id = $2 AND deleting_at IS NOT NULL",
-            &[&user_id, &host_id, &error],
+            "UPDATE machines SET delete_error = $4
+             WHERE user_id = $1 AND host_id = $2 AND deleting_at = $3",
+            &[&user_id, &host_id, &deleting_at, &error],
         )? > 0)
     }
 
-    fn machine_delete(&self, user_id: i64, host_id: &str) -> StoreResult<bool> {
+    fn machine_delete(&self, user_id: i64, host_id: &str, deleting_at: &str) -> StoreResult<bool> {
         Ok(self.execute(
-            "DELETE FROM machines WHERE user_id = $1 AND host_id = $2 AND deleting_at IS NOT NULL",
-            &[&user_id, &host_id],
+            "DELETE FROM machines WHERE user_id = $1 AND host_id = $2 AND deleting_at = $3",
+            &[&user_id, &host_id, &deleting_at],
         )? > 0)
     }
 

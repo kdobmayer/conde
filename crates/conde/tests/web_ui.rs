@@ -179,6 +179,7 @@ on_both!(
     a_vm_stuck_deleting_ends_the_wait_and_the_next_disable_only_waits,
     after_a_removal_an_enable_and_setup_deploy_a_new_machine_and_the_old_vm_key_stays_dead,
     an_adopted_host_name_is_removed_only_when_azure_shows_it_is_the_owners_vm,
+    a_removal_never_revokes_the_keys_of_another_users_host_of_the_same_name,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -5829,5 +5830,55 @@ async fn an_adopted_host_name_is_removed_only_when_azure_shows_it_is_the_owners_
     let deletes: Vec<String> = arm.calls("DELETE").into_iter().map(|c| c.path).collect();
     assert_eq!(deletes, vec![vm_path(pilot)], "only the pilot's own VM");
     assert!(arm.calls("POST").is_empty());
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The record's host name can be a board host of someone else: Bob holds `vm-agent-<jane>` by
+/// an ordinary key before Jane's first sign-in sets her machine up under that name. Jane's
+/// removal, with nothing in Azure, deletes her record and leaves Bob's key and host as they were.
+async fn a_removal_never_revokes_the_keys_of_another_users_host_of_the_same_name(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    let bob = blocking({
+        let store = ui.env.store.clone();
+        move || store.ensure_user("bob").unwrap().user_id
+    })
+    .await;
+    let key = format!("conde_test_{}", conde::util::new_ulid());
+    let (store, h, digest) = (
+        ui.env.store.clone(),
+        host.clone(),
+        conde_remote::token_digest(&key),
+    );
+    blocking(move || {
+        store
+            .mint_host_key(bob, &h, "laptop", &digest, START)
+            .unwrap()
+    })
+    .await;
+    assert!(ui.bridge_opens(&key).await);
+
+    let _jane = ui.browser_landing().await;
+    let m = ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    assert_eq!(m.host_id, host);
+    for name in [host.clone(), format!("agent-vm-{USER}")] {
+        arm.route(
+            "GET",
+            &format!("{DEPLOYMENTS}{name}"),
+            vec![(404, not_found())],
+        );
+    }
+    ui.admin_set(USER, "disable").await;
+    ui.record_gone(USER).await;
+    assert!(
+        ui.bridge_opens(&key).await,
+        "Bob's key after Jane's removal"
+    );
+    let (d2, h) = (ui.d.clone(), host.clone());
+    let owner = blocking(move || d2.with_conn(|t| t.host_owner(&h)).unwrap()).await;
+    assert_eq!(owner.map(|(o, _)| o), Some(bob), "Bob's host stays his");
+    assert!(arm.calls("DELETE").is_empty() && arm.calls("POST").is_empty());
     ui.server.shutdown().await.unwrap();
 }

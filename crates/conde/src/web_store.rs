@@ -721,8 +721,11 @@ impl WebStore for WebBoard {
         let at = iso_from_ms(self.d.now_ms());
         self.write(|t| {
             if t.machine_delete(user_id, host_id)? {
-                // the VM's keys go with it: after an enable, setup deploys anew instead of adopting
-                t.revoke_host_credentials(host_id, &at)?;
+                // the VM's keys go with it, when the board host is the user's: after an enable,
+                // setup deploys anew instead of adopting; another user's host of that name stays
+                if matches!(t.host_owner(host_id)?, Some((owner, _)) if owner == user_id) {
+                    t.revoke_host_credentials(host_id, &at)?;
+                }
                 t.announce(topics::MACHINE);
             }
             Ok(())

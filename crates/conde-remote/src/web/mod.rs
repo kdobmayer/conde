@@ -820,8 +820,8 @@ pub trait WebStore: Send + Sync {
     fn machine_delete_failed(&self, _user_id: i64, _host_id: &str, _error: &str) -> WebResult<()> {
         Err(WebStoreError("this board has no machines".into()))
     }
-    /// The VM is gone: the deleting record of `user_id` on `host_id` is deleted and that host's
-    /// live keys revoked, in one transaction. Default: refused.
+    /// The VM is gone: the deleting record of `user_id` on `host_id` is deleted and, when the
+    /// board host is that user's, its live keys revoked, in one transaction. Default: refused.
     fn machine_deleted(&self, _user_id: i64, _host_id: &str) -> WebResult<()> {
         Err(WebStoreError("this board has no machines".into()))
     }

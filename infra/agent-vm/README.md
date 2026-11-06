@@ -95,7 +95,8 @@ hourly user timer runs it with `--notify`, which pages the human through conde (
 session) when the Claude sign-in has under three days left or has ended: once a day per condition, retried next
 hour if the page failed or was stored without reaching Slack (the board needs the person's Slack id). conde's
 bridge runs the same script without `--notify` when it connects, every hour and after a sign-in on the page ends
-`done`, and reports each expiring or expired flow to the board (the Machine page's needs-sign-in line); the timer
+`done`, and reports each expiring or expired flow to the board (the Machine page's needs-sign-in line), or that
+every flow is signed in; the timer
 keeps paging until a later image rebuild drops it.
 
 ## Rebuilding a person's VM (pilot: Levente, Oliver)

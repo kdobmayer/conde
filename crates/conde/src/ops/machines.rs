@@ -281,8 +281,9 @@ fn change_flows(
     Ok(true)
 }
 
-/// The machine's `needs_sign_in` for `flow`: its `flows` map replaces the record's, and a frame
-/// without the map marks `flow` expired. Whether a record took it.
+/// The machine's `needs_sign_in` for `flow`, or its `signed_in` (no flow): its `flows` map
+/// replaces the record's, and a `needs_sign_in` without the map marks `flow` expired. Whether a
+/// record took it.
 pub fn needs_sign_in(
     db: &dyn Tx,
     host: &str,

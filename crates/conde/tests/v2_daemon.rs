@@ -4105,7 +4105,8 @@ impl CheckVm {
 
 /// The machine runs its sign-in check on connect, after a relay's `done` and every period (an
 /// hour; shortened for the second machine) and sends one `needs_sign_in` per expiring or expired
-/// flow, each with every flow's state, and nothing when every flow is fine.
+/// flow, each with every flow's state; when every flow is fine, one `signed_in` with the map,
+/// only when the map differs from the last one the connection sent (a new connection differs).
 #[cfg(unix)]
 #[test]
 fn the_sign_in_check_runs_on_connect_after_done_and_hourly() {
@@ -4158,7 +4159,34 @@ fn the_sign_in_check_runs_on_connect_after_done_and_hourly() {
                "flows": {"claude": "expired", "github": "ok", "codex": "ok"}})
     );
 
-    // the period, on a machine whose flows are all fine: it runs again and sends nothing
+    // all fine: one `signed_in` with the map, and none again while the map is the same
+    vm.set("claude ok 2026-12-01T00:00:00Z\ngithub ok\ncodex ok\n");
+    let all_ok = json!({"state": "signed_in",
+                        "flows": {"claude": "ok", "github": "ok", "codex": "ok"}});
+    let relay_done = |id: &str| {
+        board.send_frame(
+            "vm-agent-x",
+            json!({"v": 1, "type": "relay", "relay_id": id, "flow": "claude", "action": "start"})
+                .to_string(),
+        )
+    };
+    relay_done("r2");
+    let e = events(n + 3);
+    assert_eq!(e[n + 2], all_ok);
+    let runs = vm.runs();
+    relay_done("r3");
+    wait_for("the check after the second done", || {
+        (vm.runs() > runs).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        machine_events(&board, "vm-agent-x").len(),
+        n + 3,
+        "an unchanged map is not sent again"
+    );
+
+    // the period, on a machine whose flows are all fine: it runs again and sends `signed_in`
+    // once per connection
     let fine = CheckVm::start(
         &board,
         "y",
@@ -4174,7 +4202,20 @@ fn the_sign_in_check_runs_on_connect_after_done_and_hourly() {
         connects,
         "no reconnect ran them"
     );
-    assert!(machine_events(&board, "vm-agent-y").is_empty());
+    let fine_ok = json!({"state": "signed_in",
+                         "flows": {"claude": "ok", "github": "ok", "codex": "ok"}});
+    let once = vec![fine_ok; connects as usize];
+    assert_eq!(
+        machine_events(&board, "vm-agent-y"),
+        once,
+        "one per connection"
+    );
+    board.drop_connection("vm-agent-y");
+    let e = wait_for("signed_in on the new connection", || {
+        let e = machine_events(&board, "vm-agent-y");
+        (e.len() > once.len()).then_some(e)
+    });
+    assert_eq!(e[once.len()..], once[..1]);
 }
 
 /// A machine without the check script (every laptop) runs no check and sends no `needs_sign_in`.

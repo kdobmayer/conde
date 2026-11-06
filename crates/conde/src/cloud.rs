@@ -617,7 +617,8 @@ impl NotificationSource for Board {
         }
     }
 
-    /// `online` sets the record's `session_online_at`; `needs_sign_in` its sign-in flows.
+    /// `online` sets the record's `session_online_at`; `needs_sign_in` and `signed_in` its
+    /// sign-in flows.
     fn machine_event(&self, host_id: &str, e: &Value) {
         let at = iso_from_ms(self.d.now_ms());
         let state = e["state"].as_str().unwrap_or_default();
@@ -627,6 +628,7 @@ impl NotificationSource for Board {
                 "needs_sign_in" => {
                     ops::machines::needs_sign_in(tx, host_id, e["flow"].as_str(), e.get("flows"))?
                 }
+                "signed_in" => ops::machines::needs_sign_in(tx, host_id, None, e.get("flows"))?,
                 _ => false,
             };
             if taken {

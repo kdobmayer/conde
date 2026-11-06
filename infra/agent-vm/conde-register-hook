@@ -2,7 +2,9 @@
 # Claude Code SessionStart hook (settings.json of the agent user). Registers the agent's conde name for the
 # agent's own session, and only that one: a power user's own `claude` over SSH runs the same hook and must
 # not take the name. conde binds a name to one session id, so this runs on every start and resume; for the
-# pinned session it is a no-op after the first time. Quiet on stdout (that would go into the session context).
+# pinned session it is a no-op after the first time. Then publishes the name on agent.env's BOARD, taking it
+# from another host of the person's (a rebuilt VM); publishing again is a no-op. A failure is only logged.
+# Quiet on stdout (that would go into the session context).
 set -u
 log="$HOME/.config/agentvm/hook.log"
 env="$HOME/.config/agentvm/agent.env"
@@ -15,6 +17,9 @@ export PATH="$HOME/.local/bin:$PATH" CLAUDE_CODE_SESSION_ID="$sid"
   echo "$(date -u +%FT%TZ) session $sid start"
   if conde whoami >/dev/null 2>&1; then conde whoami
   else conde register "$AGENT_NAME"
+  fi
+  if [ -n "${BOARD:-}" ]; then conde publish "$AGENT_NAME" --board "$BOARD" --take
+  else echo "no BOARD in agent.env: not published"
   fi
 } >>"$log" 2>&1
 exit 0

@@ -12,11 +12,15 @@
 //! - its state: `GET` of the same deployment, at most once every 30 s per pending record; a failed
 //!   read changes nothing (the next read retries);
 //! - the VM: `GET .../providers/Microsoft.Compute/virtualMachines/<host>` for its identity's
-//!   `principalId`, only from an enrol whose identity no record has yet.
+//!   `principalId`, only from an enrol whose identity no record has yet;
+//! - the removal, only from an admin's disable of the owner ([`remove`]): the deployment's cancel
+//!   while it runs, the template's one login assignment on the VM, the VM's DELETE and its reads
+//!   until 404.
 //!
 //! The VM joins through `POST /v1/machines/enrol` ([`enrol`]) with its own identity's v1 token for
 //! the conde-machines audience: the host key is minted once per VM identity.
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
@@ -45,6 +49,13 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 pub const ARM_URL: &str = "https://management.azure.com";
 const DEPLOYMENTS_API_VERSION: &str = "2021-04-01";
 const VM_API_VERSION: &str = "2024-07-01";
+const ROLES_API_VERSION: &str = "2022-04-01";
+/// Virtual Machine Administrator Login: the role of the template's one assignment to the owner.
+const LOGIN_ROLE: &str = "1c0163c0-47e6-4577-8991-ea5c82e286e4";
+/// How often the removal reads a deployment or a VM it waits for, unless configured.
+pub const POLL_EVERY: Duration = Duration::from_secs(15);
+/// How many reads the removal waits for each (10 minutes at [`POLL_EVERY`]).
+const POLLS: u32 = 40;
 /// Entra's sign-in origin; a tenant's v1 signing keys are at `<origin>/<tenant>/discovery/keys`.
 pub const LOGIN_URL: &str = "https://login.microsoftonline.com";
 /// The tenant's signing keys are read again after this long, and at once for an unknown `kid`.
@@ -80,6 +91,8 @@ pub struct MachinesConfig {
     /// Entra's sign-in origin, where the tenant's signing keys are read ([`LOGIN_URL`]; a test's
     /// fake otherwise).
     pub login_url: String,
+    /// The removal's wait between reads ([`POLL_EVERY`]; a test's shorter one otherwise).
+    pub poll_every: Duration,
 }
 
 /// The server's user-assigned identity as the Container Apps identity endpoint serves it.
@@ -155,6 +168,7 @@ impl MachinesConfig {
             identity,
             arm_url: ARM_URL.into(),
             login_url: LOGIN_URL.into(),
+            poll_every: POLL_EVERY,
         }))
     }
 }
@@ -248,6 +262,10 @@ pub struct Deployment {
 async fn refusal(what: &str, response: reqwest::Response) -> AzureError {
     let status = response.status();
     let body: Value = response.json().await.unwrap_or(Value::Null);
+    refused_with(what, status, &body)
+}
+
+fn refused_with(what: &str, status: reqwest::StatusCode, body: &Value) -> AzureError {
     let error = &body["error"];
     let text = match (error["code"].as_str(), error["message"].as_str()) {
         (Some(code), Some(message)) => format!("{what} answered {status}: {code}: {message}"),
@@ -373,6 +391,222 @@ impl Azure {
             .as_str()
             .filter(|p| !p.is_empty())
             .map(str::to_string))
+    }
+}
+
+/// A host id that is one plain path segment: letters, digits, `-`, `_` and `.`, starting with a
+/// letter or digit. Anything else is never put in a removal's URL.
+fn plain_name(host: &str) -> bool {
+    host.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Whether a role assignment listed at the VM is the template's login assignment of the owner:
+/// on the VM itself (not inherited), of the login role, to the owner's object id.
+fn is_owner_login(a: &Value, vm_id: &str, owner_object_id: &str) -> bool {
+    let p = &a["properties"];
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_ascii_lowercase();
+    text(&p["scope"]) == vm_id.to_ascii_lowercase()
+        && text(&p["principalId"]) == owner_object_id.to_ascii_lowercase()
+        && text(&p["roleDefinitionId"]).ends_with(&format!("/roledefinitions/{LOGIN_ROLE}"))
+        && a["name"]
+            .as_str()
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+}
+
+impl Azure {
+    /// One Resource Manager call with the identity's token: the status and the JSON body (null
+    /// when there is none).
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        what: &str,
+    ) -> Result<(reqwest::StatusCode, Value), AzureError> {
+        let token = self.token().await?;
+        let mut request = self.http.request(method.clone(), url).bearer_auth(token);
+        if method == reqwest::Method::POST {
+            request = request.header(header::CONTENT_LENGTH, "0");
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| AzureError(format!("{what} failed: {e}")))?;
+        let status = response.status();
+        let body = response.json().await.unwrap_or(Value::Null);
+        Ok((status, body))
+    }
+
+    /// `/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<host>`.
+    fn vm_id(config: &MachinesConfig, host: &str) -> String {
+        format!(
+            "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/virtualMachines/{host}",
+            config.subscription, config.resource_group
+        )
+    }
+
+    /// Step 1: the named deployment ended. While it is `Accepted` or `Running` it is cancelled
+    /// once, then read every `poll_every` until it is `Succeeded`, `Failed` or `Canceled`; no
+    /// deployment of that name is ended too.
+    async fn end_deployment(&self, config: &MachinesConfig, host: &str) -> Result<(), AzureError> {
+        let url = self.deployment_url(config, host);
+        let cancel = format!(
+            "{}/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Resources/deployments/{host}/cancel?api-version={DEPLOYMENTS_API_VERSION}",
+            config.arm_url.trim_end_matches('/'),
+            config.subscription,
+            config.resource_group
+        );
+        let mut cancelled = false;
+        for read in 0..=POLLS {
+            if read > 0 {
+                tokio::time::sleep(config.poll_every).await;
+            }
+            let what = "the deployment read";
+            let (status, body) = self.call(reqwest::Method::GET, &url, what).await?;
+            match status.as_u16() {
+                404 => return Ok(()),
+                200 => {}
+                _ => return Err(refused_with(what, status, &body)),
+            }
+            let state = body["properties"]["provisioningState"]
+                .as_str()
+                .ok_or_else(|| AzureError("the deployment has no provisioningState".into()))?;
+            match state {
+                "Succeeded" | "Failed" | "Canceled" => return Ok(()),
+                "Accepted" | "Running" if !cancelled => {
+                    let what = "the deployment cancel";
+                    let (status, body) = self.call(reqwest::Method::POST, &cancel, what).await?;
+                    // 409: it ended meanwhile, which the next read shows
+                    if !matches!(status.as_u16(), 200 | 202 | 204 | 409) {
+                        return Err(refused_with(what, status, &body));
+                    }
+                    cancelled = true;
+                }
+                _ => {}
+            }
+        }
+        Err(AzureError(format!(
+            "the deployment {host} did not end within {} s",
+            config.poll_every.as_secs() * u64::from(POLLS)
+        )))
+    }
+
+    /// Step 2: the template's login assignment of the owner on the VM, deleted. Only an entry
+    /// [`is_owner_login`] accepts is deleted, by its name at the VM's scope; a VM that is gone
+    /// has none.
+    async fn delete_login(
+        &self,
+        config: &MachinesConfig,
+        host: &str,
+        owner_object_id: &str,
+    ) -> Result<(), AzureError> {
+        let base = config.arm_url.trim_end_matches('/');
+        let vm_id = Azure::vm_id(config, host);
+        let list = format!(
+            "{base}{vm_id}/providers/Microsoft.Authorization/roleAssignments?api-version={ROLES_API_VERSION}&$filter=atScope()"
+        );
+        let what = "the VM's role assignment list";
+        let (status, body) = self.call(reqwest::Method::GET, &list, what).await?;
+        match status.as_u16() {
+            404 => return Ok(()),
+            200 => {}
+            _ => return Err(refused_with(what, status, &body)),
+        }
+        let entries = body["value"].as_array().cloned().unwrap_or_default();
+        for a in entries
+            .iter()
+            .filter(|a| is_owner_login(a, &vm_id, owner_object_id))
+        {
+            let name = a["name"].as_str().unwrap_or_default();
+            let url = format!(
+                "{base}{vm_id}/providers/Microsoft.Authorization/roleAssignments/{name}?api-version={ROLES_API_VERSION}"
+            );
+            let what = "the login assignment's DELETE";
+            let (status, body) = self.call(reqwest::Method::DELETE, &url, what).await?;
+            if !matches!(status.as_u16(), 200 | 204 | 404) {
+                return Err(refused_with(what, status, &body));
+            }
+        }
+        Ok(())
+    }
+
+    /// Steps 3 and 4: the VM deleted (its NIC and OS disk go with it, the template's
+    /// `deleteOption`), then read every `poll_every` until it answers 404. A VM already gone is
+    /// deleted; one already `Deleting` is only waited for.
+    async fn delete_vm(&self, config: &MachinesConfig, host: &str) -> Result<(), AzureError> {
+        let url = format!(
+            "{}{}?api-version={VM_API_VERSION}",
+            config.arm_url.trim_end_matches('/'),
+            Azure::vm_id(config, host)
+        );
+        let what = "the VM read";
+        let (status, body) = self.call(reqwest::Method::GET, &url, what).await?;
+        match status.as_u16() {
+            404 => return Ok(()),
+            200 => {}
+            _ => return Err(refused_with(what, status, &body)),
+        }
+        if body["properties"]["provisioningState"] != "Deleting" {
+            let what = "the VM DELETE";
+            let (status, body) = self.call(reqwest::Method::DELETE, &url, what).await?;
+            match status.as_u16() {
+                404 => return Ok(()),
+                200 | 202 | 204 => {}
+                _ => return Err(refused_with(what, status, &body)),
+            }
+        }
+        for _ in 0..POLLS {
+            tokio::time::sleep(config.poll_every).await;
+            let (status, body) = self.call(reqwest::Method::GET, &url, what).await?;
+            match status.as_u16() {
+                404 => return Ok(()),
+                200 => {}
+                _ => return Err(refused_with(what, status, &body)),
+            }
+        }
+        Err(AzureError(format!(
+            "the VM {host} was not gone within {} s",
+            config.poll_every.as_secs() * u64::from(POLLS)
+        )))
+    }
+}
+
+/// An admin disabled the machine's owner: the four steps, each skipped when Azure shows it done,
+/// then the record is deleted. The first failure is the record's `delete_error` and ends the
+/// task; the next disable of the owner runs it again.
+pub(crate) async fn remove(core: super::Core, machines: Arc<Machines>, m: super::MachineCleanup) {
+    let (config, azure) = (&machines.config, &machines.azure);
+    let host = m.host_id.clone();
+    let outcome = async {
+        if !plain_name(&host) {
+            return Err(AzureError(format!("the host id {host:?} is not a VM name")));
+        }
+        azure.end_deployment(config, &host).await?;
+        azure
+            .delete_login(config, &host, &m.owner_object_id)
+            .await?;
+        azure.delete_vm(config, &host).await
+    }
+    .await;
+    let (user_id, h) = (m.user_id, host.clone());
+    let stored = match outcome {
+        Ok(()) => {
+            tracing::info!(%host, "machine removed");
+            core.store(move |s| s.machine_deleted(user_id, &h)).await
+        }
+        Err(e) => {
+            tracing::warn!(%host, error = %e, "machine removal stopped");
+            let error = e.to_string();
+            core.store(move |s| s.machine_delete_failed(user_id, &h, &error))
+                .await
+        }
+    };
+    if let Err(e) = stored {
+        tracing::error!(%host, error = %e, "the machine removal's outcome was not stored");
     }
 }
 
@@ -814,6 +1048,23 @@ pub(crate) async fn refresh(state: &WebState, user_id: i64) {
 
 #[cfg(test)]
 mod tests {
+    /// A removal's URL carries the host id as one plain path segment or not at all.
+    #[test]
+    fn a_removal_names_only_a_plain_vm() {
+        for ok in [
+            "vm-agent-krisztian-dobmayer",
+            "vm-agent-levente",
+            "pilot.1_a",
+        ] {
+            assert!(super::plain_name(ok), "{ok}");
+        }
+        for bad in [
+            "", "..", ".x", "-x", "a/b", "a/../b", "a?b", "a%2Fb", "a b", "a#b",
+        ] {
+            assert!(!super::plain_name(bad), "{bad}");
+        }
+    }
+
     /// The hand deployment and the template name a person's deployment as the server does
     /// (`vm-agent-<owner>`, the VM's own name), so both write one deployment record.
     #[test]

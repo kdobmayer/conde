@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use conde_remote::web::{
     AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrolled, Enrollment, HostKey,
-    Identity, Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, Minted,
-    RealmAccount, ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore, WebStoreError,
-    WebUser, Welcome, WelcomePatch,
+    Identity, Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, MachineCleanup,
+    Minted, RealmAccount, ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore,
+    WebStoreError, WebUser, Welcome, WelcomePatch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -681,6 +681,48 @@ impl WebStore for WebBoard {
                 replaced,
                 new_host,
             })
+        })
+    }
+
+    fn machine_deleting(&self, name: &str) -> WebResult<Option<MachineCleanup>> {
+        let at = iso_from_ms(self.d.now_ms());
+        self.write(|t| {
+            let Some(u) = t.user_by_name(name)? else {
+                return Ok(None);
+            };
+            // only a disable removes a machine: an enable that raced it leaves the record
+            if !u.disabled {
+                return Ok(None);
+            }
+            let Some(m) = t.machine_of_user(u.user_id)? else {
+                return Ok(None);
+            };
+            t.machine_set_deleting(u.user_id, &at)?;
+            t.announce(topics::MACHINE);
+            Ok(Some(MachineCleanup {
+                user_id: u.user_id,
+                host_id: m.host_id,
+                owner_object_id: m.owner_object_id,
+                delete_error: m.delete_error,
+            }))
+        })
+    }
+
+    fn machine_delete_failed(&self, user_id: i64, host_id: &str, error: &str) -> WebResult<()> {
+        self.write(|t| {
+            if t.machine_set_delete_error(user_id, host_id, error)? {
+                t.announce(topics::MACHINE);
+            }
+            Ok(())
+        })
+    }
+
+    fn machine_deleted(&self, user_id: i64, host_id: &str) -> WebResult<()> {
+        self.write(|t| {
+            if t.machine_delete(user_id, host_id)? {
+                t.announce(topics::MACHINE);
+            }
+            Ok(())
         })
     }
 

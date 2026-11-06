@@ -1,7 +1,8 @@
 //! The admin API under `/v1/admin`, authenticated by the `CONDE_ADMIN_KEY` bearer: mint, list
 //! and revoke host keys, invite users by email (and send the invite email, [`super::invite`]),
 //! bind users to an identity, list, disable and enable users, clear a user's recorded realm
-//! account, make a service user. The key is compared through its digest in constant time and
+//! account, make a service user. Disabling a user with an agent machine also removes the VM
+//! ([`super::machines::remove`]). The key is compared through its digest in constant time and
 //! never logged; every answer is `no-store`.
 
 use std::sync::Arc;
@@ -53,6 +54,8 @@ struct Inner {
     issuer: Option<Issuer>,
     /// With sign-in configured.
     invites: Option<Invites>,
+    /// With agent machines configured: the client a disable removes the user's VM with.
+    machines: Option<Arc<super::machines::Machines>>,
 }
 
 /// Shared state of the admin routes.
@@ -60,7 +63,12 @@ struct Inner {
 pub struct AdminState(Arc<Inner>);
 
 impl AdminState {
-    pub(crate) fn new(core: Core, key: &str, sign_in: Option<&WebConfig>) -> AdminState {
+    pub(crate) fn new(
+        core: Core,
+        key: &str,
+        sign_in: Option<&WebConfig>,
+        machines: Option<Arc<super::machines::Machines>>,
+    ) -> AdminState {
         AdminState(Arc::new(Inner {
             core,
             key_digest: digest(key),
@@ -75,6 +83,7 @@ impl AdminState {
                 issuer: c.issuer.clone(),
                 http: http_client(std::time::Duration::from_secs(15)),
             }),
+            machines,
         }))
     }
 
@@ -95,7 +104,7 @@ impl AdminState {
             registry,
             clock,
         };
-        Ok(AdminState::new(core, key, sign_in))
+        Ok(AdminState::new(core, key, sign_in, None))
     }
 
     fn core(&self) -> &Core {
@@ -859,10 +868,31 @@ async fn set_disabled(state: AdminState, name: String, disabled: bool) -> Respon
             }
             tracing::info!(user = %name, disabled, "admin set the user's disabled flag");
             let disconnected = if disabled { hosts } else { Vec::new() };
-            reply(
-                StatusCode::OK,
-                json!({"user": name, "disabled": disabled, "disconnected": disconnected}),
-            )
+            let mut body =
+                json!({"user": name, "disabled": disabled, "disconnected": disconnected});
+            if disabled && let Some(machines) = state.0.machines.clone() {
+                let target = name.clone();
+                match state
+                    .core()
+                    .store(move |s| s.machine_deleting(&target))
+                    .await
+                {
+                    Ok(Some(cleanup)) => {
+                        body["machine"] = json!("deleting");
+                        if let Some(e) = &cleanup.delete_error {
+                            body["machine_error"] = json!(e);
+                        }
+                        tokio::spawn(super::machines::remove(
+                            state.core().clone(),
+                            machines,
+                            cleanup,
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return store_failed(e),
+                }
+            }
+            reply(StatusCode::OK, body)
         }
         Ok(None) => fail(StatusCode::NOT_FOUND, "not_found", "no such user"),
         Err(e) => store_failed(e),
@@ -870,7 +900,9 @@ async fn set_disabled(state: AdminState, name: String, disabled: bool) -> Respon
 }
 
 /// `POST /v1/admin/users/{name}/disable`: signs the user out of the board and closes their
-/// hosts' live bridge connections; their keys stop authenticating.
+/// hosts' live bridge connections; their keys stop authenticating. A user with an agent machine
+/// has it removed in the background (`"machine": "deleting"`, with `machine_error` when the last
+/// removal stopped); a later disable resumes a removal that stopped.
 async fn disable_user(State(state): State<AdminState>, Path(name): Path<String>) -> Response {
     set_disabled(state, name, true).await
 }

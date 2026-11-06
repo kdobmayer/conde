@@ -718,8 +718,11 @@ impl WebStore for WebBoard {
     }
 
     fn machine_deleted(&self, user_id: i64, host_id: &str) -> WebResult<()> {
+        let at = iso_from_ms(self.d.now_ms());
         self.write(|t| {
             if t.machine_delete(user_id, host_id)? {
+                // the VM's keys go with it: after an enable, setup deploys anew instead of adopting
+                t.revoke_host_credentials(host_id, &at)?;
                 t.announce(topics::MACHINE);
             }
             Ok(())

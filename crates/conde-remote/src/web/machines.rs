@@ -13,9 +13,9 @@
 //!   read changes nothing (the next read retries);
 //! - the VM: `GET .../providers/Microsoft.Compute/virtualMachines/<host>` for its identity's
 //!   `principalId`, only from an enrol whose identity no record has yet;
-//! - the removal, only from an admin's disable of the owner ([`remove`]): the deployment's cancel
-//!   while it runs, the template's one login assignment on the VM, the VM's DELETE and its reads
-//!   until 404.
+//! - the removal, only from an admin's disable of the owner ([`remove`]): the deployment that
+//!   made the VM read first as the proof the VM is the owner's, then its cancel while it runs, the
+//!   template's one login assignment on the VM, the VM's DELETE and its reads until 404.
 //!
 //! The VM joins through `POST /v1/machines/enrol` ([`enrol`]) with its own identity's v1 token for
 //! the conde-machines audience: the host key is minted once per VM identity.
@@ -405,6 +405,22 @@ fn plain_name(host: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Whether deployment `d` made the owner's VM `host`: its `ownerObjectId` is the owner's, and it
+/// lists the VM's id among its resources, or it is the configured template spec deployed for the
+/// owner name the VM is named after (the template's only VM is `vm-agent-<owner>`).
+fn proves_owner(d: &Value, config: &MachinesConfig, host: &str, owner_object_id: &str) -> bool {
+    let p = &d["properties"];
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_ascii_lowercase();
+    let param = |k: &str| p["parameters"][k]["value"].as_str().unwrap_or_default();
+    let vm_id = Azure::vm_id(config, host).to_ascii_lowercase();
+    let made_it = p["outputResources"]
+        .as_array()
+        .is_some_and(|rs| rs.iter().any(|r| text(&r["id"]) == vm_id));
+    let targets_it = text(&p["templateLink"]["id"]) == config.template_spec.to_ascii_lowercase()
+        && format!("vm-agent-{}", param("owner")) == host;
+    param("ownerObjectId").eq_ignore_ascii_case(owner_object_id) && (made_it || targets_it)
+}
+
 /// Whether a role assignment listed at the VM is the template's login assignment of the owner:
 /// on the VM itself (not inherited), of the login role, to the owner's object id.
 fn is_owner_login(a: &Value, vm_id: &str, owner_object_id: &str) -> bool {
@@ -449,28 +465,82 @@ impl Azure {
         )
     }
 
-    /// Step 1: the named deployment ended. While it is `Accepted` or `Running` it is cancelled
-    /// once, then read every `poll_every` until it is `Succeeded`, `Failed` or `Canceled`; no
-    /// deployment of that name is ended too.
-    async fn end_deployment(&self, config: &MachinesConfig, host: &str) -> Result<(), AzureError> {
-        let url = self.deployment_url(config, host);
+    /// The proof before anything is deleted: the deployment that made the VM, under the VM's name
+    /// or the `agent-vm-<x>` name hand deployments had before, is the owner's ([`proves_owner`]);
+    /// its name and that read. None when neither exists and the VM is gone too (nothing to remove); an error
+    /// when one exists that proves nothing, or none does and the VM exists.
+    async fn owners_deployment(
+        &self,
+        config: &MachinesConfig,
+        host: &str,
+        owner_object_id: &str,
+    ) -> Result<Option<(String, Value)>, AzureError> {
+        let names = [
+            Some(host.to_string()),
+            host.strip_prefix("vm-agent-")
+                .map(|x| format!("agent-vm-{x}")),
+        ];
+        for name in names.into_iter().flatten() {
+            let what = "the deployment read";
+            let url = self.deployment_url(config, &name);
+            let (status, body) = self.call(reqwest::Method::GET, &url, what).await?;
+            match status.as_u16() {
+                404 => continue,
+                200 if proves_owner(&body, config, host, owner_object_id) => {
+                    return Ok(Some((name, body)));
+                }
+                200 => {
+                    return Err(AzureError(format!(
+                        "not the owner's VM: the deployment {name} was not made for this person's VM {host}; nothing was deleted"
+                    )));
+                }
+                _ => return Err(refused_with(what, status, &body)),
+            }
+        }
+        let url = format!(
+            "{}{}?api-version={VM_API_VERSION}",
+            config.arm_url.trim_end_matches('/'),
+            Azure::vm_id(config, host)
+        );
+        let what = "the VM read";
+        let (status, body) = self.call(reqwest::Method::GET, &url, what).await?;
+        match status.as_u16() {
+            404 => Ok(None),
+            200 => Err(AzureError(format!(
+                "not the owner's VM: no deployment in the resource group shows {host} was made for this person; nothing was deleted"
+            ))),
+            _ => Err(refused_with(what, status, &body)),
+        }
+    }
+
+    /// Step 1: the proven deployment `name`, as the proof read it (`first`), ended. While it is
+    /// `Accepted` or `Running` it is cancelled once, then read every `poll_every` until it is
+    /// `Succeeded`, `Failed` or `Canceled`.
+    async fn end_deployment(
+        &self,
+        config: &MachinesConfig,
+        name: &str,
+        first: Value,
+    ) -> Result<(), AzureError> {
+        let url = self.deployment_url(config, name);
         let cancel = format!(
-            "{}/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Resources/deployments/{host}/cancel?api-version={DEPLOYMENTS_API_VERSION}",
+            "{}/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Resources/deployments/{name}/cancel?api-version={DEPLOYMENTS_API_VERSION}",
             config.arm_url.trim_end_matches('/'),
             config.subscription,
             config.resource_group
         );
         let mut cancelled = false;
+        let mut body = first;
         for read in 0..=POLLS {
             if read > 0 {
                 tokio::time::sleep(config.poll_every).await;
-            }
-            let what = "the deployment read";
-            let (status, body) = self.call(reqwest::Method::GET, &url, what).await?;
-            match status.as_u16() {
-                404 => return Ok(()),
-                200 => {}
-                _ => return Err(refused_with(what, status, &body)),
+                let what = "the deployment read";
+                let (status, next) = self.call(reqwest::Method::GET, &url, what).await?;
+                match status.as_u16() {
+                    404 => return Ok(()),
+                    200 => body = next,
+                    _ => return Err(refused_with(what, status, &next)),
+                }
             }
             let state = body["properties"]["provisioningState"]
                 .as_str()
@@ -490,7 +560,7 @@ impl Azure {
             }
         }
         Err(AzureError(format!(
-            "the deployment {host} did not end within {} s",
+            "the deployment {name} did not end within {} s",
             config.poll_every.as_secs() * u64::from(POLLS)
         )))
     }
@@ -575,9 +645,11 @@ impl Azure {
     }
 }
 
-/// An admin disabled the machine's owner: the four steps, each skipped when Azure shows it done,
-/// then the record is deleted. The first failure is the record's `delete_error` and ends the
-/// task; the next disable of the owner runs it again.
+/// An admin disabled the machine's owner: the proof that the VM is the owner's
+/// ([`Azure::owners_deployment`]), then the four steps, each skipped when Azure shows it done,
+/// then the record is deleted (with its host's keys). The first failure, a failed proof
+/// included, is the record's `delete_error` and ends the task; the next disable of the owner
+/// runs it again.
 pub(crate) async fn remove(core: super::Core, machines: Arc<Machines>, m: super::MachineCleanup) {
     let (config, azure) = (&machines.config, &machines.azure);
     let host = m.host_id.clone();
@@ -585,7 +657,13 @@ pub(crate) async fn remove(core: super::Core, machines: Arc<Machines>, m: super:
         if !plain_name(&host) {
             return Err(AzureError(format!("the host id {host:?} is not a VM name")));
         }
-        azure.end_deployment(config, &host).await?;
+        let Some((deployment, read)) = azure
+            .owners_deployment(config, &host, &m.owner_object_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        azure.end_deployment(config, &deployment, read).await?;
         azure
             .delete_login(config, &host, &m.owner_object_id)
             .await?;

@@ -251,12 +251,21 @@ never logged. A sign-in ends as `expired` when the bridge connection that carrie
 its start within 60 s. The VM needs a conde release with the relay; it updates itself daily.
 
 Disabling a person who has a machine (`POST /v1/admin/users/<name>/disable`) also removes the machine; nothing else
-removes one. The answer says `"machine": "deleting"`, and the server then, in the background and with id-conde's
-token: cancels the deployment named as the VM (`vm-agent-<owner>`) while it is `Accepted` or `Running`, reads it
-until it ended; deletes the template's one role assignment on the VM (Virtual Machine Administrator Login to the
-person's object id, at the VM's own scope; every other assignment stays); deletes the VM, whose NIC and OS disk go
-with it; and reads the VM every 15 s until Azure answers 404, then deletes the record. Each step is skipped when
-Azure shows it done, and each wait ends after 10 minutes. The first Azure failure stops the removal and is kept on
-the record; the next disable of the same person answers it as `machine_error` and runs the removal again from where
-it stopped. While the record is being removed, the person's setup is refused; enable and setup after it is gone
-deploys a new machine. id-conde's two roles in infra/agent-vm/azure/agent-rg.bicep cover these calls.
+removes one. The answer says `"machine": "deleting"`, and the server then works in the background with id-conde's
+token. First it proves from Azure that the VM is the person's: the deployment named as the VM (or `agent-vm-<x>`,
+the name hand deployments had before) must carry the person's object id as `ownerObjectId` and must be the one that
+made this VM, either by listing the VM among its resources or by being the configured template spec deployed for the
+owner name the VM is named after. When no such deployment exists and the VM is gone too, only the record is removed;
+any other failed proof stops the removal before any change in Azure. Then it cancels that deployment while it is
+`Accepted` or `Running` and reads it until it ended; deletes the template's one role assignment on the VM (Virtual
+Machine Administrator Login to the person's object id, at the VM's own scope; every other assignment stays); deletes
+the VM, whose NIC and OS disk go with it; reads the VM every 15 s until Azure answers 404; and then deletes the
+record and revokes the VM host's keys, so an enable and the setup that follows deploy a new machine. Each step is
+skipped when Azure shows it done, and each wait ends after 10 minutes. The first failure stops the removal and is
+kept on the record; the next disable of the same person answers it as `machine_error` and runs the removal again
+from where it stopped. While the record is being removed, the person's setup is refused. Removals are not fenced
+against each other or against a deployment: two disables close together, an enable and setup while an earlier
+removal still runs, or a setup's deployment still in flight when the removal reads 404 can each act on the same VM
+name; do a rebuild (disable, enable, setup) only after the record is gone, one step at a time. Azure's side of the
+limit: id-conde's role assignment in infra/agent-vm/azure/agent-rg.bicep lets it delete only Virtual Machine
+Administrator Login assignments of users; which person and which VM is checked by the server.

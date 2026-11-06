@@ -8,7 +8,7 @@
 //! relay's `done` and hourly; each flow it finds expiring or expired goes up as a `needs_sign_in`
 //! `machine_event`, and a check with none as one `signed_in` when the flows changed.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -323,7 +323,7 @@ pub struct SignInCheck {
 
 impl SignInCheck {
     /// Checks now, starting the worker when `dir` has the script (a new connection).
-    pub fn start(&self, dir: &Path, every: Duration, emit: EmitMachine) {
+    pub fn start(&self, dir: &Path, every: Duration, limit: Duration, emit: EmitMachine) {
         let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
         if worker.is_none() {
             let path = dir.join(SIGNIN_CHECK);
@@ -333,7 +333,7 @@ impl SignInCheck {
             let (tx, rx) = mpsc::channel();
             std::thread::Builder::new()
                 .name("conde-signin-check".into())
-                .spawn(move || check_loop(&rx, &path, every, &emit))
+                .spawn(move || check_loop(&rx, &path, every, limit, &emit))
                 .expect("spawn the sign-in check");
             *worker = Some(tx);
         }
@@ -360,7 +360,13 @@ impl SignInCheck {
     }
 }
 
-fn check_loop(rx: &mpsc::Receiver<bool>, path: &Path, every: Duration, emit: &EmitMachine) {
+fn check_loop(
+    rx: &mpsc::Receiver<bool>,
+    path: &Path,
+    every: Duration,
+    limit: Duration,
+    emit: &EmitMachine,
+) {
     // the flows this connection last sent
     let mut sent = None;
     loop {
@@ -376,7 +382,7 @@ fn check_loop(rx: &mpsc::Receiver<bool>, path: &Path, every: Duration, emit: &Em
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        if let Some(out) = run_check(path) {
+        if let Some(out) = run_check(path, limit) {
             for event in sign_in_events(&out, &mut sent) {
                 emit(&event);
             }
@@ -384,19 +390,38 @@ fn check_loop(rx: &mpsc::Receiver<bool>, path: &Path, every: Duration, emit: &Em
     }
 }
 
-/// The check's output; None when it did not start.
-fn run_check(path: &Path) -> Option<String> {
-    match Command::new(path)
-        .stdin(Stdio::null())
-        .stderr(Stdio::inherit())
-        .output()
-    {
-        Ok(out) => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+/// The check's output; None when it did not start or ran past `limit`, when its process group is
+/// stopped as a helper's is and the round reports nothing.
+fn run_check(path: &Path, limit: Duration) -> Option<String> {
+    let mut cmd = Command::new(path);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) => {
             tracing::warn!("sign-in check not started: {e}");
-            None
+            return None;
         }
+    };
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
+    let deadline = Instant::now() + limit;
+    while matches!(child.try_wait(), Ok(None)) {
+        if Instant::now() >= deadline {
+            tracing::warn!("sign-in check ran over {limit:?}; stopped");
+            terminate(&mut child);
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
+    reader.join().ok()
 }
 
 /// The check's lines (`claude ok|expiring|expired|unknown <at>`, `github ok|expired`, `codex

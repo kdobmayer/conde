@@ -4051,17 +4051,27 @@ struct CheckVm {
 #[cfg(unix)]
 impl CheckVm {
     fn start(board: &FakeBoard, user: &str, every: Duration, state: &str) -> CheckVm {
+        let check = "#!/usr/bin/env bash\necho run >> $DIR/runs\ncat $DIR/state\n";
+        CheckVm::start_with(board, user, every, Duration::from_secs(60), check, state)
+    }
+
+    /// With the check script `check` (`$DIR` is the helper directory) and the check deadline
+    /// `limit`.
+    fn start_with(
+        board: &FakeBoard,
+        user: &str,
+        every: Duration,
+        limit: Duration,
+        check: &str,
+        state: &str,
+    ) -> CheckVm {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::Builder::new()
             .prefix("signin")
             .tempdir_in("/tmp")
             .unwrap();
         let p = dir.path();
-        let check = format!(
-            "#!/usr/bin/env bash\necho run >> {}\ncat {}\n",
-            p.join("runs").display(),
-            p.join("state").display()
-        );
+        let check = check.replace("$DIR", &p.display().to_string());
         for (name, body) in [
             ("agentvm-signin-check", check.as_str()),
             (
@@ -4079,6 +4089,7 @@ impl CheckVm {
                 Tuning {
                     relay_dir: Some(p.to_path_buf()),
                     signin_every: every,
+                    signin_limit: limit,
                     ..fast()
                 },
             ),
@@ -4218,6 +4229,55 @@ fn the_sign_in_check_runs_on_connect_after_done_and_hourly() {
     assert_eq!(e[once.len()..], once[..1]);
 }
 
+/// A check that runs past its deadline is stopped with its whole process group and reports
+/// nothing; the next round runs and its frame arrives.
+#[cfg(unix)]
+#[test]
+fn a_check_past_its_deadline_is_stopped_and_the_next_round_reports() {
+    daemon_log(); // installs the capture before the daemon logs anything
+    let hangs = "#!/usr/bin/env bash
+echo run >> $DIR/runs
+if [ \"$(wc -l < $DIR/runs)\" -eq 1 ]; then sleep 120 & echo $! > $DIR/sleeper; wait; fi
+cat $DIR/state
+";
+    let board = FakeBoard::start();
+    let vm = CheckVm::start_with(
+        &board,
+        "z",
+        Duration::from_secs(3600),
+        Duration::from_millis(500),
+        hangs,
+        "claude expired -\ngithub ok\ncodex ok\n",
+    );
+    let pid: i32 = wait_for("the hung check's sleeper", || {
+        std::fs::read_to_string(vm.dir.path().join("sleeper"))
+            .ok()
+            .and_then(|p| p.trim().parse().ok())
+    });
+    // SAFETY: signal 0 only asks whether the process exists.
+    wait_for("the hung check's group stopped", || {
+        (unsafe { libc::kill(pid, 0) } != 0).then_some(())
+    });
+    assert!(daemon_log().contains("sign-in check ran over"));
+    assert!(machine_events(&board, "vm-agent-z").is_empty());
+
+    board.send_frame(
+        "vm-agent-z",
+        json!({"v": 1, "type": "relay", "relay_id": "r1", "flow": "claude", "action": "start"})
+            .to_string(),
+    );
+    let e = wait_for("the next round's frame", || {
+        let e = machine_events(&board, "vm-agent-z");
+        (!e.is_empty()).then_some(e)
+    });
+    assert_eq!(
+        e,
+        [json!({"state": "needs_sign_in", "flow": "claude",
+                "flows": {"claude": "expired", "github": "ok", "codex": "ok"}})]
+    );
+    assert_eq!(vm.runs(), 2);
+}
+
 /// A machine without the check script (every laptop) runs no check and sends no `needs_sign_in`.
 #[test]
 fn a_host_without_the_sign_in_check_reports_nothing() {
@@ -4238,7 +4298,10 @@ fn a_host_without_the_sign_in_check_reports_nothing() {
     host.migrate(&board);
     std::thread::sleep(Duration::from_millis(500));
     assert!(machine_events(&board, "vm-agent-x").is_empty());
-    assert!(!daemon_log().contains("sign-in check"), "no check is tried");
+    assert!(
+        !daemon_log().contains("sign-in check not started"),
+        "no check is tried"
+    );
 }
 
 /// `online` goes up when the published `vm.agent`'s session goes live (the scan that adds its

@@ -239,7 +239,7 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
         .relay_dir
         .clone()
         .unwrap_or_else(|| super::relay::HELPER_DIR.into());
-    let signin_every = tuning.signin_every;
+    let (signin_every, signin_limit) = (tuning.signin_every, tuning.signin_limit);
     let _rt = core.rt.enter();
     let client = BridgeClient::start_events(config, move |event| {
         let Some(core) = weak.upgrade() else { return };
@@ -270,7 +270,8 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
                         c.send_frame("machine_event", e);
                     }
                 });
-                this.signin.start(&relay_dir, signin_every, emit);
+                this.signin
+                    .start(&relay_dir, signin_every, signin_limit, emit);
                 // In callback order: the reset, then the request that reconciles this connection.
                 core.mux.connected(&alias);
                 if let Some(conn) = core.board(&alias) {

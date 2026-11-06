@@ -255,5 +255,6 @@ The VM's bridge also runs the image's `agentvm-signin-check` when it connects, e
 the person, one `signed_in` whenever the flows differ from what that connection last sent (a new connection always
 sends it); each carries every flow's state. The record keeps them as its sign-in flows, so a sign-in renewed outside
 the page also clears an earlier report; a `done` marks its flow signed in at once; the Machine page and
-`service.presence` show them. When the agent's `vm.agent` session goes live (and again on a new connection
+`service.presence` show them. A check still running after 60 s is stopped with its processes and reports
+nothing that round; the next one runs as usual. When the agent's `vm.agent` session goes live (and again on a new connection
 while it is), the bridge sends `online`, which the record keeps as `session_online_at`.

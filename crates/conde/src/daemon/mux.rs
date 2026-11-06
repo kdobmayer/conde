@@ -80,6 +80,8 @@ pub struct Tuning {
     pub relay_dir: Option<std::path::PathBuf>,
     /// How often a machine's sign-in check runs on its own.
     pub signin_every: Duration,
+    /// How long one sign-in check may run before it is stopped.
+    pub signin_limit: Duration,
 }
 
 impl Default for Tuning {
@@ -101,6 +103,7 @@ impl Default for Tuning {
             reload_delay: None,
             relay_dir: None,
             signin_every: Duration::from_secs(3600),
+            signin_limit: Duration::from_secs(60),
         }
     }
 }

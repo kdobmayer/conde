@@ -23,14 +23,16 @@ impl Harness {
         }
     }
 
-    /// A program name or path: `claude` or `codex` (npm's native `claude.exe` too), or
-    /// Claude Code's native install, a binary named after its version in `claude/versions/`.
+    /// A program name or path: `claude` or `codex` (npm's native `claude.exe` too), an
+    /// unrenamed Codex release binary, or Claude Code's native install, a binary named after
+    /// its version in `claude/versions/`.
     fn from_program(name: &str) -> Option<Harness> {
         let mut parts = name.rsplit('/');
         let base = parts.next().unwrap_or(name);
         match base.strip_suffix(".exe").unwrap_or(base) {
             "claude" => Some(Harness::Claude),
             "codex" => Some(Harness::Codex),
+            stem if is_codex_release(stem) => Some(Harness::Codex),
             _ => (!base.is_empty()
                 && parts.next() == Some("versions")
                 && parts.next() == Some("claude"))
@@ -43,6 +45,7 @@ impl Harness {
         let path = path.to_lowercase().replace('\\', "/");
         [
             ("/@anthropic-ai/claude-code/", Harness::Claude),
+            ("/@anthropic-ai/claude-agent-sdk/", Harness::Claude),
             ("/@openai/codex/", Harness::Codex),
         ]
         .into_iter()
@@ -50,9 +53,34 @@ impl Harness {
     }
 }
 
-/// `node` or `bun`, by name or path: a process whose script decides what it is.
+/// A Codex GitHub release asset as downloaded: `codex-<arch>-<target>`, e.g.
+/// `codex-x86_64-unknown-linux-musl` (comm truncates it, so exe or argv0 decides).
+fn is_codex_release(stem: &str) -> bool {
+    let Some(triple) = stem.strip_prefix("codex-") else {
+        return false;
+    };
+    [
+        "-unknown-linux-musl",
+        "-unknown-linux-gnu",
+        "-apple-darwin",
+        "-pc-windows-msvc",
+    ]
+    .into_iter()
+    .any(|target| {
+        triple
+            .strip_suffix(target)
+            .is_some_and(|arch| !arch.is_empty() && !arch.contains('-'))
+    })
+}
+
+/// `node`, `nodejs`, `bun` or `bunx`, by name or path, `.exe` on any OS (npm's bun ships
+/// `bin/bun.exe` on Linux too): a process whose script decides what it is.
 fn is_script_host(name: &str) -> bool {
-    matches!(name.rsplit(['/', '\\']).next(), Some("node" | "bun"))
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    matches!(
+        base.strip_suffix(".exe").unwrap_or(base),
+        "node" | "nodejs" | "bun" | "bunx"
+    )
 }
 
 /// argv0, the given program names, and for a script host the harness its script is: an
@@ -687,7 +715,7 @@ mod tests {
         assert_eq!(walk(&t, 9), Ancestry::NoHarness);
     }
 
-    const NATIVE: &str = "/home/konstantin/.local/share/claude/versions/2.1.312";
+    const NATIVE: &str = "/home/u/.local/share/claude/versions/2.1.312";
 
     fn linux_harness(stat: &str, cmdline: Option<&[u8]>, exe: Option<&str>) -> Ancestry {
         let e = linux_entry(stat, cmdline, exe).unwrap();
@@ -759,6 +787,77 @@ mod tests {
         // the npm bin link run through its `#!/usr/bin/env node` shebang
         let argv = b"node\0/home/k/.nvm/versions/node/v22.20.0/bin/codex\0";
         assert_eq!(linux_harness("40 (node) S 1", Some(argv), None), CODEX);
+    }
+
+    #[test]
+    fn linux_unrenamed_codex_release_binary() {
+        // comm is truncated to 15 chars; exe and argv0 carry the release asset name
+        let exe = "/home/u/.local/bin/codex-x86_64-unknown-linux-musl";
+        assert_eq!(
+            linux_harness(
+                "40 (codex-x86_64-un) S 1",
+                Some(b"codex-x86_64-unknown-linux-musl\0"),
+                Some(exe)
+            ),
+            CODEX
+        );
+        for name in [
+            "codex-aarch64-unknown-linux-gnu",
+            "/Users/u/bin/codex-aarch64-apple-darwin",
+            "codex-x86_64-pc-windows-msvc.exe",
+        ] {
+            assert_eq!(Harness::from_program(name), Some(Harness::Codex), "{name}");
+        }
+        // a human tool that merely starts with `codex-`
+        assert_eq!(
+            linux_harness(
+                "40 (codex-answer-o) S 1",
+                Some(b"codex-answer-osd\0"),
+                Some("/home/u/.local/bin/codex-answer-osd")
+            ),
+            Ancestry::NoHarness
+        );
+        assert_eq!(Harness::from_program("codex--apple-darwin"), None);
+    }
+
+    #[test]
+    fn linux_exe_replaced_by_an_update_still_names_the_harness() {
+        // argv0 and comm name a wrapper; only the deleted exe target is claude
+        assert_eq!(
+            linux_harness(
+                "40 (tool) S 1",
+                Some(b"/x/bin/tool\0"),
+                Some("/x/real/claude (deleted)")
+            ),
+            CLAUDE
+        );
+    }
+
+    #[test]
+    fn script_hosts_by_every_name() {
+        for host in [
+            "/x/bin/bun.exe",
+            "bunx.exe",
+            "bunx",
+            "/usr/bin/nodejs",
+            r"C:\x\node.exe",
+        ] {
+            assert!(is_script_host(host), "{host}");
+        }
+        assert!(!is_script_host("nodejsx") && !is_script_host("/x/bunny"));
+        // npm's bun is bin/bun.exe on Linux too
+        let argv = b"/home/u/.npm/lib/node_modules/bun/bin/bun.exe\0/home/u/.bun/install/global/node_modules/@anthropic-ai/claude-code/cli.js\0";
+        assert_eq!(linux_harness("40 (bun.exe) S 1", Some(argv), None), CLAUDE);
+        // Debian's node is nodejs
+        let argv = b"/usr/bin/nodejs\0/usr/lib/node_modules/@openai/codex/bin/codex.js\0";
+        assert_eq!(linux_harness("40 (nodejs) S 1", Some(argv), None), CODEX);
+    }
+
+    #[test]
+    fn linux_script_host_claude_agent_sdk() {
+        // the Agent SDK runs its bundled Claude Code cli.js
+        let argv = b"node\0/srv/app/node_modules/@anthropic-ai/claude-agent-sdk/cli.js\0--output-format\0stream-json\0";
+        assert_eq!(linux_harness("40 (node) S 1", Some(argv), None), CLAUDE);
     }
 
     #[test]

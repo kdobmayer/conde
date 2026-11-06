@@ -1048,7 +1048,8 @@ fn a_connecting_daemon_syncs_the_kind_of_its_existing_publications() {
 /// A VM's SessionStart hook (`infra/agent-vm/conde-register-hook`, beneath a fake Claude Code with
 /// the session's JSON on stdin and first boot's `agent.env`) registers `vm.agent` and publishes it,
 /// taking it from the person's old host; the owner's machine then reads `connected` while its
-/// bridge heartbeats. A second session start publishes nothing new.
+/// bridge heartbeats. A second session start publishes nothing new; an `agent.env` without
+/// `BOARD` publishes nothing and the hook still succeeds.
 #[cfg(unix)]
 #[test]
 fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
@@ -1110,7 +1111,7 @@ fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
     std::fs::create_dir_all(&env).unwrap();
     std::fs::write(
         env.join("agent.env"),
-        "AGENT_NAME=vm.agent\nSESSION_ID=s-vm\nBOARD=shared\n",
+        "AGENT_NAME=vm.agent\nSESSION_ID=s-vm\n",
     )
     .unwrap();
     let bin = vm.root.join(".local/bin");
@@ -1139,6 +1140,18 @@ fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
         assert!(out.stdout.is_empty(), "the hook is quiet on stdout");
         std::fs::read_to_string(env.join("hook.log")).unwrap_or_default()
     };
+    let log = session_start();
+    assert!(
+        log.contains("no BOARD in agent.env: not published"),
+        "an agent.env from before the hook published: {log}"
+    );
+    assert_eq!(state(), "up");
+
+    std::fs::write(
+        env.join("agent.env"),
+        "AGENT_NAME=vm.agent\nSESSION_ID=s-vm\nBOARD=shared\n",
+    )
+    .unwrap();
     let log = session_start();
     assert!(
         log.contains("published vm.agent on shared as x/vm.agent"),

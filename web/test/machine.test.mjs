@@ -140,16 +140,22 @@ test('the Claude sign-in shows its link, takes the pasted code while it shows th
 	assert.equal(waiting.text, 'Checking the code with Claude…');
 });
 
-test('GitHub and Codex show the device code to type on their page and how long it is good for', () => {
+test('GitHub and Codex show the device code, its page and how long it is good for, while it shows and while it waits', () => {
 	const run = (flow, state) =>
 		signInView(machine('ready', { relay: relay(flow, state, { url: 'https://github.com/login/device', user_code: 'WDJB-MJHT', expires_at: new Date(NOW + 14 * 60_000).toISOString() }) }), NOW)
 			.running;
 	const gh = run('github', 'url');
 	assert.deepEqual([gh.text, gh.link, gh.userCode, gh.paste], ['Open GitHub’s page and type this code there. The code is good for 14 min.', 'github.com/login/device', 'WDJB-MJHT', false]);
 	assert.equal(run('codex', 'url').text, 'Open OpenAI’s page and type this code there. The code is good for 14 min.');
-	const waiting = run('github', 'waiting');
-	assert.deepEqual([waiting.text, waiting.userCode], ['Waiting for you to approve on GitHub…', null]);
-	assert.equal(run('codex', 'waiting').text, 'Waiting for you to approve on OpenAI…');
+	// the helpers print `waiting` right after the code: the person still has to type it
+	for (const [flow, site] of [['github', 'GitHub'], ['codex', 'OpenAI']]) {
+		const w = run(flow, 'waiting');
+		assert.deepEqual(
+			[w.text, w.url, w.link, w.userCode, w.paste],
+			[`Open ${site}’s page and type this code there. The code is good for 14 min. Waiting for your approval on ${site}…`, 'https://github.com/login/device', 'github.com/login/device', 'WDJB-MJHT', false],
+			flow
+		);
+	}
 });
 
 test('a finished sign-in says how it ended above the buttons; a cancelled one says nothing', () => {

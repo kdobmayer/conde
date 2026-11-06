@@ -1645,15 +1645,19 @@ for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) 
 			expect((await page.locator('.machine .outcome').count()) === 0, 'a cancel says nothing');
 			return;
 		}
+		// the request carries the pasted code trimmed (compared, never printed)
+		const sent = page.waitForRequest((q) => q.url().endsWith('/v1/rpc') && q.postDataJSON()?.op === 'machine.relay.code');
 		await page.getByLabel('The code from Claude').fill('  mock-code#123 ');
 		await send.click();
+		expect((await sent).postDataJSON().body.code === 'mock-code#123', 'the code request carries the trimmed pasted code');
 		await page.locator('.machine .outcome').waitFor({ timeout: 2000 });
 		expect((await page.locator('.machine .outcome').textContent()) === 'Signed in to Claude.', await page.locator('.machine .outcome').textContent());
 		expect((await page.locator('.machine .relay').count()) === 0, 'the sign-in part closes');
 		await page.getByRole('button', { name: 'Sign in to GitHub' }).click();
+		// the helper printed its code and then `waiting`: the code stays while the person types it
+		await page.locator('.machine .relay .line', { hasText: /Waiting for/ }).waitFor({ timeout: 2000 });
 		const usercode = page.locator('.machine .relay .usercode');
-		await usercode.waitFor({ timeout: 2000 });
-		expect((await usercode.textContent()) === 'WDJB-MJHT', await usercode.textContent());
+		expect((await usercode.count()) === 1 && (await usercode.textContent()) === 'WDJB-MJHT', 'the device code shows while GitHub waits');
 		expect((await link.textContent()) === 'github.com/login/device', await link.textContent());
 		expect((await page.getByLabel('The code from Claude').count()) === 0, 'GitHub takes no pasted code');
 		await page.getByRole('button', { name: 'Cancel' }).click();

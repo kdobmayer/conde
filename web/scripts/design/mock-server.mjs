@@ -2,8 +2,9 @@
 // Usage: node scripts/design/mock-server.mjs <build-dir> <port>
 // Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
 // owner.search, fleet.list, channel.list, machine.status and machine.setup (no machine until
-// setup, then one being set up), the sign-in relay's three ops (a helper that answers at once:
-// the link, then done on the code); the feed, thread and search ops per docs/web-ui-v2/ia.md
+// setup, then one being set up), the sign-in relay's three ops (helpers that answer at once:
+// Claude's link, then done on a well-formed code; GitHub's and Codex's device code, which, as the
+// real helpers print `url` then `waiting`, reads as waiting with its code); the feed, thread and search ops per docs/web-ui-v2/ia.md
 // "Server contract"; owner.notify, the one write, changes the fixture's settings for the server's
 // life and, like the board, wants an idempotency key and one of the owner's agents),
 // /v1/events (a WebSocket that sends the hello frame), /keys (the server's layout, masthead and
@@ -199,6 +200,8 @@ function answer(raw, res) {
 		}
 		case 'machine.status':
 			if (!machine) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no machine is set up for this person' } });
+			// relay-github and relay-codex print `waiting` right after their code: the store has passed `url`
+			if (machine.relay && machine.relay.flow !== 'claude' && machine.relay.state === 'url') machine.relay = { ...machine.relay, state: 'waiting' };
 			result = { ...machine, now: new Date().toISOString() };
 			break;
 		case 'machine.setup': {
@@ -226,6 +229,9 @@ function answer(raw, res) {
 		case 'machine.relay.cancel': {
 			const live = machine?.relay && machine.relay.relay_id === b.relay_id && ['starting', 'url', 'waiting'].includes(machine.relay.state);
 			const code = r.op === 'machine.relay.code';
+			if (code && (typeof b.code !== 'string' || b.code.length < 1 || b.code.length > 256 || /\p{Cc}/u.test(b.code))) {
+				return json(res, 200, { ok: false, error: { code: 'bad_request', message: 'the code is 1 to 256 characters without control characters' } });
+			}
 			if (!live || (code && (machine.relay.flow !== 'claude' || machine.relay.state !== 'url'))) {
 				return json(res, 200, { ok: false, error: { code: 'conflict', message: code ? 'this sign-in is not waiting for a code' : 'this sign-in is not running' } });
 			}

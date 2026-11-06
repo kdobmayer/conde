@@ -185,20 +185,22 @@ export function signInView(m: Machine | null, now: number): SignInView {
 	const f = r ? (FLOWS[r.flow] ?? r.flow) : '';
 	if (r && (r.state === 'starting' || r.state === 'url' || r.state === 'waiting')) {
 		const site = SITES[r.flow] ?? f;
+		// a device flow waits for the person to type the code: the code and its page stay
+		const device = r.flow !== 'claude' && r.state !== 'starting';
 		let text: string;
 		if (r.state === 'starting') text = `Starting the ${f} sign-in on your machine…`;
-		else if (r.state === 'waiting') text = r.flow === 'claude' ? 'Checking the code with Claude…' : `Waiting for you to approve on ${site}…`;
-		else if (r.flow === 'claude') text = 'Open the Claude sign-in, sign in as yourself, then paste the code Claude shows you here.';
-		else {
+		else if (device) {
 			const left = r.expires_at ? Math.round((Date.parse(r.expires_at) - now) / 60_000) : null;
 			const until = left !== null && left > 0 ? ` The code is good for ${left} min.` : '';
-			text = `Open ${site}’s page and type this code there.${until}`;
-		}
+			const waiting = r.state === 'waiting' ? ` Waiting for your approval on ${site}…` : '';
+			text = `Open ${site}’s page and type this code there.${until}${waiting}`;
+		} else if (r.state === 'waiting') text = 'Checking the code with Claude…';
+		else text = 'Open the Claude sign-in, sign in as yourself, then paste the code Claude shows you here.';
 		const url = r.state === 'starting' ? null : r.url;
 		const link = r.flow === 'claude' ? 'Open the Claude sign-in' : (url ?? '').replace(/^https:\/\//, '');
 		return {
 			start: [],
-			running: { relay_id: r.relay_id, flow: r.flow, text, url, link, userCode: r.state === 'url' ? r.user_code : null, paste: r.flow === 'claude' && r.state === 'url' },
+			running: { relay_id: r.relay_id, flow: r.flow, text, url, link, userCode: device ? r.user_code : null, paste: r.flow === 'claude' && r.state === 'url' },
 			outcome: null
 		};
 	}

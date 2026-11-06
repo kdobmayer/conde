@@ -47,6 +47,12 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tokio::task::spawn_blocking(f).await.unwrap()
 }
 
+/// The Postgres database of each board on Postgres, for the reads no op answers.
+fn pg_urls() -> &'static Mutex<HashMap<usize, String>> {
+    static URLS: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
+    URLS.get_or_init(Mutex::default)
+}
+
 async fn board(on_pg: bool) -> Option<Arc<Dispatcher>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let url = if on_pg {
@@ -60,13 +66,25 @@ async fn board(on_pg: bool) -> Option<Arc<Dispatcher>> {
     } else {
         None
     };
-    Some(Arc::new(
-        blocking(move || match url {
-            Some(url) => Dispatcher::connect(&url, conde::store::postgres::PgOpen::SERVER).unwrap(),
-            None => Dispatcher::open_in_memory().unwrap(),
+    let d = Arc::new(
+        blocking({
+            let url = url.clone();
+            move || match url {
+                Some(url) => {
+                    Dispatcher::connect(&url, conde::store::postgres::PgOpen::SERVER).unwrap()
+                }
+                None => Dispatcher::open_in_memory().unwrap(),
+            }
         })
         .await,
-    ))
+    );
+    if let Some(url) = url {
+        pg_urls()
+            .lock()
+            .unwrap()
+            .insert(Arc::as_ptr(&d) as usize, url);
+    }
+    Some(d)
 }
 
 fn run<F: std::future::Future<Output = ()>>(on_pg: bool, case: impl FnOnce(Arc<Dispatcher>) -> F) {
@@ -4666,6 +4684,35 @@ impl Ui {
         panic!("relay: {last}");
     }
 
+    /// The record's `pending_code` column itself, read with SQL on either store.
+    async fn pending_code_column(&self, host: &str) -> Option<String> {
+        let (d, h) = (self.d.clone(), host.to_string());
+        let url = pg_urls()
+            .lock()
+            .unwrap()
+            .get(&(Arc::as_ptr(&self.d) as usize))
+            .cloned();
+        blocking(move || match url {
+            Some(url) => ::postgres::Client::connect(&url, ::postgres::NoTls)
+                .unwrap()
+                .query_one(
+                    "SELECT pending_code FROM machines WHERE host_id = $1",
+                    &[&h],
+                )
+                .unwrap()
+                .get(0),
+            None => d.sqlite().unwrap().with_connection(|c| {
+                c.query_row(
+                    "SELECT pending_code FROM machines WHERE host_id = ?1",
+                    [&h],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            }),
+        })
+        .await
+    }
+
     /// The host's unsent relay command, read as the bridge's poll reads it.
     async fn pending(&self, host: &str) -> Option<conde::store::RelayCommand> {
         let (d, h) = (self.d.clone(), host.to_string());
@@ -4786,6 +4833,10 @@ async fn a_relay_code_is_sent_once_and_cleared(d: Arc<Dispatcher>) {
         "the code goes once"
     );
     assert!(ui.pending(&host).await.is_none(), "nothing pending");
+    assert!(
+        ui.pending_code_column(&host).await.is_none(),
+        "the record's pending_code is NULL after the send"
+    );
     let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
     assert!(
         !s.to_string().contains(RELAY_CODE),

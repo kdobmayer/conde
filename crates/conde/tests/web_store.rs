@@ -917,7 +917,8 @@ async fn sign_in_stores_the_email_and_the_admin_sets_the_slack_id(d: Arc<Dispatc
 }
 
 /// Two server replicas on one Postgres board: a key revoked (and a user disabled) through one
-/// replica's admin API closes the live bridge connected to the other, by LISTEN/NOTIFY.
+/// replica's admin API closes the live bridge connected to the other, by LISTEN/NOTIFY. The
+/// revoked key stops the bridge; the disabled user's bridge retries until the user is enabled.
 #[test]
 fn revocation_closes_a_bridge_on_another_replica() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -968,6 +969,7 @@ fn revocation_closes_a_bridge_on_another_replica() {
                 conde_remote::BridgeConfig::new(format!("ws://{two}/v1/bridge"), key, "box");
             c.backoff_min = Duration::from_millis(50);
             c.backoff_max = Duration::from_millis(100);
+            c.disabled_backoff_max = Duration::from_millis(100);
             conde_remote::BridgeClient::start(c, |_| {})
         };
         let connected = |c: &conde_remote::BridgeClient| {
@@ -1037,10 +1039,30 @@ fn revocation_closes_a_bridge_on_another_replica() {
                 .status()
                 .is_success()
         );
-        assert_eq!(
-            stopped(&client).await,
-            conde_remote::StopReason::Unauthorized
+        let mut rx = client.subscribe();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            rx.wait_for(|s| {
+                matches!(s, conde_remote::BridgeState::Stopped(_))
+                    || matches!(s, conde_remote::BridgeState::Backoff(r) if r.disabled)
+            }),
+        )
+        .await
+        .expect("closed by the other replica")
+        .unwrap()
+        .clone();
+        assert!(
+            matches!(&refused, conde_remote::BridgeState::Backoff(r) if r.disabled),
+            "{refused:?}"
         );
+        assert!(
+            call("/v1/admin/users/bob/enable".into(), json!({}))
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        connected(&client).await;
         drop((h1, h2));
     });
     drop(rt);

@@ -365,6 +365,72 @@ fn two_hosts_exchange_a_dm_through_the_server() {
 
 #[cfg(unix)]
 #[test]
+fn a_disabled_users_bridge_retries_and_reconnects_once_enabled() {
+    use conde_remote::web::WebStore as _;
+    let cloud = Cloud::start(test_config());
+    let mut a = Host::new("ann", "host-a");
+    let mut b = Host::new("ben", "host-b");
+    let carol = FakeClaude::start(&b, "s-carol");
+    cloud.enroll(&a);
+    cloud.enroll(&b);
+    let (sa, sb) = (a.sock(), b.sock());
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    cloud.join(&mut b, "daemon.log", &sb, &[]);
+    a.ok(Some("codex"), ALICE, &["register", "alice"]);
+    b.ok(Some("claude"), CAROL, &["register", "carol"]);
+    cloud.publish(&a, &sa, "alice");
+    cloud.publish(&b, &sb, "carol");
+    let doctor = |h: &Host| {
+        String::from_utf8_lossy(&h.conde(None, &[], &["doctor"], None).stdout).to_string()
+    };
+
+    // the admin's disable closes the bridge; the daemon keeps its key and retries
+    let web = conde::web_store::WebBoard::new(cloud.d.clone());
+    assert_eq!(
+        web.set_disabled("ben", true).unwrap(),
+        Some(vec!["host-b".to_string()])
+    );
+    let d = wait_for("the connection refused", || {
+        let d = doctor(&b);
+        (d.contains("shared: stopped") || d.contains("shared: the board's admin disabled"))
+            .then_some(d)
+    });
+    assert!(
+        d.contains("shared: the board's admin disabled this user; retrying"),
+        "{d}\n{}",
+        b.log("daemon.log")
+    );
+
+    // enabled again: the same daemon reconnects on its next retry and gets messages
+    web.set_disabled("ben", false).unwrap();
+    wait_for("the shared board reconnected", || {
+        doctor(&b)
+            .contains("ok      shared: connected")
+            .then_some(())
+    });
+    carol.plan(vec![vec![(ms(0), "delivered", json!({}))]]);
+    let id = queued_id(&a.ok(
+        Some("codex"),
+        ALICE,
+        &["send", "--board", "shared", "ben/carol", "after the enable"],
+    ));
+    carol.wait_frames(&id, 1);
+    wait_sent(&a, "codex", ALICE, &id, "delivered");
+
+    // a revoked key still stops the connection for good
+    cloud
+        .d
+        .with_tx(|c| conde::ops::hosts::revoke(c, Some("host-b"), None, "now"))
+        .unwrap();
+    wait_for("the connection stopped", || {
+        doctor(&b)
+            .contains("shared: stopped: the board rejected this host's credential")
+            .then_some(())
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn a_restarted_daemon_is_a_new_instance_and_resends_once() {
     let cloud = Cloud::start(test_config());
     let mut a = Host::new("ann", "host-a");

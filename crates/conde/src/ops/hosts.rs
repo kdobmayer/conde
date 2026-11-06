@@ -92,7 +92,7 @@ pub fn list(db: &dyn Tx) -> StoreResult<Vec<KeyInfo>> {
         .collect())
 }
 
-/// (user_id, host_id) of a live key with this digest.
-pub fn authenticate(db: &dyn Tx, digest: &str) -> StoreResult<Option<(i64, String)>> {
-    db.authenticate(digest)
+/// (user_id, host_id, whether the user is disabled) of an unrevoked key with this digest.
+pub fn live_credential(db: &dyn Tx, digest: &str) -> StoreResult<Option<(i64, String, bool)>> {
+    db.live_credential(digest)
 }

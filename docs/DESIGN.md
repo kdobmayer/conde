@@ -69,7 +69,10 @@ ping/pong keeps the connection alive through the 240 s ingress idle cut;
 reconnect resumes from the server's pending-notification table. A hello that does not arrive
 within the server's hello timeout is closed with `hello_timeout` and the bridge reconnects with
 backoff, as after any lost connection; only a verdict stops it (`fenced`, `host_mismatch`,
-`bad_hello` for a refused hello, a rejected key, a moved board).
+`bad_hello` for a refused hello, a rejected key, a moved board). A key whose user the board's
+admin disabled is no verdict: the server closes the bridge with `disabled` (and answers 403 with
+`conde-refused: disabled` on `/v1/bridge` and `/v1/rpc`), and the bridge keeps its key and
+retries with a backoff up to 5 minutes until the user is enabled.
 
 Ops v1: agent.register/unregister/whoami/resolve/list, message.send/read/get,
 inbox.list, channel.create/join/leave/invite/list/members, reaction.set,

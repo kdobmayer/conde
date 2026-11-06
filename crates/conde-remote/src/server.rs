@@ -106,8 +106,10 @@ enum Control {
     Poll,
     /// The same instance reconnected; this older connection is obsolete.
     Replaced,
-    /// The host's key was revoked or its user disabled.
+    /// The host's key was revoked.
     Revoked,
+    /// The host's user was disabled; the key stays valid for when the user is enabled.
+    Disabled,
 }
 
 /// Revocation's view of this replica's bridge connections.
@@ -207,10 +209,14 @@ async fn revalidate_host(shared: &Arc<Shared>, host: &str) -> bool {
     };
     match check(shared, token).await {
         Authentication::Valid(_) => true,
-        Authentication::Invalid => {
+        refused @ (Authentication::Invalid | Authentication::Disabled) => {
+            let kick = match refused {
+                Authentication::Disabled => Control::Disabled,
+                _ => Control::Revoked,
+            };
             let bridges = shared.bridges.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(b) = bridges.get(host).filter(|b| b.conn_id == conn_id) {
-                let _ = b.control.send(Control::Revoked);
+                let _ = b.control.send(kick);
             }
             true
         }
@@ -562,11 +568,20 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
 }
 
 /// The caller's principal, or the response refusing it (boxed: a `Response` is large): 401 for
-/// an invalid token, 503 (retry) when the store could not answer.
+/// an invalid token, 403 for a disabled user's, 503 (retry) when the store could not answer.
 async fn authenticate(shared: &Shared, headers: &HeaderMap) -> Result<Principal, Box<Response>> {
     match check(shared, bearer(headers)).await {
         Authentication::Valid(principal) => Ok(principal),
         Authentication::Invalid => Err(Box::new(unauthorized())),
+        // Not a JSON object, so an older client's rpc takes it for a transport failure.
+        Authentication::Disabled => Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                [(protocol::REFUSED_HEADER, protocol::CODE_DISABLED)],
+                "the board's admin disabled this user\n",
+            )
+                .into_response(),
+        )),
         Authentication::Unavailable(why) => {
             tracing::warn!(%why, "credential check failed: store unavailable");
             Err(Box::new(
@@ -681,6 +696,16 @@ struct EndpointsDiff {
 
 type Sink = SplitSink<WebSocket, Message>;
 
+const DISABLED_MESSAGE: &str = "the board's admin disabled this host's user";
+
+/// Why the hello's credential and registration step refused the connection.
+enum HelloRefusal {
+    Revoked,
+    Disabled,
+    /// Not a verdict on the key: what failed and why.
+    Retry(&'static str, String),
+}
+
 async fn close_with_error(tx: &mut Sink, code: &str, message: &str) {
     let _ = tx
         .send(Message::text(protocol::error_frame(code, message)))
@@ -762,9 +787,13 @@ async fn run_bridge(
             match token.as_deref().map(|t| shared.auth.check(t)) {
                 Some(Authentication::Valid(current)) if current == admitted => {}
                 Some(Authentication::Unavailable(why)) => {
-                    return Err(Some(("credential store unavailable, retry", why)));
+                    return Err(HelloRefusal::Retry(
+                        "credential store unavailable, retry",
+                        why,
+                    ));
                 }
-                _ => return Err(None),
+                Some(Authentication::Disabled) => return Err(HelloRefusal::Disabled),
+                _ => return Err(HelloRefusal::Revoked),
             }
             let result = shared.source.admit(&host, &hello);
             if result == Admission::Active {
@@ -774,7 +803,7 @@ async fn run_bridge(
                 match shared.source.endpoints(&host, &instance, &endpoints) {
                     Recorded::Accepted => {}
                     Recorded::Retry(why) | Recorded::Rejected(why) => {
-                        return Err(Some(("endpoints not recorded, retry", why)));
+                        return Err(HelloRefusal::Retry("endpoints not recorded, retry", why));
                     }
                 }
                 let entry = ActiveBridge {
@@ -802,11 +831,14 @@ async fn run_bridge(
         Ok(Ok(Admission::Refused { code, message })) => {
             return close_with_error(&mut tx, &code, &message).await;
         }
-        Ok(Err(None)) => {
+        Ok(Err(HelloRefusal::Revoked)) => {
             return close_with_error(&mut tx, "revoked", "this host's key was revoked").await;
         }
+        Ok(Err(HelloRefusal::Disabled)) => {
+            return close_with_error(&mut tx, protocol::CODE_DISABLED, DISABLED_MESSAGE).await;
+        }
         // Not a verdict on the key: the bridge reconnects after its backoff.
-        Ok(Err(Some((what, why)))) => {
+        Ok(Err(HelloRefusal::Retry(what, why))) => {
             tracing::warn!(%host, %why, "hello refused for now: {what}");
             return close_with_error(&mut tx, "unavailable", what).await;
         }
@@ -1058,6 +1090,10 @@ impl Conn {
                         Some(Control::Revoked) => {
                             close_with_error(tx, "revoked", "this host's key was revoked").await;
                             return "revoked";
+                        }
+                        Some(Control::Disabled) => {
+                            close_with_error(tx, protocol::CODE_DISABLED, DISABLED_MESSAGE).await;
+                            return "user disabled";
                         }
                         Some(Control::Poll) => {
                             if !self.push_pending(tx).await { return "connection lost"; }

@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use conde_remote::{
-    Authenticator, BridgeClient, BridgeConfig, BridgeState, CallError, Dispatcher, Endpoint,
-    FenceResult, NotificationSource, Notify, Outcome, Principal, Recorded, ServerConfig,
+    Authentication, Authenticator, BridgeClient, BridgeConfig, BridgeState, CallError, Dispatcher,
+    Endpoint, FenceResult, NotificationSource, Notify, Outcome, Principal, Recorded, ServerConfig,
     ServerHandle, StopReason,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -20,17 +20,31 @@ const WAIT: Duration = Duration::from_secs(5);
 
 struct FakeAuth;
 
+/// Whether the user of `tok-c` is disabled.
+static CARL_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 impl Authenticator for FakeAuth {
     fn authenticate(&self, token: &str) -> Option<Principal> {
         let (user, host) = match token {
             "tok-a" => ("alice", "host-a"),
             "tok-b" => ("bob", "host-b"),
+            "tok-c" => ("carl", "host-c"),
             _ => return None,
         };
         Some(Principal {
             user_id: user.into(),
             host_id: host.into(),
         })
+    }
+
+    fn check(&self, token: &str) -> Authentication {
+        if token == "tok-c" && CARL_DISABLED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Authentication::Disabled;
+        }
+        match self.authenticate(token) {
+            Some(p) => Authentication::Valid(p),
+            None => Authentication::Invalid,
+        }
     }
 }
 
@@ -403,6 +417,47 @@ async fn healthz_and_bad_tokens_are_401() {
     let (client, _rx) = start_client(client_config(addr, "nope", "host-a", "i-bad"));
     let reason = tokio::time::timeout(WAIT, client.stopped()).await.unwrap();
     assert_eq!(reason, StopReason::Unauthorized);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disabled_users_key_is_refused_distinctly_and_retried() {
+    let server = start_server(local(), test_config(), Arc::default()).await;
+    let addr = server.local_addr();
+    let (status, body) = http(addr, "POST", "/v1/rpc", Some("tok-c"), "{}").await;
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        serde_json::from_str::<Value>(&body).is_err(),
+        "never a response object: {body}"
+    );
+    let called = conde_remote::rpc(
+        &format!("http://{addr}/v1/rpc"),
+        "tok-c",
+        json!({"op": "board.info", "body": {}}),
+        WAIT,
+    )
+    .await;
+    assert!(matches!(called, Err(CallError::Disabled)), "{called:?}");
+    match raw_ws(addr, "tok-c").await {
+        Err(tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), 403);
+            assert_eq!(resp.headers()["conde-refused"], "disabled");
+        }
+        other => panic!("expected a 403 handshake, got {:?}", other.map(|_| ())),
+    }
+
+    // the client keeps the key and retries; once the user is enabled it connects
+    let mut config = client_config(addr, "tok-c", "host-c", "i-off");
+    config.disabled_backoff_max = Duration::from_millis(400);
+    let (client, _rx) = start_client(config);
+    wait_until(
+        "a disabled retry",
+        || matches!(client.state(), BridgeState::Backoff(r) if r.disabled && r.attempt >= 2),
+    )
+    .await;
+    CARL_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    wait_until("connected", || client.state() == BridgeState::Connected).await;
+    client.shutdown();
     server.shutdown().await.unwrap();
 }
 

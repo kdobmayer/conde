@@ -263,23 +263,29 @@ impl Authenticator for Board {
     fn authenticate(&self, bearer_token: &str) -> Option<RemotePrincipal> {
         match self.check(bearer_token) {
             Authentication::Valid(p) => Some(p),
-            Authentication::Invalid | Authentication::Unavailable(_) => None,
+            Authentication::Invalid | Authentication::Disabled | Authentication::Unavailable(_) => {
+                None
+            }
         }
     }
 
     /// A storage failure is Unavailable, never Invalid: it must not stop a valid bridge.
     fn check(&self, bearer_token: &str) -> Authentication {
         let digest = conde_remote::token_digest(bearer_token);
-        match self.d.with_conn(|c| ops::hosts::authenticate(c, &digest)) {
+        match self
+            .d
+            .with_conn(|c| ops::hosts::live_credential(c, &digest))
+        {
             // The browser's reserved host is never a host credential, even one minted before
             // the name was reserved.
-            Ok(Some((_, host_id)))
+            Ok(Some((_, host_id, _)))
                 if host_id == conde_remote::web::BROWSER_HOST
                     || host_id == conde_remote::SLACK_INSTANCE =>
             {
                 Authentication::Invalid
             }
-            Ok(Some((user_id, host_id))) => Authentication::Valid(RemotePrincipal {
+            Ok(Some((_, _, true))) => Authentication::Disabled,
+            Ok(Some((user_id, host_id, false))) => Authentication::Valid(RemotePrincipal {
                 user_id: user_id.to_string(),
                 host_id,
             }),

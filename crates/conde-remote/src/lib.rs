@@ -86,8 +86,10 @@ pub trait Authenticator: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Authentication {
     Valid(Principal),
-    /// Unknown, revoked, or its user disabled: final.
+    /// Unknown or revoked: final.
     Invalid,
+    /// A live key whose user the board's admin disabled: refused until the user is enabled.
+    Disabled,
     /// The store did not answer; the same check may succeed later.
     Unavailable(String),
 }

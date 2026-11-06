@@ -12,6 +12,11 @@ pub const CODE_HOST_MISMATCH: &str = "host_mismatch";
 pub const CODE_BAD_HELLO: &str = "bad_hello";
 /// No hello arrived in time: the connection is closed and the bridge reconnects.
 pub const CODE_HELLO_TIMEOUT: &str = "hello_timeout";
+/// The key is live but the board's admin disabled its user: the bridge keeps the key and
+/// retries slowly. Over HTTP it is a 403 with [`REFUSED_HEADER`]` = disabled`.
+pub const CODE_DISABLED: &str = "disabled";
+/// Names the reason of a 403 on `/v1/bridge` and `/v1/rpc`.
+pub const REFUSED_HEADER: &str = "conde-refused";
 
 /// Serializes `payload` (a struct or object) and adds `v` and `type`.
 pub fn frame<T: Serialize>(kind: &str, payload: &T) -> String {

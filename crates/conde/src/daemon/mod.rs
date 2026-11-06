@@ -295,6 +295,13 @@ impl Core {
                 Some(conde_remote::BridgeState::Connected) => "connected (reconciling)".into(),
                 Some(conde_remote::BridgeState::Backoff(r)) => {
                     let wait = r.at.saturating_duration_since(tokio::time::Instant::now());
+                    if r.disabled {
+                        return format!(
+                            "the board's admin disabled this user; retrying (attempt {}, next in {}s)",
+                            r.attempt,
+                            wait.as_secs_f64().ceil()
+                        );
+                    }
                     format!(
                         "reconnecting (attempt {}, next in {}s): {}",
                         r.attempt,

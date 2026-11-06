@@ -920,7 +920,14 @@ pub trait Tx {
         ttls: &[(&str, i64)],
     ) -> StoreResult<()>;
     /// (user id, host) of a live credential with this digest whose user is not disabled.
-    fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>>;
+    fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>> {
+        Ok(self
+            .live_credential(digest)?
+            .filter(|(_, _, disabled)| !disabled)
+            .map(|(user_id, host, _)| (user_id, host)))
+    }
+    /// (user id, host, whether the user is disabled) of an unrevoked credential with this digest.
+    fn live_credential(&self, digest: &str) -> StoreResult<Option<(i64, String, bool)>>;
 
     // human paging
     /// Every user's paging fields, by user id.

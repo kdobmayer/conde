@@ -1198,14 +1198,14 @@ impl Tx for PgTx {
             .get(0))
     }
 
-    fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>> {
+    fn live_credential(&self, digest: &str) -> StoreResult<Option<(i64, String, bool)>> {
         Ok(self
             .query_opt(
-                "SELECT c.user_id, c.host_id FROM device_credentials c JOIN users u ON u.user_id = c.user_id
-                 WHERE c.token_digest = $1 AND c.revoked_at IS NULL AND NOT u.disabled",
+                "SELECT c.user_id, c.host_id, u.disabled FROM device_credentials c JOIN users u ON u.user_id = c.user_id
+                 WHERE c.token_digest = $1 AND c.revoked_at IS NULL",
                 &[&digest],
             )?
-            .map(|r| (r.get(0), r.get(1))))
+            .map(|r| (r.get(0), r.get(1), r.get(2))))
     }
 
     // users, sign-in identities and browser sign-in

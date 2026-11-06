@@ -695,12 +695,12 @@ impl Tx for SqliteTx<'_> {
         )
     }
 
-    fn authenticate(&self, digest: &str) -> StoreResult<Option<(i64, String)>> {
+    fn live_credential(&self, digest: &str) -> StoreResult<Option<(i64, String, bool)>> {
         self.opt(
-            "SELECT c.user_id, c.host_id FROM device_credentials c JOIN users u ON u.user_id = c.user_id
-             WHERE c.token_digest = ?1 AND c.revoked_at IS NULL AND u.disabled = 0",
+            "SELECT c.user_id, c.host_id, u.disabled FROM device_credentials c JOIN users u ON u.user_id = c.user_id
+             WHERE c.token_digest = ?1 AND c.revoked_at IS NULL",
             [digest],
-            pair,
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
     }
 

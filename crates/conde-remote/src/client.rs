@@ -14,7 +14,9 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HELLO_TIMEOUT, CODE_HOST_MISMATCH};
+use crate::protocol::{
+    self, CODE_BAD_HELLO, CODE_DISABLED, CODE_FENCED, CODE_HELLO_TIMEOUT, CODE_HOST_MISMATCH,
+};
 use crate::server::MAX_FRAME_BYTES;
 use crate::{Endpoint, Hello, Notify, Outcome, PROTO_V1, Relay, Routes};
 
@@ -42,6 +44,8 @@ pub struct BridgeConfig {
     pub bridge_instance: Option<String>,
     pub backoff_min: Duration,
     pub backoff_max: Duration,
+    /// The backoff ceiling while the board's admin has this host's user disabled.
+    pub disabled_backoff_max: Duration,
     pub connect_timeout: Duration,
     /// A connection with no inbound frame (server pings included) for this long is dropped.
     pub idle_timeout: Duration,
@@ -80,6 +84,7 @@ impl BridgeConfig {
             bridge_instance: None,
             backoff_min: Duration::from_secs(1),
             backoff_max: Duration::from_secs(60),
+            disabled_backoff_max: Duration::from_secs(300),
             connect_timeout: Duration::from_secs(20),
             idle_timeout: Duration::from_secs(90),
             call_timeout: Duration::from_secs(60),
@@ -131,6 +136,8 @@ pub struct Retry {
     pub at: tokio::time::Instant,
     /// Why the previous connection or attempt ended.
     pub reason: String,
+    /// The board refused it because its admin disabled this host's user; the key is kept.
+    pub disabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +177,19 @@ pub enum CallError {
     /// An HTTP request ([`rpc`]) did not get a response object.
     #[error("{0}")]
     Transport(String),
+    /// The board's admin disabled this host's user; the key works again once the user is
+    /// enabled.
+    #[error("the board's admin disabled this user")]
+    Disabled,
+}
+
+/// A 403 that names the disabled user ([`protocol::REFUSED_HEADER`]), on `/v1/rpc` or the bridge
+/// upgrade.
+fn refused_disabled(status: u16, headers: &tungstenite::http::HeaderMap) -> bool {
+    status == 403
+        && headers
+            .get(protocol::REFUSED_HEADER)
+            .is_some_and(|v| v.as_bytes() == CODE_DISABLED.as_bytes())
 }
 
 /// One request object over `POST <rpc_url>` (`https://host/v1/rpc`) with the host
@@ -206,6 +226,9 @@ pub async fn rpc(
         .map_err(|e| CallError::Transport(format!("{rpc_url}: {e}")))?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(CallError::Stopped(StopReason::Unauthorized));
+    }
+    if refused_disabled(response.status().as_u16(), response.headers()) {
+        return Err(CallError::Disabled);
     }
     let status = response.status();
     let location = response
@@ -611,6 +634,7 @@ impl BridgeClient {
 
 enum ConnectError {
     Unauthorized,
+    Disabled,
     Moved(String),
     Other(String),
 }
@@ -645,6 +669,11 @@ async fn connect(inner: &Inner) -> Result<Ws, ConnectError> {
         Ok(Ok((ws, _))) => Ok(ws),
         Ok(Err(tungstenite::Error::Http(resp))) if resp.status() == StatusCode::UNAUTHORIZED => {
             Err(ConnectError::Unauthorized)
+        }
+        Ok(Err(tungstenite::Error::Http(resp)))
+            if refused_disabled(resp.status().as_u16(), resp.headers()) =>
+        {
+            Err(ConnectError::Disabled)
         }
         Ok(Err(tungstenite::Error::Http(resp)))
             if resp.status() == StatusCode::PERMANENT_REDIRECT =>
@@ -714,6 +743,8 @@ impl Seen {
 
 enum SessionEnd {
     Lost(String),
+    /// The board's admin disabled this host's user: retried with the slow backoff.
+    Disabled,
     Stop(StopReason),
 }
 
@@ -733,13 +764,14 @@ async fn supervise(
             r = connect(&inner) => r,
             _ = protocol::shutdown_signal(&mut shutdown) => break StopReason::Shutdown,
         };
-        let reason = match connected {
+        // Why it ended, and whether the board refused it for the user's disabled flag.
+        let (reason, disabled) = match connected {
             Ok(ws) => {
                 let started = tokio::time::Instant::now();
                 inner.connects.fetch_add(1, Ordering::Relaxed);
                 inner.state.send_replace(BridgeState::Connected);
                 tracing::info!(url = %cfg.url, instance = %inner.instance, "bridge connected");
-                let why = match session(
+                let end = session(
                     &inner,
                     ws,
                     &mut cmd_rx,
@@ -747,27 +779,38 @@ async fn supervise(
                     &mut seen,
                     &mut shutdown,
                 )
-                .await
-                {
-                    SessionEnd::Stop(reason) => break reason,
-                    SessionEnd::Lost(why) => why,
-                };
-                tracing::warn!(%why, "bridge connection lost");
+                .await;
                 // A session that lasted starts the backoff over; one closed soon after its hello
                 // (a server closing it again and again, say for a full queue) keeps doubling it.
                 if started.elapsed() >= cfg.backoff_max {
                     backoff = cfg.backoff_min;
                     attempt = 0;
                 }
-                why
+                match end {
+                    SessionEnd::Stop(reason) => break reason,
+                    SessionEnd::Disabled => (CallError::Disabled.to_string(), true),
+                    SessionEnd::Lost(why) => {
+                        tracing::warn!(%why, "bridge connection lost");
+                        (why, false)
+                    }
+                }
             }
             Err(ConnectError::Unauthorized) => break StopReason::Unauthorized,
+            Err(ConnectError::Disabled) => (CallError::Disabled.to_string(), true),
             Err(ConnectError::Moved(url)) => break StopReason::Moved(url),
             Err(ConnectError::Other(e)) => {
                 tracing::warn!(error = %e, "bridge connect failed");
-                format!("connect failed: {e}")
+                (format!("connect failed: {e}"), false)
             }
         };
+        // The key is kept and retried, slowly.
+        let ceiling = if disabled {
+            tracing::warn!("the board's admin disabled this host's user; retrying");
+            cfg.disabled_backoff_max.max(cfg.backoff_max)
+        } else {
+            cfg.backoff_max
+        };
+        backoff = backoff.min(ceiling);
         // Equal jitter: half fixed, half random.
         let half = backoff / 2;
         let delay = half + half.mul_f64(rand::random::<f64>());
@@ -776,12 +819,13 @@ async fn supervise(
             attempt,
             at: tokio::time::Instant::now() + delay,
             reason,
+            disabled,
         }));
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = protocol::shutdown_signal(&mut shutdown) => break StopReason::Shutdown,
         }
-        backoff = (backoff * 2).min(cfg.backoff_max);
+        backoff = (backoff * 2).min(ceiling);
     };
     let reason = inner.mark_stopping(reason);
     tracing::info!(?reason, instance = %inner.instance, "bridge stopped");
@@ -1094,6 +1138,7 @@ fn handle_frame(
             tracing::warn!(%code, %message, "server error frame");
             match code.as_str() {
                 CODE_FENCED => return Some(SessionEnd::Stop(StopReason::Fenced)),
+                CODE_DISABLED => return Some(SessionEnd::Disabled),
                 CODE_HELLO_TIMEOUT => return Some(SessionEnd::Lost(format!("{code}: {message}"))),
                 CODE_BAD_HELLO if message == LEGACY_HELLO_TIMEOUT => {
                     return Some(SessionEnd::Lost(format!("{code}: {message}")));

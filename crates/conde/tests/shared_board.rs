@@ -103,6 +103,7 @@ on_both!(
     the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply_marks_ready,
     a_service_reads_a_persons_presence_and_nothing_else,
     the_relay_ops_take_no_bearer_key_a_services_included,
+    a_service_reads_the_sign_in_its_machine_reported,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -2573,6 +2574,33 @@ async fn a_service_reads_a_persons_presence_and_nothing_else(d: Arc<Dispatcher>)
         let r = n.s.rpc(key, None, "machine.status", body, None).await;
         assert_eq!(r["error"]["code"], "forbidden", "{r}");
     }
+}
+
+/// `service.presence` answers the sign-in flows the machine's bridge reported, as stored.
+async fn a_service_reads_the_sign_in_its_machine_reported(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    let mut ws = n.s.v2(&n.lev, "inst-p", 4, &[&n.mailbox]).await;
+    let flows = json!({"claude": "expiring", "github": "expired", "codex": "ok"});
+    ws.send(
+        json!({"v": 1, "type": "machine_event", "state": "needs_sign_in", "flow": "github",
+                   "flows": flows}),
+    )
+    .await;
+    let mut last = Value::Null;
+    for _ in 0..100 {
+        last = n.presence("levente-szabo").await;
+        if last["result"]["sign_in"] == flows {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(last["result"]["sign_in"], flows, "{last}");
+    assert_eq!(
+        last["result"].as_object().unwrap().len(),
+        2,
+        "state and sign_in only: {last}"
+    );
 }
 
 /// The sign-in relay is the person's page only: a bearer key is refused for every relay op, a

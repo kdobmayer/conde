@@ -4021,3 +4021,233 @@ while true; do sleep 0.1; done"#;
     vm.host.kill();
     vm.wait_log("term", 2);
 }
+
+// --- needs-sign-in and the online event ---------------------------------------------------------
+
+/// Every `machine_event` the host sent, without its envelope.
+fn machine_events(board: &FakeBoard, host: &str) -> Vec<Value> {
+    board
+        .capture(host)
+        .iter()
+        .filter_map(|f| serde_json::from_str::<Value>(f).ok())
+        .filter(|v| v["type"] == "machine_event")
+        .map(|mut v| {
+            let o = v.as_object_mut().unwrap();
+            o.remove("v");
+            o.remove("type");
+            v
+        })
+        .collect()
+}
+
+/// A running machine host on `board` whose helper directory has a stub `agentvm-signin-check`
+/// that prints the `state` file and logs each run to `runs`, and a `relay-claude` that ends `done`.
+#[cfg(unix)]
+struct CheckVm {
+    host: Host,
+    dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl CheckVm {
+    fn start(board: &FakeBoard, user: &str, every: Duration, state: &str) -> CheckVm {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new()
+            .prefix("signin")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let p = dir.path();
+        let check = format!(
+            "#!/usr/bin/env bash\necho run >> {}\ncat {}\n",
+            p.join("runs").display(),
+            p.join("state").display()
+        );
+        for (name, body) in [
+            ("agentvm-signin-check", check.as_str()),
+            (
+                "relay-claude",
+                "#!/usr/bin/env bash\nread -r cmd\necho done\n",
+            ),
+        ] {
+            std::fs::write(p.join(name), body).unwrap();
+            std::fs::set_permissions(p.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut vm = CheckVm {
+            host: Host::tuned(
+                user,
+                &format!("vm-agent-{user}"),
+                Tuning {
+                    relay_dir: Some(p.to_path_buf()),
+                    signin_every: every,
+                    ..fast()
+                },
+            ),
+            dir,
+        };
+        vm.set(state);
+        vm.host.enroll(board);
+        vm.host.start();
+        vm.host.migrate(board);
+        vm
+    }
+
+    fn set(&self, state: &str) {
+        std::fs::write(self.dir.path().join("state"), state).unwrap();
+    }
+
+    fn runs(&self) -> usize {
+        std::fs::read_to_string(self.dir.path().join("runs"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+}
+
+/// The machine runs its sign-in check on connect, after a relay's `done` and every period (an
+/// hour; shortened for the second machine) and sends one `needs_sign_in` per expiring or expired
+/// flow, each with every flow's state, and nothing when every flow is fine.
+#[cfg(unix)]
+#[test]
+fn the_sign_in_check_runs_on_connect_after_done_and_hourly() {
+    let board = FakeBoard::start();
+    let hour = Duration::from_secs(3600);
+    let vm = CheckVm::start(
+        &board,
+        "x",
+        hour,
+        "claude expiring 2026-11-08T10:00:00Z\ngithub expired\ncodex ok\n",
+    );
+    let events = |n: usize| {
+        wait_for(&format!("{n} machine event(s)"), || {
+            let e = machine_events(&board, "vm-agent-x");
+            (e.len() >= n).then_some(e)
+        })
+    };
+    let flows = json!({"claude": "expiring", "github": "expired", "codex": "ok"});
+    let first = events(2);
+    assert_eq!(
+        first[..2],
+        [
+            json!({"state": "needs_sign_in", "flow": "claude", "flows": flows}),
+            json!({"state": "needs_sign_in", "flow": "github", "flows": flows}),
+        ]
+    );
+    let n = machine_events(&board, "vm-agent-x").len();
+
+    // a relay's done: checked at once (the period is an hour)
+    vm.set("claude ok 2026-12-01T00:00:00Z\ngithub expired\ncodex ok\n");
+    board.send_frame(
+        "vm-agent-x",
+        json!({"v": 1, "type": "relay", "relay_id": "r1", "flow": "claude", "action": "start"})
+            .to_string(),
+    );
+    let after_done = events(n + 1);
+    assert_eq!(
+        after_done[n],
+        json!({"state": "needs_sign_in", "flow": "github",
+               "flows": {"claude": "ok", "github": "expired", "codex": "ok"}})
+    );
+
+    // a new connection is checked at once
+    vm.set("claude expired -\ngithub ok\ncodex ok\n");
+    board.drop_connection("vm-agent-x");
+    let e = events(n + 2);
+    assert_eq!(
+        e[n + 1],
+        json!({"state": "needs_sign_in", "flow": "claude",
+               "flows": {"claude": "expired", "github": "ok", "codex": "ok"}})
+    );
+
+    // the period, on a machine whose flows are all fine: it runs again and sends nothing
+    let fine = CheckVm::start(
+        &board,
+        "y",
+        Duration::from_millis(200),
+        "claude ok 2026-12-01T00:00:00Z\ngithub ok\ncodex ok\n",
+    );
+    let connects = board.connections("vm-agent-y");
+    wait_for("three checks more than connects", || {
+        (fine.runs() >= connects as usize + 3).then_some(())
+    });
+    assert_eq!(
+        board.connections("vm-agent-y"),
+        connects,
+        "no reconnect ran them"
+    );
+    assert!(machine_events(&board, "vm-agent-y").is_empty());
+}
+
+/// A machine without the check script (every laptop) runs no check and sends no `needs_sign_in`.
+#[test]
+fn a_host_without_the_sign_in_check_reports_nothing() {
+    daemon_log(); // installs the capture before the daemon logs anything
+    let helpers = tempfile::tempdir().unwrap();
+    let board = FakeBoard::start();
+    let mut host = Host::tuned(
+        "x",
+        "vm-agent-x",
+        Tuning {
+            relay_dir: Some(helpers.path().to_path_buf()),
+            signin_every: Duration::from_millis(100),
+            ..fast()
+        },
+    );
+    host.enroll(&board);
+    host.start();
+    host.migrate(&board);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(machine_events(&board, "vm-agent-x").is_empty());
+    assert!(!daemon_log().contains("sign-in check"), "no check is tried");
+}
+
+/// `online` goes up when the published `vm.agent`'s session goes live (the scan that adds its
+/// endpoint) and again on a new connection while it is live; nothing when it stops, and nothing
+/// for another published agent.
+#[test]
+fn the_online_event_is_sent_when_the_published_sessions_endpoint_goes_live() {
+    let board = FakeBoard::start();
+    let online = json!({"state": "online"});
+    let onlines = || {
+        machine_events(&board, "vm-agent-x")
+            .into_iter()
+            .filter(|e| *e == online)
+            .count()
+    };
+    let wait_onlines = |n: usize| {
+        wait_for(&format!("{n} online event(s)"), || {
+            (onlines() >= n).then_some(())
+        })
+    };
+    let (h, _) = published_host(&board, "x", "vm-agent-x", "vm.agent", "s-vm", fast());
+    let vm = board.mailbox_named("x", "vm.agent").unwrap().id;
+    wait_onlines(1);
+    assert!(board.endpoints("vm-agent-x").contains(&vm));
+
+    h.harness.gone("s-vm");
+    wait_for("the endpoint gone", || {
+        (!board.endpoints("vm-agent-x").contains(&vm)).then_some(())
+    });
+    h.claude("worker", "s-worker");
+    assert_eq!(h.publish("worker")["state"], "published");
+    let worker = board.mailbox_named("x", "worker").unwrap().id;
+    wait_for("the worker's endpoint", || {
+        board
+            .endpoints("vm-agent-x")
+            .contains(&worker)
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        onlines(),
+        1,
+        "nothing when it stops, nothing for another agent"
+    );
+
+    h.harness.live("s-vm");
+    wait_onlines(2);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(onlines(), 2, "once per going live");
+
+    board.drop_connection("vm-agent-x");
+    wait_onlines(3);
+}

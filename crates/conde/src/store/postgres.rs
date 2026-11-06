@@ -3316,6 +3316,20 @@ impl Tx for PgTx {
         Ok(())
     }
 
+    fn machine_set_session_online(&self, user_id: i64, at: &str) -> StoreResult<()> {
+        self.execute(
+            "UPDATE machines SET session_online_at = $2 WHERE user_id = $1",
+            &[&user_id, &at],
+        )?;
+        Ok(())
+    }
+
+    fn machine_of_host(&self, host: &str) -> StoreResult<Option<MachineRow>> {
+        Ok(self
+            .query_opt(&format!("{MACHINE_SELECT} WHERE host_id = $1"), &[&host])?
+            .map(|r| machine_row(&r)))
+    }
+
     fn machine_set_deleting(&self, user_id: i64, at: &str) -> StoreResult<()> {
         self.execute(
             "UPDATE machines SET deleting_at = $2 WHERE user_id = $1",

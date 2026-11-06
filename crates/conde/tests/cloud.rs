@@ -1044,3 +1044,129 @@ fn a_connecting_daemon_syncs_the_kind_of_its_existing_publications() {
         (kind.as_deref() == Some("claude")).then_some(())
     });
 }
+
+/// A VM's SessionStart hook (`infra/agent-vm/conde-register-hook`, beneath a fake Claude Code with
+/// the session's JSON on stdin and first boot's `agent.env`) registers `vm.agent` and publishes it,
+/// taking it from the person's old host; the owner's machine then reads `connected` while its
+/// bridge heartbeats. A second session start publishes nothing new.
+#[cfg(unix)]
+#[test]
+fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
+    use conde::dispatch::Principal;
+    let cloud = Cloud::start(test_config());
+    let mut old = Host::new("x", "vm-agent-old");
+    cloud.enroll(&old);
+    let so = old.sock();
+    cloud.join(&mut old, "daemon.log", &so, &[]);
+    old.ok(
+        Some("claude"),
+        &[("CLAUDE_CODE_SESSION_ID", "s-old")],
+        &["register", "vm.agent"],
+    );
+    cloud.publish(&old, &so, "vm.agent");
+    let mut vm = Host::new("x", "vm-agent-x");
+    cloud.enroll(&vm);
+    let sock = vm.sock();
+    cloud.join(&mut vm, "daemon.log", &sock, &[]);
+    let user_id = cloud.d.principal("x", "vm-agent-x", false).unwrap().user_id;
+    cloud
+        .d
+        .with_tx(|tx| {
+            Ok(tx.machine_request(&conde::store::NewMachine {
+                user_id,
+                host_id: "vm-agent-x",
+                owner_object_id: "oid-x",
+                vm_size: "Standard_B2as_v2",
+                minted_at: Some("2026-11-06T00:00:00.000Z"),
+            })?)
+        })
+        .unwrap();
+    let browser = Principal {
+        user_id,
+        user: "x".into(),
+        host: "web".into(),
+        local: false,
+        bridge_instance: None,
+        bridge_connection: None,
+        browser: true,
+    };
+    let state = || {
+        let req =
+            conde::protocol::Request::new(conde::util::new_ulid(), "machine.status", json!({}));
+        let resp = cloud.d.dispatch(&browser, &req);
+        assert!(resp.ok, "machine.status: {:?}", resp.error);
+        resp.result.unwrap()["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        state(),
+        "up",
+        "the bridge is up, vm.agent is on the old host"
+    );
+
+    let env = vm.root.join(".config/agentvm");
+    std::fs::create_dir_all(&env).unwrap();
+    std::fs::write(
+        env.join("agent.env"),
+        "AGENT_NAME=vm.agent\nSESSION_ID=s-vm\nBOARD=shared\n",
+    )
+    .unwrap();
+    let bin = vm.root.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("conde")).unwrap();
+    let hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../infra/agent-vm/conde-register-hook");
+    let session_start = || {
+        let mut cmd = os::under(
+            &os::harness_file(&vm.root.join("bin"), "claude"),
+            "/bin/bash",
+        );
+        vm.env(&mut cmd)
+            .env("PATH", "/usr/bin:/bin")
+            .arg(&hook)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            br#"{"session_id":"s-vm","hook_event_name":"SessionStart"}"#,
+        )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty(), "the hook is quiet on stdout");
+        std::fs::read_to_string(env.join("hook.log")).unwrap_or_default()
+    };
+    let log = session_start();
+    assert!(
+        log.contains("published vm.agent on shared as x/vm.agent"),
+        "{log}"
+    );
+    assert_eq!(
+        cloud.fleet_kind("x", "vm-agent-x", "vm.agent"),
+        ("claude".into(), "vm-agent-x".into())
+    );
+    assert_eq!(state(), "connected", "{log}");
+    let route = || -> (String, i64) {
+        rusqlite::Connection::open(vm.root.join("data/conde.db"))
+            .unwrap()
+            .query_row(
+                "SELECT mailbox_id, route_generation FROM publications",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    let first = route();
+
+    let log = session_start();
+    assert_eq!(
+        log.matches("published vm.agent on shared").count(),
+        2,
+        "the next start publishes again, unchanged: {log}"
+    );
+    assert_eq!(route(), first, "no second publication");
+    assert_eq!(state(), "connected");
+}

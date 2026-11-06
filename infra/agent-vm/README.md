@@ -27,13 +27,13 @@ page and the relay) is in conde itself.
 | `bootstrap.sh` | root; Packer (`image`) or cloud-init | installs from current releases: Ubuntu updates, git (git-core PPA), gh, Claude Code, uv, conde; the agent user with linger; `~/work` trusted, onboarding and bypass-mode prompt pre-answered, the SessionStart hook. Without `image` it also runs `conde setup` |
 | `image/agent-vm.pkr.hcl` | Packer | the image: Ubuntu 24.04 server, `bootstrap.sh image` + `image/provision.sh`, generalized, into `galNativeLanes/agent-vm` |
 | `image/provision.sh` | Packer, root | headless Chrome (Google's apt repository, key fingerprint-checked), unattended-upgrades for Ubuntu, the git PPA, gh and Chrome (no automatic reboot), a daily `conde update` user timer, `agentvm-firstboot.service`, clean-up of this build machine's identity |
-| `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde setup`; agent.env with a pinned session id; `claude-agent.service` enabled |
+| `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde setup`; agent.env with a pinned session id and the board; `claude-agent.service` enabled |
 | `claude-agent.service` | root-owned in `/etc/systemd/user`, enabled for the agent user | tmux around the root-owned `/usr/local/lib/agentvm/run-agent`; `Restart=always` |
 | `run-agent` | agent user, in tmux | waits for the Claude sign-in; first start `--session-id <uuid>`, every later start `--resume <uuid>` with a recovery prompt; never `--continue` |
-| `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped) |
+| `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped), then publishes it on agent.env's `BOARD` with `--take` |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
-| `pilot-rebuild.sh` | operator, locally, pilot only | the rebuild's steps that are not one command: `inventory`, the pilot migration's manual `join` (removed after the two pilot joins), `signin` by hand, `publish`; deleted with the relay |
+| `pilot-rebuild.sh` | operator, locally, pilot only | the rebuild's steps that are not one command: `inventory`, the pilot migration's manual `join` (removed after the two pilot joins), `signin` by hand; deleted with the relay |
 | `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, condeResource (required: the conde-machines application id), vmSize (B2as_v2 by default, D2as_v5 for the pilot). Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
 | `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; Azure Policy: only the AADSSHLoginForLinux extension (Deny), since RBAC cannot narrow extension writes. Accepted residual: the identity could create its own VM in the subnet with a copy of a person's OS disk |
@@ -80,7 +80,9 @@ default.
    the steps `pilot-rebuild.sh join` runs); it never means clearing the live record or deleting the VM.
 3. `claude-agent.service` starts and waits for the Claude sign-in (the page relays it).
 4. Once signed in, Claude starts under the pinned session id with remote control on; the SessionStart hook
-   registers the name; the server publishes it when the registration arrives from that host.
+   registers the name and publishes it on the board (`--take`: the person's name moves to this VM); every later
+   start publishes again, a no-op. A failed publish is logged in `~/.config/agentvm/hook.log` and the session
+   starts anyway.
 5. Every later start (reboot, crash, a new sign-in) resumes the same session with a short recovery prompt: finish
    interrupted work without repeating completed external actions, then read the conde inbox. Recovery assistance,
    not completion tracking.
@@ -99,8 +101,8 @@ bridge sends `machine_event`, it runs the same script and the timer goes.
 Moves a person from a test-flow VM (`vm-agent-<short>`, user = their short name) onto an image VM
 (`vm-agent-<owner>`, user `agent`). The names differ, so the new VM is staged first. What cannot carry over: the
 old agent's conversation history, and files on the old VM nobody copied out. Each old VM is deleted only on
-Krisztián's go, per VM. Steps 3 and 4 are `pilot-rebuild.sh` until the relay and publication exist; then the
-page and the VM do them and the script is deleted. Step 2's manual join is the pilot migration's own path and goes
+Krisztián's go, per VM. Step 3 is `pilot-rebuild.sh` until the relay exists; then the page does it and the script
+is deleted. Step 2's manual join is the pilot migration's own path and goes
 after Levente's and Oliver's joins.
 
 1. **Inventory**, and the person copies out what they keep: `./pilot-rebuild.sh inventory <short>`.
@@ -121,9 +123,19 @@ after Levente's and Oliver's joins.
    Everyone else: the person's first sign-in to the board, or "Set up my agent" on its Machine page; the server
    deploys `vm-agent-<owner>` and the VM joins the board by itself at first boot (the enrol call).
 3. **Sign-ins** through the page, or `./pilot-rebuild.sh signin <owner> claude` and `signin <owner> code CODE`,
-   then `signin <owner> github`. The hook registers the name locally.
-4. **Move the name**: on the old VM, as its user, `conde unpublish vm.agent --board dakai`; then
-   `./pilot-rebuild.sh publish <owner>` (until the session hook on the image publishes it itself).
+   then `signin <owner> github`. The session that starts after the Claude sign-in registers the name and
+   publishes it (the hook, step 4).
+4. **Move the name**: on the old VM, as its user, `conde unpublish vm.agent --board dakai`; then the new VM's next
+   session start takes the name (the hook publishes with `--take`, which also takes it from an old host that has
+   not unpublished). Without restarting a session that is already running, run the hook's publish line once on
+   the new VM as the agent user (over SSH, or the same text through `az vm run-command invoke`):
+
+   ```sh
+   sudo -u agent -H env XDG_RUNTIME_DIR=/run/user/$(id -u agent) PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin \
+     bash -c '. ~/.config/agentvm/agent.env && conde publish "$AGENT_NAME" --board "$BOARD" --take && conde boards'
+   ```
+
+   It prints `published vm.agent on dakai as <owner>/vm.agent`, also when the VM held the name already.
 5. **Check with a real request**: another host's agent sends `<owner>/vm.agent` a question on dakai and gets the
    answer.
 6. **Retire the old VM**, on Krisztián's go: stop its agent (`systemctl --user disable --now claude-agent` as its
@@ -151,6 +163,10 @@ They carry a copy of the agent unit in `~/.config/systemd/user`, which takes pre
 rm -f ~/.config/systemd/user/claude-agent.service ~/.config/agentvm/run-agent
 systemctl --user daemon-reload && systemctl --user enable --now claude-agent && systemctl --user restart claude-agent
 ```
+
+An `agent.env` written before the hook published has no `BOARD` line; without it the hook logs
+`no BOARD in agent.env: not published`. With the new hook in place, as the agent user:
+`grep -q '^BOARD=' ~/.config/agentvm/agent.env || echo BOARD=dakai >> ~/.config/agentvm/agent.env`.
 
 ## Watching and steering the agent (power users)
 

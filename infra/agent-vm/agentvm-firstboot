@@ -10,7 +10,8 @@
 #   4. conde enroll with that key on stdin, retried while the key is held (the mint has no replay); the key is
 #      never in an argument, a file or the log
 #   5. conde setup, after the enrollment, so the skill names the board and the bridge starts on the new key
-#   6. agent.env with a pinned session id, and claude-agent.service enabled (it waits for the Claude sign-in)
+#   6. agent.env with a pinned session id and the board the hook publishes on, and claude-agent.service enabled
+#      (it waits for the Claude sign-in)
 #
 # Retried until one 30-minute deadline: network errors and timeouts, 5xx, 404 (the server may not have this
 # VM's identity yet while its deployment finishes), 429 (Retry-After); the metadata service's transient answers
@@ -142,7 +143,7 @@ date -u +%FT%TZ > "$STATE/bootstrap-done"
 as_agent "mkdir -p ~/$WORK_DIR_NAME"
 if [ ! -f "$home/.config/agentvm/agent.env" ]; then
   printf '%s=%q\n' AGENT_NAME "${FULL_NAME#*/}" RC_NAME "$FULL_NAME" OWNER_LABEL "$OWNER" SESSION_ID "$(uuidgen)" \
-    PERMISSION_MODE "$PERMISSION_MODE" WORK_DIR "$home/$WORK_DIR_NAME" \
+    BOARD "$BOARD" PERMISSION_MODE "$PERMISSION_MODE" WORK_DIR "$home/$WORK_DIR_NAME" \
     | as_agent 'umask 077 && mkdir -p ~/.config/agentvm && cat > ~/.config/agentvm/agent.env'
 fi
 as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent agentvm-signin-check.timer conde-update.timer'

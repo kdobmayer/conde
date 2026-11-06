@@ -211,8 +211,8 @@ variables, all set or none (some set: the server refuses to start and names the 
 - `CONDE_MACHINES_TEMPLATE_SPEC`: the resource id of the template spec version it deploys
   (`/subscriptions/<sub>/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2`).
 - `CONDE_MACHINES_AUDIENCE`: the application id of the Entra app conde-machines (`terraform output machines` in
-  infra/terraform). A VM's token must carry it as `aud`, and every deployment passes it as `condeResource`, never
-  the SSO app's id.
+  infra/terraform). A VM's token must carry it as `aud`, and every deployment passes it as `condeResource`; a VM
+  deployed by hand passes the same value (`-p condeResource=<CONDE_MACHINES_AUDIENCE>`), never the SSO app's id.
 - `CONDE_MACHINES_IDENTITY_CLIENT_ID`: the client id of the server's user-assigned identity (id-conde), which
   deploys the VMs.
 

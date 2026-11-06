@@ -814,15 +814,15 @@ pub(crate) async fn refresh(state: &WebState, user_id: i64) {
 
 #[cfg(test)]
 mod tests {
-    /// The server is the one deployer: the README has no hand deployment, and nothing names a
-    /// deployment other than the server's `vm-agent-<owner>` (the VM's own name).
+    /// The hand deployment and the template name a person's deployment as the server does
+    /// (`vm-agent-<owner>`, the VM's own name), so both write one deployment record.
     #[test]
-    fn the_server_is_the_one_deployer_and_names_the_deployment_after_the_vm() {
+    fn a_hand_deployment_and_the_server_share_one_deployment_name() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../infra/agent-vm/");
         let read = |f: &str| std::fs::read_to_string(format!("{root}{f}")).unwrap();
         let (readme, template) = (read("README.md"), read("template/agent-vm.bicep"));
         assert!(
-            !readme.contains("az deployment group create -g conde-vm -n vm-agent"),
+            readme.contains("az deployment group create -g conde-vm -n vm-agent-<owner>"),
             "the README's hand deployment"
         );
         for (file, text) in [("README.md", &readme), ("agent-vm.bicep", &template)] {

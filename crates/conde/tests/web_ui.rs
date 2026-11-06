@@ -140,6 +140,7 @@ on_both!(
     enrol_answers_404_until_the_vm_resource_has_its_principal,
     enrol_answers_403_for_a_disabled_owner_or_a_deleting_record,
     enrol_is_rate_limited_with_retry_after,
+    enrol_answers_503_while_the_tenant_keys_cannot_be_read_and_mints_once_they_can,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -4480,5 +4481,42 @@ async fn enrol_is_rate_limited_with_retry_after(d: Arc<Dispatcher>) {
     assert!((1..=60).contains(&wait), "{wait}");
     assert_eq!(v["retry_after"], wait);
     assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// While the tenant's signing keys cannot be read the enrol is 503 `unavailable`, which the VM
+/// retries (a 401 would be final), and nothing is minted; once the keys can be read the same
+/// token mints.
+async fn enrol_answers_503_while_the_tenant_keys_cannot_be_read_and_mints_once_they_can(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-k"))]);
+    let _browser = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let idp = &ui.env.idp;
+    idp.v1_keys_status.store(503, Ordering::SeqCst);
+    let token = ui.vm_token("oid-vm-k");
+    let (status, headers, v) = ui.enrol(Some(&token)).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable")),
+        "{v}"
+    );
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        ui.record(USER).await.unwrap().minted_at,
+        None,
+        "nothing minted"
+    );
+    let d2 = d.clone();
+    let keys = blocking(move || d2.with_conn(|t| t.credentials()).unwrap()).await;
+    assert!(keys.iter().all(|k| k.host != host), "no key: {keys:?}");
+    assert!(arm.vm_reads().is_empty(), "an unchecked token reads no VM");
+    idp.v1_keys_status.store(0, Ordering::SeqCst);
+    let (status, _, v) = ui.enrol(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(ui.record(USER).await.unwrap().minted_at.is_some());
     ui.server.shutdown().await.unwrap();
 }

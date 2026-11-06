@@ -81,6 +81,8 @@ struct Idp {
     jwks_reads: AtomicUsize,
     /// Reads of the tenant's v1 keys (`/<tenant>/discovery/keys`), which machine tokens use.
     v1_keys_reads: AtomicUsize,
+    /// Set to a status: the v1 keys URL answers it instead of the keys (0: the keys).
+    v1_keys_status: AtomicUsize,
     authorizations: AtomicUsize,
 }
 
@@ -287,6 +289,7 @@ async fn start_idp() -> Arc<Idp> {
         discoveries: AtomicUsize::new(0),
         jwks_reads: AtomicUsize::new(0),
         v1_keys_reads: AtomicUsize::new(0),
+        v1_keys_status: AtomicUsize::new(0),
         authorizations: AtomicUsize::new(0),
     });
     let t = TENANT;
@@ -300,7 +303,10 @@ async fn start_idp() -> Arc<Idp> {
             &format!("/{t}/discovery/keys"),
             get(|State(idp): State<Arc<Idp>>| async move {
                 idp.v1_keys_reads.fetch_add(1, Ordering::SeqCst);
-                jwks(State(idp)).await
+                match idp.v1_keys_status.load(Ordering::SeqCst) {
+                    0 => jwks(State(idp)).await,
+                    status => StatusCode::from_u16(status as u16).unwrap().into_response(),
+                }
             }),
         )
         .route(&format!("/{t}/oauth2/v2.0/authorize"), get(authorize))

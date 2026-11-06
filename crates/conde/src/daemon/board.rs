@@ -64,6 +64,8 @@ pub struct BoardConn {
     snapshot: Mutex<Option<(u64, Vec<Route>)>>,
     /// `board.forget` removed this board: nothing applies to it or starts it any more.
     pub forgotten: AtomicBool,
+    /// The sign-in relay's helper on this connection's host.
+    relay: super::relay::Relay,
 }
 
 impl BoardConn {
@@ -85,6 +87,7 @@ impl BoardConn {
             revision: Mutex::new(0),
             snapshot: Mutex::new(None),
             forgotten: AtomicBool::new(false),
+            relay: super::relay::Relay::default(),
         }
     }
 
@@ -130,6 +133,7 @@ impl BoardConn {
         if let Some(c) = self.client() {
             c.shutdown();
         }
+        self.relay.stop();
     }
 
     /// One request over the connection, with the board's answer as a response object.
@@ -227,15 +231,29 @@ pub fn start(core: &Arc<Core>, conn: &Arc<BoardConn>) {
     let alias = conn.alias.clone();
     let weak: Weak<Core> = Arc::downgrade(core);
     let me = Arc::downgrade(conn);
+    let relay_dir = tuning
+        .relay_dir
+        .clone()
+        .unwrap_or_else(|| super::relay::HELPER_DIR.into());
     let _rt = core.rt.enter();
     let client = BridgeClient::start_events(config, move |event| {
         let Some(core) = weak.upgrade() else { return };
         // a reloaded board's previous connection applies nothing
-        if !me.upgrade().is_some_and(|me| core.is_current(&me)) {
+        let Some(this) = me.upgrade().filter(|me| core.is_current(me)) else {
             return;
-        }
+        };
         match event {
+            Inbound::Relay(frame) => {
+                let up = Arc::downgrade(&this);
+                let emit: super::relay::Emit = Arc::new(move |e| {
+                    if let Some(c) = up.upgrade().and_then(|c| c.client()) {
+                        c.send_frame("relay_event", e);
+                    }
+                });
+                this.relay.frame(frame, &relay_dir, emit);
+            }
             Inbound::Connected => {
+                this.relay.reset();
                 // In callback order: the reset, then the request that reconciles this connection.
                 core.mux.connected(&alias);
                 if let Some(conn) = core.board(&alias) {

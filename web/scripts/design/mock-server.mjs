@@ -2,13 +2,15 @@
 // Usage: node scripts/design/mock-server.mjs <build-dir> <port>
 // Answers /v1/session, /v1/rpc (owner.list, owner.history, owner.message, owner.feed, owner.thread,
 // owner.search, fleet.list, channel.list, machine.status and machine.setup (no machine until
-// setup, then one being set up); the feed, thread and search ops per docs/web-ui-v2/ia.md
+// setup, then one being set up), the sign-in relay's three ops (helpers that answer at once:
+// Claude's link, then done on a well-formed code; GitHub's and Codex's device code, which, as the
+// real helpers print `url` then `waiting`, reads as waiting with its code); the feed, thread and search ops per docs/web-ui-v2/ia.md
 // "Server contract"; owner.notify, the one write, changes the fixture's settings for the server's
 // life and, like the board, wants an idempotency key and one of the owner's agents),
 // /v1/events (a WebSocket that sends the hello frame), /keys (the server's layout, masthead and
 // keys templates from crates/conde-remote/src/web/pages.rs, filled with the fixture) and
 // /join/<anything> (the join page's template from crates/conde-remote/src/web/join.rs in the
-// same layout, signed out).
+// same layout, signed out). POST /mock/machine-joined makes the machine connected (it joined).
 
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
@@ -198,6 +200,8 @@ function answer(raw, res) {
 		}
 		case 'machine.status':
 			if (!machine) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no machine is set up for this person' } });
+			// relay-github and relay-codex print `waiting` right after their code: the store has passed `url`
+			if (machine.relay && machine.relay.flow !== 'claude' && machine.relay.state === 'url') machine.relay = { ...machine.relay, state: 'waiting' };
 			result = { ...machine, now: new Date().toISOString() };
 			break;
 		case 'machine.setup': {
@@ -205,6 +209,34 @@ function answer(raw, res) {
 			const at = new Date().toISOString();
 			machine ??= { state: 'requested', host_id: `vm-agent-${fx.OWNER}`, requested_at: at, minted_at: null, deploy_state: 'Running', deploy_error: null, probe_id: null, ready_at: null, session_online_at: null, sign_in: null, relay: null, admins: [] };
 			result = { ...machine, now: at, deploy: null };
+			break;
+		}
+		case 'machine.relay.start': {
+			const at = new Date().toISOString();
+			if (!r.idempotency_key) return json(res, 200, { ok: false, error: { code: 'bad_request', message: "'machine.relay.start' needs an idempotency_key (1-200 chars)" } });
+			if (!machine) return json(res, 200, { ok: false, error: { code: 'not_found', message: 'no machine is set up for you' } });
+			if (!['claude', 'github', 'codex'].includes(b.flow)) return json(res, 200, { ok: false, error: { code: 'bad_request', message: 'flow is claude, github or codex' } });
+			const relay_id = `relay-${Date.now()}`;
+			const device = { github: 'https://github.com/login/device', codex: 'https://auth.openai.com/codex/device' };
+			machine.relay =
+				b.flow === 'claude'
+					? { relay_id, flow: 'claude', state: 'url', url: 'https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=journey', user_code: null, expires_at: null, reason: null, at }
+					: { relay_id, flow: b.flow, state: 'url', url: device[b.flow], user_code: 'WDJB-MJHT', expires_at: new Date(Date.now() + 15 * 60_000).toISOString(), reason: null, at };
+			result = { relay_id };
+			break;
+		}
+		case 'machine.relay.code':
+		case 'machine.relay.cancel': {
+			const live = machine?.relay && machine.relay.relay_id === b.relay_id && ['starting', 'url', 'waiting'].includes(machine.relay.state);
+			const code = r.op === 'machine.relay.code';
+			if (code && (typeof b.code !== 'string' || b.code.length < 1 || b.code.length > 256 || /\p{Cc}/u.test(b.code))) {
+				return json(res, 200, { ok: false, error: { code: 'bad_request', message: 'the code is 1 to 256 characters without control characters' } });
+			}
+			if (!live || (code && (machine.relay.flow !== 'claude' || machine.relay.state !== 'url'))) {
+				return json(res, 200, { ok: false, error: { code: 'conflict', message: code ? 'this sign-in is not waiting for a code' : 'this sign-in is not running' } });
+			}
+			machine.relay = { ...machine.relay, state: code ? 'done' : 'cancelled', at: new Date().toISOString() };
+			result = { relay_id: b.relay_id };
 			break;
 		}
 		default:
@@ -350,6 +382,10 @@ const http = createServer((req, res) => {
 	const url = new URL(req.url, 'http://x');
 	if (url.pathname === '/v1/session') return json(res, 200, { ...fx.session, machines: true });
 	if (url.pathname === '/v1/rpc' && req.method === 'POST') return rpc(req, res);
+	if (url.pathname === '/mock/machine-joined' && req.method === 'POST') {
+		if (machine) machine = { ...machine, state: 'connected', minted_at: new Date().toISOString(), deploy_state: 'Succeeded' };
+		return json(res, 200, { ok: Boolean(machine) });
+	}
 	if (url.pathname === '/keys') {
 		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagesCsp(true) });
 		return res.end(keysPage());

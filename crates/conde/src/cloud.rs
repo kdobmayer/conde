@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use conde_remote::{
     Admission, Authentication, Authenticator, Endpoint, FenceResult, Hello, NotificationSource,
-    Notify, NotifyFields, Outcome, Polled, Principal as RemotePrincipal, Recorded, Route, Routes,
-    ServerConfig, ServerHandle, SourceEvent, WebPrincipal,
+    Notify, NotifyFields, Outcome, Polled, Principal as RemotePrincipal, Recorded, Relay,
+    RelayEvent, Route, Routes, ServerConfig, ServerHandle, SourceEvent, WebPrincipal,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -19,7 +19,7 @@ use crate::address::{Address, Kind};
 use crate::dispatch::{Dispatcher, Principal};
 use crate::ops;
 use crate::protocol::{ErrorCode, Request, Response};
-use crate::store::Wake;
+use crate::store::{RelayUpdate, Wake, topics};
 use crate::util::{iso_from_ms, new_ulid};
 
 /// How long SIGTERM may take before the server stops waiting for connections.
@@ -526,6 +526,91 @@ impl NotificationSource for Board {
                 instance = bridge_instance,
                 "heartbeat not recorded: {e}"
             ),
+        }
+    }
+
+    /// The host's unsent relay command; a start no bridge took in time is not sent any more.
+    fn relay_command(&self, host_id: &str) -> Option<Relay> {
+        let now = self.d.now_ms();
+        match self.d.with_conn(|tx| tx.machine_commands(host_id)) {
+            Ok(Some(c))
+                if c.relay.action == "start"
+                    && ops::machines::relay_start_stale(c.relay_at.as_deref(), now) =>
+            {
+                None
+            }
+            Ok(c) => c.map(|c| c.relay),
+            Err(e) => {
+                tracing::warn!(host = host_id, "relay command not read: {e}");
+                None
+            }
+        }
+    }
+
+    fn relay_command_sent(&self, host_id: &str, c: &Relay) {
+        let cleared = self.d.with_tx(|tx| {
+            Ok(tx.machine_relay_command_sent(host_id, &c.relay_id, &c.action, c.code.as_deref())?)
+        });
+        if let Err(e) = cleared {
+            tracing::warn!(
+                host = host_id,
+                relay = c.relay_id,
+                "relay command not cleared: {e}"
+            );
+        }
+    }
+
+    fn relay_event(&self, host_id: &str, e: &RelayEvent) {
+        if !matches!(e.event.as_str(), "url" | "waiting" | "done" | "failed") {
+            tracing::warn!(
+                host = host_id,
+                event = e.event,
+                "unknown relay event dropped"
+            );
+            return;
+        }
+        let update = RelayUpdate {
+            relay_id: &e.relay_id,
+            state: &e.event,
+            url: e.url.as_deref(),
+            user_code: e.user_code.as_deref(),
+            expires_at: e.expires_at.as_deref(),
+            reason: e.reason.as_deref(),
+        };
+        let at = iso_from_ms(self.d.now_ms());
+        let applied = self.d.with_tx(|tx| {
+            let applied = tx.machine_relay_update(host_id, &update, &at)?;
+            if applied {
+                tx.announce(topics::MACHINE);
+            }
+            Ok(applied)
+        });
+        match applied {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                host = host_id,
+                relay = e.relay_id,
+                "relay event of a relay that is over"
+            ),
+            Err(err) => tracing::warn!(
+                host = host_id,
+                relay = e.relay_id,
+                "relay event not recorded: {err}"
+            ),
+        }
+    }
+
+    fn relay_lost(&self, host_id: &str, relay_id: &str) {
+        let at = iso_from_ms(self.d.now_ms());
+        let expired = self.d.with_tx(|tx| {
+            let expired = tx.machine_relay_expire(host_id, relay_id, &at)?;
+            if expired {
+                tx.announce(topics::MACHINE);
+            }
+            Ok(expired)
+        });
+        if let Err(e) = expired {
+            tracing::warn!(host = host_id, relay = relay_id, "relay not expired: {e}");
         }
     }
 

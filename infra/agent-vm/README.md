@@ -33,7 +33,7 @@ page and the relay) is in conde itself.
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped), then publishes it on agent.env's `BOARD` with `--take` |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
-| `pilot-rebuild.sh` | operator, locally, pilot only | the rebuild's steps that are not one command: `inventory`, the pilot migration's manual `join` (removed after the two pilot joins), `signin` by hand; deleted with the relay |
+| `pilot-join.sh` | operator, locally, pilot migration only | the manual join of Levente's and Oliver's replacement VMs (`conde login` on the VM, then first boot without the mint); deleted after those two joins |
 | `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, condeResource (required: the conde-machines application id), vmSize (B2as_v2 by default, D2as_v5 for the pilot). Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
 | `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; Azure Policy: only the AADSSHLoginForLinux extension (Deny), since RBAC cannot narrow extension writes. Accepted residual: the identity could create its own VM in the subnet with a copy of a person's OS disk |
@@ -77,7 +77,7 @@ default.
    of ours or the log. The key is minted once per VM identity: if the 200 is lost (the response, or first boot
    dying before it saved the key and the enrolled marker), every retry gets 409 `already_minted`, which is final.
    The recovery is a hand join of that VM (`conde login` on it as the agent user, then first boot without the mint,
-   the steps `pilot-rebuild.sh join` runs); it never means clearing the live record or deleting the VM.
+   the steps `pilot-join.sh` runs); it never means clearing the live record or deleting the VM.
 3. `claude-agent.service` starts and waits for the Claude sign-in (the page relays it).
 4. Once signed in, Claude starts under the pinned session id with remote control on; the SessionStart hook
    registers the name and publishes it on the board (`--take`: the person's name moves to this VM); every later
@@ -101,11 +101,32 @@ bridge sends `machine_event`, it runs the same script and the timer goes.
 Moves a person from a test-flow VM (`vm-agent-<short>`, user = their short name) onto an image VM
 (`vm-agent-<owner>`, user `agent`). The names differ, so the new VM is staged first. What cannot carry over: the
 old agent's conversation history, and files on the old VM nobody copied out. Each old VM is deleted only on
-Krisztián's go, per VM. Step 3 is `pilot-rebuild.sh` until the relay exists; then the page does it and the script
-is deleted. Step 2's manual join is the pilot migration's own path and goes
-after Levente's and Oliver's joins.
+Krisztián's go, per VM. Step 3 is the person's Machine page. Step 2's manual join (`pilot-join.sh`) is the pilot
+migration's own path: the script and the join commands below go once Levente's and Oliver's replacements are
+joined.
 
-1. **Inventory**, and the person copies out what they keep: `./pilot-rebuild.sh inventory <short>`.
+1. **Inventory**, and the person copies out what they keep. Read-only, as the old VM's user: save this as
+   `inventory.sh` with `U` set to the short name, then
+   `az vm run-command invoke -g conde-vm -n vm-agent-<short> --command-id RunShellScript --scripts @inventory.sh --query 'value[0].message' -o tsv`:
+
+   ```sh
+   U=<short>
+   sudo -u "$U" -H env XDG_RUNTIME_DIR=/run/user/$(id -u "$U") PATH=/home/$U/.local/bin:/usr/local/bin:/usr/bin:/bin bash -s <<'EOS'
+   cd ~
+   echo "== git repositories under ~ (unpushed commits, uncommitted changes)"
+   find ~ -maxdepth 4 -name .git -type d -prune 2>/dev/null | while read -r g; do
+     r=${g%/.git}; cd "$r" || continue
+     echo "  $r: $(git log --oneline --branches --not --remotes | wc -l) unpushed commits, $(git status --porcelain | wc -l) uncommitted files, origin $(git remote get-url origin 2>/dev/null || echo none)"
+   done
+   echo "== ~/work, newest 15 files outside .git"
+   find ~/work -path "*/.git" -prune -o -type f -printf "%TY-%Tm-%Td %8s %p\n" 2>/dev/null | sort -r | head -15
+   echo "== size"; du -sh ~/work ~/.claude 2>/dev/null
+   echo "== agent"; systemctl --user is-active claude-agent
+   echo "== conde"; conde boards | tail -n +2
+   echo "== gh"; gh auth status 2>&1 | grep -E "Logged in|not logged" | head -2
+   EOS
+   ```
+
 2. **Stage the new VM.** Levente and Oliver (their published `vm.agent` and live keys are still on the old
    short-name host): join the replacement `vm-agent-<owner>` by hand with a live key **before** the release that
    enables "Set up my agent" on dakai. Setup adopts a live `vm-agent-<owner>` first; while the old published host
@@ -119,12 +140,12 @@ after Levente's and Oliver's joins.
      -p owner=<owner> ownerObjectId=<Entra object id> condeResource=<CONDE_MACHINES_AUDIENCE> vmSize=Standard_D2as_v5
    ```
 
-   then `./pilot-rebuild.sh join <owner>` (the person signs in to conde), `./pilot-rebuild.sh join <owner> CODE`.
+   then `./pilot-join.sh <owner>` (the person signs in to conde), `./pilot-join.sh <owner> CODE`.
    Everyone else: the person's first sign-in to the board, or "Set up my agent" on its Machine page; the server
    deploys `vm-agent-<owner>` and the VM joins the board by itself at first boot (the enrol call).
-3. **Sign-ins** through the page, or `./pilot-rebuild.sh signin <owner> claude` and `signin <owner> code CODE`,
-   then `signin <owner> github`. The session that starts after the Claude sign-in registers the name and
-   publishes it (the hook, step 4).
+3. **Sign-ins** on the person's Machine page: Claude (they open the link, sign in, and paste the code Claude shows),
+   then GitHub and, if they use it, Codex (they type the code the page shows on GitHub's or OpenAI's page). The
+   session that starts after the Claude sign-in registers the name and publishes it (the hook, step 4).
 4. **Move the name**: on the old VM, as its user, `conde unpublish vm.agent --board dakai`; then the new VM's next
    session start takes the name (the hook publishes with `--take`, which also takes it from an old host that has
    not unpublished). Without restarting a session that is already running, run the hook's publish line once on
@@ -193,8 +214,9 @@ journalctl -u agentvm-firstboot                  # how the VM joined the board
 
 ## The relay helpers
 
-The bridge (conde's code) handles the relay frames and the machine events, and execs one of two helpers per
-relay, as the agent user, with a line protocol on stdin and stdout:
+conde's daemon on the VM (the bridge, as the agent user) takes the page's sign-in from the board and runs one of
+three helpers per relay, one at a time, with a line protocol on stdin and stdout; each line it prints goes to the
+page. A new sign-in, a lost board connection and the daemon's stop end the running helper (stdin closed, SIGTERM):
 
 | helper | in | out |
 |---|---|---|
@@ -202,11 +224,10 @@ relay, as the agent user, with a line protocol on stdin and stdout:
 | `relay-github` | `start`; EOF or SIGTERM cancels | `url <verification URL> <user_code> <expires_at>`, `waiting`, `done`, `failed <reason>` |
 | `relay-codex` | `start`; EOF or SIGTERM cancels | `url <device URL> <user_code> <expires_at>`, `waiting`, `done`, `failed <reason>` |
 
-Reasons are the contract's: `expired`, `denied`, `bad_code`, `process_exited`, `timeout`, `busy`. Until the bridge
-side exists the pilot runs them by hand, keeping stdin open (closing it cancels):
-`{ echo start; sleep 900; } | relay-github`.
+Reasons are the contract's: `expired`, `denied`, `bad_code`, `process_exited`, `timeout`, `busy`. By hand, to see
+one work on a VM, keep stdin open (closing it cancels): `{ echo start; sleep 900; } | relay-github`.
 
 ## Not here yet
 
-- The bridge's handling of the relay frames and the machine events (`online`, `needs_sign_in`): conde's half.
+- The bridge's machine events (`online`, `needs_sign_in`): conde's half, next.
 - The rebuild of Levente's and Oliver's VMs (above), after the probe passed on 5 Nov.

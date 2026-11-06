@@ -74,6 +74,9 @@ pub struct Tuning {
     /// and replacing it.
     #[doc(hidden)]
     pub reload_delay: Option<Duration>,
+    /// Tests only: where the sign-in relay's helpers are (the image's directory when `None`).
+    #[doc(hidden)]
+    pub relay_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Tuning {
@@ -93,6 +96,7 @@ impl Default for Tuning {
             outcome_resend: None,
             routes_delay: None,
             reload_delay: None,
+            relay_dir: None,
         }
     }
 }

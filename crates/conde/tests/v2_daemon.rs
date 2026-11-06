@@ -3808,3 +3808,216 @@ fn a_moved_board_stops_the_bridge_and_names_the_move_command() {
     );
     rt.block_on(old.shutdown()).unwrap();
 }
+
+// --- the sign-in relay on the machine -----------------------------------------------------------
+
+/// A pasted code as the board relays it (a fixture); nothing prints it.
+#[cfg(unix)]
+const RELAY_CODE: &str = "relay-fixture-9Kd#b2";
+
+/// A machine host on the fake board whose relay helpers are `stubs` ((flow, bash body)) in a
+/// directory of their own; the helpers write what they saw to `log` (one line each).
+#[cfg(unix)]
+struct RelayVm {
+    board: FakeBoard,
+    host: Host,
+    _helpers: tempfile::TempDir,
+    log: PathBuf,
+}
+
+#[cfg(unix)]
+impl RelayVm {
+    fn start(stubs: &[(&str, &str)]) -> RelayVm {
+        use std::os::unix::fs::PermissionsExt;
+        let helpers = tempfile::Builder::new()
+            .prefix("relay")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let log = helpers.path().join("log");
+        for (flow, body) in stubs {
+            let path = helpers.path().join(format!("relay-{flow}"));
+            let body = body.replace("$LOG", &log.display().to_string());
+            std::fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let board = FakeBoard::start();
+        let tuning = Tuning {
+            relay_dir: Some(helpers.path().to_path_buf()),
+            ..fast()
+        };
+        let mut host = Host::tuned("x", "vm-agent-x", tuning);
+        host.enroll(&board);
+        host.start();
+        host.migrate(&board);
+        RelayVm {
+            board,
+            host,
+            _helpers: helpers,
+            log,
+        }
+    }
+
+    /// The board sends a `relay` frame.
+    fn relay(&self, relay_id: &str, action: &str, extra: Value) {
+        let mut f = json!({"v": 1, "type": "relay", "relay_id": relay_id, "action": action});
+        for (k, v) in extra.as_object().unwrap() {
+            f[k] = v.clone();
+        }
+        self.board.send_frame("vm-agent-x", f.to_string());
+    }
+
+    /// Every `relay_event` the machine sent, without its envelope.
+    fn events(&self) -> Vec<Value> {
+        self.board
+            .capture("vm-agent-x")
+            .iter()
+            .filter_map(|f| serde_json::from_str::<Value>(f).ok())
+            .filter(|v| v["type"] == "relay_event")
+            .map(|mut v| {
+                let o = v.as_object_mut().unwrap();
+                o.remove("v");
+                o.remove("type");
+                v
+            })
+            .collect()
+    }
+
+    fn wait_events(&self, n: usize) -> Vec<Value> {
+        wait_for(&format!("{n} relay events"), || {
+            let e = self.events();
+            (e.len() >= n).then_some(e)
+        })
+    }
+
+    /// The helpers' log lines.
+    fn log(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn wait_log(&self, line: &str, n: usize) -> Vec<String> {
+        wait_for(&format!("{n} log line(s) {line}"), || {
+            let l = self.log();
+            (l.iter().filter(|x| *x == line).count() >= n).then_some(l)
+        })
+    }
+}
+
+/// `start` runs `relay-<flow>` with `start` on its stdin and each line it prints goes up as the
+/// contract's `relay_event`; `code` is written to its stdin as `code <code>` and logged nowhere.
+#[cfg(unix)]
+#[test]
+fn the_daemon_runs_the_relay_helper_and_reports_its_lines() {
+    daemon_log(); // installs the capture before the daemon logs anything
+    let claude = format!(
+        r#"read -r cmd; echo "$cmd" >> $LOG
+echo "url https://claude.com/cai/oauth/authorize?x=1"
+read -r line; echo "${{line%% *}}" >> $LOG
+[ "$line" = "code {RELAY_CODE}" ] && echo exact >> $LOG
+echo waiting
+echo done"#
+    );
+    let github = r#"read -r cmd
+echo "url https://github.com/login/device WDJB-MJHT 2026-11-06T10:15:00Z"
+echo waiting
+echo "failed denied""#;
+    let vm = RelayVm::start(&[("claude", &claude), ("github", github)]);
+    vm.relay("r1", "start", json!({"flow": "claude"}));
+    let e = vm.wait_events(1);
+    assert_eq!(
+        e,
+        [
+            json!({"relay_id": "r1", "event": "url", "url": "https://claude.com/cai/oauth/authorize?x=1"})
+        ]
+    );
+    vm.relay("r1", "code", json!({"code": RELAY_CODE}));
+    let e = vm.wait_events(3);
+    assert_eq!(
+        e[1..],
+        [
+            json!({"relay_id": "r1", "event": "waiting"}),
+            json!({"relay_id": "r1", "event": "done"})
+        ]
+    );
+    assert_eq!(vm.log(), ["start", "code", "exact"]);
+    assert!(
+        !daemon_log().contains(RELAY_CODE),
+        "the code is in no log line"
+    );
+
+    vm.relay("r2", "start", json!({"flow": "github"}));
+    let e = vm.wait_events(6);
+    assert_eq!(
+        e[3..],
+        [
+            json!({"relay_id": "r2", "event": "url", "url": "https://github.com/login/device",
+                   "user_code": "WDJB-MJHT", "expires_at": "2026-11-06T10:15:00Z"}),
+            json!({"relay_id": "r2", "event": "waiting"}),
+            json!({"relay_id": "r2", "event": "failed", "reason": "denied"})
+        ]
+    );
+}
+
+/// `cancel` closes the helper's stdin (the helpers' EOF rule), and the helper's exit after it is
+/// not reported.
+#[cfg(unix)]
+#[test]
+fn a_cancel_closes_the_helpers_stdin() {
+    let claude = r#"read -r cmd
+echo "url https://claude.com/cai/oauth/authorize"
+while read -r l; do :; done
+echo eof >> $LOG"#;
+    let vm = RelayVm::start(&[("claude", claude)]);
+    vm.relay("r1", "start", json!({"flow": "claude"}));
+    vm.wait_events(1);
+    vm.relay("r1", "cancel", json!({}));
+    vm.wait_log("eof", 1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(vm.events().len(), 1, "{:?}", vm.events());
+}
+
+/// A helper that ends without `done` or `failed` is `failed process_exited`; so are a flow with no
+/// helper on the machine and a code for a relay no helper runs.
+#[cfg(unix)]
+#[test]
+fn a_helper_that_exits_silently_is_process_exited() {
+    let vm = RelayVm::start(&[("github", "read -r cmd; exit 0")]);
+    vm.relay("r1", "start", json!({"flow": "github"}));
+    let gone = |id: &str| json!({"relay_id": id, "event": "failed", "reason": "process_exited"});
+    assert_eq!(vm.wait_events(1), [gone("r1")]);
+    vm.relay("r2", "start", json!({"flow": "codex"}));
+    assert_eq!(vm.wait_events(2)[1], gone("r2"));
+    vm.relay("r3", "code", json!({"code": RELAY_CODE}));
+    assert_eq!(vm.wait_events(3)[2], gone("r3"));
+}
+
+/// The connection's loss stops the running helper (SIGTERM to its process group) and its relay is
+/// reported expired on the new connection; the daemon's shutdown stops it too.
+#[cfg(unix)]
+#[test]
+fn a_reconnect_or_shutdown_kills_the_running_helper() {
+    let claude = r#"trap 'echo term >> $LOG; exit 0' TERM
+read -r cmd
+echo "url https://claude.com/cai/oauth/authorize"
+while true; do sleep 0.1; done"#;
+    let mut vm = RelayVm::start(&[("claude", claude)]);
+    vm.relay("r1", "start", json!({"flow": "claude"}));
+    vm.wait_events(1);
+    let before = vm.board.connections("vm-agent-x");
+    vm.board.drop_connection("vm-agent-x");
+    vm.wait_log("term", 1);
+    let e = vm.wait_events(2);
+    assert_eq!(
+        e[1],
+        json!({"relay_id": "r1", "event": "failed", "reason": "expired"})
+    );
+    assert!(vm.board.connections("vm-agent-x") > before);
+    vm.relay("r2", "start", json!({"flow": "claude"}));
+    let e = vm.wait_events(3);
+    assert_eq!(e[2]["relay_id"], "r2");
+    vm.host.kill();
+    vm.wait_log("term", 2);
+}

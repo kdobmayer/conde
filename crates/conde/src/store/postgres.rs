@@ -34,9 +34,10 @@ use super::{
     ChannelThread, CredentialRow, Delivery, DmDelivery, DmThread, DueNotification, EndpointRow,
     EvidenceRow, FeedArg, FeedRange, HostBridge, ImportState, ImportedAgent, MachineDeploy,
     MachineRow, McpCodeRow, McpGrantRow, McpRefreshRow, Membership, Message, Mode, NewMachine,
-    NewMessage, NewNotification, NotificationRow, OpenAttempt, PendingSignal, SearchScope,
-    SlackDue, StaleAttempt, Store, StoreError, StoreResult, Tx, UserRow, UserSlack, Wake, Wakes,
-    WebSessionRow, address_of, feed_seqs_sql, problem_seqs_sql, thread_down_sql, thread_up_sql,
+    NewMessage, NewNotification, NotificationRow, OpenAttempt, PendingSignal, RelayCommand,
+    RelayUpdate, SearchScope, SlackDue, StaleAttempt, Store, StoreError, StoreResult, Tx, UserRow,
+    UserSlack, Wake, Wakes, WebSessionRow, address_of, feed_seqs_sql, problem_seqs_sql,
+    thread_down_sql, thread_up_sql,
 };
 use crate::address::Address;
 use crate::util::sha256_hex;
@@ -904,7 +905,9 @@ fn user_slack_row(r: &Row) -> UserSlack {
 
 const MACHINE_SELECT: &str = "SELECT user_id, host_id, owner_object_id, vm_size, requested_at,
     deploy_state, deploy_checked_at, deploy_error, principal_id, minted_at, probe_id, ready_at,
-    session_online_at, sign_in, deleting_at, delete_error FROM machines";
+    session_online_at, sign_in, deleting_at, delete_error, relay_id, relay_flow, relay_state,
+    relay_url, relay_user_code, relay_expires_at, relay_reason, relay_at, pending_action
+    FROM machines";
 
 fn machine_row(r: &Row) -> MachineRow {
     MachineRow {
@@ -924,6 +927,15 @@ fn machine_row(r: &Row) -> MachineRow {
         sign_in: r.get(13),
         deleting_at: r.get(14),
         delete_error: r.get(15),
+        relay_id: r.get(16),
+        relay_flow: r.get(17),
+        relay_state: r.get(18),
+        relay_url: r.get(19),
+        relay_user_code: r.get(20),
+        relay_expires_at: r.get(21),
+        relay_reason: r.get(22),
+        relay_at: r.get(23),
+        pending_action: r.get(24),
     }
 }
 
@@ -3220,6 +3232,10 @@ impl Tx for PgTx {
         self.wakes.borrow_mut().board |= topics;
     }
 
+    fn wake_host(&self, host: &str) {
+        self.wakes.borrow_mut().hosts.insert(host.to_string());
+    }
+
     // agent machines
 
     fn identity_subject(&self, user_id: i64, issuer: &str) -> StoreResult<Option<String>> {
@@ -3343,6 +3359,95 @@ impl Tx for PgTx {
         Ok(self.execute(
             "UPDATE machines SET minted_at = $2 WHERE user_id = $1 AND minted_at IS NULL",
             &[&user_id, &at],
+        )? > 0)
+    }
+
+    fn machine_relay_start(
+        &self,
+        user_id: i64,
+        relay_id: &str,
+        flow: &str,
+        at: &str,
+    ) -> StoreResult<()> {
+        self.execute(
+            "UPDATE machines SET relay_id = $2, relay_flow = $3, relay_state = 'starting',
+             relay_url = NULL, relay_user_code = NULL, relay_expires_at = NULL, relay_reason = NULL,
+             relay_at = $4, pending_action = 'start', pending_code = NULL WHERE user_id = $1",
+            &[&user_id, &relay_id, &flow, &at],
+        )?;
+        Ok(())
+    }
+
+    fn machine_relay_code(&self, user_id: i64, relay_id: &str, code: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE machines SET pending_action = 'code', pending_code = $3
+             WHERE user_id = $1 AND relay_id = $2 AND relay_flow = 'claude' AND relay_state = 'url'",
+            &[&user_id, &relay_id, &code],
+        )? > 0)
+    }
+
+    fn machine_relay_cancel(&self, user_id: i64, relay_id: &str, at: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE machines SET relay_state = 'cancelled', relay_at = $3, pending_action = 'cancel',
+             pending_code = NULL WHERE user_id = $1 AND relay_id = $2 AND relay_state IN ('starting', 'url', 'waiting')",
+            &[&user_id, &relay_id, &at],
+        )? > 0)
+    }
+
+    fn machine_relay_update(&self, host: &str, u: &RelayUpdate, at: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE machines SET relay_state = $3,
+             relay_url = COALESCE($4, relay_url), relay_user_code = COALESCE($5, relay_user_code),
+             relay_expires_at = COALESCE($6, relay_expires_at), relay_reason = $7, relay_at = $8,
+             pending_action = CASE WHEN $3 IN ('done', 'failed') THEN NULL ELSE pending_action END,
+             pending_code = CASE WHEN $3 IN ('done', 'failed') THEN NULL ELSE pending_code END
+             WHERE host_id = $1 AND relay_id = $2 AND relay_state IN ('starting', 'url', 'waiting')",
+            &[&host, &u.relay_id, &u.state, &u.url, &u.user_code, &u.expires_at, &u.reason, &at],
+        )? > 0)
+    }
+
+    fn machine_commands(&self, host: &str) -> StoreResult<Option<RelayCommand>> {
+        Ok(self
+            .query_opt(
+                "SELECT relay_id, relay_flow, pending_action, pending_code, relay_at FROM machines
+                 WHERE host_id = $1 AND pending_action IS NOT NULL AND relay_id IS NOT NULL",
+                &[&host],
+            )?
+            .map(|r| {
+                let action: String = r.get(2);
+                RelayCommand {
+                    relay: conde_remote::Relay {
+                        relay_id: r.get(0),
+                        flow: if action == "start" { r.get(1) } else { None },
+                        action,
+                        code: r.get(3),
+                    },
+                    relay_at: r.get(4),
+                }
+            }))
+    }
+
+    fn machine_relay_command_sent(
+        &self,
+        host: &str,
+        relay_id: &str,
+        action: &str,
+        code: Option<&str>,
+    ) -> StoreResult<()> {
+        self.execute(
+            "UPDATE machines SET pending_action = NULL, pending_code = NULL
+             WHERE host_id = $1 AND relay_id = $2 AND pending_action = $3
+               AND pending_code IS NOT DISTINCT FROM $4",
+            &[&host, &relay_id, &action, &code],
+        )?;
+        Ok(())
+    }
+
+    fn machine_relay_expire(&self, host: &str, relay_id: &str, at: &str) -> StoreResult<bool> {
+        Ok(self.execute(
+            "UPDATE machines SET relay_state = 'failed', relay_reason = 'expired', relay_at = $3,
+             pending_action = NULL, pending_code = NULL WHERE host_id = $1 AND relay_id = $2 AND relay_state IN ('starting', 'url', 'waiting')",
+            &[&host, &relay_id, &at],
         )? > 0)
     }
 

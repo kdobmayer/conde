@@ -243,3 +243,9 @@ pending records' VMs from Azure for their identity's `principalId` (the VM's own
 call changes nothing), 429 `rate_limited` with `Retry-After` (30 calls a minute per address), 503 `unavailable`
 while the tenant's keys cannot be read. The mint revokes any earlier live key of the VM's host and disconnects its
 bridge.
+
+The sign-ins run on the VM from the Machine page (Claude, GitHub, Codex): the page's step is stored in the machine
+record and the VM's bridge connection, on whichever replica it is, sends it on its next poll (the store's wake makes
+that at once) and clears it. The code the person pastes for Claude is in the record only until that send, and is
+never logged. A sign-in ends as `expired` when the bridge connection that carried it ends, or when no bridge took
+its start within 60 s. The VM needs a conde release with the relay; it updates itself daily.

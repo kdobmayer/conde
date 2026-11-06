@@ -8,6 +8,7 @@ mod board;
 pub mod legacy;
 pub mod mux;
 mod publish;
+mod relay;
 pub mod resolve;
 
 use std::collections::BTreeMap;
@@ -534,6 +535,7 @@ pub(crate) fn reload_board(
             client.shutdown();
             core.mux.stop_client(alias, &client, "reloaded");
         }
+        old.shutdown();
     }
     tracing::info!(board = alias, "board file reloaded");
     activate(core, &conn);

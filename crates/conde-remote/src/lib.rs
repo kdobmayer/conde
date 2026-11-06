@@ -147,6 +147,56 @@ pub trait NotificationSource: Send + Sync {
     /// The bridge answered a ping: its instance is alive (the fleet's online state).
     /// Called from a blocking thread. Default: ignored.
     fn heartbeat(&self, _host_id: &str, _bridge_instance: &str) {}
+    /// The host's unsent sign-in relay command, if any. Called from a blocking thread on every
+    /// poll. Default: none.
+    fn relay_command(&self, _host_id: &str) -> Option<Relay> {
+        None
+    }
+    /// `command` went out on the host's connection: clears it unless a newer one replaced it.
+    fn relay_command_sent(&self, _host_id: &str, _command: &Relay) {}
+    /// A `relay_event` from the host's bridge, in the order the bridge sent them.
+    fn relay_event(&self, _host_id: &str, _event: &RelayEvent) {}
+    /// The connection that carried relay `relay_id` ended: the helper went with it.
+    fn relay_lost(&self, _host_id: &str, _relay_id: &str) {}
+}
+
+/// A `relay` frame (server to bridge): `start` a sign-in `flow`, type the pasted `code` into it,
+/// or `cancel` it. Its Debug never shows the code.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Relay {
+    pub relay_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+impl std::fmt::Debug for Relay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Relay")
+            .field("relay_id", &self.relay_id)
+            .field("flow", &self.flow)
+            .field("action", &self.action)
+            .field("code", &self.code.as_ref().map(|_| "<hidden>"))
+            .finish()
+    }
+}
+
+/// A `relay_event` frame (bridge to server): what the sign-in helper reported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayEvent {
+    pub relay_id: String,
+    /// `url`, `waiting`, `done` or `failed`.
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Result of [`NotificationSource::poll`].

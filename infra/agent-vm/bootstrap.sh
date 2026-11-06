@@ -66,7 +66,7 @@ verify_tools() { as_agent 'echo "claude $(claude --version)"; conde --version; u
 # --- Claude Code state that a terminal would otherwise ask for: onboarding done, the work folder
 # trusted (remote control asks to trust a folder, and there is no terminal to answer), and bypass mode
 # accepted for this dedicated VM.
-as_agent "mkdir -p ~/$WORK_DIR_NAME ~/.claude && cd ~/$WORK_DIR_NAME && git init -q 2>/dev/null || true"
+as_agent "mkdir -p ~/$WORK_DIR_NAME ~/.claude"
 as_agent "f=~/.claude.json; [ -f \$f ] || echo '{}' > \$f; \
   jq --arg d \"\$HOME/$WORK_DIR_NAME\" '.hasCompletedOnboarding = true
      | .projects[\$d].hasTrustDialogAccepted = true

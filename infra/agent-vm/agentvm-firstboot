@@ -9,7 +9,8 @@
 #   3. POST /v1/machines/enrol with it: the host key, once per identity
 #   4. conde enroll with that key on stdin, retried while the key is held (the mint has no replay); the key is
 #      never in an argument, a file or the log
-#   5. conde setup, after the enrollment, so the skill names the board and the bridge starts on the new key
+#   5. conde update (the image's conde may predate the board's current release; a failure is only logged), then
+#      conde setup, after the enrollment, so the skill names the board and the bridge starts on the new key
 #   6. agent.env with a pinned session id and the board the hook publishes on, and claude-agent.service enabled
 #      (it waits for the Claude sign-in)
 #
@@ -132,7 +133,9 @@ else
   log "enrolled as $host_id on $board ($server); agent name $name"
 fi
 
-# --- 5. conde on this machine: bridge service, skill and MCP entries naming the board (after the enrollment)
+# --- 5. conde on this machine: the current release (the image's may be older than the board's; the daily timer
+# would catch up only within a day), then the bridge service, skill and MCP entries naming the board
+as_agent 'timeout 300 conde update' || log "conde update failed; setting up with the image's $(as_agent 'conde --version')"
 as_agent 'conde setup' || die "conde setup"
 date -u +%FT%TZ > "$STATE/bootstrap-done"
 

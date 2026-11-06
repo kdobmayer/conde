@@ -27,7 +27,7 @@ page and the relay) is in conde itself.
 | `bootstrap.sh` | root; Packer (`image`) or cloud-init | installs from current releases: Ubuntu updates, git (git-core PPA), gh, Claude Code, uv, conde; the agent user with linger; `~/work` trusted, onboarding and bypass-mode prompt pre-answered, the SessionStart hook. Without `image` it also runs `conde setup` |
 | `image/agent-vm.pkr.hcl` | Packer | the image: Ubuntu 24.04 server, `bootstrap.sh image` + `image/provision.sh`, generalized, into `galNativeLanes/agent-vm` |
 | `image/provision.sh` | Packer, root | headless Chrome (Google's apt repository, key fingerprint-checked), unattended-upgrades for Ubuntu, the git PPA, gh and Chrome (no automatic reboot), a daily `conde update` user timer, `agentvm-firstboot.service`, clean-up of this build machine's identity |
-| `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde setup`; agent.env with a pinned session id and the board; `claude-agent.service` enabled |
+| `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde update` (a failure only logs) and `conde setup`; agent.env with a pinned session id and the board; `claude-agent.service` enabled |
 | `claude-agent.service` | root-owned in `/etc/systemd/user`, enabled for the agent user | tmux around the root-owned `/usr/local/lib/agentvm/run-agent`; `Restart=always` |
 | `run-agent` | agent user, in tmux | waits for the Claude sign-in; first start `--session-id <uuid>`, every later start `--resume <uuid>` with a recovery prompt; never `--continue` |
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped), then publishes it on agent.env's `BOARD` with `--take` |
@@ -73,8 +73,8 @@ default.
    finds no record for its identity (not from the deployment outputs, which come only after the extension).
 2. First boot (`agentvm-firstboot`): a token for the VM's identity with conde-machines as the resource,
    `POST /v1/machines/enrol` (network errors, 404, 5xx, and 429 with Retry-After retried for 30 minutes; every other
-   4xx is final), `conde enroll` with the key on stdin, then `conde setup`. The key is never in an argument, a file
-   of ours or the log. The key is minted once per VM identity: if the 200 is lost (the response, or first boot
+   4xx is final), `conde enroll` with the key on stdin, then `conde update` (a failure only logs) and `conde setup`.
+   The key is never in an argument, a file of ours or the log. The key is minted once per VM identity: if the 200 is lost (the response, or first boot
    dying before it saved the key and the enrolled marker), every retry gets 409 `already_minted`, which is final.
    The recovery is a hand join of that VM (`conde login` on it as the agent user, then first boot without the mint,
    the steps `pilot-join.sh` runs); it never means clearing the live record or deleting the VM.

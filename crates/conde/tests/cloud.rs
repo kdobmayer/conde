@@ -429,6 +429,46 @@ fn a_disabled_users_bridge_retries_and_reconnects_once_enabled() {
     });
 }
 
+#[test]
+fn a_key_revoked_while_its_user_is_disabled_stops_the_bridge() {
+    use conde_remote::web::WebStore as _;
+    let cloud = Cloud::start(test_config());
+    let mut a = Host::new("ann", "host-a");
+    cloud.enroll(&a);
+    let sa = a.sock();
+    cloud.join(&mut a, "daemon.log", &sa, &[]);
+    let doctor = |h: &Host| {
+        String::from_utf8_lossy(&h.conde(None, &[], &["doctor"], None).stdout).to_string()
+    };
+    let web = conde::web_store::WebBoard::new(cloud.d.clone());
+    web.set_disabled("ann", true).unwrap();
+    wait_for("the disabled retry", || {
+        doctor(&a)
+            .contains("shared: the board's admin disabled this user; retrying")
+            .then_some(())
+    });
+    cloud
+        .d
+        .with_tx(|c| conde::ops::hosts::revoke(c, Some("host-a"), None, "now"))
+        .unwrap();
+    let d = wait_for("the connection stopped", || {
+        let d = doctor(&a);
+        d.contains("shared: stopped").then_some(d)
+    });
+    assert!(
+        d.contains("shared: stopped: the board rejected this host's credential"),
+        "{d}"
+    );
+    // the stop is final: an enable does not bring the revoked key back
+    web.set_disabled("ann", false).unwrap();
+    std::thread::sleep(ms(1500));
+    assert!(
+        doctor(&a).contains("shared: stopped: the board rejected this host's credential"),
+        "{}",
+        a.log("daemon.log")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_restarted_daemon_is_a_new_instance_and_resends_once() {

@@ -76,6 +76,9 @@ one tenant whose administrators assign and can reassign UPNs, and an unclaimed i
 the user is disabled. Already bound users are matched by their object id, never by the UPN.
 Admission has no expiry (decision, 2026-10-28): the invite gate admits the invited email until the
 user is disabled; disable a user whose invite should no longer stand.
+Disable is reversible: the user's bridges retry and every unrevoked key of the user works again after
+an enable, so a key suspected stolen is revoked (`POST /v1/admin/keys/<key id>/revoke`), not just its
+user disabled.
 Never enable Keycloak's "Trust Email" on a brokered identity provider: conde matches invites on the
 email Keycloak marks verified, so trusting a provider's unverified address lets it claim an invite.
 Migration 0017 renames the identities columns, so this version is not rolling-safe beside an older

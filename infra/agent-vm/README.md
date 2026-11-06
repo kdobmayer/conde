@@ -160,6 +160,10 @@ joined.
    ```
 
    It prints `published vm.agent on dakai as <owner>/vm.agent`, also when the VM held the name already.
+   From the take onward the person talks to the new agent. The old agent goes silent: the name no longer reaches
+   it, and its own sends fail with `vm.agent is not published`. The old VM's unpublish is optional when the old host
+   does not run the publishing session hook (the short-name pilot VMs never got it) or its key is revoked; a host
+   that runs the hook takes the name back at its next session start, since the hook publishes with `--take`.
 5. **Check with a real request**: another host's agent sends `<owner>/vm.agent` a question on dakai and gets the
    answer.
 6. **Retire the old VM**, on Krisztián's go: stop its agent (`systemctl --user disable --now claude-agent` as its

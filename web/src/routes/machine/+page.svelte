@@ -1,10 +1,12 @@
 <script lang="ts">
 	// Machine: the person's agent machine, from `machine.status`; refetched on the machine and fleet
-	// topics and every 30 s while visible (heartbeats announce nothing). A first sign-in lands here.
+	// topics, after each sign-in step, and every 30 s while visible (heartbeats announce nothing). A
+	// first sign-in lands here. The sign-ins run on the machine through the relay; the code pasted
+	// for Claude goes to `machine.relay.code` and is kept nowhere on the page after it is sent.
 	import { onMount } from 'svelte';
 	import { mutate, rpc, RpcError } from '#lib/api.ts';
 	import { board, onBoard } from '#lib/board.svelte.ts';
-	import { UNKNOWN, machineView, settle, skew, type Load, type Machine } from '#lib/machine.ts';
+	import { UNKNOWN, machineView, settle, signInView, skew, type Flow, type Load, type Machine } from '#lib/machine.ts';
 	import Disclosure from '#lib/ui/Disclosure.svelte';
 	import ErrorLine from '#lib/ui/ErrorLine.svelte';
 	import SkeletonRows from '#lib/ui/SkeletonRows.svelte';
@@ -14,6 +16,8 @@
 	const error = $derived(load.error);
 	let failedSetup = $state('');
 	let busy = $state(false);
+	let code = $state('');
+	let relayError = $state('');
 
 	async function read(): Promise<void> {
 		try {
@@ -39,6 +43,35 @@
 		}
 	}
 
+	/** One sign-in step, then the record as it stands. */
+	async function relay(op: string, body: object): Promise<boolean> {
+		busy = true;
+		try {
+			await mutate(op, body);
+			relayError = '';
+			return true;
+		} catch (e) {
+			relayError = (e as Error).message;
+			return false;
+		} finally {
+			busy = false;
+			void read();
+		}
+	}
+
+	function start(flow: Flow): void {
+		void relay('machine.relay.start', { flow });
+	}
+
+	async function sendCode(relayId: string): Promise<void> {
+		if (await relay('machine.relay.code', { relay_id: relayId, code: code.trim() })) code = '';
+	}
+
+	function cancel(relayId: string): void {
+		code = '';
+		void relay('machine.relay.cancel', { relay_id: relayId });
+	}
+
 	onMount(() => {
 		void read();
 		const off = onBoard((topics) => {
@@ -58,6 +91,7 @@
 		board.fleet?.hosts.find((h) => h.owner === board.session?.user && h.host === machine?.host_id)?.last_seen ?? null
 	);
 	const view = $derived(load.known ? machineView(machine, now, lastSeen) : null);
+	const signIn = $derived(signInView(machine, now));
 </script>
 
 <section class="machine">
@@ -80,8 +114,39 @@
 			<p class="state" data-state={machine?.state ?? 'none'}>{view.headline}</p>
 			<p class="detail">{view.detail}</p>
 			{#if machine}<p class="host">{machine.host_id}</p>{/if}
-			{#if view.claude}
-				<p class="line">Sign in to Claude on the machine: attach to the agent’s session from a terminal (below) and run <code>/login</code>.</p>
+			{#if view.claude && !signIn.running}
+				<p class="line">Sign in to Claude so your agent can start.</p>
+			{/if}
+			{#if signIn.running}
+				{@const r = signIn.running}
+				<div class="relay" data-flow={r.flow}>
+					<p class="line">{r.text}</p>
+					{#if r.url}
+						<p class="link"><a href={r.url} target="_blank" rel="noopener noreferrer">{r.link}</a></p>
+					{/if}
+					{#if r.userCode}
+						<p class="usercode">{r.userCode}</p>
+					{/if}
+					{#if r.paste}
+						<form class="paste" onsubmit={(e) => { e.preventDefault(); void sendCode(r.relay_id); }}>
+							<input type="text" bind:value={code} autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="The code from Claude" placeholder="Paste the code" />
+							<button type="submit" disabled={busy || code.trim() === ''}>Send code</button>
+						</form>
+					{/if}
+					<button type="button" class="cancel" disabled={busy} onclick={() => cancel(r.relay_id)}>Cancel</button>
+				</div>
+			{:else if signIn.start.length > 0}
+				{#if signIn.outcome}
+					<p class="line outcome">{signIn.outcome}</p>
+				{/if}
+				<div class="flows">
+					{#each signIn.start as f (f.flow)}
+						<button type="button" disabled={busy} onclick={() => start(f.flow)}>{f.label}</button>
+					{/each}
+				</div>
+			{/if}
+			{#if relayError}
+				<ErrorLine error={relayError} what="Could not sign in" retry={() => { relayError = ''; void read(); }} />
 			{/if}
 			{#if view.signIn.length > 0}
 				<p class="line">Needs sign-in: {view.signIn.join(', ')}.</p>
@@ -145,6 +210,38 @@ sudo -u agent tmux -L agent attach -t agent</pre>
 	}
 	.setup {
 		margin-top: 18px;
+	}
+	.relay,
+	.flows {
+		margin-top: 18px;
+	}
+	.flows {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+	}
+	.link {
+		margin: 10px 0 0;
+		font-size: 15px;
+		overflow-wrap: anywhere;
+	}
+	.usercode {
+		margin: 10px 0 0;
+		font: 600 22px/1.2 var(--mono, monospace);
+		letter-spacing: 0.06em;
+	}
+	.paste {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		margin-top: 12px;
+	}
+	.paste input {
+		flex: 1 1 240px;
+		min-width: 0;
+	}
+	.cancel {
+		margin-top: 12px;
 	}
 	.hatch {
 		margin-top: 28px;

@@ -589,6 +589,38 @@ pub struct MachineRow {
     pub sign_in: Option<String>,
     pub deleting_at: Option<String>,
     pub delete_error: Option<String>,
+    /// The one live sign-in relay (`relay_state` `starting`, `url`, `waiting`, `done`, `failed`
+    /// or `cancelled`), its helper's URL, user code and expiry, its failure, and its last change.
+    pub relay_id: Option<String>,
+    pub relay_flow: Option<String>,
+    pub relay_state: Option<String>,
+    pub relay_url: Option<String>,
+    pub relay_user_code: Option<String>,
+    pub relay_expires_at: Option<String>,
+    pub relay_reason: Option<String>,
+    pub relay_at: Option<String>,
+    /// The relay command not yet sent to the bridge (`start`, `code`, `cancel`); the pasted code
+    /// beside it is read only by [`Tx::machine_commands`].
+    pub pending_action: Option<String>,
+}
+
+/// The host's unsent relay command ([`Tx::machine_commands`]), with the relay's last change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayCommand {
+    pub relay: conde_remote::Relay,
+    pub relay_at: Option<String>,
+}
+
+/// What a relay event writes ([`Tx::machine_relay_update`]).
+#[derive(Clone, Debug, Default)]
+pub struct RelayUpdate<'a> {
+    pub relay_id: &'a str,
+    /// `url`, `waiting`, `done` or `failed`.
+    pub state: &'a str,
+    pub url: Option<&'a str>,
+    pub user_code: Option<&'a str>,
+    pub expires_at: Option<&'a str>,
+    pub reason: Option<&'a str>,
 }
 
 /// A new machine record ([`Tx::machine_request`]); `minted_at` is set for an adopted host.
@@ -1254,6 +1286,8 @@ pub trait Tx {
     fn touch_bridge(&self, instance: &str, at: &str) -> StoreResult<bool>;
     /// Announces a board change ([`topics`]) to the browsers on commit.
     fn announce(&self, topics: u8);
+    /// Wakes the bridge connection of `host` on commit (it polls its pending work at once).
+    fn wake_host(&self, host: &str);
 
     // agent machines
     /// The subject of the user's identity of `issuer` (for Entra the `oid`).
@@ -1278,6 +1312,37 @@ pub trait Tx {
     fn machine_set_principal(&self, user_id: i64, principal_id: &str) -> StoreResult<()>;
     /// Sets `minted_at` unless set; whether this call set it (the one mint).
     fn machine_claim_mint(&self, user_id: i64, at: &str) -> StoreResult<bool>;
+    /// Replaces the live relay with `relay_id` of `flow` in `starting`, its `start` pending.
+    fn machine_relay_start(
+        &self,
+        user_id: i64,
+        relay_id: &str,
+        flow: &str,
+        at: &str,
+    ) -> StoreResult<()>;
+    /// Makes `code` the pending command of relay `relay_id` while it is the Claude flow showing
+    /// its URL; whether it did.
+    fn machine_relay_code(&self, user_id: i64, relay_id: &str, code: &str) -> StoreResult<bool>;
+    /// Cancels relay `relay_id` while it is live (`starting`, `url`, `waiting`), its `cancel`
+    /// pending and any pending code dropped; whether it did.
+    fn machine_relay_cancel(&self, user_id: i64, relay_id: &str, at: &str) -> StoreResult<bool>;
+    /// Applies a relay event of `host`'s bridge while `u.relay_id` is the live relay and still
+    /// live; a final state drops the pending code. Whether it applied.
+    fn machine_relay_update(&self, host: &str, u: &RelayUpdate, at: &str) -> StoreResult<bool>;
+    /// The host's unsent relay command, with the pending code.
+    fn machine_commands(&self, host: &str) -> StoreResult<Option<RelayCommand>>;
+    /// Clears the pending command of `host` only where it still is exactly the one sent (the
+    /// relay, the action and the code).
+    fn machine_relay_command_sent(
+        &self,
+        host: &str,
+        relay_id: &str,
+        action: &str,
+        code: Option<&str>,
+    ) -> StoreResult<()>;
+    /// Marks relay `relay_id` of `host` `failed` with reason `expired` while it is live, its
+    /// pending command dropped; whether it did.
+    fn machine_relay_expire(&self, host: &str, relay_id: &str, at: &str) -> StoreResult<bool>;
     /// Every channel membership of the owner's agents, by agent then channel name.
     fn owner_memberships(&self, owner_id: i64) -> StoreResult<Vec<Membership>>;
     /// The newest messages over `ranges` (see [`feed_seqs_sql`]) with `after < seq < before`, at

@@ -16,7 +16,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HELLO_TIMEOUT, CODE_HOST_MISMATCH};
 use crate::server::MAX_FRAME_BYTES;
-use crate::{Endpoint, Hello, Notify, Outcome, PROTO_V1, Routes};
+use crate::{Endpoint, Hello, Notify, Outcome, PROTO_V1, Relay, Routes};
 
 /// An outcome's reason is cut to this many bytes, so a diagnostic can never make it too large.
 pub const MAX_REASON_BYTES: usize = 4096;
@@ -109,6 +109,8 @@ pub enum Inbound {
         routes: Routes,
         seq: u64,
     },
+    /// A sign-in relay command for this host's helper.
+    Relay(Relay),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,7 +256,12 @@ fn bound_reason(reason: &str) -> String {
 
 enum Cmd {
     Endpoints,
-    Request { request_id: String, frame: String },
+    Request {
+        request_id: String,
+        frame: String,
+    },
+    /// A frame sent as it is, on the current connection or the next one.
+    Frame(String),
 }
 
 type Reply = oneshot::Sender<Result<(Value, u64), CallError>>;
@@ -530,6 +537,15 @@ impl BridgeClient {
         };
         self.inner.outcome_wake.notify_one();
         Ok(event_seq)
+    }
+
+    /// Sends one `kind` frame with `payload`'s fields on the current connection, or on the next
+    /// one while disconnected; nothing is retained after it is written.
+    pub fn send_frame<T: serde::Serialize>(&self, kind: &str, payload: &T) {
+        let _ = self
+            .inner
+            .cmd_tx
+            .send(Cmd::Frame(protocol::frame(kind, payload)));
     }
 
     /// Outcomes reported but not yet acknowledged by the server.
@@ -886,6 +902,7 @@ async fn run_session(
                         inflight.insert(request_id);
                         frame
                     }
+                    Some(Cmd::Frame(frame)) => frame,
                 };
                 if let Err(e) = tx.send(Message::text(frame)).await { return lost(e); }
             }
@@ -1008,6 +1025,15 @@ fn handle_frame(
                 }
             }
             Err(e) => tracing::warn!(error = %e, "bad routes frame"),
+        },
+        // The error is not logged: it could quote the pasted code.
+        "relay" => match serde_json::from_value::<Relay>(value) {
+            Ok(r) => {
+                if notify_tx.send(Inbound::Relay(r)).is_err() {
+                    tracing::error!("notify handler thread is gone");
+                }
+            }
+            Err(_) => tracing::warn!("bad relay frame"),
         },
         "outcome_ack" => {
             let attempt = value

@@ -28,7 +28,7 @@ use tokio::time::{MissedTickBehavior, interval_at, timeout};
 use crate::protocol::{self, CODE_BAD_HELLO, CODE_FENCED, CODE_HELLO_TIMEOUT, CODE_HOST_MISMATCH};
 use crate::{
     Admission, Authentication, Authenticator, Dispatcher, Endpoint, Hello, NotificationSource,
-    Outcome, PROTO_V2, Polled, Principal, Recorded, Routes, SourceEvent,
+    Outcome, PROTO_V2, Polled, Principal, Recorded, RelayEvent, Routes, SourceEvent,
 };
 
 /// Frame and request-body limit (DESIGN.md §4).
@@ -843,13 +843,21 @@ async fn run_bridge(
         proto,
         window,
         routes: None,
+        relay: None,
     };
     let reason = conn.run(&mut tx, &mut rx, &mut control_rx).await;
     tracing::info!(%host, %instance, conn_id, reason, "bridge disconnected");
 
-    let mut bridges = shared.bridges.lock().unwrap_or_else(|p| p.into_inner());
-    if bridges.get(&host).is_some_and(|b| b.conn_id == conn_id) {
-        bridges.remove(&host);
+    {
+        let mut bridges = shared.bridges.lock().unwrap_or_else(|p| p.into_inner());
+        if bridges.get(&host).is_some_and(|b| b.conn_id == conn_id) {
+            bridges.remove(&host);
+        }
+    }
+    // The bridge kills its sign-in helper with the connection, so its relay is over.
+    if let Some(relay_id) = conn.relay.take() {
+        let source = shared.source.clone();
+        let _ = tokio::task::spawn_blocking(move || source.relay_lost(&host, &relay_id)).await;
     }
 }
 
@@ -876,6 +884,8 @@ enum Work {
     Outcome(Outcome),
     /// The connection's full endpoint set after an `endpoints` frame.
     Endpoints(Vec<Endpoint>),
+    /// A sign-in relay's event, recorded in the order the helper reported them.
+    Relay(RelayEvent),
 }
 
 /// Records one connection's outcomes and endpoint snapshots in arrival order, one transaction at
@@ -893,6 +903,11 @@ async fn record_outcomes(
     while let Some(item) = work.recv().await {
         let outcome = match item {
             Work::Outcome(o) => o,
+            Work::Relay(event) => {
+                let (source, h) = (shared.source.clone(), host.clone());
+                let _ = tokio::task::spawn_blocking(move || source.relay_event(&h, &event)).await;
+                continue;
+            }
             Work::Endpoints(all) => {
                 let (shared, h, i) = (shared.clone(), host.clone(), instance.clone());
                 let written = tokio::task::spawn_blocking(move || {
@@ -963,6 +978,8 @@ struct Conn {
     window: Option<u32>,
     /// v2: the routes last sent on this connection (None until the first is sent).
     routes: Option<Routes>,
+    /// The sign-in relay this connection last carried a command of.
+    relay: Option<String>,
 }
 
 impl Conn {
@@ -1129,6 +1146,35 @@ impl Conn {
                 return false;
             }
         }
+        self.push_relay(tx).await
+    }
+
+    /// Sends the host's unsent relay command, then clears exactly that command in the store; a
+    /// newer one committed meanwhile stays for the next poll. False when the connection is lost.
+    async fn push_relay(&mut self, tx: &mut Sink) -> bool {
+        let (source, host) = (self.shared.source.clone(), self.host.clone());
+        let command = match tokio::task::spawn_blocking(move || source.relay_command(&host)).await {
+            Ok(Some(c)) => c,
+            Ok(None) => return true,
+            Err(e) => {
+                tracing::error!(error = %e, "relay_command failed");
+                return true;
+            }
+        };
+        if !self.is_active() {
+            return true;
+        }
+        if tx
+            .send(Message::text(protocol::frame("relay", &command)))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        self.relay = Some(command.relay_id.clone());
+        let (source, host) = (self.shared.source.clone(), self.host.clone());
+        let _ =
+            tokio::task::spawn_blocking(move || source.relay_command_sent(&host, &command)).await;
         true
     }
 
@@ -1259,6 +1305,19 @@ impl Conn {
                 // Behind the outcomes read before it, in the same ordered worker.
                 let all: Vec<Endpoint> = self.endpoints.iter().cloned().collect();
                 self.enqueue(outcome_tx, stop_tx, Work::Endpoints(all));
+                None
+            }
+            "relay_event" => {
+                let event: RelayEvent = match serde_json::from_value(value) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Some(protocol::error_frame(
+                            "bad_frame",
+                            &format!("bad relay_event frame: {e}"),
+                        ));
+                    }
+                };
+                self.enqueue(outcome_tx, stop_tx, Work::Relay(event));
                 None
             }
             "request" => {

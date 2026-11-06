@@ -102,6 +102,7 @@ on_both!(
     a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired,
     the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply_marks_ready,
     a_service_reads_a_persons_presence_and_nothing_else,
+    the_relay_ops_take_no_bearer_key_a_services_included,
     a_held_mailbox_attempt_is_abandoned_when_the_mailbox_leaves_the_endpoints,
     a_hold_reported_after_its_mailbox_left_is_abandoned,
     a_hold_reported_after_its_mailbox_came_back_is_kept,
@@ -2571,5 +2572,26 @@ async fn a_service_reads_a_persons_presence_and_nothing_else(d: Arc<Dispatcher>)
     ] {
         let r = n.s.rpc(key, None, "machine.status", body, None).await;
         assert_eq!(r["error"]["code"], "forbidden", "{r}");
+    }
+}
+
+/// The sign-in relay is the person's page only: a bearer key is refused for every relay op, a
+/// service's and the person's own alike.
+async fn the_relay_ops_take_no_bearer_key_a_services_included(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    for key in [&n.praxia, &n.lev] {
+        for (op, body) in [
+            ("machine.relay.start", json!({"flow": "claude"})),
+            (
+                "machine.relay.code",
+                json!({"relay_id": "r1", "code": "abc"}),
+            ),
+            ("machine.relay.cancel", json!({"relay_id": "r1"})),
+        ] {
+            let idem = conde::util::new_ulid();
+            let r = n.s.rpc(key, None, op, body, Some(&idem)).await;
+            assert_eq!(r["error"]["code"], "forbidden", "{op}: {r}");
+        }
     }
 }

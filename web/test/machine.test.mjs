@@ -1,8 +1,8 @@
 // The Machine page's words per state of `machine.status`, the elapsed line, the setup button, the
-// sign-in lines, and the server clock's skew.
+// sign-in lines, the sign-in relay's buttons and lines per state, and the server clock's skew.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { UNKNOWN, elapsed, machineView, settle, skew } from '../src/lib/machine.ts';
+import { UNKNOWN, elapsed, machineView, settle, signInView, skew } from '../src/lib/machine.ts';
 
 const NOW = Date.parse('2026-11-05T22:30:00Z');
 const at = (s) => new Date(NOW - s * 1000).toISOString();
@@ -65,6 +65,9 @@ test('the Claude sign-in shows while connected and not known ok; expiring and ex
 	assert.equal(machineView(machine('connected'), NOW).claude, true, 'unknown');
 	assert.equal(machineView(machine('connected', { sign_in: { claude: 'ok' } }), NOW).claude, false);
 	assert.equal(machineView(machine('ready'), NOW).claude, false);
+	const done = { relay_id: 'r1', flow: 'claude', state: 'done', url: null, user_code: null, expires_at: null, reason: null, at: at(5) };
+	assert.equal(machineView(machine('connected', { relay: done }), NOW).claude, false, 'just signed in through the page');
+	assert.equal(machineView(machine('connected', { relay: { ...done, flow: 'github' } }), NOW).claude, true);
 	const v = machineView(machine('ready', { sign_in: { claude: 'expiring', github: 'expired', codex: 'ok' } }), NOW);
 	assert.deepEqual(v.signIn, ['Claude', 'GitHub']);
 });
@@ -96,4 +99,69 @@ test('the page knows nothing until a status answer or not_found; a failed read i
 	assert.deepEqual(load, { known: true, machine: m, error: '' });
 	load = settle(load, { error: { code: 'network', message: 'The server could not be reached' } });
 	assert.deepEqual(load, { known: true, machine: m, error: 'The server could not be reached' }, 'the last answer stays');
+});
+
+const relay = (flow, state, o = {}) => ({ relay_id: 'r1', flow, state, url: null, user_code: null, expires_at: null, reason: null, at: at(5), ...o });
+const CLAUDE_URL = 'https://claude.com/cai/oauth/authorize?code=true';
+
+test('the sign-in buttons show while the machine can run one and no sign-in runs', () => {
+	const labels = (m) => signInView(m, NOW).start.map((f) => f.label);
+	const all = ['Sign in to Claude', 'Sign in to GitHub', 'Sign in to Codex'];
+	for (const state of ['up', 'connected', 'ready']) assert.deepEqual(labels(machine(state)), all, state);
+	for (const state of ['requested', 'failed', 'not_connected', 'disconnected', 'deleting']) {
+		const v = signInView(machine(state, { relay: relay('claude', 'url', { url: CLAUDE_URL }) }), NOW);
+		assert.deepEqual(v, { start: [], running: null, outcome: null }, state);
+	}
+	assert.deepEqual(signInView(null, NOW), { start: [], running: null, outcome: null });
+	for (const state of ['starting', 'url', 'waiting']) {
+		assert.deepEqual(labels(machine('connected', { relay: relay('github', state) })), [], state);
+	}
+	assert.deepEqual(labels(machine('connected', { relay: relay('claude', 'cancelled') })), all);
+});
+
+test('the Claude sign-in shows its link, takes the pasted code while it shows the link, then checks it', () => {
+	const run = (state, o) => signInView(machine('connected', { relay: relay('claude', state, o) }), NOW).running;
+	assert.deepEqual(run('starting', { url: null }), {
+		relay_id: 'r1',
+		flow: 'claude',
+		text: 'Starting the Claude sign-in on your machine…',
+		url: null,
+		link: 'Open the Claude sign-in',
+		userCode: null,
+		paste: false
+	});
+	const url = run('url', { url: CLAUDE_URL });
+	assert.equal(url.url, CLAUDE_URL);
+	assert.equal(url.link, 'Open the Claude sign-in');
+	assert.equal(url.paste, true);
+	assert.equal(url.text, 'Open the Claude sign-in, sign in as yourself, then paste the code Claude shows you here.');
+	const waiting = run('waiting', { url: CLAUDE_URL });
+	assert.equal(waiting.paste, false, 'one code per sign-in');
+	assert.equal(waiting.text, 'Checking the code with Claude…');
+});
+
+test('GitHub and Codex show the device code to type on their page and how long it is good for', () => {
+	const run = (flow, state) =>
+		signInView(machine('ready', { relay: relay(flow, state, { url: 'https://github.com/login/device', user_code: 'WDJB-MJHT', expires_at: new Date(NOW + 14 * 60_000).toISOString() }) }), NOW)
+			.running;
+	const gh = run('github', 'url');
+	assert.deepEqual([gh.text, gh.link, gh.userCode, gh.paste], ['Open GitHub’s page and type this code there. The code is good for 14 min.', 'github.com/login/device', 'WDJB-MJHT', false]);
+	assert.equal(run('codex', 'url').text, 'Open OpenAI’s page and type this code there. The code is good for 14 min.');
+	const waiting = run('github', 'waiting');
+	assert.deepEqual([waiting.text, waiting.userCode], ['Waiting for you to approve on GitHub…', null]);
+	assert.equal(run('codex', 'waiting').text, 'Waiting for you to approve on OpenAI…');
+});
+
+test('a finished sign-in says how it ended above the buttons; a cancelled one says nothing', () => {
+	const outcome = (flow, state, reason = null) => signInView(machine('connected', { relay: relay(flow, state, { reason }) }), NOW).outcome;
+	assert.equal(outcome('claude', 'done'), 'Signed in to Claude.');
+	assert.equal(outcome('github', 'done'), 'Signed in to GitHub.');
+	assert.equal(outcome('claude', 'failed', 'expired'), 'The Claude sign-in expired. Start it again.');
+	assert.equal(outcome('github', 'failed', 'denied'), 'GitHub refused the sign-in.');
+	assert.equal(outcome('claude', 'failed', 'bad_code'), 'Claude did not take that code. Start again for a new link.');
+	assert.equal(outcome('codex', 'failed', 'timeout'), 'The Codex sign-in timed out. Start it again.');
+	assert.equal(outcome('github', 'failed', 'busy'), 'Another GitHub sign-in is running on your machine. Try again in a minute.');
+	assert.equal(outcome('codex', 'failed', 'process_exited'), 'The Codex sign-in stopped on your machine. Start it again.');
+	assert.equal(outcome('claude', 'cancelled'), null);
+	assert.equal(signInView(machine('connected'), NOW).outcome, null);
 });

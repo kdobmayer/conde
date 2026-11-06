@@ -141,6 +141,14 @@ on_both!(
     enrol_answers_403_for_a_disabled_owner_or_a_deleting_record,
     enrol_is_rate_limited_with_retry_after,
     enrol_answers_503_while_the_tenant_keys_cannot_be_read_and_mints_once_they_can,
+    a_relay_start_reaches_the_bridge_and_its_events_reach_the_page,
+    a_relay_code_is_sent_once_and_cleared,
+    a_start_committed_between_read_and_send_survives_the_clear,
+    a_new_start_replaces_the_live_relay_and_the_old_ids_events_are_dropped,
+    a_lost_bridge_connection_expires_the_live_relay,
+    a_relay_stuck_in_starting_reads_as_expired_after_60_s,
+    a_relay_op_is_refused_for_another_owner_or_a_dead_relay_id,
+    a_cancel_reaches_the_bridge_and_ends_the_relay,
 );
 
 /// The whole server (bridge API, web sign-in, the app) over `d`, signed in through the fake
@@ -4518,5 +4526,624 @@ async fn enrol_answers_503_while_the_tenant_keys_cannot_be_read_and_mints_once_t
     let (status, _, v) = ui.enrol(Some(&token)).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert!(ui.record(USER).await.unwrap().minted_at.is_some());
+    ui.server.shutdown().await.unwrap();
+}
+
+// --- the sign-in relay ------------------------------------------------------------------------
+
+/// A pasted code as a test writes it (a fixture, never a real code); assertions never print it.
+const RELAY_CODE: &str = "relay-fixture-7Qx#a1";
+
+/// The signed-in person's minted machine `vm-agent-<USER>` with its host key: (browser, CSRF,
+/// host, key).
+async fn relay_machine(ui: &Ui) -> (Browser, String, String, String) {
+    let (b, csrf) = ui.browser().await;
+    let host = format!("vm-agent-{USER}");
+    let key = vm_key(ui, USER, &host).await;
+    (b, csrf, host, key)
+}
+
+/// A minted machine record of `user` on `host` and the host's key.
+async fn vm_key(ui: &Ui, user: &str, host: &str) -> String {
+    let uid = ui.principal(user, host).await.user_id;
+    let key = format!("conde_test_{}", conde::util::new_ulid());
+    let (store, h, digest) = (
+        ui.env.store.clone(),
+        host.to_string(),
+        conde_remote::token_digest(&key),
+    );
+    blocking(move || store.mint_host_key(uid, &h, "vm", &digest, START).unwrap()).await;
+    let h = host.to_string();
+    ui.write(move |t| {
+        t.set_host_mailbox_only(&h)?;
+        t.machine_request(&conde::store::NewMachine {
+            user_id: uid,
+            host_id: &h,
+            owner_object_id: "oid-relay",
+            vm_size: "Standard_B2as_v2",
+            minted_at: Some("2026-11-06T08:00:00.000Z"),
+        })?;
+        Ok(())
+    })
+    .await;
+    key
+}
+
+/// The machine's bridge: a v2 hello without endpoints.
+async fn vm_bridge(ui: &Ui, host: &str, key: &str, instance: &str) -> Ws {
+    let mut req = format!("{}/v1/bridge", ui.env.base.replace("http", "ws"))
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let hello = json!({"v": 1, "type": "hello", "host_id": host, "bridge_instance": instance,
+                       "endpoints": [], "proto": 2, "window": 4});
+    ws.send(tungstenite::Message::text(hello.to_string()))
+        .await
+        .unwrap();
+    ws
+}
+
+/// The next `relay` frame the bridge gets within `ms`, skipping every other frame.
+async fn relay_within(ws: &mut Ws, ms: u64) -> Option<Value> {
+    let read = async {
+        loop {
+            match ws.next().await {
+                Some(Ok(tungstenite::Message::Text(t))) => {
+                    let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                    if v["type"] == "relay" {
+                        return Some(v);
+                    }
+                }
+                Some(Ok(_)) => continue,
+                _ => return None,
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(ms), read)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn relay_frame(ws: &mut Ws) -> Value {
+    relay_within(ws, 10_000).await.expect("a relay frame")
+}
+
+/// The bridge reports `event` of a relay.
+async fn relay_event(ws: &mut Ws, event: Value) {
+    let mut f = event;
+    f["v"] = json!(1);
+    f["type"] = json!("relay_event");
+    ws.send(tungstenite::Message::text(f.to_string()))
+        .await
+        .unwrap();
+}
+
+/// The browser's event socket.
+async fn events_socket(ui: &Ui, b: &Browser) -> Ws {
+    let url = ui.env.url("/v1/events").replace("http://", "ws://");
+    let mut req = url.as_str().into_client_request().unwrap();
+    req.headers_mut()
+        .insert(header::ORIGIN, ui.env.base.parse().unwrap());
+    req.headers_mut()
+        .insert(header::COOKIE, b.jar_cookie(&ui.env.base).parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    assert_eq!(next_frame(&mut ws).await.expect("a hello")["type"], "hello");
+    ws
+}
+
+impl Ui {
+    /// One relay op from the browser, with its own idempotency key: the whole response.
+    async fn relay(&self, b: &Browser, csrf: &str, op: &str, body: Value) -> Value {
+        let (status, v) = self
+            .mutate(b, csrf, op, body, &conde::util::new_ulid())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{op}");
+        v
+    }
+
+    /// Starts `flow`: the new relay's id.
+    async fn relay_start(&self, b: &Browser, csrf: &str, flow: &str) -> String {
+        let r = self
+            .relay(b, csrf, "machine.relay.start", json!({"flow": flow}))
+            .await;
+        assert_eq!(r["ok"], true, "{r}");
+        r["result"]["relay_id"].as_str().unwrap().to_string()
+    }
+
+    /// `machine.status`'s relay once `ready` holds for it.
+    async fn relay_when(&self, b: &Browser, csrf: &str, ready: impl Fn(&Value) -> bool) -> Value {
+        let mut last = Value::Null;
+        for _ in 0..100 {
+            last = self.ok(b, csrf, "machine.status", json!({})).await["relay"].clone();
+            if ready(&last) {
+                return last;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("relay: {last}");
+    }
+
+    /// The host's unsent relay command, read as the bridge's poll reads it.
+    async fn pending(&self, host: &str) -> Option<conde::store::RelayCommand> {
+        let (d, h) = (self.d.clone(), host.to_string());
+        blocking(move || d.with_conn(|t| t.machine_commands(&h)).unwrap()).await
+    }
+}
+
+fn state(relay: &Value) -> (&str, &str) {
+    (
+        relay["state"].as_str().unwrap_or(""),
+        relay["reason"].as_str().unwrap_or(""),
+    )
+}
+
+/// The browser's start reaches the machine's bridge as the contract's `relay` frame; each
+/// `relay_event` the bridge sends tells the page's event socket `machine`, and `machine.status`
+/// shows it: the Claude URL, then waiting and done; GitHub's device code with its expiry.
+async fn a_relay_start_reaches_the_bridge_and_its_events_reach_the_page(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let mut events = events_socket(&ui, &b).await;
+    let id = ui.relay_start(&b, &csrf, "claude").await;
+    assert_eq!(
+        relay_frame(&mut ws).await,
+        json!({"v": 1, "type": "relay", "relay_id": id, "flow": "claude", "action": "start"})
+    );
+    let r = ui
+        .relay_when(&b, &csrf, |r| r["relay_id"] == id.as_str())
+        .await;
+    assert_eq!(
+        (r["flow"].as_str(), state(&r)),
+        (Some("claude"), ("starting", ""))
+    );
+    while quiet_frame(&mut events).await.is_some() {}
+    let url = "https://claude.com/cai/oauth/authorize?code=true&state=s1";
+    relay_event(&mut ws, json!({"relay_id": id, "event": "url", "url": url})).await;
+    let changed = next_frame(&mut events).await.expect("the event's change");
+    assert_eq!(changed["type"], "changed", "{changed}");
+    assert!(
+        changed["topics"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("machine")),
+        "{changed}"
+    );
+    let r = ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    assert_eq!(r["url"], url, "{r}");
+    relay_event(&mut ws, json!({"relay_id": id, "event": "waiting"})).await;
+    relay_event(&mut ws, json!({"relay_id": id, "event": "done"})).await;
+    let r = ui.relay_when(&b, &csrf, |r| r["state"] == "done").await;
+    assert_eq!(r["relay_id"], id.as_str());
+
+    let gh = ui.relay_start(&b, &csrf, "github").await;
+    assert_eq!(
+        relay_frame(&mut ws).await,
+        json!({"v": 1, "type": "relay", "relay_id": gh, "flow": "github", "action": "start"})
+    );
+    relay_event(
+        &mut ws,
+        json!({"relay_id": gh, "event": "url", "url": "https://github.com/login/device",
+               "user_code": "WDJB-MJHT", "expires_at": "2026-11-06T10:15:00Z"}),
+    )
+    .await;
+    let r = ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    assert_eq!(
+        (&r["flow"], &r["url"], &r["user_code"], &r["expires_at"]),
+        (
+            &json!("github"),
+            &json!("https://github.com/login/device"),
+            &json!("WDJB-MJHT"),
+            &json!("2026-11-06T10:15:00Z")
+        ),
+        "{r}"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The pasted code goes to the bridge once, in the contract's `code` frame, and is cleared from
+/// the record when the connection sent it; no answer, status or later poll carries it. A code is
+/// taken only while the Claude relay shows its URL.
+async fn a_relay_code_is_sent_once_and_cleared(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let id = ui.relay_start(&b, &csrf, "claude").await;
+    relay_frame(&mut ws).await;
+    relay_event(
+        &mut ws,
+        json!({"relay_id": id, "event": "url", "url": "https://claude.com/cai/oauth/authorize"}),
+    )
+    .await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    let r = ui
+        .relay(
+            &b,
+            &csrf,
+            "machine.relay.code",
+            json!({"relay_id": id, "code": RELAY_CODE}),
+        )
+        .await;
+    assert!(
+        !r.to_string().contains(RELAY_CODE),
+        "the answer has no code"
+    );
+    assert_eq!(r["ok"], true, "the code is taken");
+    let f = relay_frame(&mut ws).await;
+    let mut keys: Vec<&String> = f.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["action", "code", "relay_id", "type", "v"]);
+    assert!(
+        f["action"] == "code" && f["relay_id"] == id.as_str() && f["code"] == RELAY_CODE,
+        "the code frame carries the pasted code for the live relay"
+    );
+    // cleared by the send: no later poll sends it again
+    assert!(
+        relay_within(&mut ws, 2_500).await.is_none(),
+        "the code goes once"
+    );
+    assert!(ui.pending(&host).await.is_none(), "nothing pending");
+    let s = ui.ok(&b, &csrf, "machine.status", json!({})).await;
+    assert!(
+        !s.to_string().contains(RELAY_CODE),
+        "the status has no code"
+    );
+    // after the helper took it, no second code
+    relay_event(&mut ws, json!({"relay_id": id, "event": "waiting"})).await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "waiting").await;
+    let again = ui
+        .relay(
+            &b,
+            &csrf,
+            "machine.relay.code",
+            json!({"relay_id": id, "code": RELAY_CODE}),
+        )
+        .await;
+    assert!(
+        !again.to_string().contains(RELAY_CODE),
+        "the refusal has no code"
+    );
+    assert_eq!(
+        again["error"]["code"], "conflict",
+        "{}",
+        again["error"]["message"]
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The connection clears exactly the command it sent: a start, or a code, committed between its
+/// read and its clear stays pending, and the next poll sends it.
+async fn a_start_committed_between_read_and_send_survives_the_clear(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    // no bridge yet: the commands wait in the record
+    let first = ui.relay_start(&b, &csrf, "claude").await;
+    let read = ui.pending(&host).await.expect("the first start");
+    assert_eq!(read.relay.relay_id, first);
+    let second = ui.relay_start(&b, &csrf, "github").await;
+    let (h, sent) = (host.clone(), read.relay.clone());
+    ui.write(move |t| {
+        Ok(t.machine_relay_command_sent(&h, &sent.relay_id, &sent.action, sent.code.as_deref())?)
+    })
+    .await;
+    let left = ui.pending(&host).await.expect("the newer start stays");
+    assert_eq!(
+        (left.relay.relay_id.as_str(), left.relay.action.as_str()),
+        (second.as_str(), "start")
+    );
+    // the same for two codes: the second, committed after the read of the first, stays
+    let h = host.clone();
+    let s2 = second.clone();
+    ui.write(move |t| {
+        t.machine_relay_command_sent(&h, &s2, "start", None)?;
+        let claude = t.machine_relay_start(
+            t.user_id(USER)?.unwrap(),
+            "relay-codes",
+            "claude",
+            "2026-11-06T08:00:00.000Z",
+        );
+        claude?;
+        t.machine_relay_command_sent(&h, "relay-codes", "start", None)?;
+        let url = conde::store::RelayUpdate {
+            relay_id: "relay-codes",
+            state: "url",
+            url: Some("https://claude.com/cai/oauth/authorize"),
+            ..Default::default()
+        };
+        assert!(t.machine_relay_update(&h, &url, "2026-11-06T08:00:01.000Z")?);
+        Ok(())
+    })
+    .await;
+    // the ops' clock is far from the written relay_at, which only the start rule reads
+    let code = |c: &str| json!({"relay_id": "relay-codes", "code": c});
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.code", code("first-code"))
+        .await;
+    assert_eq!(r["ok"], true, "{r}");
+    let read = ui.pending(&host).await.expect("the first code");
+    assert_eq!(read.relay.code.as_deref(), Some("first-code"));
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.code", code("second-code"))
+        .await;
+    assert_eq!(r["ok"], true, "{r}");
+    let (h, sent) = (host.clone(), read.relay.clone());
+    ui.write(move |t| {
+        Ok(t.machine_relay_command_sent(&h, &sent.relay_id, &sent.action, sent.code.as_deref())?)
+    })
+    .await;
+    // the bridge's next poll sends what stayed, once
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let f = relay_frame(&mut ws).await;
+    assert_eq!(
+        (&f["relay_id"], &f["action"], &f["code"]),
+        (&json!("relay-codes"), &json!("code"), &json!("second-code"))
+    );
+    assert!(
+        relay_within(&mut ws, 2_500).await.is_none(),
+        "what stayed goes once"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A new start replaces the live relay: the bridge gets the new start, and every event of the old
+/// relay is dropped from then on.
+async fn a_new_start_replaces_the_live_relay_and_the_old_ids_events_are_dropped(
+    d: Arc<Dispatcher>,
+) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let old = ui.relay_start(&b, &csrf, "claude").await;
+    relay_frame(&mut ws).await;
+    relay_event(
+        &mut ws,
+        json!({"relay_id": old, "event": "url", "url": "https://claude.com/cai/oauth/authorize"}),
+    )
+    .await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    let new = ui.relay_start(&b, &csrf, "codex").await;
+    assert_eq!(
+        relay_frame(&mut ws).await,
+        json!({"v": 1, "type": "relay", "relay_id": new, "flow": "codex", "action": "start"})
+    );
+    relay_event(&mut ws, json!({"relay_id": old, "event": "done"})).await;
+    relay_event(
+        &mut ws,
+        json!({"relay_id": old, "event": "failed", "reason": "process_exited"}),
+    )
+    .await;
+    relay_event(
+        &mut ws,
+        json!({"relay_id": new, "event": "url", "url": "https://auth.openai.com/codex/device",
+               "user_code": "ABCD-12345", "expires_at": "2026-11-06T10:15:00Z"}),
+    )
+    .await;
+    let r = ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    assert_eq!(
+        (&r["relay_id"], &r["flow"], &r["user_code"], &r["reason"]),
+        (
+            &json!(new),
+            &json!("codex"),
+            &json!("ABCD-12345"),
+            &Value::Null
+        ),
+        "{r}"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The connection that carried a relay ends (closed by the bridge, or replaced by its reconnect):
+/// the relay is `failed` `expired`. A relay the ending connection never carried stays.
+async fn a_lost_bridge_connection_expires_the_live_relay(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let id = ui.relay_start(&b, &csrf, "claude").await;
+    relay_frame(&mut ws).await;
+    relay_event(
+        &mut ws,
+        json!({"relay_id": id, "event": "url", "url": "https://claude.com/cai/oauth/authorize"}),
+    )
+    .await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    ws.send(tungstenite::Message::Close(None)).await.unwrap();
+    drop(ws);
+    let r = ui.relay_when(&b, &csrf, |r| r["state"] == "failed").await;
+    assert_eq!(
+        (state(&r), &r["relay_id"]),
+        (("failed", "expired"), &json!(id))
+    );
+
+    // the same instance reconnects: the replaced connection's relay is over too
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let id = ui.relay_start(&b, &csrf, "github").await;
+    relay_frame(&mut ws).await;
+    relay_event(&mut ws, json!({"relay_id": id, "event": "waiting"})).await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "waiting").await;
+    let mut again = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let r = ui.relay_when(&b, &csrf, |r| r["state"] == "failed").await;
+    assert_eq!(state(&r), ("failed", "expired"));
+
+    // a relay the connection never carried is not its to expire
+    let live = ui.relay_start(&b, &csrf, "codex").await;
+    relay_frame(&mut again).await;
+    let (h, old) = (host.clone(), id.clone());
+    let d2 = d.clone();
+    let expired = blocking(move || {
+        d2.with_tx(|t| Ok(t.machine_relay_expire(&h, &old, "2026-11-06T09:00:00.000Z")?))
+            .unwrap()
+    })
+    .await;
+    assert!(!expired);
+    let r = ui.ok(&b, &csrf, "machine.status", json!({})).await["relay"].clone();
+    assert_eq!(
+        (&r["relay_id"], state(&r)),
+        (&json!(live), ("starting", ""))
+    );
+    drop(ws);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A start no bridge took within 60 s reads `failed` `expired`, is not sent when a bridge comes,
+/// and a new start replaces it.
+async fn a_relay_stuck_in_starting_reads_as_expired_after_60_s(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let stuck = ui.relay_start(&b, &csrf, "claude").await;
+    let r = ui
+        .relay_when(&b, &csrf, |r| r["relay_id"] == stuck.as_str())
+        .await;
+    assert_eq!(state(&r), ("starting", ""));
+    d.advance_clock(59_000);
+    let r = ui.ok(&b, &csrf, "machine.status", json!({})).await["relay"].clone();
+    assert_eq!(state(&r), ("starting", ""), "inside the 60 s");
+    d.advance_clock(2_000);
+    let r = ui.ok(&b, &csrf, "machine.status", json!({})).await["relay"].clone();
+    assert_eq!(state(&r), ("failed", "expired"));
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    assert!(
+        relay_within(&mut ws, 2_500).await.is_none(),
+        "the stale start is not sent"
+    );
+    let fresh = ui.relay_start(&b, &csrf, "claude").await;
+    let f = relay_frame(&mut ws).await;
+    assert_eq!(
+        (&f["relay_id"], &f["action"]),
+        (&json!(fresh), &json!("start"))
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The relay ops are the signed-in owner's, in the browser: a dead or another owner's relay id
+/// is refused and changes nothing, a code is taken only for the live Claude relay showing its URL
+/// and only in form, and a bearer key (the machine's own included) is refused.
+async fn a_relay_op_is_refused_for_another_owner_or_a_dead_relay_id(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let refused = |r: &Value, code: &str| {
+        assert!(!r.to_string().contains(RELAY_CODE), "a refusal has no code");
+        assert_eq!(r["error"]["code"], code, "{}", r["error"]["message"]);
+    };
+    let id = ui.relay_start(&b, &csrf, "claude").await;
+    relay_frame(&mut ws).await;
+    let code = |id: &str, c: &str| json!({"relay_id": id, "code": c});
+    // not yet showing its URL
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.code", code(&id, RELAY_CODE))
+        .await;
+    refused(&r, "conflict");
+    relay_event(
+        &mut ws,
+        json!({"relay_id": id, "event": "url", "url": "https://claude.com/cai/oauth/authorize"}),
+    )
+    .await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    let dead = conde::util::new_ulid();
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.code", code(&dead, RELAY_CODE))
+        .await;
+    refused(&r, "conflict");
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.cancel", json!({"relay_id": dead}))
+        .await;
+    refused(&r, "conflict");
+    for bad in [String::new(), "x".repeat(257), format!("{RELAY_CODE}\n")] {
+        let r = ui
+            .relay(&b, &csrf, "machine.relay.code", code(&id, &bad))
+            .await;
+        refused(&r, "bad_request");
+    }
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.start", json!({"flow": "gitlab"}))
+        .await;
+    refused(&r, "bad_request");
+    assert!(ui.pending(&host).await.is_none(), "nothing was taken");
+
+    // another owner, with a machine of their own, cannot touch this relay
+    ui.env.invite("dpacsuta", "dpacsuta@dakai.example").await;
+    ui.person("oid-dp", "dpacsuta@dakai.example", "D P");
+    let (b2, csrf2) = ui.browser().await;
+    vm_key(&ui, "dpacsuta", "vm-agent-dpacsuta").await;
+    let r = ui
+        .relay(&b2, &csrf2, "machine.relay.code", code(&id, RELAY_CODE))
+        .await;
+    refused(&r, "conflict");
+    let r = ui
+        .relay(&b2, &csrf2, "machine.relay.cancel", json!({"relay_id": id}))
+        .await;
+    refused(&r, "conflict");
+    let theirs = ui.ok(&b2, &csrf2, "machine.status", json!({})).await;
+    assert_eq!(theirs["relay"], Value::Null, "{theirs}");
+    let mine = ui.ok(&b, &csrf, "machine.status", json!({})).await["relay"].clone();
+    assert_eq!((&mine["relay_id"], state(&mine)), (&json!(id), ("url", "")));
+    assert!(ui.pending(&host).await.is_none(), "nothing was taken");
+
+    // a code for a flow that takes none
+    let gh = ui.relay_start(&b, &csrf, "github").await;
+    relay_frame(&mut ws).await;
+    relay_event(
+        &mut ws,
+        json!({"relay_id": gh, "event": "url", "url": "https://github.com/login/device",
+               "user_code": "WDJB-MJHT", "expires_at": "2026-11-06T10:15:00Z"}),
+    )
+    .await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "url").await;
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.code", code(&gh, RELAY_CODE))
+        .await;
+    refused(&r, "conflict");
+
+    // a bearer key, the machine's own, is not the browser
+    for (op, body) in [
+        ("machine.relay.start", json!({"flow": "claude"})),
+        ("machine.relay.code", code(&gh, RELAY_CODE)),
+        ("machine.relay.cancel", json!({"relay_id": gh})),
+    ] {
+        let req = json!({"v": 1, "type": "request", "request_id": "r1", "op": op, "body": body,
+                         "idempotency_key": conde::util::new_ulid()});
+        let r: Value = reqwest::Client::new()
+            .post(ui.env.url("/v1/rpc"))
+            .bearer_auth(&key)
+            .json(&req)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        refused(&r, "forbidden");
+    }
+    let mine = ui.ok(&b, &csrf, "machine.status", json!({})).await["relay"].clone();
+    assert_eq!((&mine["relay_id"], state(&mine)), (&json!(gh), ("url", "")));
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A cancel goes to the bridge as the contract's `cancel` frame and ends the relay; the helper's
+/// later lines change nothing.
+async fn a_cancel_reaches_the_bridge_and_ends_the_relay(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf, host, key) = relay_machine(&ui).await;
+    let mut ws = vm_bridge(&ui, &host, &key, "inst-r").await;
+    let id = ui.relay_start(&b, &csrf, "github").await;
+    relay_frame(&mut ws).await;
+    relay_event(&mut ws, json!({"relay_id": id, "event": "waiting"})).await;
+    ui.relay_when(&b, &csrf, |r| r["state"] == "waiting").await;
+    let r = ui
+        .relay(&b, &csrf, "machine.relay.cancel", json!({"relay_id": id}))
+        .await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        relay_frame(&mut ws).await,
+        json!({"v": 1, "type": "relay", "relay_id": id, "action": "cancel"})
+    );
+    relay_event(&mut ws, json!({"relay_id": id, "event": "done"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let r = ui.ok(&b, &csrf, "machine.status", json!({})).await["relay"].clone();
+    assert_eq!(state(&r), ("cancelled", ""));
+    assert!(ui.pending(&host).await.is_none());
     ui.server.shutdown().await.unwrap();
 }

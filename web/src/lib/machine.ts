@@ -1,7 +1,7 @@
 /**
  * The Machine page's words (`machine.status`): one headline and one detail line per state, whether
- * the setup button shows and what it says, and the sign-in flows that need the person. Times
- * come from the browser clock corrected by the server's skew.
+ * the setup button shows and what it says, the sign-in flows that need the person, and the sign-in
+ * relay's step. Times come from the browser clock corrected by the server's skew.
  */
 
 export type MachineState =
@@ -26,9 +26,24 @@ export interface Machine {
 	session_online_at: string | null;
 	/** The flows the machine last reported (`{"claude": "expired", ...}`). */
 	sign_in: Record<string, string> | null;
-	relay: null;
+	relay: Relay | null;
 	admins: string[];
 	now: string;
+}
+
+export type Flow = 'claude' | 'github' | 'codex';
+
+/** The machine's one sign-in relay, as `machine.status` reports it. */
+export interface Relay {
+	relay_id: string;
+	flow: Flow;
+	state: 'starting' | 'url' | 'waiting' | 'done' | 'failed' | 'cancelled';
+	url: string | null;
+	/** GitHub's and OpenAI's device code, typed on their page. */
+	user_code: string | null;
+	expires_at: string | null;
+	reason: string | null;
+	at: string | null;
 }
 
 export interface MachineView {
@@ -38,7 +53,8 @@ export interface MachineView {
 	setup: string | null;
 	/** Flows whose sign-in is expiring or has expired. */
 	signIn: string[];
-	/** Connected while the Claude sign-in is not known to be ok: the person signs in. */
+	/** Connected while the Claude sign-in is not known to be ok and the last relay did not just
+	 * sign in to Claude: the person signs in. */
 	claude: boolean;
 }
 
@@ -75,6 +91,8 @@ export function elapsed(iso: string, now: number): string {
 }
 
 const FLOWS: Record<string, string> = { claude: 'Claude', github: 'GitHub', codex: 'Codex' };
+/** Where a device code is typed. */
+const SITES: Record<string, string> = { github: 'GitHub', codex: 'OpenAI' };
 
 /** The person's names joined for a sentence: "a", "a and b", "a, b and c". */
 function names(list: string[]): string {
@@ -96,7 +114,8 @@ export function machineView(m: Machine | null, now: number, lastSeen: string | n
 	const signIn = Object.entries(m.sign_in ?? {})
 		.filter(([, v]) => v === 'expiring' || v === 'expired')
 		.map(([k]) => FLOWS[k] ?? k);
-	const claude = m.state === 'connected' && m.sign_in?.claude !== 'ok';
+	const signedIn = m.relay?.flow === 'claude' && m.relay.state === 'done';
+	const claude = m.state === 'connected' && m.sign_in?.claude !== 'ok' && !signedIn;
 	const view = (headline: string, detail: string, setup: string | null = null): MachineView => ({ headline, detail, setup, signIn, claude });
 	switch (m.state) {
 		case 'requested':
@@ -123,4 +142,66 @@ export function machineView(m: Machine | null, now: number, lastSeen: string | n
 		case 'deleting':
 			return view('Your agent’s machine is being removed.', 'Set it up again once it is gone.');
 	}
+}
+
+/** What the sign-in part of the page shows. */
+export interface SignInView {
+	/** The flows the person can start now: none while one runs or the machine cannot run one. */
+	start: { flow: Flow; label: string }[];
+	/** The running sign-in: its line, its link, the device code to type there, and whether the
+	 * page takes the code Claude shows. */
+	running: null | { relay_id: string; flow: Flow; text: string; url: string | null; link: string; userCode: string | null; paste: boolean };
+	/** How the last sign-in ended; null when it was cancelled or none ran. */
+	outcome: string | null;
+}
+
+/** The machine's bridge is there to run a sign-in. */
+const RELAYS: MachineState[] = ['up', 'connected', 'ready'];
+const ORDER: Flow[] = ['claude', 'github', 'codex'];
+
+function failure(flow: string, reason: string | null): string {
+	const f = FLOWS[flow] ?? flow;
+	switch (reason) {
+		case 'expired':
+			return `The ${f} sign-in expired. Start it again.`;
+		case 'denied':
+			return `${SITES[flow] ?? f} refused the sign-in.`;
+		case 'bad_code':
+			return 'Claude did not take that code. Start again for a new link.';
+		case 'timeout':
+			return `The ${f} sign-in timed out. Start it again.`;
+		case 'busy':
+			return `Another ${f} sign-in is running on your machine. Try again in a minute.`;
+		default:
+			return `The ${f} sign-in stopped on your machine. Start it again.`;
+	}
+}
+
+/** What the relay part says for `m` at `now`. */
+export function signInView(m: Machine | null, now: number): SignInView {
+	const none: SignInView = { start: [], running: null, outcome: null };
+	if (!m || !RELAYS.includes(m.state)) return none;
+	const r = m.relay;
+	const f = r ? (FLOWS[r.flow] ?? r.flow) : '';
+	if (r && (r.state === 'starting' || r.state === 'url' || r.state === 'waiting')) {
+		const site = SITES[r.flow] ?? f;
+		let text: string;
+		if (r.state === 'starting') text = `Starting the ${f} sign-in on your machine…`;
+		else if (r.state === 'waiting') text = r.flow === 'claude' ? 'Checking the code with Claude…' : `Waiting for you to approve on ${site}…`;
+		else if (r.flow === 'claude') text = 'Open the Claude sign-in, sign in as yourself, then paste the code Claude shows you here.';
+		else {
+			const left = r.expires_at ? Math.round((Date.parse(r.expires_at) - now) / 60_000) : null;
+			const until = left !== null && left > 0 ? ` The code is good for ${left} min.` : '';
+			text = `Open ${site}’s page and type this code there.${until}`;
+		}
+		const url = r.state === 'starting' ? null : r.url;
+		const link = r.flow === 'claude' ? 'Open the Claude sign-in' : (url ?? '').replace(/^https:\/\//, '');
+		return {
+			start: [],
+			running: { relay_id: r.relay_id, flow: r.flow, text, url, link, userCode: r.state === 'url' ? r.user_code : null, paste: r.flow === 'claude' && r.state === 'url' },
+			outcome: null
+		};
+	}
+	const outcome = !r ? null : r.state === 'done' ? `Signed in to ${f}.` : r.state === 'failed' ? failure(r.flow, r.reason) : null;
+	return { start: ORDER.map((flow) => ({ flow, label: `Sign in to ${FLOWS[flow]}` })), running: null, outcome };
 }

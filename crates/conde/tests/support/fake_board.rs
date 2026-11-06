@@ -640,6 +640,11 @@ impl FakeBoard {
         self.lock().hosts.get_mut(host).unwrap().acks = acks;
     }
 
+    /// Sends one frame as it is to the host's connection.
+    pub fn send_frame(&self, host: &str, frame: String) {
+        self.lock().send_to(host, frame);
+    }
+
     /// Drops the host's connection (the process on the host stays).
     pub fn drop_connection(&self, host: &str) {
         if let Some((_, tx, _)) = self.lock().conns.remove(host) {

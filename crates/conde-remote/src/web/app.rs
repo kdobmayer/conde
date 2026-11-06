@@ -55,7 +55,7 @@ const COALESCE: Duration = Duration::from_millis(250);
 const EVENTS_PING: Duration = Duration::from_secs(30);
 /// The ops a browser may call: the owner-scoped reads, the fleet and public directory reads,
 /// `owner.notify` (an own agent's notify setting), and the owner's machine (`machine.setup`,
-/// `machine.status`). Nothing that sends, registers or acts as an agent.
+/// `machine.status`, the sign-in relay). Nothing that sends, registers or acts as an agent.
 const BROWSER_OPS: &[&str] = &[
     "owner.notify",
     "owner.list",
@@ -70,6 +70,9 @@ const BROWSER_OPS: &[&str] = &[
     "channel.members",
     "machine.setup",
     "machine.status",
+    "machine.relay.start",
+    "machine.relay.code",
+    "machine.relay.cancel",
 ];
 
 /// What the app routes share with the server.

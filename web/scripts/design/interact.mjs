@@ -1592,14 +1592,15 @@ const frames = (page) => page.evaluate(() => new Promise((r) => requestAnimation
 	await context.close();
 }
 
-// ---- the Machine page: no machine, "Set up my agent", then the request's progress (the mock keeps
-// the machine, so the phone pass sees the request) ----
+// ---- the Machine page: no machine, "Set up my agent", the request's progress; once the machine
+// joined, the sign-ins: Claude's link and pasted code, GitHub's device code and its cancel (the mock
+// keeps the machine, so the phone pass sees the joined machine and Claude's long link) ----
 for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
 	where = `machine ${size.width}`;
 	const phone = size.width < 720;
 	const context = await browser.newContext({ viewport: size, ...(phone ? { isMobile: true, hasTouch: true } : {}), locale: 'en-GB' });
 	const page = await context.newPage();
-	await check(phone ? 'machine: a tab of its own, Keys in More, the request shown' : 'machine: listed, setup offered, the request shown after the click', async () => {
+	await check(phone ? 'machine: a tab of its own, Keys in More, the sign-in link fits' : 'machine: listed, setup offered, the request shown after the click, then the sign-ins', async () => {
 		await page.goto(`${FEED}#/machine`, { waitUntil: 'networkidle' });
 		const bar = phone ? '.tabs' : '.mast .sections';
 		const labels = await page.locator(`${bar} a`).allTextContents();
@@ -1609,17 +1610,56 @@ for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) 
 		expect(current === 'Machine', `current section ${current}`);
 		const state = page.locator('.machine .state');
 		await state.waitFor();
+		const fits = async (what) => {
+			const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+			expect(!overflow, `the page scrolls sideways (${what})`);
+		};
 		if (!phone) {
 			expect((await state.textContent()) === 'Your agent has no machine yet.', await state.textContent());
 			await page.getByRole('button', { name: 'Set up my agent' }).click();
+			await page.locator('.machine .state[data-state=requested]').waitFor({ timeout: 2000 });
+			const detail = await page.locator('.machine .detail').textContent();
+			expect(/^Requested \d+ (s|min) ago · Azure: running\.$/.test(detail ?? ''), detail);
+			expect((await page.getByRole('button', { name: 'Set up my agent' }).count()) === 0, 'the setup button stays after the request');
+			expect((await page.locator('.machine .host').textContent()) === 'vm-agent-kdobmayer', 'the host');
+			expect((await page.locator('.machine .flows button').count()) === 0, 'no sign-in before the machine joined');
+			await fits('requested');
+			await page.request.post(`${FEED}mock/machine-joined`);
+			await page.reload({ waitUntil: 'networkidle' });
 		}
-		await page.locator('.machine .state[data-state=requested]').waitFor({ timeout: 2000 });
-		const detail = await page.locator('.machine .detail').textContent();
-		expect(/^Requested \d+ (s|min) ago · Azure: running\.$/.test(detail ?? ''), detail);
-		expect((await page.getByRole('button', { name: 'Set up my agent' }).count()) === 0, 'the setup button stays after the request');
-		expect((await page.locator('.machine .host').textContent()) === 'vm-agent-kdobmayer', 'the host');
-		const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
-		expect(!overflow, 'the page scrolls sideways');
+		await page.locator('.machine .state[data-state=connected]').waitFor({ timeout: 2000 });
+		const flows = await page.locator('.machine .flows button').allTextContents();
+		expect(flows.join('|') === 'Sign in to Claude|Sign in to GitHub|Sign in to Codex', flows.join('|'));
+		await page.getByRole('button', { name: 'Sign in to Claude' }).click();
+		const link = page.locator('.machine .relay .link a');
+		await link.waitFor({ timeout: 2000 });
+		expect((await link.textContent()) === 'Open the Claude sign-in', await link.textContent());
+		expect((await link.getAttribute('target')) === '_blank', 'the link opens beside the page');
+		expect((await link.getAttribute('href'))?.startsWith('https://claude.com/cai/oauth/authorize'), await link.getAttribute('href'));
+		await fits('the Claude link');
+		const send = page.getByRole('button', { name: 'Send code' });
+		expect(await send.isDisabled(), 'Send code waits for a code');
+		if (phone) {
+			await page.getByRole('button', { name: 'Cancel' }).click();
+			await page.locator('.machine .flows').waitFor({ timeout: 2000 });
+			expect((await page.locator('.machine .outcome').count()) === 0, 'a cancel says nothing');
+			return;
+		}
+		await page.getByLabel('The code from Claude').fill('  mock-code#123 ');
+		await send.click();
+		await page.locator('.machine .outcome').waitFor({ timeout: 2000 });
+		expect((await page.locator('.machine .outcome').textContent()) === 'Signed in to Claude.', await page.locator('.machine .outcome').textContent());
+		expect((await page.locator('.machine .relay').count()) === 0, 'the sign-in part closes');
+		await page.getByRole('button', { name: 'Sign in to GitHub' }).click();
+		const usercode = page.locator('.machine .relay .usercode');
+		await usercode.waitFor({ timeout: 2000 });
+		expect((await usercode.textContent()) === 'WDJB-MJHT', await usercode.textContent());
+		expect((await link.textContent()) === 'github.com/login/device', await link.textContent());
+		expect((await page.getByLabel('The code from Claude').count()) === 0, 'GitHub takes no pasted code');
+		await page.getByRole('button', { name: 'Cancel' }).click();
+		await page.locator('.machine .flows').waitFor({ timeout: 2000 });
+		expect((await page.locator('.machine .outcome').count()) === 0, 'a cancel says nothing');
+		await fits('connected');
 	});
 	await context.close();
 }

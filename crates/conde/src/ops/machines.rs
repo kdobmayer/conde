@@ -3,7 +3,9 @@
 //! says `deploy` when a deployment PUT is due, which conde-remote issues (the Azure client lives
 //! there). `machine.status` reads the owner's own record with the agent's state. The startup exchange: the
 //! first live endpoint of the person's `vm.agent` on the machine's host gets one DM from the
-//! person's human row, and the agent's reply to it marks the machine ready.
+//! person's human row, and the agent's reply to it marks the machine ready. The sign-in relay: the
+//! page starts a flow, sends the pasted Claude code or cancels; the command waits in the record
+//! until the bridge connection of the machine's host sends it.
 
 use serde_json::{Value, json};
 
@@ -11,7 +13,9 @@ use super::agents::{self, Agent, PUBLIC_AGENT};
 use super::messages::{Target, insert_message};
 use super::web::{ONLINE_TTL_MS, browser_only};
 use crate::address::Kind;
-use crate::dispatch::{Ctx, MachineSettings, OpResult, conflict, forbidden, not_found, opt_str};
+use crate::dispatch::{
+    Ctx, MachineSettings, OpResult, bad_request, conflict, forbidden, not_found, opt_str, str_param,
+};
 use crate::humans;
 use crate::store::{MachineDeploy, MachineRow, NewMachine, Tx, topics};
 use crate::util::{iso_from_ms, ms_from_iso};
@@ -21,6 +25,11 @@ pub const JOIN_DEADLINE_MS: i64 = 30 * 60 * 1000;
 /// The machine's name, host id and deployment name: this prefix and the owner name.
 pub const HOST_PREFIX: &str = "vm-agent-";
 pub const PROBE_TEXT: &str = "Your machine is set up. Reply to this message in one line so the board knows you are reachable.";
+/// A relay no bridge took within this long of its start reads as expired, and its start is not
+/// sent any more.
+pub const RELAY_START_TTL_MS: i64 = 60_000;
+/// The sign-in flows a relay runs (`relay-<flow>` on the machine).
+pub const RELAY_FLOWS: &[&str] = &["claude", "github", "codex"];
 
 fn settings<'a>(ctx: &Ctx<'a>) -> OpResult<&'a MachineSettings> {
     ctx.machines
@@ -159,8 +168,91 @@ pub fn status_json(db: &dyn Tx, m: &MachineRow, now_ms: i64) -> OpResult<Value> 
         "state": state_of(db, m, now_ms)?, "host_id": m.host_id, "requested_at": m.requested_at,
         "minted_at": m.minted_at, "deploy_state": m.deploy_state, "deploy_error": m.deploy_error,
         "probe_id": m.probe_id, "ready_at": m.ready_at, "session_online_at": m.session_online_at,
-        "sign_in": sign_in_json(m), "relay": null, "admins": admins, "now": iso_from_ms(now_ms),
+        "sign_in": sign_in_json(m), "relay": relay_json(m, now_ms), "admins": admins,
+        "now": iso_from_ms(now_ms),
     }))
+}
+
+/// Whether a relay in `starting` since `at` was taken by no bridge in time.
+pub fn relay_start_stale(at: Option<&str>, now_ms: i64) -> bool {
+    at.and_then(ms_from_iso)
+        .is_none_or(|at| now_ms - at > RELAY_START_TTL_MS)
+}
+
+/// The record's relay as `machine.status` answers it; null when none was started.
+fn relay_json(m: &MachineRow, now_ms: i64) -> Value {
+    let Some(relay_id) = &m.relay_id else {
+        return Value::Null;
+    };
+    let stale = m.relay_state.as_deref() == Some("starting")
+        && relay_start_stale(m.relay_at.as_deref(), now_ms);
+    let (state, reason) = if stale {
+        (Some("failed"), Some("expired"))
+    } else {
+        (m.relay_state.as_deref(), m.relay_reason.as_deref())
+    };
+    json!({"relay_id": relay_id, "flow": m.relay_flow, "state": state, "url": m.relay_url,
+           "user_code": m.relay_user_code, "expires_at": m.relay_expires_at, "reason": reason,
+           "at": m.relay_at})
+}
+
+/// The signed-in owner's own record, for the relay ops.
+fn own_machine(ctx: &Ctx) -> OpResult<MachineRow> {
+    browser_only(ctx)?;
+    ctx.db
+        .machine_of_user(ctx.p.user_id)?
+        .ok_or_else(|| not_found("no machine is set up for you"))
+}
+
+/// `machine.relay.start {flow}` → `{relay_id}`: a new relay replaces the live one (the bridge
+/// stops the running helper when the start reaches it).
+pub fn relay_start(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    let m = own_machine(ctx)?;
+    let flow = str_param(body, "flow")?;
+    if !RELAY_FLOWS.contains(&flow) {
+        return Err(bad_request("flow is claude, github or codex"));
+    }
+    if m.deleting_at.is_some() {
+        return Err(conflict("your machine is being removed"));
+    }
+    let relay_id = crate::util::new_ulid();
+    ctx.db
+        .machine_relay_start(m.user_id, &relay_id, flow, &ctx.now_iso())?;
+    ctx.db.wake_host(&m.host_id);
+    Ok(json!({"relay_id": relay_id}))
+}
+
+/// `machine.relay.code {relay_id, code}`: the code the person pasted, for the live Claude relay
+/// showing its URL. Checked for form only; never logged and never in an answer or an error.
+pub fn relay_code(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    let m = own_machine(ctx)?;
+    let relay_id = str_param(body, "relay_id")?;
+    let code = str_param(body, "code")?;
+    let len = code.chars().count();
+    if !(1..=256).contains(&len) || code.chars().any(char::is_control) {
+        return Err(bad_request(
+            "the code is 1 to 256 characters without control characters",
+        ));
+    }
+    if !ctx.db.machine_relay_code(m.user_id, relay_id, code)? {
+        return Err(conflict("this sign-in is not waiting for a code"));
+    }
+    ctx.db.wake_host(&m.host_id);
+    Ok(json!({"relay_id": relay_id}))
+}
+
+/// `machine.relay.cancel {relay_id}`: stops the live relay.
+pub fn relay_cancel(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    let m = own_machine(ctx)?;
+    let relay_id = str_param(body, "relay_id")?;
+    if !ctx
+        .db
+        .machine_relay_cancel(m.user_id, relay_id, &ctx.now_iso())?
+    {
+        return Err(conflict("this sign-in is not running"));
+    }
+    ctx.db.wake_host(&m.host_id);
+    Ok(json!({"relay_id": relay_id}))
 }
 
 /// The record's sign-in flows as JSON (null when none were reported or unreadable).

@@ -79,13 +79,12 @@ Owner's own steps, at his pace, none blocking the above:
   Zone settings + Pages edit) with a token holding only "Cloudflare Pages: Edit": create it at
   dash.cloudflare.com/profile/api-tokens, `pass insert -f conde/cloudflare-pages-token`, then desk runs
   `pass show conde/cloudflare-pages-token | gh secret set CLOUDFLARE_API_TOKEN -R kdobmayer/conde`.
-- D2: sign in to Keycloak's admin console as the permanent `admin` (temporary password in Secret Manager
-  keycloak-admin-temp-password), set the password and the authenticator; then desk deletes bootstrap-admin
-  and adds master to `no_password_grant` (infra/gcp/realms/README.md).
+- D2: done (infra/gcp/realms/README.md, steps 1 to 5); the Secret Manager secret keycloak-bootstrap-admin is the
+  last trace.
 - D3: sign in to Argo CD at argocd.conde.cloud through the infra realm as `krisztian` (temporary password
   in Secret Manager infra-krisztian-temp-password); then desk flips `argocd_local_admin` to false and
   deletes argocd-initial-admin-secret.
-- D4: Cloudflare account 2FA (profile, Authentication); it holds the domain.
+- D4: Cloudflare account 2FA (profile, Authentication); it holds the domain. Postponed by the owner (2026-11-07), not dropped.
 - D6 (after S5): the realms Terraform state no longer holds the Google client secret and the Resend key, but the
   state bucket keeps old object versions that do. Cheapest fix: rotate both (Resend dashboard: new API key, then
   `pass insert -f conde/resend-api-key` and a new Secret Manager version of `resend-api-key`; Google Auth Platform:

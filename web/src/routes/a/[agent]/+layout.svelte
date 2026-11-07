@@ -1,13 +1,15 @@
 <script lang="ts">
 	// An own agent (ia.md "Agents"): its status line and its conversations, DMs then channels,
 	// newest first, beside the open conversation; on the phone the list, then the conversation.
-	import type { Snippet } from 'svelte';
+	import { tick, type Snippet } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { mutate } from '#lib/api.ts';
 	import { board, changeRail, refreshRail, short } from '#lib/board.svelte.ts';
 	import { KIND, agentFacts, conversationsOf, latestOf } from '#lib/conversation.ts';
 	import { ago, stamp } from '#lib/time.ts';
 	import { nextNotify, notifyHint, notifyLabel, withNotify } from '#lib/notify.ts';
+	import { retirable, withoutAgent } from '#lib/retire.ts';
 	import type { Notify } from '#lib/types.ts';
 	import EmptyState from '#lib/ui/EmptyState.svelte';
 	import ErrorLine from '#lib/ui/ErrorLine.svelte';
@@ -88,6 +90,44 @@
 		}
 	}
 
+	/** The name whose Retire waits for its confirmation, the retire in flight, the last that failed. */
+	let confirming = $state<string | null>(null);
+	let retiring = $state<string | null>(null);
+	let retireFailed = $state<{ agent: string; error: string } | null>(null);
+	let keepButton = $state<HTMLButtonElement | null>(null);
+	let offerButton = $state<HTMLButtonElement | null>(null);
+
+	async function askRetire(agent: string) {
+		confirming = agent;
+		retireFailed = null;
+		await tick();
+		keepButton?.focus();
+	}
+	async function keep() {
+		confirming = null;
+		await tick();
+		offerButton?.focus();
+	}
+
+	/** Retires `agent`; on the board's answer it leaves the rail and the page goes to the agent list. */
+	async function retire(agent: string) {
+		if (retiring) return;
+		retiring = agent;
+		retireFailed = null;
+		try {
+			await mutate('agent.retire', { name: agent });
+			confirming = null;
+			// leave first: without the name on the rail this page would say it is not yours
+			await goto('#/agents');
+			changeRail((rail) => withoutAgent(rail, agent));
+			void refreshRail();
+		} catch (e) {
+			retireFailed = { agent, error: (e as Error).message };
+		} finally {
+			retiring = null;
+		}
+	}
+
 	const health = $derived.by(() => {
 		if (!facts) return '';
 		const problems = [facts.held ? `${facts.held} held` : '', facts.stuck ? `${facts.stuck} stuck` : ''].filter(Boolean);
@@ -112,6 +152,29 @@
 					Not on any host yet.
 				{/if}
 			</p>
+			{#if retirable(me)}
+				<div class="retire">
+					{#if confirming === name}
+						<!-- Escape from either button cancels; the group only catches the key -->
+						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+						<div class="confirm" role="group" aria-label={`Retire ${page.params.agent}`} onkeydown={(e) => e.key === 'Escape' && keep()}>
+							<p>Retire {page.params.agent}? It leaves your lists; its messages stay readable.</p>
+							<div class="actions">
+								<button type="button" aria-busy={retiring === name} disabled={retiring === name} onclick={() => retire(name)}>
+									{retiring === name ? 'Retiring' : 'Retire'}
+								</button>
+								<button type="button" class="quiet" bind:this={keepButton} disabled={retiring === name} onclick={keep}>Keep</button>
+							</div>
+						</div>
+					{:else}
+						<p>Nothing holds this name. <button type="button" class="link" bind:this={offerButton} onclick={() => askRetire(name)}>Retire it</button></p>
+					{/if}
+					{#if retireFailed && retireFailed.agent === name}
+						{@const f = retireFailed}
+						<ErrorLine what={`Could not retire ${page.params.agent}`} error={f.error} retry={() => retire(f.agent)} />
+					{/if}
+				</div>
+			{/if}
 			<h2 class="grp">Direct</h2>
 			{#each lists.dms as d (d.target)}
 				<a href={dmHref(d.target)} class:on={open === d.target} aria-current={open === d.target ? 'page' : undefined}>
@@ -314,6 +377,32 @@
 	}
 	.notify[aria-busy='true'] {
 		opacity: 0.55;
+	}
+	/* an own name nothing holds: the quiet offer, then the confirmation in place */
+	.retire {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		margin-top: 12px;
+		font-size: 13.5px;
+		color: var(--faint);
+	}
+	.retire p {
+		margin: 0;
+	}
+	.confirm {
+		padding: 10px 12px;
+		border-left: 2px solid var(--accent);
+		background: var(--panel);
+		color: var(--muted);
+	}
+	.confirm .actions {
+		display: flex;
+		gap: 8px;
+		margin-top: 8px;
+	}
+	.confirm button {
+		padding: 4px 12px;
 	}
 	.notify-error {
 		margin-top: 8px;

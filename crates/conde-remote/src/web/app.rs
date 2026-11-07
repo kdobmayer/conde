@@ -5,8 +5,9 @@
 //! - `GET /app/{*path}`: the app's scripts and styles (no data, no session needed).
 //! - `GET /v1/session`: who is signed in, and the CSRF token the app sends back.
 //! - `POST /v1/rpc` (without a bearer token): one request for the signed-in owner (owner-scoped
-//!   reads, the fleet, the directory, and the one write: an own agent's notify setting); the
-//!   `x-csrf-token` header must carry the session's token.
+//!   reads, the fleet, the directory, and the writes: an own agent's notify setting, and
+//!   retiring an own name nothing holds); the `x-csrf-token` header must carry the session's
+//!   token.
 //! - `GET /v1/attachments/{id}`: one attachment as a download, under the same visibility rules.
 //! - `GET /v1/events`: a WebSocket that says when the board changed (never what), so the app
 //!   refetches what it shows.
@@ -54,10 +55,12 @@ const COALESCE: Duration = Duration::from_millis(250);
 /// Ping period of the event socket (inside the ingress idle cut) and its session recheck.
 const EVENTS_PING: Duration = Duration::from_secs(30);
 /// The ops a browser may call: the owner-scoped reads, the fleet and public directory reads,
-/// `owner.notify` (an own agent's notify setting), and the owner's machine (`machine.setup`,
-/// `machine.status`, the sign-in relay). Nothing that sends, registers or acts as an agent.
+/// `owner.notify` (an own agent's notify setting), `agent.retire` (an own name nothing holds),
+/// and the owner's machine (`machine.setup`, `machine.status`, the sign-in relay). Nothing that
+/// sends, registers or acts as an agent.
 const BROWSER_OPS: &[&str] = &[
     "owner.notify",
+    "agent.retire",
     "owner.list",
     "owner.history",
     "owner.message",

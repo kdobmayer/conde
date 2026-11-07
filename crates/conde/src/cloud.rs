@@ -164,8 +164,8 @@ impl conde_remote::Dispatcher for Board {
     }
 
     /// A browser request as the signed-in owner: no actor, no host, so only owner-scoped and
-    /// public reads and the owner's own write (`owner.notify`, with its idempotency key) answer
-    /// (conde-remote lets nothing else through).
+    /// public reads and the owner's own writes (`owner.notify`, `agent.retire`, each with its
+    /// idempotency key) answer (conde-remote lets nothing else through).
     fn dispatch_web(&self, user: &WebPrincipal, request: Value) -> Value {
         let id = request
             .get("request_id")

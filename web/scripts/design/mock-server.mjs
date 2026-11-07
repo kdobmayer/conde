@@ -5,8 +5,9 @@
 // setup, then one being set up), the sign-in relay's three ops (helpers that answer at once:
 // Claude's link, then done on a well-formed code; GitHub's and Codex's device code, which, as the
 // real helpers print `url` then `waiting`, reads as waiting with its code); the feed, thread and search ops per docs/web-ui-v2/ia.md
-// "Server contract"; owner.notify, the one write, changes the fixture's settings for the server's
-// life and, like the board, wants an idempotency key and one of the owner's agents),
+// "Server contract"; owner.notify, a write, changes the fixture's settings for the server's
+// life and, like the board, wants an idempotency key and one of the owner's agents; agent.retire
+// takes an own name nothing holds out of the rail for the server's life),
 // /v1/events (a WebSocket that sends the hello frame), /keys (the server's layout, masthead and
 // keys templates from crates/conde-remote/src/web/pages.rs, filled with the fixture) and
 // /join/<anything> (the join page's template from crates/conde-remote/src/web/join.rs in the
@@ -198,6 +199,18 @@ function answer(raw, res) {
 			if (!fx.channels[b.channel]?.members.includes(agent)) return refuse('forbidden', `${agent} is not a member of ${b.channel}`);
 			fx.notify[`${agent} ${b.channel}`] = b.notify;
 			result = { agent, channel: b.channel, notify: b.notify };
+			break;
+		}
+		case 'agent.retire': {
+			const name = b.name?.includes('/') ? b.name : `${fx.OWNER}/${b.name}`;
+			const refuse = (code, message) => json(res, 200, { ok: false, error: { code, message } });
+			if (!r.idempotency_key) return refuse('bad_request', "'agent.retire' needs an idempotency_key (1-200 chars)");
+			if (!name.startsWith(`${fx.OWNER}/`)) return refuse('forbidden', `names are per owner: '${name}' is not in your namespace '${fx.OWNER}'`);
+			const a = fx.rail().agents.find((x) => x.name === name);
+			if (!a) return refuse('not_found', `no agent named '${name}'`);
+			if (a.address) return refuse('forbidden', `${name} is bound to ${a.address}; unbind it first (conde unregister ${b.name}, or conde unpublish on a shared board)`);
+			fx.ownAgents.splice(fx.ownAgents.indexOf(name), 1);
+			result = { name, retired: true };
 			break;
 		}
 		case 'machine.status':

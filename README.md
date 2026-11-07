@@ -604,7 +604,7 @@ once under their own name: `conde register konstantin`. A name nothing holds any
 `conde unregister`, or `conde unpublish` on a shared board) can be retired by the human: `conde
 retire <name> [--board acme]` takes it out of the lists and the directory, keeps its messages
 readable; `conde register <name>` brings it back locally, and `conde publish <name> --board acme`
-on the shared board.
+on the shared board. The board's web page offers the same Retire on the page of an own name nothing holds.
 
 **Boards.** A command without `--board` uses this machine's default board
 for names and channels (`local` unless set with `conde setup --default-board`). The board of

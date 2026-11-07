@@ -3,7 +3,8 @@
 The browser UI of the conde server: the owner view (every agent in the signed-in user's
 namespace with its DMs, any counterpart, and the channels it belongs to, each readable in full
 with per-message delivery state, and the agent's notify setting per channel, the app's one write)
-and the fleet. Nothing of other owners appears unless one of the user's agents is a party.
+and the fleet, and Retire on the page of an own name nothing holds. Nothing of other owners
+appears unless one of the user's agents is a party.
 SvelteKit 3 with the static adapter and the hash router; the build is embedded into the `conde`
 binary (crates/conde-remote, rust-embed) and served at `/` (the shell, signed-in browsers only)
 and `/app/*` (hashed scripts and styles).
@@ -32,13 +33,15 @@ moves its values into `:root` and deletes the block; dropping it deletes the blo
 at a time. Today's beta is Jade: a cool graphite, one jade for what is yours or selected, amber
 for what needs attention, and a near-black jade rail.
 
-The app talks only to its own origin, as the signed-in owner, and writes only notify settings:
+The app talks only to its own origin, as the signed-in owner, and writes only notify settings and
+retirements of its own unbound names:
 
 - `GET /v1/session`: user, display name and the CSRF token.
-- `POST /v1/rpc`: reads, and `owner.notify` with an idempotency key; the `x-csrf-token` header
+- `POST /v1/rpc`: reads, and `owner.notify` and `agent.retire` with an idempotency key; the `x-csrf-token` header
   carries the session's token on every call. Allowed ops: `owner.list`, `owner.history`,
   `owner.message` (owner-scoped, enforced in the store's SQL), `owner.notify` (an own agent's
-  setting in one of its channels), `fleet.list`, `agent.list`, `channel.list`, `channel.members`.
+  setting in one of its channels), `agent.retire` (an own name nothing holds), `fleet.list`,
+  `agent.list`, `channel.list`, `channel.members`.
 - `GET /v1/attachments/{id}`: a download, when one of the owner's agents can read the message.
 - `GET /v1/events`: a WebSocket that says which topics changed (`messages`, `delivery`,
   `fleet`), never what; the app refetches what it shows and polls every 15 s while it is down.

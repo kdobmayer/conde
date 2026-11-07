@@ -22,6 +22,8 @@ const ASTRA = 'kdobmayer/astra';
 const HELPER = 'kdobmayer/dakai-helper';
 const BUILDER = 'kdobmayer/builder';
 const DRIFT = 'kdobmayer/infrastructure-drift-reviewer';
+/** An own name nothing holds any more (unpublished): the agent page offers to retire it. */
+const SPARE = 'kdobmayer/spare-reviewer';
 const KOSZTYA = 'konstantin/kosztya-devops-manager';
 const NUC = 'konstantin/nuc-worker';
 const REVIEW = 'balazs/review-bot';
@@ -204,7 +206,8 @@ export const messages: Message[] = [
 // seq follows creation order above, not date; re-number by date so seq grows with time.
 messages.sort((x, y) => Date.parse(x.date) - Date.parse(y.date)).forEach((x, i) => (x.seq = 18_400 + i * 3));
 
-export const ownAgents = [DESK, ASTRA, HELPER, BUILDER, DRIFT];
+/** The owner's names; the mock's agent.retire takes one out. */
+export const ownAgents = [DESK, ASTRA, HELPER, BUILDER, DRIFT, SPARE];
 export const names = { DESK, ASTRA, HELPER, BUILDER, KOSZTYA, NUC, REVIEW, INFRA, COST };
 export const ids = { feedThread: c3.message_id, dmLatest: d9.message_id, markdown: r1.message_id };
 
@@ -233,7 +236,7 @@ export function visibleTo(agent: string, x: Message): boolean {
 
 /** owner.list, derived from the messages. */
 export function rail(): Rail {
-	const kinds: Record<string, 'claude' | 'codex'> = { [DESK]: 'claude', [ASTRA]: 'codex', [HELPER]: 'claude', [BUILDER]: 'codex', [DRIFT]: 'claude' };
+	const kinds: Record<string, 'claude' | 'codex'> = { [DESK]: 'claude', [ASTRA]: 'codex', [HELPER]: 'claude', [BUILDER]: 'codex', [DRIFT]: 'claude', [SPARE]: 'claude' };
 	return {
 		owner: OWNER,
 		agents: ownAgents.map((name): Rail['agents'][number] => {
@@ -262,7 +265,7 @@ export function rail(): Rail {
 			return {
 				name,
 				kind: kinds[name] ?? null,
-				address: null,
+				address: name === SPARE ? null : `mailbox:mbx-${name.split('/')[1]}@${fleet.agents.find((a) => a.name === name)?.host}`,
 				dms: [...dms.values()].sort((a, b) => b.last_seq - a.last_seq),
 				channels: chs
 			};

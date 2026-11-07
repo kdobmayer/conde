@@ -129,6 +129,7 @@ on_both!(
     the_owner_sees_what_their_agents_can_read_and_nothing_else,
     another_owner_sees_only_their_own_agents,
     a_retired_name_leaves_the_lists_and_keeps_its_history,
+    the_owner_retires_an_unbound_name_in_the_browser,
     the_browser_searches_what_its_agents_can_read,
     the_feed_is_what_the_owners_agents_can_read,
     the_feed_pages_between_exclusive_bounds,
@@ -2036,6 +2037,78 @@ async fn a_retired_name_leaves_the_lists_and_keeps_its_history(d: Arc<Dispatcher
         .await;
     let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
     assert!(names(&rail, "agents").contains(&helper), "{rail}");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The signed-in owner retires an own name nothing holds from the browser, through the same
+/// `agent.retire`: a bound name, another owner's name and an unknown name are refused, and the
+/// retired name leaves owner.list with its history still readable.
+async fn the_owner_retires_an_unbound_name_in_the_browser(d: Arc<Dispatcher>) {
+    let ui = ui(&d).await;
+    let (b, csrf) = ui.browser().await;
+    let c = cast(&ui).await;
+    let retire = |name: &str| {
+        let body = json!({"name": name});
+        async {
+            ui.mutate(&b, &csrf, "agent.retire", body, &conde::util::new_ulid())
+                .await
+        }
+    };
+    let (_, v) = retire("helper").await;
+    assert_eq!(v["error"]["code"], "forbidden", "bound: {v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unbind it first"),
+        "{v}"
+    );
+    ui.op(
+        &c.dv,
+        &c.scout,
+        "agent.unregister",
+        json!({"name": "scout"}),
+    )
+    .await;
+    let (_, v) = retire("david/scout").await;
+    assert_eq!(v["error"]["code"], "forbidden", "not yours: {v}");
+    let (_, v) = retire("nobody").await;
+    assert_eq!(v["error"]["code"], "not_found", "unknown: {v}");
+
+    ui.op(
+        &c.k,
+        "human:kd",
+        "agent.unregister",
+        json!({"name": "helper"}),
+    )
+    .await;
+    let (status, v) = retire("helper").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["result"],
+        json!({"name": format!("{USER}/helper"), "retired": true}),
+        "{v}"
+    );
+    let rail = ui.ok(&b, &csrf, "owner.list", json!({})).await;
+    let names: Vec<&str> = rail["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.contains(&format!("{USER}/helper").as_str()),
+        "{rail}"
+    );
+    let found = ui
+        .ok(
+            &b,
+            &csrf,
+            "owner.search",
+            json!({"pattern": "handoff to worker"}),
+        )
+        .await;
+    assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
     ui.server.shutdown().await.unwrap();
 }
 

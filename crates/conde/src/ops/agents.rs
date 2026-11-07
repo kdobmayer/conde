@@ -222,11 +222,12 @@ pub fn unregister(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({"name": canonical, "was_registered": true, "address": current.to_string()}))
 }
 
-/// Retire one of the owner's names that nothing holds any more (the human owner only): it leaves
-/// the owner's lists and the directory, its history stays readable, and binding it again (a
-/// register, or a publish on a shared board) revives it.
+/// Retire one of the owner's names that nothing holds any more (the human owner only, at the CLI
+/// or signed in in the browser): it leaves the owner's lists and the directory, its history stays
+/// readable, and binding it again (a register, or a publish on a shared board) revives it.
 pub fn retire(ctx: &Ctx, body: &Value) -> OpResult<Value> {
-    if ctx.actor_address()?.kind != Kind::Human {
+    let browser = ctx.p.browser && ctx.actor.is_none();
+    if !browser && ctx.actor_address()?.kind != Kind::Human {
         return Err(forbidden(
             "retiring a name is the human owner's; ask your human",
         ));

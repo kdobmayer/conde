@@ -61,6 +61,11 @@ after the peering. The policy permits only AADSSHLoginForLinux extension resourc
 run-command permissions; the policy itself does not block operators who hold them. The policy matches the extension's
 type, not its publisher (an accepted residual).
 
+The trust boundary of the VMs is the subscription: everyone holding Contributor or Owner on it (inherited on
+conde-vm) can run commands on any agent VM and export its OS disk, and so read the person's Claude login and GitHub
+token; neither the custom role nor the extension policy sees those calls. This is accepted: the agent VMs stay in the
+shared subscription.
+
 The token audience is the Entra app conde-machines (infra/terraform/entra.tf): its application id is the server's
 `CONDE_MACHINES_AUDIENCE` and every deployment's `condeResource` (`terraform output machines` in infra/terraform).
 A deployment by hand passes the same value: `-p condeResource=<CONDE_MACHINES_AUDIENCE>`. The template has no

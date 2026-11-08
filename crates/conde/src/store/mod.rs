@@ -1332,6 +1332,17 @@ pub trait Tx {
     fn machines_without_principal(&self) -> StoreResult<Vec<MachineRow>>;
     /// Sets the VM identity's object id unless one is set.
     fn machine_set_principal(&self, user_id: i64, principal_id: &str) -> StoreResult<()>;
+    /// The minted records without a VM identity, not deleting (hosts joined by hand, adopted).
+    fn machines_minted_without_principal(&self) -> StoreResult<Vec<MachineRow>>;
+    /// Sets the VM identity's object id on the record `(user_id, host_id, minted_at)` while it is
+    /// still that record without one and not deleting; whether it did.
+    fn machine_backfill_principal(
+        &self,
+        user_id: i64,
+        host_id: &str,
+        minted_at: &str,
+        principal_id: &str,
+    ) -> StoreResult<bool>;
     /// Sets `minted_at` unless set; whether this call set it (the one mint).
     fn machine_claim_mint(&self, user_id: i64, at: &str) -> StoreResult<bool>;
     /// Replaces the live relay with `relay_id` of `flow` in `starting`, its `start` pending.

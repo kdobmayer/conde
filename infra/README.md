@@ -23,7 +23,8 @@ Env of the server: PORT, RUST_LOG, DATABASE_URL (secret), CONDE_ADMIN_KEY (secre
 CONDE_BOARD_NAME, CONDE_MIN_PROTO (1 until every host runs v2, then 2: `min_proto`), ENTRA_TENANT_ID,
 ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET (secret), ENTRA_REDIRECT_URI, and the agent machines' CONDE_MACHINES_SUBSCRIPTION,
 CONDE_MACHINES_RESOURCE_GROUP, CONDE_MACHINES_TEMPLATE_SPEC, CONDE_MACHINES_AUDIENCE (the conde-machines app's client
-id), CONDE_MACHINES_IDENTITY_CLIENT_ID (id-conde's), as docs/DEPLOY.md "Agent machines" says.
+id), CONDE_MACHINES_IDENTITY_CLIENT_ID (id-conde's), and, when `connect_audience` is set, CONDE_MACHINES_CONNECT_AUDIENCE
+(Praxia's praxia-agent-connect app id, for `/v1/machines/whois`), as docs/DEPLOY.md "Agent machines" says.
 
 Slack DMs for people (off unless both are set): CONDE_SLACK_BOT_TOKEN (secret; a bot token with `chat:write`) and
 CONDE_SLACK_NOTIFY, comma-separated `<owner>=<Slack member id>` (owner = the board user name, as in `owner/name`;

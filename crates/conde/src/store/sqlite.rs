@@ -2788,6 +2788,31 @@ impl Tx for SqliteTx<'_> {
         Ok(())
     }
 
+    fn machines_minted_without_principal(&self) -> StoreResult<Vec<MachineRow>> {
+        self.rows(
+            &format!(
+                "{MACHINE_SELECT} WHERE principal_id IS NULL AND minted_at IS NOT NULL
+                 AND deleting_at IS NULL ORDER BY user_id"
+            ),
+            [],
+            machine_row,
+        )
+    }
+
+    fn machine_backfill_principal(
+        &self,
+        user_id: i64,
+        host_id: &str,
+        minted_at: &str,
+        principal_id: &str,
+    ) -> StoreResult<bool> {
+        Ok(self.exec(
+            "UPDATE machines SET principal_id = ?4 WHERE user_id = ?1 AND host_id = ?2
+             AND minted_at = ?3 AND principal_id IS NULL AND deleting_at IS NULL",
+            params![user_id, host_id, minted_at, principal_id],
+        )? > 0)
+    }
+
     fn machine_claim_mint(&self, user_id: i64, at: &str) -> StoreResult<bool> {
         Ok(self.exec(
             "UPDATE machines SET minted_at = ?2 WHERE user_id = ?1 AND minted_at IS NULL",

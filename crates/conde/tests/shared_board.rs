@@ -102,6 +102,7 @@ on_both!(
     a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired,
     the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply_marks_ready,
     a_service_reads_a_persons_presence_and_nothing_else,
+    presence_always_carries_the_principal_key,
     the_relay_ops_take_no_bearer_key_a_services_included,
     a_service_reads_the_sign_in_its_machine_reported,
     a_signed_in_report_clears_an_expired_sign_in_and_the_person_is_reachable_again,
@@ -2531,8 +2532,8 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
     assert_eq!(r["result"]["state"], "ready", "{r}");
 }
 
-/// A service reads a person's presence by board user name or sign-in email: the state and the
-/// sign-in flows, nothing else. A person without a machine, or no such person, is not found; a
+/// A service reads a person's presence by board user name or sign-in email: the state, the
+/// sign-in flows and the VM identity, nothing else. A person without a machine, or no such person, is not found; a
 /// key without a service row is refused; `machine.status` takes no bearer request, a service's
 /// included.
 async fn a_service_reads_a_persons_presence_and_nothing_else(d: Arc<Dispatcher>) {
@@ -2550,7 +2551,8 @@ async fn a_service_reads_a_persons_presence_and_nothing_else(d: Arc<Dispatcher>)
         assert_eq!(r["ok"], true, "{to}: {r}");
         assert_eq!(
             r["result"],
-            json!({"state": "up", "sign_in": {"claude": "expired", "github": "ok", "codex": "ok"}}),
+            json!({"state": "up", "sign_in": {"claude": "expired", "github": "ok", "codex": "ok"},
+                   "principal_id": null}),
             "{to}"
         );
     }
@@ -2575,6 +2577,24 @@ async fn a_service_reads_a_persons_presence_and_nothing_else(d: Arc<Dispatcher>)
         let r = n.s.rpc(key, None, "machine.status", body, None).await;
         assert_eq!(r["error"]["code"], "forbidden", "{r}");
     }
+}
+
+/// `service.presence` always carries `principal_id`: an explicit null while the record has no VM
+/// identity, the identity once it has one. A missing key would read as an older board.
+async fn presence_always_carries_the_principal_key(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
+    let r = n.presence("levente-szabo").await;
+    let result = r["result"].as_object().unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(result.get("principal_id"), Some(&Value::Null), "{r}");
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| Ok(t.machine_set_principal(uid, "oid-vm-l")?))
+            .unwrap()
+    })
+    .await;
+    let r = n.presence("Levente.Szabo@dakai.io").await;
+    assert_eq!(r["result"]["principal_id"], "oid-vm-l", "{r}");
 }
 
 /// `service.presence` answers the sign-in flows the machine's bridge reported, as stored.

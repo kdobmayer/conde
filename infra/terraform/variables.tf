@@ -62,3 +62,10 @@ variable "moved_to" {
   type    = string
   default = ""
 }
+
+# CONDE_MACHINES_CONNECT_AUDIENCE: the application id of the service app whose audience the agent VMs' connect proofs
+# carry (Praxia's praxia-agent-connect, an output of native-infra terraform/praxia). Empty = no /v1/machines/whois.
+variable "connect_audience" {
+  type    = string
+  default = ""
+}

@@ -612,6 +612,21 @@ pub enum Enrolled {
     },
 }
 
+/// The machine record whose VM identity a connect proof carries, with its owner
+/// ([`WebStore::machine_whois`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineOwner {
+    pub user: String,
+    /// The owner's sign-in email, when the board has one.
+    pub email: Option<String>,
+    pub disabled: bool,
+    pub deleting: bool,
+    pub host_id: String,
+    pub principal_id: String,
+    /// `machine.status`'s state word.
+    pub state: String,
+}
+
 /// A disabled user's machine record the disable route removes ([`WebStore::machine_deleting`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineCleanup {
@@ -804,6 +819,28 @@ pub trait WebStore: Send + Sync {
     }
     /// The VM identity's object id as Azure reads it, stored unless one is. Default: refused.
     fn machine_set_principal(&self, _user_id: i64, _principal_id: &str) -> WebResult<()> {
+        Err(WebStoreError("this board has no machines".into()))
+    }
+    /// The record whose VM identity is `principal_id`, with its owner and state; never writes.
+    /// Default: none.
+    fn machine_whois(&self, _principal_id: &str) -> WebResult<Option<MachineOwner>> {
+        Ok(None)
+    }
+    /// `(user_id, host_id, minted_at)` of every minted record without a VM identity, not
+    /// deleting: hosts joined by hand and adopted. Default: none.
+    fn machines_minted_without_principal(&self) -> WebResult<Vec<(i64, String, String)>> {
+        Ok(Vec::new())
+    }
+    /// Sets `principal_id` on exactly the record selected as `(user_id, host_id, minted_at)`
+    /// while it is still minted then, without a principal and not deleting; whether it did.
+    /// Default: refused.
+    fn machine_backfill_principal(
+        &self,
+        _user_id: i64,
+        _host_id: &str,
+        _minted_at: &str,
+        _principal_id: &str,
+    ) -> WebResult<bool> {
         Err(WebStoreError("this board has no machines".into()))
     }
     /// The one mint of the record whose VM identity is `principal_id`, in one transaction: the
@@ -1097,6 +1134,9 @@ pub fn router(state: WebState) -> Router {
     let mut routes = Router::new();
     if state.machines().is_some() {
         routes = routes.route("/v1/machines/enrol", post(machines::enrol));
+    }
+    if state.machines().is_some_and(|m| m.connect_tokens.is_some()) {
+        routes = routes.route("/v1/machines/whois", post(machines::whois));
     }
     routes
         .route("/auth/login", get(auth::login))

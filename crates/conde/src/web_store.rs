@@ -8,7 +8,7 @@ use std::sync::Arc;
 use conde_remote::web::{
     AdminKey, AdminUser, BindUser, CliCode, CliIssued, CreateUser, Enrolled, Enrollment, HostKey,
     Identity, Invite, Invited, JOIN_TTL, JoinRecord, KeyDisplay, Limits, LoginTxn, MachineCleanup,
-    Minted, RealmAccount, ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore,
+    MachineOwner, Minted, RealmAccount, ServiceRow, SessionRecord, SetWelcome, WebResult, WebStore,
     WebStoreError, WebUser, Welcome, WelcomePatch,
 };
 use serde::Serialize;
@@ -650,6 +650,49 @@ impl WebStore for WebBoard {
 
     fn machine_set_principal(&self, user_id: i64, principal_id: &str) -> WebResult<()> {
         self.write(|t| Ok(t.machine_set_principal(user_id, principal_id)?))
+    }
+
+    fn machine_whois(&self, principal_id: &str) -> WebResult<Option<MachineOwner>> {
+        let now_ms = self.d.now_ms();
+        self.write(|t| {
+            let Some(m) = t.machine_by_principal(principal_id)? else {
+                return Ok(None);
+            };
+            let Some(owner) = t.user_by_id(m.user_id)? else {
+                return Ok(None);
+            };
+            let state = crate::ops::machines::state_of(t, &m, now_ms)
+                .map_err(|e| anyhow::anyhow!("the machine's state: {e}"))?;
+            Ok(Some(MachineOwner {
+                user: owner.name,
+                email: owner.email,
+                disabled: owner.disabled,
+                deleting: m.deleting_at.is_some(),
+                host_id: m.host_id,
+                principal_id: principal_id.to_string(),
+                state: state.to_string(),
+            }))
+        })
+    }
+
+    fn machines_minted_without_principal(&self) -> WebResult<Vec<(i64, String, String)>> {
+        let rows = self.read(|t| t.machines_minted_without_principal())?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|m| Some((m.user_id, m.host_id, m.minted_at?)))
+            .collect())
+    }
+
+    fn machine_backfill_principal(
+        &self,
+        user_id: i64,
+        host_id: &str,
+        minted_at: &str,
+        principal_id: &str,
+    ) -> WebResult<bool> {
+        self.write(|t| {
+            Ok(t.machine_backfill_principal(user_id, host_id, minted_at, principal_id)?)
+        })
     }
 
     fn machine_enrol(&self, principal_id: &str, token_digest: &str) -> WebResult<Enrolled> {

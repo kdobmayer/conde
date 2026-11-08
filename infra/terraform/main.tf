@@ -306,13 +306,13 @@ locals {
 # The agent VMs: deployed by the server as id-conde into conde-vm from the template spec (infra/agent-vm), their
 # tokens checked against conde-machines (entra.tf). The VM size stays the server's default (CONDE_MACHINES_VM_SIZE).
 locals {
-  machines_env = {
+  machines_env = merge({
     CONDE_MACHINES_SUBSCRIPTION       = local.subscription_id
     CONDE_MACHINES_RESOURCE_GROUP     = "conde-vm"
     CONDE_MACHINES_TEMPLATE_SPEC      = "/subscriptions/${local.subscription_id}/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2"
     CONDE_MACHINES_AUDIENCE           = azuread_application.machines.client_id
     CONDE_MACHINES_IDENTITY_CLIENT_ID = azurerm_user_assigned_identity.app.client_id
-  }
+  }, var.connect_audience != "" ? { CONDE_MACHINES_CONNECT_AUDIENCE = var.connect_audience } : {})
 }
 
 # ── The server: public HTTPS + WebSocket ingress, one replica until the app is proven stateless ────────────────────

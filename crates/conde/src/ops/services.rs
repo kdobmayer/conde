@@ -56,9 +56,9 @@ fn person(ctx: &Ctx, to: &str) -> OpResult<UserRow> {
         .ok_or_else(|| not_found(format!("no user {to} on this board")))
 }
 
-/// `service.presence {to}`: the person's machine as `{state, sign_in}` (`machine.status`'s state
-/// word and the reported sign-in flows), nothing else; `not_found` without a machine. Reads the
-/// store only, never Azure.
+/// `service.presence {to}`: the person's machine as `{state, sign_in, principal_id}`
+/// (`machine.status`'s state word, the reported sign-in flows and the VM identity, null until
+/// known), nothing else; `not_found` without a machine. Reads the store only, never Azure.
 pub fn presence(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     sender(ctx)?;
     let user = person(ctx, str_param(body, "to")?.trim())?;
@@ -69,6 +69,8 @@ pub fn presence(ctx: &Ctx, body: &Value) -> OpResult<Value> {
     Ok(json!({
         "state": machines::state_of(ctx.db, &m, ctx.now_ms)?,
         "sign_in": machines::sign_in_json(&m),
+        // always present: a reader takes a missing key for an older board, a null for none
+        "principal_id": m.principal_id,
     }))
 }
 

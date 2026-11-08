@@ -165,6 +165,20 @@ on_both!(
     enrol_answers_403_for_a_disabled_owner_or_a_deleting_record,
     enrol_is_rate_limited_with_retry_after,
     enrol_answers_503_while_the_tenant_keys_cannot_be_read_and_mints_once_they_can,
+    a_connect_proof_never_enrols_and_answers_whois_once_the_record_has_its_principal,
+    whois_answers_the_owner_of_an_enrolled_machine_and_changes_nothing,
+    whois_and_enrol_refuse_each_others_audience,
+    whois_binds_an_adopted_pilots_principal_after_the_vm_read_matches,
+    whois_binds_nothing_when_the_pilots_vm_read_differs_or_finds_no_vm,
+    whois_never_gives_a_record_with_a_principal_another_one,
+    whois_answers_403_for_a_disabled_owner_or_a_deleting_record,
+    whois_refuses_invalid_tokens_with_401_before_the_bucket,
+    whois_is_rate_limited_per_vm_identity,
+    the_key_floor_holds_back_a_second_fetch_with_503_on_whois_and_on_enrol,
+    concurrent_cold_requests_while_the_keys_fail_fetch_once_per_floor_and_recover,
+    a_failed_refresh_keeps_the_cached_keys_and_fetches_once_per_floor,
+    after_a_forged_kid_a_real_rollover_verifies_once_the_floor_passed,
+    whois_never_binds_a_record_replaced_during_the_vm_read,
     a_relay_start_reaches_the_bridge_and_its_events_reach_the_page,
     a_relay_code_is_sent_once_and_cleared,
     a_start_committed_between_read_and_send_survives_the_clear,
@@ -3378,6 +3392,8 @@ async fn the_owner_sets_notify_for_their_own_agents_only(d: Arc<Dispatcher>) {
 // --- agent machines -----------------------------------------------------------------------------
 
 const AUDIENCE: &str = "52f027a8-e3d6-4fb8-996c-d2221d38b6d6";
+/// A service's application id that VMs' connect proofs carry as their `aud`.
+const CONNECT_AUDIENCE: &str = "9a41c3d0-7e2b-4f5a-8c6d-0b1e2f3a4c5d";
 const TEMPLATE_SPEC: &str = "/subscriptions/sub-1/resourceGroups/conde-vm/providers/Microsoft.Resources/templateSpecs/agent-vm/versions/2";
 const DEPLOYMENTS: &str =
     "/subscriptions/sub-1/resourceGroups/conde-vm/providers/Microsoft.Resources/deployments/";
@@ -3599,9 +3615,38 @@ async fn ui_machines_with(
         arm_url: arm.url.clone(),
         login_url: web::LOGIN_URL.into(),
         poll_every: Duration::from_millis(20),
+        connect_audience: Some(CONNECT_AUDIENCE.into()),
+        keys_floor: Duration::ZERO,
     };
     (
         ui_full(d, ServerConfig::default(), Some(machines), tweak).await,
+        arm,
+    )
+}
+
+/// As [`ui_machines`], with the tenant keys fetched at most once per `floor`.
+async fn ui_machines_floor(d: &Arc<Dispatcher>, floor: Duration) -> (Ui, Arc<Arm>) {
+    let arm = fake_arm().await;
+    let (identity, _) = identity_endpoint(200, 3600).await;
+    let machines = web::MachinesConfig {
+        subscription: "sub-1".into(),
+        resource_group: "conde-vm".into(),
+        template_spec: TEMPLATE_SPEC.into(),
+        audience: AUDIENCE.into(),
+        vm_size: web::DEFAULT_VM_SIZE.into(),
+        identity: web::ManagedIdentity {
+            endpoint: identity,
+            header: "identity-header".into(),
+            client_id: "id-conde".into(),
+        },
+        arm_url: arm.url.clone(),
+        login_url: web::LOGIN_URL.into(),
+        poll_every: Duration::from_millis(20),
+        connect_audience: Some(CONNECT_AUDIENCE.into()),
+        keys_floor: floor,
+    };
+    (
+        ui_full(d, ServerConfig::default(), Some(machines), |_| {}).await,
         arm,
     )
 }
@@ -6182,5 +6227,573 @@ async fn a_removal_whose_record_was_replaced_meanwhile_sends_no_cancel_and_no_de
         (None, None),
         "nothing written"
     );
+    ui.server.shutdown().await.unwrap();
+}
+
+// --- whois: a VM's connect proof ---------------------------------------------------------------
+
+/// The claims of a v1 token of the VM identity `oid` for the connect audience.
+fn connect_claims(oid: &str) -> Value {
+    let mut c = vm_claims(oid);
+    c["aud"] = json!(CONNECT_AUDIENCE);
+    c
+}
+
+impl Ui {
+    fn connect_token(&self, oid: &str) -> String {
+        self.env.idp.sign(&connect_claims(oid))
+    }
+
+    /// `POST /v1/machines/whois` with `bearer` when given.
+    async fn whois(&self, bearer: Option<&str>) -> (StatusCode, HeaderMap, Value) {
+        let mut r = reqwest::Client::new().post(self.env.url("/v1/machines/whois"));
+        if let Some(token) = bearer {
+            r = r.bearer_auth(token);
+        }
+        let r = r.send().await.unwrap();
+        let (status, headers) = (r.status(), r.headers().clone());
+        (status, headers, r.json().await.unwrap_or(Value::Null))
+    }
+
+    /// A minted record of `user` on `host` whose VM identity is `oid`.
+    async fn machine_with_principal(&self, user: &str, host: &str, oid: &str) {
+        self.machine(user, host, "owner-oid").await;
+        let uid = self.user_id(user).await;
+        let oid = oid.to_string();
+        self.write(move |t| Ok(t.machine_set_principal(uid, &oid)?))
+            .await;
+    }
+
+    async fn credentials_of(&self, host: &str) -> usize {
+        let (d, host) = (self.d.clone(), host.to_string());
+        blocking(move || d.with_conn(|t| t.credentials()).unwrap())
+            .await
+            .iter()
+            .filter(|k| k.host == host)
+            .count()
+    }
+}
+
+fn retry_after(headers: &HeaderMap) -> u64 {
+    headers[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// The connect proof Praxia receives cannot mint: the enrol route refuses its audience with 401
+/// and the unminted record keeps no key; the same proof answers whois once the record has its
+/// principal (enrol's own VM read stores it), and whois never reads or binds an unminted record.
+async fn a_connect_proof_never_enrols_and_answers_whois_once_the_record_has_its_principal(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-k"))]);
+    let _browser = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let proof = ui.connect_token("oid-vm-k");
+    let (status, _, v) = ui.enrol(Some(&proof)).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("invalid_token")),
+        "{v}"
+    );
+    let m = ui.record(USER).await.unwrap();
+    assert_eq!((m.minted_at, m.principal_id), (None, None));
+    assert_eq!(ui.credentials_of(&host).await, 0, "no key");
+    // whois never binds an unminted record: that is enrol's
+    let (status, _, v) = ui.whois(Some(&proof)).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("unknown_machine")),
+        "{v}"
+    );
+    assert!(
+        arm.vm_reads().is_empty(),
+        "no VM read for an unminted record"
+    );
+    assert_eq!(ui.record(USER).await.unwrap().principal_id, None);
+    let uid = ui.user_id(USER).await;
+    ui.write(move |t| Ok(t.machine_set_principal(uid, "oid-vm-k")?))
+        .await;
+    let (status, headers, v) = ui.whois(Some(&proof)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(v["principal_id"], "oid-vm-k");
+    let m = ui.record(USER).await.unwrap();
+    assert_eq!(m.minted_at, None, "still unminted");
+    assert_eq!(ui.credentials_of(&host).await, 0, "still no key");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// An enrolled machine's connect proof answers its owner, email, host, principal and state, and
+/// nothing on the record or its keys changes.
+async fn whois_answers_the_owner_of_an_enrolled_machine_and_changes_nothing(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-k"))]);
+    let _browser = ui.browser_landing().await;
+    ui.record_when(USER, |m| m.requested_at.is_some()).await;
+    let (status, _, v) = ui.enrol(Some(&ui.vm_token("oid-vm-k"))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let before = ui.record(USER).await.unwrap();
+    let keys = ui.credentials_of(&host).await;
+    let d2 = d.clone();
+    let email = blocking(move || {
+        d2.with_conn(|t| t.user_by_name(USER))
+            .unwrap()
+            .unwrap()
+            .email
+    })
+    .await
+    .expect("the signed-in user has an email");
+    let (status, headers, v) = ui.whois(Some(&ui.connect_token("oid-vm-k"))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        v,
+        json!({"v": 1, "user": USER, "email": email, "host_id": host,
+               "principal_id": "oid-vm-k", "state": "up"})
+    );
+    let after = ui.record(USER).await.unwrap();
+    assert_eq!(
+        (after.minted_at, after.principal_id),
+        (before.minted_at, before.principal_id)
+    );
+    assert_eq!(
+        ui.credentials_of(&host).await,
+        keys,
+        "no key minted or revoked"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A conde-machines token is no connect proof (whois: 401), and a connect proof is no enrol token
+/// (enrol: 401), for the same enrolled machine.
+async fn whois_and_enrol_refuse_each_others_audience(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    ui.machine_with_principal(USER, &host, "oid-vm-k").await;
+    let (status, _, v) = ui.whois(Some(&ui.vm_token("oid-vm-k"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("invalid_token")),
+        "{v}"
+    );
+    let (status, _, v) = ui.enrol(Some(&ui.connect_token("oid-vm-k"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("invalid_token")),
+        "{v}"
+    );
+    assert_eq!(
+        ui.whois(Some(&ui.connect_token("oid-vm-k"))).await.0,
+        StatusCode::OK
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// An adopted pilot (minted, no principal): the VM read of its host answers the proof's `oid`, so
+/// whois binds it and answers 200; `minted_at` and the keys stay as they were.
+async fn whois_binds_an_adopted_pilots_principal_after_the_vm_read_matches(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    ui.machine(USER, &host, "owner-oid").await;
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-p"))]);
+    let before = ui.record(USER).await.unwrap();
+    let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-vm-p"))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["user"].as_str(), v["host_id"].as_str()),
+        (Some(USER), Some(host.as_str()))
+    );
+    let after = ui.record(USER).await.unwrap();
+    assert_eq!(after.principal_id.as_deref(), Some("oid-vm-p"));
+    assert_eq!(after.minted_at, before.minted_at);
+    assert_eq!(ui.credentials_of(&host).await, 0, "no key minted");
+    let reads = arm.vm_reads();
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].path, vm_path(&host));
+    // bound now: the next call reads no VM
+    assert_eq!(
+        ui.whois(Some(&ui.connect_token("oid-vm-p"))).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(arm.vm_reads().len(), 1);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The pilot's VM answers another principal, or no VM: 404 `unknown_machine`, nothing written.
+async fn whois_binds_nothing_when_the_pilots_vm_read_differs_or_finds_no_vm(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    ui.machine(USER, &host, "owner-oid").await;
+    arm.vm(
+        &host,
+        vec![
+            (200, vm_with_identity("oid-other")),
+            (
+                404,
+                json!({"error": {"code": "ResourceNotFound", "message": "no such VM"}}),
+            ),
+        ],
+    );
+    for round in ["another principal", "no VM"] {
+        let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-vm-p"))).await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::NOT_FOUND, Some("unknown_machine")),
+            "{round}: {v}"
+        );
+        assert_eq!(ui.record(USER).await.unwrap().principal_id, None, "{round}");
+    }
+    assert_eq!(arm.vm_reads().len(), 2);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A record that has its principal is never given another, even when its host's VM now answers
+/// the new `oid` (a host name reused by another VM): 404, the principal unchanged.
+async fn whois_never_gives_a_record_with_a_principal_another_one(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    ui.machine_with_principal(USER, &host, "oid-vm-a").await;
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-b"))]);
+    let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-vm-b"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("unknown_machine")),
+        "{v}"
+    );
+    assert_eq!(
+        ui.record(USER).await.unwrap().principal_id.as_deref(),
+        Some("oid-vm-a")
+    );
+    assert!(
+        arm.vm_reads().is_empty(),
+        "a record with a principal is never read"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A record being deleted, or one whose owner is disabled, is 403 `disabled`.
+async fn whois_answers_403_for_a_disabled_owner_or_a_deleting_record(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines(&d).await;
+    let lev = "levente-szabo";
+    ui.machine_with_principal(USER, &format!("vm-agent-{USER}"), "oid-vm-k")
+        .await;
+    ui.machine_with_principal(lev, "vm-agent-levente-szabo", "oid-vm-l")
+        .await;
+    let uid = ui.user_id(USER).await;
+    ui.write(move |t| Ok(t.machine_set_deleting(uid, "2026-11-08T09:00:00.000Z")?))
+        .await;
+    let store = ui.env.store.clone();
+    blocking(move || store.set_disabled(lev, true).unwrap()).await;
+    for (user, oid) in [(USER, "oid-vm-k"), (lev, "oid-vm-l")] {
+        let (status, _, v) = ui.whois(Some(&ui.connect_token(oid))).await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::FORBIDDEN, Some("disabled")),
+            "{user}: {v}"
+        );
+    }
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A bad signature, another tenant, an expired or not yet valid token is 401 `invalid_token`, and
+/// spends no bucket: a burst of them past the budget leaves a valid proof its answer.
+async fn whois_refuses_invalid_tokens_with_401_before_the_bucket(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines_with(&d, |c| c.limits.machine_whois_per_min = 2).await;
+    ui.machine_with_principal(USER, &format!("vm-agent-{USER}"), "oid-vm-k")
+        .await;
+    let idp = &ui.env.idp;
+    let with = |change: &dyn Fn(&mut Value)| {
+        let mut c = connect_claims("oid-vm-k");
+        change(&mut c);
+        idp.sign(&c)
+    };
+    let now = unix_now();
+    let spoiled = {
+        *idp.spoil.lock().unwrap() = Spoil::Signature;
+        let t = ui.connect_token("oid-vm-k");
+        *idp.spoil.lock().unwrap() = Spoil::None;
+        t
+    };
+    let cases = [
+        ("a bad signature", spoiled),
+        (
+            "another tenant",
+            with(&|c| c["tid"] = json!("72f988bf-86f1-41af-91ab-2d7cd011db47")),
+        ),
+        ("expired", with(&|c| c["exp"] = json!(now - 1))),
+        ("not valid yet", with(&|c| c["nbf"] = json!(now + 600))),
+    ];
+    for _ in 0..2 {
+        for (case, token) in &cases {
+            let (status, _, v) = ui.whois(Some(token)).await;
+            assert_eq!(
+                (status, v["error"].as_str()),
+                (StatusCode::UNAUTHORIZED, Some("invalid_token")),
+                "{case}: {v}"
+            );
+        }
+    }
+    let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-vm-k"))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "eight invalid calls spent nothing: {v}"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Past its budget one VM identity is 429 `rate_limited` with `Retry-After`; another identity
+/// still gets its answer.
+async fn whois_is_rate_limited_per_vm_identity(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines_with(&d, |c| c.limits.machine_whois_per_min = 2).await;
+    ui.machine_with_principal(USER, &format!("vm-agent-{USER}"), "oid-vm-k")
+        .await;
+    for _ in 0..2 {
+        assert_eq!(
+            ui.whois(Some(&ui.connect_token("oid-vm-k"))).await.0,
+            StatusCode::OK
+        );
+    }
+    let (status, headers, v) = ui.whois(Some(&ui.connect_token("oid-vm-k"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        "{v}"
+    );
+    assert!((1..=60).contains(&retry_after(&headers)));
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-stranger"))).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "another identity has its own budget: {v}"
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+const FLOOR: Duration = Duration::from_secs(2);
+
+/// The first fetch of each validator is its cold one; a second one inside the floor (an unknown
+/// `kid`) is held back and answered 503 `unavailable` with `Retry-After`, never 401, on whois and
+/// on enrol alike, each validator on its own cache. Past the floor an unknown `kid` is fetched
+/// once more and then 401.
+async fn the_key_floor_holds_back_a_second_fetch_with_503_on_whois_and_on_enrol(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, _arm) = ui_machines_floor(&d, FLOOR).await;
+    let reads = || ui.env.idp.v1_keys_reads.load(Ordering::SeqCst);
+    let forged_proof = signed(&connect_claims("oid-vm-k"), "RS256", "kid-x", 1);
+    let forged_vm = signed(&vm_claims("oid-vm-k"), "RS256", "kid-x", 1);
+    for round in 0..2 {
+        let (status, headers, v) = ui.whois(Some(&forged_proof)).await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable")),
+            "whois {round}: {v}"
+        );
+        assert!((1..=2).contains(&retry_after(&headers)), "whois {round}");
+        assert_eq!(reads(), 1, "whois {round}: the cold fetch only");
+    }
+    for round in 0..2 {
+        let (status, headers, v) = ui.enrol(Some(&forged_vm)).await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable")),
+            "enrol {round}: {v}"
+        );
+        assert!((1..=2).contains(&retry_after(&headers)), "enrol {round}");
+        assert_eq!(reads(), 2, "enrol {round}: its own cold fetch only");
+    }
+    tokio::time::sleep(FLOOR).await;
+    let (status, _, v) = ui.whois(Some(&forged_proof)).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("invalid_token")),
+        "{v}"
+    );
+    assert_eq!(reads(), 3);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// While the key endpoint fails, concurrent cold requests make one attempt per floor and all get
+/// 503; once it answers again, the first request past the floor verifies.
+async fn concurrent_cold_requests_while_the_keys_fail_fetch_once_per_floor_and_recover(
+    d: Arc<Dispatcher>,
+) {
+    let (ui, _arm) = ui_machines_floor(&d, FLOOR).await;
+    ui.machine_with_principal(USER, &format!("vm-agent-{USER}"), "oid-vm-k")
+        .await;
+    let idp = &ui.env.idp;
+    let reads = || idp.v1_keys_reads.load(Ordering::SeqCst);
+    idp.v1_keys_status.store(503, Ordering::SeqCst);
+    let proof = ui.connect_token("oid-vm-k");
+    let calls = futures_util::future::join_all((0..5).map(|_| ui.whois(Some(&proof)))).await;
+    for (status, headers, v) in &calls {
+        assert_eq!(*status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert!((1..=2).contains(&retry_after(headers)));
+    }
+    assert_eq!(reads(), 1, "one attempt for five cold requests");
+    idp.v1_keys_status.store(0, Ordering::SeqCst);
+    assert_eq!(
+        ui.whois(Some(&proof)).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(reads(), 1, "the floor holds after a failed attempt");
+    tokio::time::sleep(FLOOR).await;
+    let (status, _, v) = ui.whois(Some(&proof)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(reads(), 2);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A refresh that fails keeps the cached keys: known keys still verify, and failed refreshes
+/// are attempted once per floor.
+async fn a_failed_refresh_keeps_the_cached_keys_and_fetches_once_per_floor(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines_floor(&d, FLOOR).await;
+    ui.machine_with_principal(USER, &format!("vm-agent-{USER}"), "oid-vm-k")
+        .await;
+    let idp = &ui.env.idp;
+    let reads = || idp.v1_keys_reads.load(Ordering::SeqCst);
+    let proof = ui.connect_token("oid-vm-k");
+    assert_eq!(ui.whois(Some(&proof)).await.0, StatusCode::OK);
+    assert_eq!(reads(), 1);
+    tokio::time::sleep(FLOOR).await;
+    idp.v1_keys_status.store(503, Ordering::SeqCst);
+    let forged = signed(&connect_claims("oid-vm-k"), "RS256", "kid-x", 1);
+    for round in 0..2 {
+        let (status, _, v) = ui.whois(Some(&forged)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{round}: {v}");
+        assert_eq!(reads(), 2, "{round}: one failed attempt in the window");
+        let (status, _, v) = ui.whois(Some(&proof)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{round}: the cached key still verifies: {v}"
+        );
+    }
+    tokio::time::sleep(FLOOR).await;
+    assert_eq!(
+        ui.whois(Some(&forged)).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(reads(), 3, "the next window's one attempt");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A forged `kid` just before the tenant rotates its key: the real token with the new `kid` is
+/// 503 (retried, never final) inside the floor, and 200 once the floor passed.
+async fn after_a_forged_kid_a_real_rollover_verifies_once_the_floor_passed(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines_floor(&d, FLOOR).await;
+    ui.machine_with_principal(USER, &format!("vm-agent-{USER}"), "oid-vm-k")
+        .await;
+    let idp = &ui.env.idp;
+    let reads = || idp.v1_keys_reads.load(Ordering::SeqCst);
+    assert_eq!(
+        ui.whois(Some(&ui.connect_token("oid-vm-k"))).await.0,
+        StatusCode::OK
+    );
+    tokio::time::sleep(FLOOR).await;
+    let forged = signed(&connect_claims("oid-vm-k"), "RS256", "kid-x", 1);
+    assert_eq!(ui.whois(Some(&forged)).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(reads(), 2);
+    idp.rotate();
+    let real = ui.connect_token("oid-vm-k");
+    let (status, headers, v) = ui.whois(Some(&real)).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable")),
+        "{v}"
+    );
+    assert!((1..=2).contains(&retry_after(&headers)));
+    assert_eq!(reads(), 2);
+    tokio::time::sleep(FLOOR).await;
+    let (status, _, v) = ui.whois(Some(&real)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(reads(), 3);
+    ui.server.shutdown().await.unwrap();
+}
+
+/// The selected pilot record is deleted while its VM read is out: set up again by a deployment
+/// (`minted_at` NULL), adopted again (another `minted_at`), or not at all. The old proof is bound
+/// to none of them and answers 404; an ordinary pilot afterwards still binds.
+async fn whois_never_binds_a_record_replaced_during_the_vm_read(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-p"))]);
+    // the replacement's `minted_at`: a new deployment, a new adoption, or no replacement
+    let rounds: [(&str, Option<Option<&'static str>>); 3] = [
+        ("deployed again", Some(None)),
+        ("adopted again", Some(Some("2026-11-08T10:00:00.000Z"))),
+        ("deleted", None),
+    ];
+    for (round, replacement) in rounds {
+        ui.machine(USER, &host, "owner-oid").await;
+        let uid = ui.user_id(USER).await;
+        arm.delay("GET", &vm_path(&host), Duration::from_millis(1500));
+        let call = {
+            let token = ui.connect_token("oid-vm-p");
+            let url = ui.env.url("/v1/machines/whois");
+            tokio::spawn(async move {
+                let r = reqwest::Client::new()
+                    .post(url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .unwrap();
+                (r.status(), r.json::<Value>().await.unwrap_or(Value::Null))
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let h = host.clone();
+        ui.write(move |t| {
+            t.machine_set_deleting(uid, "2026-11-08T09:00:00.000Z")?;
+            t.machine_delete(uid, &h, "2026-11-08T09:00:00.000Z")?;
+            if let Some(minted_at) = replacement {
+                t.machine_request(&conde::store::NewMachine {
+                    user_id: uid,
+                    host_id: &h,
+                    owner_object_id: "owner-oid",
+                    vm_size: web::DEFAULT_VM_SIZE,
+                    minted_at,
+                })?;
+            }
+            Ok(())
+        })
+        .await;
+        let (status, v) = call.await.unwrap();
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::NOT_FOUND, Some("unknown_machine")),
+            "{round}: {v}"
+        );
+        match (ui.record(USER).await, replacement) {
+            (None, None) => {}
+            (Some(m), Some(minted_at)) => {
+                assert_eq!(
+                    m.principal_id, None,
+                    "{round}: the replacement is unchanged"
+                );
+                assert_eq!(m.minted_at.as_deref(), minted_at, "{round}");
+                let h = host.clone();
+                ui.write(move |t| {
+                    t.machine_set_deleting(uid, "2026-11-08T11:00:00.000Z")?;
+                    t.machine_delete(uid, &h, "2026-11-08T11:00:00.000Z")?;
+                    Ok(())
+                })
+                .await;
+            }
+            (m, _) => panic!("{round}: {m:?}"),
+        }
+    }
+    arm.delay("GET", &vm_path(&host), Duration::ZERO);
+    ui.machine(USER, &host, "owner-oid").await;
+    let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-vm-p"))).await;
+    assert_eq!(status, StatusCode::OK, "an ordinary pilot still binds: {v}");
     ui.server.shutdown().await.unwrap();
 }

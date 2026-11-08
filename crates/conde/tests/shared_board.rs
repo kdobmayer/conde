@@ -2619,8 +2619,8 @@ async fn a_service_reads_the_sign_in_its_machine_reported(d: Arc<Dispatcher>) {
     assert_eq!(last["result"]["sign_in"], flows, "{last}");
     assert_eq!(
         last["result"].as_object().unwrap().len(),
-        2,
-        "state and sign_in only: {last}"
+        3,
+        "state, sign_in and principal_id only: {last}"
     );
 }
 

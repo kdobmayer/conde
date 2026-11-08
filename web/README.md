@@ -6,8 +6,9 @@ with per-message delivery state, and the agent's notify setting per channel, the
 and the fleet, and Retire on the page of an own name nothing holds. Nothing of other owners
 appears unless one of the user's agents is a party.
 SvelteKit 3 with the static adapter and the hash router; the build is embedded into the `conde`
-binary (crates/conde-remote, rust-embed) and served at `/` (the shell, signed-in browsers only)
-and `/app/*` (hashed scripts and styles).
+binary (crates/conde-remote, rust-embed) and served at `/` (the shell, signed-in browsers only;
+a signed-out `/` is a page that signs in and returns to the view in the URL fragment) and
+`/app/*` (hashed scripts and styles).
 
     npm ci
     npm run check    # svelte-kit sync + svelte-check, warnings fail

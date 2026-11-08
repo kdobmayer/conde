@@ -168,7 +168,7 @@ const THEME_JS: &str = r#"(function(){var r=document.documentElement,m=matchMedi
 const MENU_JS: &str = r#"(function(){var K='conde.theme',U='conde.ui',r=document.documentElement,q=matchMedia('(prefers-color-scheme: light)'),b=document.querySelectorAll('[data-theme-choice]'),u=document.querySelectorAll('[data-ui-choice]'),n=document.querySelectorAll('[data-ui-note]'),d=document.querySelectorAll('details.menu-panel'),t,w;function g(k){try{return localStorage.getItem(k)}catch(e){return null}}function l(){t=g(K);t=t==='light'||t==='dark'?t:'system';w=g(U)==='beta'?'beta':'current'}function p(){r.dataset.theme=t==='system'?(q.matches?'light':'dark'):t;if(w==='beta')r.dataset.ui=w;else delete r.dataset.ui;b.forEach(function(x){x.setAttribute('aria-checked',String(x.dataset.themeChoice===t))});u.forEach(function(x){x.setAttribute('aria-checked',String(x.dataset.uiChoice===w))});n.forEach(function(x){x.hidden=w!=='beta'})}function o(k,v,z){try{if(v===z)localStorage.removeItem(k);else localStorage.setItem(k,v)}catch(e){}}b.forEach(function(x){x.addEventListener('click',function(){t=x.dataset.themeChoice;o(K,t,'system');p()})});u.forEach(function(x){x.addEventListener('click',function(){w=x.dataset.uiChoice;o(U,w,'current');p()})});addEventListener('click',function(e){d.forEach(function(m){if(m.open&&!m.contains(e.target))m.open=false})});addEventListener('keydown',function(e){if(e.key==='Escape')d.forEach(function(m){m.open=false})});q.addEventListener('change',p);addEventListener('storage',function(){l();p()});l();p()})()"#;
 
 /// The CSP source of an inline script.
-fn script_hash(js: &str) -> String {
+pub(crate) fn script_hash(js: &str) -> String {
     let digest = Sha256::digest(js.as_bytes());
     format!(
         "'sha256-{}'",

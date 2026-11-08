@@ -1,7 +1,8 @@
 //! The web app: the static Svelte build embedded in the binary (`/` and `/app/*`) and the
 //! browser API under `/v1`, every route authenticated by the Entra browser session.
 //!
-//! - `GET /`: the app shell for a signed-in browser, else a redirect to sign in.
+//! - `GET /`: the app shell for a signed-in browser, else a page that signs in and returns to
+//!   the view in the URL fragment.
 //! - `GET /app/{*path}`: the app's scripts and styles (no data, no session needed).
 //! - `GET /v1/session`: who is signed in, and the CSRF token the app sends back.
 //! - `POST /v1/rpc` (without a bearer token): one request for the signed-in owner (owner-scoped
@@ -23,7 +24,7 @@ use axum::extract::ws::{
 };
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum_extra::extract::cookie::CookieJar;
 use base64::Engine as _;
@@ -331,11 +332,57 @@ fn content_disposition(filename: &str) -> HeaderValue {
     .unwrap_or_else(|_| HeaderValue::from_static("attachment"))
 }
 
-/// `GET /`: the app shell when signed in, else sign-in (which returns here).
+/// Signs in and returns to the app's view, which is in the URL fragment the server never sees
+/// (the app's own `signIn()` in web/src/lib/api.ts; web/test/sign-in.test.mjs runs both).
+const SIGN_IN_JS: &str =
+    r#"location.replace('/auth/login?next='+encodeURIComponent('/'+location.hash))"#;
+
+/// A signed-out `GET /`: a page that signs in and returns to the view in the fragment; without
+/// a script it signs in for `/`.
+fn sign_in_page() -> Response {
+    static CSP: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "default-src 'none'; script-src {}; form-action 'none'; frame-ancestors 'none'; \
+             base-uri 'none'",
+            super::pages::script_hash(SIGN_IN_JS)
+        )
+    });
+    let body = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>conde</title>\
+         <script>{SIGN_IN_JS}</script>\
+         <noscript><meta http-equiv=\"refresh\" content=\"0; url=/auth/login?next=%2F\"></noscript>\
+         </head><body><noscript><p><a href=\"/auth/login?next=%2F\">Sign in</a></p></noscript>\
+         </body></html>"
+    );
+    let csp = HeaderValue::from_str(&CSP).expect("an ASCII policy");
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            no_store(),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+            (
+                header::REFERRER_POLICY,
+                HeaderValue::from_static("same-origin"),
+            ),
+            (header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")),
+            (header::CONTENT_SECURITY_POLICY, csp),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// `GET /`: the app shell when signed in, else sign-in (which returns to the view).
 async fn root(State(app): State<AppState>, headers: HeaderMap) -> Response {
     match session::current(&app.web, &CookieJar::from_headers(&headers)).await {
         Ok(Some(_)) => {}
-        Ok(None) => return ([no_store()], Redirect::to("/auth/login?next=%2F")).into_response(),
+        Ok(None) => return sign_in_page(),
         Err(e) => return e.into_response(),
     }
     let body = match Assets::get("index.html") {

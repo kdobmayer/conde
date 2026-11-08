@@ -368,14 +368,74 @@ impl Ui {
 
 // --- the app shell ------------------------------------------------------------------------------
 
+/// The inline script of a page and its CSP source.
+fn inline_script(page: &str) -> (&str, String) {
+    let script = page
+        .split("<script>")
+        .nth(1)
+        .and_then(|s| s.split("</script>").next())
+        .expect("an inline script");
+    let hash = STANDARD.encode(sha2::Sha256::digest(script.as_bytes()));
+    (script, format!("'sha256-{hash}'"))
+}
+
+/// The last Location of a redirect chain from `url`, fragment included (reqwest drops it).
+async fn last_hop(b: &Browser, url: &str) -> String {
+    let mut at = reqwest::Url::parse(url).unwrap();
+    let mut last = String::new();
+    for _ in 0..10 {
+        let r = b.step.get(at.clone()).send().await.unwrap();
+        let Some(loc) = r.headers().get(header::LOCATION) else {
+            return last;
+        };
+        last = loc.to_str().unwrap().to_string();
+        at = at.join(&last).unwrap();
+    }
+    panic!("too many redirects from {url}");
+}
+
 async fn the_root_serves_the_app_to_a_signed_in_browser_only(d: Arc<Dispatcher>) {
     let ui = ui(&d).await;
     let b = Browser::new();
+    // Signed out, `/` is a page that signs in with the view in the URL fragment, which never
+    // reaches the server; without a script it signs in for `/`.
     let r = b.step.get(ui.env.url("/")).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::SEE_OTHER);
-    assert_eq!(r.headers()[header::LOCATION], "/auth/login?next=%2F");
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers()[header::CONTENT_TYPE],
+        "text/html; charset=utf-8"
+    );
     assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store");
-    // Sign-in returns to the app.
+    assert_eq!(r.headers()[header::X_FRAME_OPTIONS], "DENY");
+    let csp = r.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let page = r.text().await.unwrap();
+    let (script, hash) = inline_script(&page);
+    assert_eq!(
+        script,
+        "location.replace('/auth/login?next='+encodeURIComponent('/'+location.hash))"
+    );
+    assert_eq!(
+        csp,
+        format!(
+            "default-src 'none'; script-src {hash}; form-action 'none'; frame-ancestors 'none'; \
+             base-uri 'none'"
+        )
+    );
+    assert!(
+        page.contains(
+            r#"<noscript><meta http-equiv="refresh" content="0; url=/auth/login?next=%2F"></noscript>"#
+        ),
+        "{page}"
+    );
+    // Sign-in from `/#/machine` returns to that view, from `/` to the app.
+    assert_eq!(
+        last_hop(&b, &ui.env.url("/auth/login?next=%2F%23%2Fmachine")).await,
+        "/#/machine"
+    );
+    assert_eq!(last_hop(&b, &ui.env.url("/auth/login?next=%2F")).await, "/");
     let (status, at, body) = b.get(&ui.env.url("/")).await;
     assert_eq!(
         (status, at.as_str()),

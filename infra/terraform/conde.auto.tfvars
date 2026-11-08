@@ -1,4 +1,4 @@
-image        = "crnative.azurecr.io/conde@sha256:196cae029e87190e5bebdc55b233e43bee38c212015c87d02a98ff9560d5f60c"
+image        = "crnative.azurecr.io/conde@sha256:5796ce0b8cf983ca255776290cf661d43b02f51107e4d286fa58c7871dc2e6ba"
 target_port  = 8080
 replicas     = 2    # two replicas since 2026-10-09: a single replica loss was a nine-minute outage
 dump_enabled = true # until the dakai move to GCP is done (docs/CUTOVER-dakai.md); false removes the dump job and share

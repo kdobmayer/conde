@@ -43,6 +43,8 @@ jobs:
       # as it goes; no azure/login, whose az session ran out an hour into a build.
       PKR_VAR_client_id: ${{ vars.AZURE_CLIENT_ID }}
       PKR_VAR_tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      # Praxia's praxia-agent-connect application id (not secret); unset: the image's VMs never connect to Praxia.
+      PKR_VAR_connect_resource: ${{ vars.PRAXIA_CONNECT_RESOURCE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -30,6 +30,8 @@ page and the relay) is in conde itself.
 | `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde update` (a failure only logs) and `conde setup`; agent.env with a pinned session id and the board; `claude-agent.service` enabled |
 | `claude-agent.service` | root-owned in `/etc/systemd/user`, enabled for the agent user | tmux around the root-owned `/usr/local/lib/agentvm/run-agent`; `Restart=always` |
 | `run-agent` | agent user, in tmux | waits for the Claude sign-in; first start `--session-id <uuid>`, every later start `--resume <uuid>` with a recovery prompt; never `--continue` |
+| `praxia-connect` (+ `.service`, `.timer`) | agent user; the service is the only runner, started once by first boot, by its timer every 10 min until connected, and by `praxia-connect --again` | the agent's Praxia token: the VM identity's token for Praxia's connect audience (`CONNECT_RESOURCE`, never conde-machines) to Praxia's `POST /api/agent/connect`, which asks conde's `POST /v1/machines/whois` whose machine it is; the answer's token installed as the user-scope `praxia` MCP entry; a running signed-in session restarted to load it; the marker `~/.config/agentvm/praxia-connected` last. Nothing without `PRAXIA_URL` and `CONNECT_RESOURCE` in `/etc/agentvm.conf` |
+| `test/praxia-connect.sh` | a lane VM (any Linux user with systemd), never an agent VM | the tests of `praxia-connect` and its units under a real user manager against local fakes: install, faults recovered by the timer, a reconnect asked from inside the agent's unit, overlap, no reconnect without a request, start-up, unset `PRAXIA_URL`, a hanging Praxia |
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped), then publishes it on agent.env's `BOARD` with `--take` |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
@@ -83,7 +85,16 @@ default.
    dying before it saved the key and the enrolled marker), every retry gets 409 `already_minted`, which is final.
    The recovery is a hand join of that VM (`conde login` on it as the agent user, then first boot without the mint,
    the steps `pilot-join.sh` runs); it never means clearing the live record or deleting the VM.
-3. `claude-agent.service` starts and waits for the Claude sign-in (the page relays it).
+3. Before the agent starts, one Praxia connect (`praxia-connect.service`, each request bounded by
+   `--connect-timeout 10 --max-time 60`) and its retry timer, enabled and started. A connect that succeeded gives
+   the first session the Praxia tools; one that failed (Praxia down, no Praxia person yet) is retried every ten
+   minutes, and its success restarts the running session (it resumes) so the session loads the entry. The agent
+   never waits for Praxia. Then `claude-agent.service` starts and waits for the Claude sign-in (the page relays it).
+   A reconnect (after the person revoked the token on Praxia's Claude access page, or to rotate it) is
+   `praxia-connect --again`, as the agent user, from a shell or by the agent itself: it writes the request flag and
+   starts the service, which does the work outside the agent's session. Without that request a connected VM never
+   mints again. The token is in `claude mcp add`'s arguments for that one call, readable by any process on the VM
+   meanwhile: inside the trust boundary below, and any process on the VM can get the VM's identity token anyway.
 4. Once signed in, Claude starts under the pinned session id with remote control on; the SessionStart hook
    registers the name and publishes it on the board (`--take`: the person's name moves to this VM); every later
    start publishes again, a no-op. A failed publish is logged in `~/.config/agentvm/hook.log` and the session
@@ -200,6 +211,20 @@ systemctl --user daemon-reload && systemctl --user enable --now claude-agent && 
 An `agent.env` written before the hook published has no `BOARD` line; without it the hook logs
 `no BOARD in agent.env: not published`. With the new hook in place, as the agent user:
 `grep -q '^BOARD=' ~/.config/agentvm/agent.env || echo BOARD=dakai >> ~/.config/agentvm/agent.env`.
+
+## Existing VMs: the Praxia connection (once per VM, on Krisztián's release)
+
+A VM made before the image carried `praxia-connect` gets it once, by `az vm run-command invoke` (root): the script
+into `/usr/local/lib/agentvm/` (0755) and its two units into `/etc/systemd/user/` (0644), as the image installs them;
+`PRAXIA_URL=https://praxia.nativeai.space` and `CONNECT_RESOURCE=<praxia-agent-connect application id>` appended to
+`/etc/agentvm.conf`; then, as the agent user, the service once and the timer enabled and started:
+
+```sh
+sudo -u agent -H env XDG_RUNTIME_DIR=/run/user/$(id -u agent) PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin \
+  bash -c 'systemctl --user daemon-reload; systemctl --user start praxia-connect.service; systemctl --user enable --now praxia-connect.timer; systemctl --user is-active praxia-connect.timer'
+```
+
+It prints `active`; `journalctl --user -u praxia-connect` (as the agent) says whether it connected.
 
 ## Watching and steering the agent (power users)
 

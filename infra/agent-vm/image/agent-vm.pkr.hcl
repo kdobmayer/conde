@@ -66,6 +66,12 @@ variable "allowed_ip" {
   }
 }
 
+variable "connect_resource" {
+  type        = string
+  default     = ""
+  description = "Praxia's praxia-agent-connect application id (/etc/agentvm.conf CONNECT_RESOURCE); empty: the VMs never connect to Praxia"
+}
+
 variable "build_vm_size" {
   type    = string
   default = "Standard_D2as_v5"
@@ -126,14 +132,18 @@ build {
       "${path.root}/../agentvm-signin-check",
       "${path.root}/../agentvm-signin-check.service",
       "${path.root}/../agentvm-signin-check.timer",
+      "${path.root}/../praxia-connect",
+      "${path.root}/../praxia-connect.service",
+      "${path.root}/../praxia-connect.timer",
       "${path.root}/provision.sh",
     ]
     destination = "/tmp/agentvm/"
   }
 
   provisioner "shell" {
-    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E bash '{{ .Path }}'"
-    inline          = ["bash /tmp/agentvm/provision.sh"]
+    execute_command  = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E bash '{{ .Path }}'"
+    environment_vars = ["CONNECT_RESOURCE=${var.connect_resource}"]
+    inline           = ["bash /tmp/agentvm/provision.sh"]
   }
 
   # Generalize last: removes the build user (packer) and the machine's identity, so every VM is new.

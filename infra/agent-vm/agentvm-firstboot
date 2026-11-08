@@ -11,8 +11,9 @@
 #      never in an argument, a file or the log
 #   5. conde update (the image's conde may predate the board's current release; a failure is only logged), then
 #      conde setup, after the enrollment, so the skill names the board and the bridge starts on the new key
-#   6. agent.env with a pinned session id and the board the hook publishes on, and claude-agent.service enabled
-#      (it waits for the Claude sign-in)
+#   6. agent.env with a pinned session id and the board the hook publishes on; one Praxia connect attempt
+#      (praxia-connect.service, bounded by its requests) and its retry timer started; claude-agent.service enabled
+#      (it waits for the Claude sign-in, and does not wait for Praxia)
 #
 # Retried until one 30-minute deadline: network errors and timeouts, 5xx, 404 (the server may not have this
 # VM's identity yet while its deployment finishes), 429 (Retry-After); the metadata service's transient answers
@@ -149,7 +150,12 @@ if [ ! -f "$home/.config/agentvm/agent.env" ]; then
     BOARD "$BOARD" PERMISSION_MODE "$PERMISSION_MODE" WORK_DIR "$home/$WORK_DIR_NAME" \
     | as_agent 'umask 077 && mkdir -p ~/.config/agentvm && cat > ~/.config/agentvm/agent.env'
 fi
-as_agent 'systemctl --user daemon-reload && systemctl --user enable --now claude-agent agentvm-signin-check.timer conde-update.timer'
+as_agent 'systemctl --user daemon-reload'
+# Praxia before the agent starts, so a first attempt that succeeds gives the first session its tools; a failed one
+# is retried by the timer, which `enable` alone would not start until a reboot.
+as_agent 'systemctl --user start praxia-connect.service' || log "the first Praxia connect failed; its timer retries"
+as_agent 'systemctl --user enable --now praxia-connect.timer' || log "the Praxia connect timer did not start"
+as_agent 'systemctl --user enable --now claude-agent agentvm-signin-check.timer conde-update.timer'
 
 date -u +%FT%TZ > "$DONE"
 log "done; the agent starts when the person has signed in to Claude"

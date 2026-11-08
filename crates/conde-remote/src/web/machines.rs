@@ -19,6 +19,8 @@
 //!
 //! The VM joins through `POST /v1/machines/enrol` ([`enrol`]) with its own identity's v1 token for
 //! the conde-machines audience: the host key is minted once per VM identity.
+//! A service the VM shows a connect proof (a token of the same identity for the connect audience)
+//! asks `POST /v1/machines/whois` ([`whois`]) whose machine it is; that proof never enrols.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -59,7 +61,10 @@ const POLLS: u32 = 40;
 /// Entra's sign-in origin; a tenant's v1 signing keys are at `<origin>/<tenant>/discovery/keys`.
 pub const LOGIN_URL: &str = "https://login.microsoftonline.com";
 /// The tenant's signing keys are read again after this long, and at once for an unknown `kid`.
-const KEYS_MAX_AGE: Duration = Duration::from_secs(3600);
+pub const KEYS_MAX_AGE: Duration = Duration::from_secs(3600);
+/// The tenant's signing keys are fetched at most this often, whatever asks and whether the last
+/// fetch failed: a flood of forged tokens never turns into a flood of fetches.
+pub const KEYS_FLOOR: Duration = Duration::from_secs(60);
 /// A pending record's deployment is read at most this often (seconds).
 pub const DEPLOY_CHECK_EVERY: i64 = 30;
 /// The longest Azure error text kept on a record.
@@ -93,6 +98,14 @@ pub struct MachinesConfig {
     pub login_url: String,
     /// The removal's wait between reads ([`POLL_EVERY`]; a test's shorter one otherwise).
     pub poll_every: Duration,
+    /// `CONDE_MACHINES_CONNECT_AUDIENCE`: the application id a VM's connect proof carries as its
+    /// `aud` (a service's app, never conde-machines); `/v1/machines/whois` exists only with it.
+    pub connect_audience: Option<String>,
+    /// The least time between two fetches of the tenant's keys ([`KEYS_FLOOR`]; a test's own
+    /// otherwise).
+    pub keys_floor: Duration,
+    /// How long a fetched key set serves ([`KEYS_MAX_AGE`]; a test's own otherwise).
+    pub keys_max_age: Duration,
 }
 
 /// The server's user-assigned identity as the Container Apps identity endpoint serves it.
@@ -123,7 +136,8 @@ impl MachinesConfig {
 
     /// From `CONDE_MACHINES_SUBSCRIPTION`, `CONDE_MACHINES_RESOURCE_GROUP`,
     /// `CONDE_MACHINES_TEMPLATE_SPEC`, `CONDE_MACHINES_AUDIENCE`,
-    /// `CONDE_MACHINES_IDENTITY_CLIENT_ID` and the optional `CONDE_MACHINES_VM_SIZE`, with the
+    /// `CONDE_MACHINES_IDENTITY_CLIENT_ID` and the optional `CONDE_MACHINES_VM_SIZE` and
+    /// `CONDE_MACHINES_CONNECT_AUDIENCE`, with the
     /// platform's `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`. `Ok(None)` when no `CONDE_MACHINES_*`
     /// is set; an error naming the first missing one when only some are.
     pub fn from_vars(
@@ -159,6 +173,10 @@ impl MachinesConfig {
             )?,
             client_id,
         };
+        let connect_audience = var("CONDE_MACHINES_CONNECT_AUDIENCE");
+        if connect_audience.as_deref() == Some(audience.as_str()) {
+            return Err(ConfigError::ConnectAudience);
+        }
         Ok(Some(MachinesConfig {
             subscription,
             resource_group,
@@ -169,6 +187,9 @@ impl MachinesConfig {
             arm_url: ARM_URL.into(),
             login_url: LOGIN_URL.into(),
             poll_every: POLL_EVERY,
+            connect_audience,
+            keys_floor: KEYS_FLOOR,
+            keys_max_age: KEYS_MAX_AGE,
         }))
     }
 }
@@ -736,28 +757,51 @@ pub(crate) enum TokenError {
     /// The token fails a check: 401, final for the VM.
     #[error("{0}")]
     Invalid(String),
-    /// The tenant's signing keys could not be read: 503, the VM retries.
+    /// The tenant's signing keys could not be read, or the floor held a fetch back: 503 with
+    /// `Retry-After` (the second field, seconds), the VM retries.
     #[error("the tenant's signing keys could not be read: {0}")]
-    Keys(String),
+    Keys(String, u64),
+}
+
+/// The tenant's cached key set and when a fetch last started, failed ones included.
+#[derive(Default)]
+struct KeyCache {
+    set: Option<(CoreJsonWebKeySet, std::time::Instant)>,
+    attempt: Option<std::time::Instant>,
+}
+
+/// Whole seconds, rounded up, at least 1: a `Retry-After`.
+fn whole_secs(d: Duration) -> u64 {
+    (d.as_secs() + u64::from(d.subsec_nanos() > 0)).max(1)
 }
 
 fn invalid(why: impl Into<String>) -> TokenError {
     TokenError::Invalid(why.into())
 }
 
-/// The check of an agent VM's Entra token: a v1 access token of the tenant for the
-/// conde-machines audience, signed with one of the tenant's v1 signing keys (RS256).
+/// The check of an agent VM's Entra token: a v1 access token of the tenant for one audience
+/// (conde-machines for enrol, the connect audience for whois), signed with one of the tenant's v1
+/// signing keys (RS256).
 pub(crate) struct VmTokens {
     http: reqwest::Client,
     keys_url: String,
     issuer: String,
     tenant: String,
     audience: String,
-    keys: tokio::sync::Mutex<Option<(CoreJsonWebKeySet, std::time::Instant)>>,
+    keys: tokio::sync::Mutex<KeyCache>,
+    /// The least time between two fetches of the key set, whatever asks.
+    floor: Duration,
+    max_age: Duration,
 }
 
 impl VmTokens {
-    pub fn new(login_url: &str, tenant: &str, audience: &str) -> VmTokens {
+    pub fn new(
+        login_url: &str,
+        tenant: &str,
+        audience: &str,
+        floor: Duration,
+        max_age: Duration,
+    ) -> VmTokens {
         VmTokens {
             http: super::auth::http_client(HTTP_TIMEOUT),
             keys_url: format!(
@@ -767,34 +811,51 @@ impl VmTokens {
             issuer: format!("https://sts.windows.net/{tenant}/"),
             tenant: tenant.to_string(),
             audience: audience.to_string(),
-            keys: tokio::sync::Mutex::new(None),
+            keys: tokio::sync::Mutex::new(KeyCache::default()),
+            floor,
+            max_age,
         }
     }
 
     /// The tenant's key set, read when none is cached, the cached one is older than
-    /// [`KEYS_MAX_AGE`], or `refresh`.
+    /// [`KEYS_MAX_AGE`], or `refresh`; a read starts at most once per floor, and a failed one
+    /// keeps the cached set. Concurrent callers wait on the cache's lock, so they share a read.
     async fn key_set(&self, refresh: bool) -> Result<CoreJsonWebKeySet, TokenError> {
-        let mut cached = self.keys.lock().await;
-        if let Some((set, at)) = cached.as_ref()
+        let mut cache = self.keys.lock().await;
+        if let Some((set, at)) = cache.set.as_ref()
             && !refresh
-            && at.elapsed() < KEYS_MAX_AGE
+            && at.elapsed() < self.max_age
         {
             return Ok(set.clone());
         }
+        if let Some(at) = cache.attempt
+            && at.elapsed() < self.floor
+        {
+            let left = self.floor - at.elapsed();
+            return Err(TokenError::Keys(
+                "a read started less than the floor ago".into(),
+                whole_secs(left),
+            ));
+        }
+        cache.attempt = Some(std::time::Instant::now());
+        let wait = whole_secs(self.floor);
         let response = self
             .http
             .get(&self.keys_url)
             .send()
             .await
-            .map_err(|e| TokenError::Keys(e.to_string()))?;
+            .map_err(|e| TokenError::Keys(e.to_string(), wait))?;
         if !response.status().is_success() {
-            return Err(TokenError::Keys(format!("answered {}", response.status())));
+            return Err(TokenError::Keys(
+                format!("answered {}", response.status()),
+                wait,
+            ));
         }
         let set: CoreJsonWebKeySet = response
             .json()
             .await
-            .map_err(|e| TokenError::Keys(format!("not a key set: {e}")))?;
-        *cached = Some((set.clone(), std::time::Instant::now()));
+            .map_err(|e| TokenError::Keys(format!("not a key set: {e}"), wait))?;
+        cache.set = Some((set.clone(), std::time::Instant::now()));
         Ok(set)
     }
 
@@ -853,7 +914,10 @@ impl VmTokens {
             _ => false,
         };
         if !audience {
-            return Err(invalid("the audience is not conde-machines"));
+            return Err(invalid(format!(
+                "the audience is not this route's ({})",
+                self.audience
+            )));
         }
         let exp = claims["exp"]
             .as_i64()
@@ -878,13 +942,24 @@ pub(crate) struct Machines {
     pub config: MachinesConfig,
     pub azure: Azure,
     pub tokens: VmTokens,
+    /// The check of a VM's connect proof (`whois`), when a connect audience is configured; its
+    /// own key cache and floor.
+    pub connect_tokens: Option<VmTokens>,
+    /// Held by the one adopted pass that may run at a time ([`bind_adopted`]).
+    adopted_pass: tokio::sync::Mutex<()>,
 }
 
 impl Machines {
     pub fn new(config: MachinesConfig, tenant: &str) -> Machines {
+        let (floor, max_age) = (config.keys_floor, config.keys_max_age);
         Machines {
             azure: Azure::new(config.identity.clone()),
-            tokens: VmTokens::new(&config.login_url, tenant, &config.audience),
+            tokens: VmTokens::new(&config.login_url, tenant, &config.audience, floor, max_age),
+            connect_tokens: config
+                .connect_audience
+                .as_deref()
+                .map(|aud| VmTokens::new(&config.login_url, tenant, aud, floor, max_age)),
+            adopted_pass: tokio::sync::Mutex::new(()),
             config,
         }
     }
@@ -900,6 +975,29 @@ fn answer(status: StatusCode, body: Value) -> Response {
 
 fn refused(status: StatusCode, error: &str, message: &str) -> Response {
     answer(status, json!({"error": error, "message": message}))
+}
+
+fn with_retry_after(mut r: Response, wait: u64) -> Response {
+    if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
+        r.headers_mut().insert(header::RETRY_AFTER, v);
+    }
+    r
+}
+
+/// 503 `unavailable` with the wait of a [`TokenError::Keys`].
+fn unavailable(e: &TokenError) -> Response {
+    let wait = match e {
+        TokenError::Keys(_, wait) => *wait,
+        TokenError::Invalid(_) => 1,
+    };
+    with_retry_after(
+        refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "the tenant's signing keys could not be read; retry",
+        ),
+        wait,
+    )
 }
 
 /// Before an enrol looks its identity up again: every record still without a VM identity has its
@@ -977,13 +1075,9 @@ pub(crate) async fn enrol(
                 "the token is not a valid machine token of this board's tenant",
             );
         }
-        Err(e @ TokenError::Keys(_)) => {
+        Err(e @ TokenError::Keys(..)) => {
             tracing::warn!(error = %e, "machine enrol not checked");
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "unavailable",
-                "the tenant's signing keys could not be read; retry",
-            );
+            return unavailable(&e);
         }
     };
     let key = super::keys::new_host_key();
@@ -1065,6 +1159,155 @@ pub(crate) async fn enrol(
             "name": format!("{user}/vm.agent"),
         }),
     )
+}
+
+/// One pass over the minted records without a VM identity (hosts joined by hand and adopted):
+/// each record's VM is read, and the one whose identity is `oid` is bound, on exactly the record
+/// selected before the read. One pass at a time: any tenant identity can get a connect proof,
+/// so a miss that finds a pass running returns at once (`false`) instead of reading every
+/// pilot's VM again. Whether a pass ran.
+async fn bind_adopted(state: &WebState, machines: &Machines, oid: &str) -> bool {
+    let Ok(_pass) = machines.adopted_pass.try_lock() else {
+        tracing::info!(%oid, "an adopted pass is running: none started");
+        return false;
+    };
+    let adopted = match state.store(|s| s.machines_minted_without_principal()).await {
+        Ok(adopted) => adopted,
+        Err(e) => {
+            tracing::error!(error = %e, "the adopted machines were not read");
+            return false;
+        }
+    };
+    for (user_id, host, minted_at) in adopted {
+        if !plain_name(&host) {
+            tracing::warn!(
+                user_id,
+                "an adopted host is not a plain name: its VM is not read"
+            );
+            continue;
+        }
+        match machines.azure.vm_principal(&machines.config, &host).await {
+            Ok(Some(principal)) if principal == oid => {
+                let (h, o) = (host.clone(), oid.to_string());
+                match state
+                    .store(move |s| s.machine_backfill_principal(user_id, &h, &minted_at, &o))
+                    .await
+                {
+                    Ok(true) => return true,
+                    Ok(false) => {
+                        tracing::info!(%host, %oid, "not bound here: the record was replaced or bound meanwhile");
+                        return true;
+                    }
+                    Err(e) => tracing::error!(%host, error = %e, "the VM identity was not stored"),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(%host, error = %e, "the VM was not read"),
+        }
+    }
+    true
+}
+
+/// `POST /v1/machines/whois` with a VM's connect proof as the bearer: a token of its identity
+/// for the connect audience (`CONDE_MACHINES_CONNECT_AUDIENCE`), never conde-machines, so the
+/// service it is shown to cannot enrol with it. The token is checked before the per-`oid`
+/// bucket; nothing is minted. 200 `{v, user, email, host_id, principal_id, state}`, 401
+/// `invalid_token`, 404 `unknown_machine`, 403 `disabled` (owner disabled or record deleting),
+/// 429 `rate_limited`, 503 `unavailable` (with `Retry-After`). Logs the status and the `oid`,
+/// never the token or the email.
+pub(crate) async fn whois(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    let Some(machines) = state.machines().cloned() else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            "unknown_machine",
+            "this board has no agent machines",
+        );
+    };
+    let Some(tokens) = machines.connect_tokens.as_ref() else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            "unknown_machine",
+            "this board has no agent machines",
+        );
+    };
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let checked = match bearer {
+        Some(token) => tokens.check(token.trim(), state.now()).await,
+        None => Err(invalid("no bearer token")),
+    };
+    let oid = match checked {
+        Ok(oid) => oid,
+        Err(TokenError::Invalid(why)) => {
+            tracing::info!(status = 401, %why, "whois");
+            return refused(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "the token is not a valid connect proof of this board's tenant",
+            );
+        }
+        Err(e @ TokenError::Keys(..)) => {
+            tracing::warn!(status = 503, error = %e, "whois");
+            return unavailable(&e);
+        }
+    };
+    if let Err(wait) = state.0.limits.machine_whois(&oid) {
+        tracing::info!(status = 429, %oid, wait, "whois");
+        return with_retry_after(
+            answer(
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"error": "rate_limited",
+                       "message": format!("too many whois calls for this machine; retry in {wait} s"),
+                       "retry_after": wait}),
+            ),
+            wait,
+        );
+    }
+    let lookup = || {
+        let oid = oid.clone();
+        state.store(move |s| s.machine_whois(&oid))
+    };
+    let mut found = lookup().await;
+    // after a pass, whoever bound the record (this pass or a concurrent one), it is the answer
+    if matches!(found, Ok(None)) && bind_adopted(&state, &machines, &oid).await {
+        found = lookup().await;
+    }
+    match found {
+        Ok(Some(m)) if m.disabled || m.deleting => {
+            tracing::info!(status = 403, %oid, "whois");
+            refused(
+                StatusCode::FORBIDDEN,
+                "disabled",
+                "the machine's owner is disabled on this board, or the machine is being removed",
+            )
+        }
+        Ok(Some(m)) => {
+            tracing::info!(status = 200, %oid, host = %m.host_id, "whois");
+            answer(
+                StatusCode::OK,
+                json!({"v": 1, "user": m.user, "email": m.email, "host_id": m.host_id,
+                       "principal_id": m.principal_id, "state": m.state}),
+            )
+        }
+        Ok(None) => {
+            tracing::info!(status = 404, %oid, "whois");
+            refused(
+                StatusCode::NOT_FOUND,
+                "unknown_machine",
+                "no machine of this board has this identity",
+            )
+        }
+        Err(e) => {
+            tracing::error!(status = 500, %oid, error = %e, "whois");
+            refused(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "the lookup failed",
+            )
+        }
+    }
 }
 
 /// Runs one browser request as `user` on a blocking thread.
@@ -1168,6 +1411,58 @@ pub(crate) async fn refresh(state: &WebState, user_id: i64) {
 
 #[cfg(test)]
 mod tests {
+    /// The connect audience is optional and alone enables nothing; the floor is a minute.
+    #[test]
+    fn the_connect_audience_is_read_when_set() {
+        let vars = |connect: Option<&'static str>| {
+            move |k: &str| match k {
+                "CONDE_MACHINES_CONNECT_AUDIENCE" => connect.map(str::to_string),
+                "IDENTITY_ENDPOINT" | "IDENTITY_HEADER" => Some("x".into()),
+                k if k.starts_with("CONDE_MACHINES_") && k != "CONDE_MACHINES_VM_SIZE" => {
+                    Some(format!("{k}-value"))
+                }
+                _ => None,
+            }
+        };
+        let with = super::MachinesConfig::from_vars(vars(Some("app-id")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(with.connect_audience.as_deref(), Some("app-id"));
+        assert_eq!(with.keys_floor, super::KEYS_FLOOR);
+        let without = super::MachinesConfig::from_vars(vars(None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(without.connect_audience, None);
+        let only = super::MachinesConfig::from_vars(|k: &str| {
+            (k == "CONDE_MACHINES_CONNECT_AUDIENCE").then(|| "app-id".to_string())
+        })
+        .unwrap();
+        assert!(
+            only.is_none(),
+            "the connect audience alone sets up no machines"
+        );
+    }
+
+    /// The connect audience is never conde-machines: a proof shown to a service could then enrol.
+    #[test]
+    fn a_connect_audience_equal_to_conde_machines_is_refused() {
+        let e = super::MachinesConfig::from_vars(|k: &str| match k {
+            "CONDE_MACHINES_CONNECT_AUDIENCE" | "CONDE_MACHINES_AUDIENCE" => {
+                Some("same-app".into())
+            }
+            "IDENTITY_ENDPOINT" | "IDENTITY_HEADER" => Some("x".into()),
+            k if k.starts_with("CONDE_MACHINES_") && k != "CONDE_MACHINES_VM_SIZE" => {
+                Some(format!("{k}-value"))
+            }
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("CONDE_MACHINES_CONNECT_AUDIENCE"),
+            "{e}"
+        );
+    }
+
     /// A removal's URL carries the host id as one plain path segment or not at all.
     #[test]
     fn a_removal_names_only_a_plain_vm() {

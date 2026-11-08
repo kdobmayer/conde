@@ -219,7 +219,11 @@ variables, all set or none (some set: the server refuses to start and names the 
 - `CONDE_MACHINES_IDENTITY_CLIENT_ID`: the client id of the server's user-assigned identity (id-conde), which
   deploys the VMs.
 
-`CONDE_MACHINES_VM_SIZE` is optional (default `Standard_B2as_v2`). The server gets its Azure token from the
+`CONDE_MACHINES_VM_SIZE` is optional (default `Standard_B2as_v2`). `CONDE_MACHINES_CONNECT_AUDIENCE` is optional: the
+application id of a service's Entra app (on dakai, Praxia's `praxia-agent-connect`; Terraform variable
+`connect_audience`) whose audience the VMs' connect proofs carry; without it there is no `POST /v1/machines/whois`.
+It must differ from `CONDE_MACHINES_AUDIENCE` (the server refuses to start, and the Terraform refuses to plan,
+otherwise): a proof shown to the service could then enrol. The server gets its Azure token from the
 managed identity endpoint Container Apps provides (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`); without it the machines
 variables are refused. The Terraform sets all five on ca-conde (`machines_env` in infra/terraform/main.tf). The
 startup log line `web surface enabled` shows the configuration, without the identity header.
@@ -239,13 +243,27 @@ the stored state, so it learns of a failed deployment only after the person's pa
 The VM joins by itself at first boot: it presents its own identity's Entra token (v1, audience
 `CONDE_MACHINES_AUDIENCE`) to `POST /v1/machines/enrol` and gets its host key, once per VM identity. The server
 checks the token's signature against the tenant's v1 signing keys (`https://login.microsoftonline.com/<tenant>/discovery/keys`,
-cached for an hour and read again for an unknown key id), its issuer `https://sts.windows.net/<tenant>/`, its tenant,
+cached for an hour and read again for an unknown key id; a read starts at most once a minute, failed ones included,
+and a token whose key is not in hand meanwhile is 503 `unavailable` with `Retry-After`, never 401), its issuer `https://sts.windows.net/<tenant>/`, its tenant,
 audience and lifetime, and maps its `oid` to the machine record; while no record has that identity it reads the
 pending records' VMs from Azure for their identity's `principalId` (the VM's own retries drive this). Answers: 401
 `invalid_token` (final), 404 `unknown_machine` (the VM retries), 403 `disabled`, 409 `already_minted` (a second
 call changes nothing), 429 `rate_limited` with `Retry-After` (30 calls a minute per address), 503 `unavailable`
 while the tenant's keys cannot be read. The mint revokes any earlier live key of the VM's host and disconnects its
 bridge.
+
+A service the VM connects to (Praxia) learns whose machine it is from `POST /v1/machines/whois`, with the VM's
+connect proof as the bearer: a token of the same VM identity for `CONDE_MACHINES_CONNECT_AUDIENCE`, which the enrol
+route refuses (its audience is not conde-machines), so the service cannot enrol with what it was shown. The token is
+checked as above, then counted against 30 calls a minute per VM identity (invalid tokens count nothing). Answers:
+200 `{v, user, email, host_id, principal_id, state}`, 401 `invalid_token`, 404 `unknown_machine`, 403 `disabled`
+(the owner disabled or the record deleting), 429 `rate_limited`, 503 `unavailable`. Nothing is minted. A record that
+was joined by hand and adopted (minted, without its VM identity) is bound on a whois miss: its VM is read, and only
+when that VM's identity is the token's `oid` is it written, on exactly the record read before the VM (a record
+replaced meanwhile is not); then the identity is looked up once more, whoever bound it. One such pass runs at a
+time, since any identity of the tenant can get a connect proof: a miss while one runs is 404 at once. A host that
+is not one plain name is never read. A record that has its identity never gets another. `service.presence` carries the
+record's `principal_id` (null until known), so the service can tell a replaced machine.
 
 The sign-ins run on the VM from the Machine page (Claude, GitHub, Codex): the page's step is stored in the machine
 record and the VM's bridge connection, on whichever replica it is, sends it on its next poll (the store's wake makes

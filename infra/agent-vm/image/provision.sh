@@ -7,6 +7,8 @@
 #   - updates in place: unattended-upgrades for Ubuntu, the git PPA and gh (no automatic reboot: a reboot would kill
 #     the agent's work in progress; a kernel update waits for a planned one), a daily `conde update`, Claude's own updater
 #   - agentvm-firstboot.service, which joins the board with the VM's identity and starts the agent
+#   - praxia-connect (its service and retry timer, started by first boot): the agent's Praxia token, when the build
+#     gives CONNECT_RESOURCE (Praxia's praxia-agent-connect application id); without it the VM never connects
 set -euo pipefail
 SRC=/tmp/agentvm
 AGENT_USER=agent
@@ -16,8 +18,10 @@ cloud-init status --wait >/dev/null || true   # its apt run holds the lock
 
 install -d -m 0755 /usr/local/lib/agentvm
 install -m 0755 "$SRC/bootstrap.sh" "$SRC/run-agent" "$SRC/conde-register-hook" "$SRC/agentvm-firstboot" \
-  "$SRC/relay-claude" "$SRC/relay-github" "$SRC/relay-codex" "$SRC/agentvm-signin-check" /usr/local/lib/agentvm/
-install -m 0644 "$SRC/claude-agent.service" "$SRC/agentvm-signin-check.service" "$SRC/agentvm-signin-check.timer" /etc/systemd/user/
+  "$SRC/relay-claude" "$SRC/relay-github" "$SRC/relay-codex" "$SRC/agentvm-signin-check" "$SRC/praxia-connect" \
+  /usr/local/lib/agentvm/
+install -m 0644 "$SRC/claude-agent.service" "$SRC/agentvm-signin-check.service" "$SRC/agentvm-signin-check.timer" \
+  "$SRC/praxia-connect.service" "$SRC/praxia-connect.timer" /etc/systemd/user/
 install -m 0755 "$SRC/agentvm" /usr/local/bin/agentvm
 # GITHUB_*: the relay's GitHub device flow. The pilot uses the gh CLI's public OAuth client id until the
 # Dakai OAuth app exists (Krisztián, 5 Nov); switching is this one value.
@@ -26,7 +30,16 @@ AGENT_USER=$AGENT_USER
 CONDE_SERVER_DEFAULT=https://dakai.conde.cloud
 GITHUB_OAUTH_CLIENT_ID=178c6fc778ccc68e1d6a
 GITHUB_OAUTH_SCOPES="repo read:org workflow"
+PRAXIA_URL=https://praxia.nativeai.space
 CONF
+# The application id is not secret; the build passes it (agent-image.yml, the environment's PRAXIA_CONNECT_RESOURCE).
+# First boot sources this file as root: only an application id's shape gets in.
+if [ -n "${CONNECT_RESOURCE:-}" ]; then
+  [[ $CONNECT_RESOURCE =~ ^[0-9a-f-]{36}$ ]] || { echo "CONNECT_RESOURCE is not an application id"; exit 1; }
+  printf 'CONNECT_RESOURCE=%s\n' "$CONNECT_RESOURCE" >> /etc/agentvm.conf
+else
+  echo "warning: no CONNECT_RESOURCE: the VMs of this image never connect to Praxia"
+fi
 
 bash /usr/local/lib/agentvm/bootstrap.sh image
 

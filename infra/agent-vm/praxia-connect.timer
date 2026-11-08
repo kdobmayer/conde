@@ -1,0 +1,10 @@
+# Retries praxia-connect every ten minutes until it connected; after that each run only sees the marker.
+[Unit]
+Description=Agent VM: retry the Praxia connection
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=10min
+
+[Install]
+WantedBy=timers.target

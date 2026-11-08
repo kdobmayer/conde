@@ -146,9 +146,9 @@ joined.
    EOS
    ```
 
-2. **Stage the new VM.** Levente and Oliver (their published `vm.agent` and live keys are still on the old
+2. **Stage the new VM.** Levente and Oliver (their published agent and live keys are still on the old
    short-name host): join the replacement `vm-agent-<owner>` by hand with a live key **before** the release that
-   enables "Set up my agent" on dakai. Setup adopts a live `vm-agent-<owner>` first; while the old published host
+   enables "Set up Praxy" on dakai. Setup adopts a live `vm-agent-<owner>` first; while the old published host
    is the only live one, it adopts that host instead, the record is minted, and the replacement can no longer join
    through the enrol call. The pilot migration's path, removed after both joins (the deployment only for a
    replacement that does not exist yet):
@@ -160,27 +160,34 @@ joined.
    ```
 
    then `./pilot-join.sh <owner>` (the person signs in to conde), `./pilot-join.sh <owner> CODE`.
-   Everyone else: the person's first sign-in to the board, or "Set up my agent" on its Machine page; the server
+   Everyone else: the person's first sign-in to the board, or "Set up Praxy" on its Machine page; the server
    deploys `vm-agent-<owner>` and the VM joins the board by itself at first boot (the enrol call).
 3. **Sign-ins** on the person's Machine page: Claude (they open the link, sign in, and paste the code Claude shows),
    then GitHub and, if they use it, Codex (they type the code the page shows on GitHub's or OpenAI's page). The
    session that starts after the Claude sign-in registers the name and publishes it (the hook, step 4).
-4. **Move the name**: on the old VM, as its user, `conde unpublish vm.agent --board dakai`; then the new VM's next
-   session start takes the name (the hook publishes with `--take`, which also takes it from an old host that has
-   not unpublished). Without restarting a session that is already running, run the hook's publish line once on
-   the new VM as the agent user (over SSH, or the same text through `az vm run-command invoke`):
+4. **Move the name**. The person's agent is `<owner>/praxy`, published from the old VM. First stop and disable
+   the old VM's agent (`systemctl --user disable --now claude-agent` as its user), so no later start there can take
+   the name back, and note its mailbox's evidence there as the agent: the newest message id from
+   `conde sent --board dakai` and its channels (`conde channels --board dakai`, `conde members <#channel> --board
+   dakai`). Then the new VM's session start takes the same mailbox (the hook publishes with `--take`). Without
+   restarting a session that is already running, run the hook's publish line once on the new VM as the agent user
+   (over SSH, or the same text through `az vm run-command invoke`):
 
    ```sh
    sudo -u agent -H env XDG_RUNTIME_DIR=/run/user/$(id -u agent) PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin \
      bash -c '. ~/.config/agentvm/agent.env && conde publish "$AGENT_NAME" --board "$BOARD" --take && conde boards'
    ```
 
-   It prints `published vm.agent on dakai as <owner>/vm.agent`, also when the VM held the name already.
-   From the take onward the person talks to the new agent. The old agent goes silent: the name no longer reaches
-   it, and its own sends fail with `vm.agent is not published`. The old VM's unpublish is optional when the old host
-   does not run the publishing session hook (the short-name pilot VMs never got it) or its key is revoked; a host
-   that runs the hook takes the name back at its next session start, since the hook publishes with `--take`.
-5. **Check with a real request**: another host's agent sends `<owner>/vm.agent` a question on dakai and gets the
+   It prints `published praxy on dakai as <owner>/praxy`, also when the VM held the name already. The take is a
+   board op: done, pending (no answer; the daemon replays it on connect and `conde doctor` lists it) or refused.
+   While it is pending, nothing starts, restarts, takes or publishes the name on either VM. Done: `conde agents
+   --board dakai` shows `<owner>/praxy` on the new host, and on the new VM, as the agent, `conde show <the noted
+   id>` prints that message and the channels match. Refused: the row stayed on the old host (check with `conde
+   agents --board dakai`), and re-enabling the old agent restores the state before this step. A take that
+   committed leaves the name on the new host; to go back, stop the new agent, then `conde publish praxy --board
+   dakai --take` on the old VM and re-enable its agent. A hand-joined replacement must hold a live key before
+   "Set up Praxy" is pressed, since setup adopts a hand-joined host only while the person has no machine record.
+5. **Check with a real request**: another host's agent sends `<owner>/praxy` a question on dakai and gets the
    answer.
 6. **Retire the old VM**, on Krisztián's go: stop its agent (`systemctl --user disable --now claude-agent` as its
    user); ask desk to revoke the old host's keys (`vm-agent-<short>`; the admin API, which also disconnects its
@@ -190,6 +197,26 @@ joined.
    deletes VM, NIC and disk.
 
 After both pilot VMs: `agent-rg.bicep` (the server's roles and the extension policy).
+
+## Renaming `vm.agent` to `praxy` (once, right after the release that names it)
+
+Every person's agent is `<owner>/praxy`; agents published as `vm.agent` before that release are renamed in place,
+so the mailbox keeps its id, inbox, history and channels. Per VM, by `az vm run-command invoke`, as the VM's agent
+user:
+
+0. Note the version (`conde --version`), where the name is bound (`conde agents --board dakai`), and the mailbox's
+   evidence as the agent (the pinned session id from `agent.env` in `CLAUDE_CODE_SESSION_ID`): the newest message id
+   from `conde sent --board dakai` (or `conde inbox --board dakai`), and the channels with their members.
+1. `conde update`; the version must be the release's, else stop here (nothing changed).
+2. `conde rename vm.agent praxy --board dakai`: done when `conde boards` shows `published: praxy` and `conde agents
+   --board dakai` shows `<owner>/praxy` on this host; pending (no answer) waits for the daemon's replay and is never
+   sent again as a new rename; refused stops this VM with nothing changed.
+3. `conde rename vm.agent praxy`: the local name.
+4. `agent.env`: `AGENT_NAME=praxy` and, where the line exists, `RC_NAME=<owner>/praxy`, written by the agent user.
+
+Steps 2 to 4 run back to back, so no start of the agent in between publishes the old name again. Then, where the
+hook runs, one restart of `claude-agent`. Check: as the agent, `conde show <the noted id>` prints that message and
+the channels match step 0; another host's agent's message to `<owner>/praxy` gets its answer.
 
 ## Codex
 

@@ -36,6 +36,6 @@ fi
 [[ $code =~ ^[A-Za-z0-9-]{8,9}$ ]] || { echo "the conde code looks like ABCD-1234" >&2; exit 64; }   # conde validates it
 # First boot writes agent.env with its BOARD from machine.env; the session hook publishes, conde login does not.
 on_vm "vm-agent-$owner" "$(as_agent "conde login --server https://dakai.conde.cloud --code $code 2>&1 | tail -n 1; conde boards | tail -n +2")
-printf '%s=%q\\n' OWNER $(printf '%q' "$owner") FULL_NAME $(printf '%q' "$owner/vm.agent") BOARD dakai > /var/lib/agentvm/machine.env
+printf '%s=%q\\n' OWNER $(printf '%q' "$owner") FULL_NAME $(printf '%q' "$owner/praxy") BOARD dakai > /var/lib/agentvm/machine.env
 date -u +%FT%TZ > /var/lib/agentvm/enrolled
 systemctl start agentvm-firstboot; journalctl -u agentvm-firstboot --no-pager -o cat | grep agentvm-firstboot | tail -2"

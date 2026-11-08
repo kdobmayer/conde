@@ -188,7 +188,7 @@ name>"}` (a second call answers `exists`), then `POST /v1/admin/keys {"user": "<
 The service sends one request per event, its event id as the idempotency key:
 `service.notify {to, text, link}` on `/v1/rpc` with its key as the bearer. `to` is a board user
 name or a sign-in email; `text` is one line of at most 140 characters; `link` is an https URL.
-When the person's `<owner>/vm.agent` is reachable (published, its host's bridge heartbeat within
+When the person's `<owner>/praxy` is reachable (published, its host's bridge heartbeat within
 the online TTL, and its mailbox a live endpoint of that bridge), the notice is a DM to that agent,
 `<text>\n<link>`; otherwise it is a `blocked` page to the person's human, which the Slack worker
 sends as `<display>: <text>`, then `<link|Open in <display>>`, then the board link. The answer is

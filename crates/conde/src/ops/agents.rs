@@ -435,9 +435,9 @@ pub fn profile_set(ctx: &Ctx, body: &Value) -> OpResult<Value> {
 }
 
 /// The name of each person's public agent, the agent on their machine.
-pub const PUBLIC_AGENT: &str = "vm.agent";
+pub const PUBLIC_AGENT: &str = conde_remote::PUBLIC_AGENT;
 
-/// The owner's public agent when it is reachable: `<owner>/vm.agent` is published (a mailbox
+/// The owner's public agent when it is reachable: `<owner>/praxy` is published (a mailbox
 /// binding), its host's bridge heartbeat is within [`super::web::ONLINE_TTL_MS`], and that bridge
 /// lists the mailbox as a live endpoint, which the daemon does only while the mailbox's session
 /// is up, and the owner's machine record does not say the Claude sign-in expired. A heartbeat

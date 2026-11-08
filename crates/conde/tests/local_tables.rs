@@ -128,11 +128,56 @@ fn one_pending_op_per_agent_and_one_live_migrate_per_board() {
         "migrate with an agent"
     );
     assert!(
-        op(&c, "op7", "rename", Some("a3"), "pending").is_err(),
+        op(&c, "op7", "resend", Some("a3"), "pending").is_err(),
         "unknown kind"
     );
     assert!(
         op(&c, "op8", "publish", Some("a3"), "running").is_err(),
         "unknown state"
+    );
+}
+
+/// A file whose `board_ops` predates rename ops gets the table rebuilt on open: its rows and its
+/// one-pending-per-agent index stay, and a rename op is accepted.
+#[test]
+fn a_board_ops_table_from_before_rename_accepts_rename_after_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    drop(SqliteStore::open(&path).unwrap());
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "DROP TABLE board_ops;
+         CREATE TABLE board_ops(
+             op_id TEXT PRIMARY KEY,
+             board TEXT NOT NULL,
+             kind TEXT NOT NULL CHECK (kind IN ('publish', 'unpublish', 'migrate')),
+             agent_id TEXT,
+             request_json TEXT NOT NULL,
+             state TEXT NOT NULL CHECK (state IN ('pending', 'done', 'failed')),
+             result_json TEXT,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             CHECK ((agent_id IS NULL) = (kind = 'migrate'))
+         );",
+    )
+    .unwrap();
+    op(&c, "op1", "publish", Some("a1"), "pending").unwrap();
+    assert!(
+        op(&c, "op0", "rename", Some("a0"), "done").is_err(),
+        "the old CHECK"
+    );
+    drop(c);
+    drop(SqliteStore::open(&path).unwrap());
+    let c = Connection::open(&path).unwrap();
+    let kept: String = c
+        .query_row("SELECT kind FROM board_ops WHERE op_id = 'op1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, "publish");
+    op(&c, "op2", "rename", Some("a2"), "pending").unwrap();
+    assert!(
+        op(&c, "op3", "rename", Some("a1"), "pending").is_err(),
+        "one pending op per agent"
     );
 }

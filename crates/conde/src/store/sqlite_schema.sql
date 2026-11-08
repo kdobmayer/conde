@@ -244,7 +244,7 @@ CREATE TABLE IF NOT EXISTS publications(
 CREATE TABLE IF NOT EXISTS board_ops(
     op_id TEXT PRIMARY KEY,
     board TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('publish', 'unpublish', 'migrate')),
+    kind TEXT NOT NULL CHECK (kind IN ('publish', 'unpublish', 'migrate', 'rename')),
     agent_id TEXT,
     request_json TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'done', 'failed')),

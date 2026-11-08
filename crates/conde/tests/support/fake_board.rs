@@ -1245,6 +1245,32 @@ fn dispatch(s: &mut St, host: &str, req: &Value) -> Value {
                 _ => err(&id, "conflict", "the mailbox moved"),
             }
         }
+        "mailbox.rename" => {
+            let mid = body["mailbox_id"].as_str().unwrap_or_default();
+            let expected = body["expected_generation"].as_u64().unwrap_or_default();
+            let name = body["name"].as_str().unwrap_or_default().to_string();
+            let taken = s
+                .mailboxes
+                .iter()
+                .any(|m| m.owner == owner && m.name == name && m.id != mid);
+            match s.mailboxes.iter_mut().find(|m| m.id == mid) {
+                Some(_) if taken => err(&id, "conflict", &format!("{owner}/{name} is taken")),
+                Some(m)
+                    if m.owner == owner
+                        && m.host.as_deref() == Some(host)
+                        && m.generation == expected =>
+                {
+                    m.name = name.clone();
+                    m.generation += 1;
+                    let result =
+                        json!({"name": name, "mailbox_id": m.id, "route_generation": m.generation});
+                    let f = s.routes_frame(host);
+                    s.send_to(host, f);
+                    ok(&id, result)
+                }
+                _ => err(&id, "conflict", "the mailbox moved"),
+            }
+        }
         "mailbox.mine" => {
             let mine: Vec<Value> = s
                 .mailboxes

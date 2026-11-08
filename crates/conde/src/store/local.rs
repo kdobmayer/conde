@@ -88,13 +88,15 @@ pub enum BoardOpKind {
     Publish,
     Unpublish,
     Migrate,
+    Rename,
 }
 
 impl BoardOpKind {
-    pub const ALL: [BoardOpKind; 3] = [
+    pub const ALL: [BoardOpKind; 4] = [
         BoardOpKind::Publish,
         BoardOpKind::Unpublish,
         BoardOpKind::Migrate,
+        BoardOpKind::Rename,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -102,6 +104,7 @@ impl BoardOpKind {
             BoardOpKind::Publish => "publish",
             BoardOpKind::Unpublish => "unpublish",
             BoardOpKind::Migrate => "migrate",
+            BoardOpKind::Rename => "rename",
         }
     }
 
@@ -115,6 +118,7 @@ impl BoardOpKind {
             BoardOpKind::Publish => op::MAILBOX_PUBLISH,
             BoardOpKind::Unpublish => op::MAILBOX_UNPUBLISH,
             BoardOpKind::Migrate => op::HOST_MIGRATE_V2,
+            BoardOpKind::Rename => op::MAILBOX_RENAME,
         }
     }
 }
@@ -173,6 +177,15 @@ pub trait LocalTx {
         at: &str,
     ) -> StoreResult<()>;
     fn delete_publication(&self, board: &str, agent_id: &str) -> StoreResult<bool>;
+    /// Sets the shared name and generation of one publication (a completed rename).
+    fn rename_publication(
+        &self,
+        board: &str,
+        agent_id: &str,
+        shared_name: &str,
+        route_generation: u64,
+        at: &str,
+    ) -> StoreResult<()>;
     fn set_publication_kind(&self, board: &str, agent_id: &str, kind: &str) -> StoreResult<()>;
     fn insert_op(&self, op: &BoardOp) -> StoreResult<()>;
     fn op(&self, op_id: &str) -> StoreResult<Option<BoardOp>>;
@@ -315,6 +328,22 @@ impl LocalTx for SqliteTx<'_> {
             params![board, agent_id],
         ))?;
         Ok(n > 0)
+    }
+
+    fn rename_publication(
+        &self,
+        board: &str,
+        agent_id: &str,
+        shared_name: &str,
+        route_generation: u64,
+        at: &str,
+    ) -> StoreResult<()> {
+        self.guard(self.raw().execute(
+            "UPDATE publications SET shared_name = ?3, route_generation = ?4, updated_at = ?5
+             WHERE board = ?1 AND agent_id = ?2",
+            params![board, agent_id, shared_name, route_generation as i64, at],
+        ))?;
+        Ok(())
     }
 
     fn set_publication_kind(&self, board: &str, agent_id: &str, kind: &str) -> StoreResult<()> {

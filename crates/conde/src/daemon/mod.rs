@@ -676,6 +676,7 @@ impl Core {
         match req.op.as_str() {
             op::MAILBOX_PUBLISH => done(publish::publish(&self, &req).await),
             op::MAILBOX_UNPUBLISH => done(publish::unpublish(&self, &req).await),
+            op::MAILBOX_RENAME => done(publish::rename(&self, &req).await),
             crate::surface::BOARD_LIST => done(publish::list(&self)),
             crate::surface::BOARD_FORGET => done(publish::forget(&self, &req)),
             crate::surface::BOARD_RELOAD => done(publish::reload(&self, &req)),

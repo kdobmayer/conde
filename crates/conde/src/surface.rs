@@ -205,6 +205,41 @@ fn owner_qualified(r: &Value, board: &str, name: &str) -> String {
     }
 }
 
+/// The refusal of `rename <name> --board <alias>`: a publication is renamed by its agent and
+/// the new shared name.
+pub fn rename_needs_both(name: &str, board: &str) -> String {
+    format!(
+        "rename on {board} renames a publication: conde rename {name} <new name> --board {board}"
+    )
+}
+
+/// `mailbox.rename`'s answer: the new owner/name, a pending op, or Err when the board was
+/// forgotten before the answer applied.
+pub fn renamed_publication(
+    r: &Value,
+    agent: &str,
+    board: &str,
+    name: &str,
+) -> Result<String, String> {
+    match r["state"].as_str().unwrap_or_default() {
+        "forgotten" => Err(format!(
+            "not renamed here: board {board} was forgotten before the rename completed"
+        )),
+        "renamed" => {
+            let name = r["name"].as_str().unwrap_or(name);
+            Ok(format!(
+                "renamed {agent}'s publication on {board} to {}",
+                owner_qualified(r, board, name)
+            ))
+        }
+        _ => Ok(format!(
+            "renaming {agent}'s publication on {board} is pending (op {}): {board} did not answer; the daemon \
+             completes it when it reconnects, and conde doctor shows it until then",
+            r["op_id"].as_str().unwrap_or_default()
+        )),
+    }
+}
+
 /// `mailbox.unpublish`'s answer.
 pub fn unpublished(r: &Value, agent: &str, board: &str) -> String {
     if r["state"] == "unpublished" {

@@ -708,7 +708,7 @@ fn board_flag_travels_in_the_envelope_and_references_verbatim() {
         ),
         (
             &["rename", "worker", "--board", "dakai"],
-            "rename is local; a shared address is conde publish worker --board dakai",
+            "rename on dakai renames a publication: conde rename worker <new name> --board dakai",
         ),
         (
             &["pin", "worker", "claude:x", "--board", "dakai"],
@@ -806,6 +806,8 @@ fn publish_unpublish_boards_whoami_and_doctor() {
             "mailbox.publish" if body["agent"] == "slow" => json!({"state": "publishing", "op_id": "01OP"}),
             "mailbox.publish" => json!({"state": "published", "op_id": "01OP", "name": body["name"], "mailbox_id": "01MB", "route_generation": 1}),
             "mailbox.unpublish" => json!({"state": "unpublished", "op_id": "01OQ"}),
+            "mailbox.rename" if body["agent"] == "slow" => json!({"state": "renaming", "op_id": "01OR"}),
+            "mailbox.rename" => json!({"state": "renamed", "op_id": "01OR", "agent": body["agent"], "name": body["name"], "owner": "tester", "mailbox_id": "01MB", "route_generation": 2}),
             "board.list" => json!({"boards": [
                 {"board": "local", "agents": 12},
                 {"board": "dakai", "state": "connected", "published": [{"agent": "desk", "name": "tester/desk", "state": "published"},
@@ -860,6 +862,30 @@ fn publish_unpublish_boards_whoami_and_doctor() {
         "{err}"
     );
     assert!(d.take().is_empty());
+
+    // rename with --board renames the local agent's publication there: the agent, then the new name
+    let (ok, out, err) = r.conde(&["rename", "vm.agent", "praxy", "--board", "dakai"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "renamed vm.agent's publication on dakai to tester/praxy\n"
+    );
+    let req = d.take().pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["board"].as_str(), &req["body"]),
+        (
+            Some("mailbox.rename"),
+            Some("dakai"),
+            &json!({"agent": "vm.agent", "name": "praxy"})
+        )
+    );
+    let (ok, out, _) = r.conde(&["rename", "slow", "praxy", "--board", "dakai"]);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "renaming slow's publication on dakai is pending (op 01OR): dakai did not answer; the daemon completes it when it reconnects, and conde doctor shows it until then\n"
+    );
+    d.take();
 
     let (ok, out, _) = r.conde(&["unpublish", "worker", "--board", "dakai"]);
     assert!(ok);

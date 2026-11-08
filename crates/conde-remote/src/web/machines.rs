@@ -1,6 +1,6 @@
 //! The server's side of the agent machines: where a person's VM is deployed (`CONDE_MACHINES_*`),
 //! the Azure Resource Manager client of the server's own managed identity (id-conde), and the two
-//! triggers of a deployment: a person's first sign-in and the page's "Set up my agent"
+//! triggers of a deployment: a person's first sign-in and the page's "Set up Praxy"
 //! (`machine.setup`, whose answer says when a PUT is due). The deployment is read on demand by
 //! the page's `machine.status` and `machine.setup`, never by a timer.
 //!
@@ -1156,7 +1156,7 @@ pub(crate) async fn enrol(
             "label": host_id,
             "key_id": &token_digest[..12],
             "key": key,
-            "name": format!("{user}/vm.agent"),
+            "name": format!("{user}/{}", crate::PUBLIC_AGENT),
         }),
     )
 }

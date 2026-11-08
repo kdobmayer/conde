@@ -15,6 +15,8 @@ pub mod op {
     pub const MAILBOX_PUBLISH: &str = "mailbox.publish";
     /// Mutation, idempotent on the op id: [`UnpublishBody`](super::UnpublishBody) -> [`Unpublished`](super::Unpublished).
     pub const MAILBOX_UNPUBLISH: &str = "mailbox.unpublish";
+    /// Mutation, idempotent on the op id: [`RenameBody`](super::RenameBody) -> [`Published`](super::Published).
+    pub const MAILBOX_RENAME: &str = "mailbox.rename";
     /// Query: [`Mine`](super::Mine).
     pub const MAILBOX_MINE: &str = "mailbox.mine";
     /// Query, read-only: [`MigratePreview`](super::MigratePreview).
@@ -107,6 +109,15 @@ pub struct Published {
 pub struct UnpublishBody {
     pub mailbox_id: String,
     pub expected_generation: u64,
+}
+
+/// `mailbox.rename` body: the calling host's own mailbox at its current generation, and its new
+/// name in the owner's namespace. The answer is [`Published`] under the new name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameBody {
+    pub mailbox_id: String,
+    pub expected_generation: u64,
+    pub name: String,
 }
 
 /// `mailbox.unpublish` result: the generation after the unbind.

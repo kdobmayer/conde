@@ -178,7 +178,57 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS messages_by_reply_to ON messages(reply_to, commit_seq);",
     )?;
     rebuild_agents(conn)?;
+    rebuild_board_ops(conn)?;
     rebuild_identities(conn)
+}
+
+/// A file created before `board_ops.kind` accepted 'rename' gets the table rebuilt with the
+/// schema's CHECK and its indexes, in one transaction. Runs once per file.
+fn rebuild_board_ops(conn: &Connection) -> rusqlite::Result<()> {
+    let current: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'board_ops'",
+        [],
+        |r| r.get(0),
+    )?;
+    if current.contains("'rename'") {
+        return Ok(());
+    }
+    const START: &str = "CREATE TABLE IF NOT EXISTS board_ops(";
+    let at = SCHEMA.find(START).expect("the schema defines board_ops");
+    let len = SCHEMA[at..]
+        .find(");")
+        .expect("the board_ops definition ends")
+        + 2;
+    let create = SCHEMA[at..at + len].replacen(START, "CREATE TABLE board_ops_rebuilt(", 1);
+    const COLUMNS: &str =
+        "op_id, board, kind, agent_id, request_json, state, result_json, created_at, updated_at";
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let steps = || -> rusqlite::Result<()> {
+        // another process may have rebuilt it while this one waited for the lock
+        let current: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'board_ops'",
+            [],
+            |r| r.get(0),
+        )?;
+        if current.contains("'rename'") {
+            return Ok(());
+        }
+        conn.execute_batch(&create)?;
+        conn.execute_batch(&format!(
+            "INSERT INTO board_ops_rebuilt({COLUMNS}) SELECT {COLUMNS} FROM board_ops;
+             DROP TABLE board_ops;
+             ALTER TABLE board_ops_rebuilt RENAME TO board_ops;
+             CREATE UNIQUE INDEX IF NOT EXISTS board_ops_one_pending ON board_ops(board, agent_id) WHERE state = 'pending' AND agent_id IS NOT NULL;
+             CREATE UNIQUE INDEX IF NOT EXISTS board_ops_one_migrate ON board_ops(board) WHERE kind = 'migrate' AND state <> 'failed';"
+        ))
+    };
+    match steps() {
+        Ok(()) => conn.execute_batch("COMMIT"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// A file from before sign-in by any issuer (identities keyed by Entra's `tid`, `oid`, one per

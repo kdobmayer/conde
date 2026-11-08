@@ -12,7 +12,7 @@ use crate::address::{Address, Kind, normalize_name};
 use crate::boards;
 use crate::protocol::v2::{
     LOCAL_BOARD, Manifest, ManifestRow, MigrateBody, PublishBody, Published, PublishedKind,
-    UnpublishBody, op,
+    RenameBody, UnpublishBody, op,
 };
 use crate::protocol::{ErrorCode, Request};
 use crate::store::Tx;
@@ -408,6 +408,92 @@ pub async fn unpublish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal
     let outcome = board::send_op(&conn, &op, wait(core)).await;
     let state = board::finish_op(core, &conn, &op, outcome)?;
     Ok(json!({"board": alias, "agent": agent.name, "state": state, "op_id": op.op_id}))
+}
+
+/// `daemon.rename {agent, name, board}`: renames the local agent's publication on the board in
+/// place (`mailbox.rename`), so its mailbox keeps its id, inbox, history and channels. The agent
+/// is named by its current local name and its publication found by the agent's id. Recorded as a
+/// board op before the first call and resumed with the same key; logged like publish.
+pub async fn rename(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
+    let conn = board_of(core, req)?;
+    usable(&conn)?;
+    let alias = conn.alias.clone();
+    let field = |k: &str| {
+        req.body
+            .get(k)
+            .and_then(Value::as_str)
+            .ok_or_else(|| refuse(ErrorCode::BadRequest, format!("missing string field '{k}'")))
+    };
+    let agent = agent_named(core, field("agent")?)?;
+    let raw = field("name")?;
+    let name = raw.rsplit('/').next().unwrap_or(raw);
+    let name = normalize_name(name)
+        .ok_or_else(|| refuse(ErrorCode::BadRequest, format!("invalid name '{name}'")))?;
+    let now = iso_from_ms(now_ms());
+    let op = core
+        .local_tx(|tx| {
+            if let Some(pending) = tx.pending_op_for(&alias, &agent.id)? {
+                return Ok(Err(pending_refusal(&agent.name, &alias, &pending)));
+            }
+            let Some(p) = tx.publication(&alias, &agent.id)? else {
+                return Ok(Err(refuse(
+                    ErrorCode::NotFound,
+                    format!("{} is not published on {alias}", agent.name),
+                )));
+            };
+            let (Some(mailbox_id), Some(generation), PublicationState::Published) =
+                (p.mailbox_id.clone(), p.route_generation, p.state)
+            else {
+                return Ok(Err(refuse(
+                    ErrorCode::Conflict,
+                    format!("{} is still {} on {alias}", agent.name, p.state.as_str()),
+                )));
+            };
+            if let Some(other) = tx.publication_by_name(&alias, &name)?
+                && other.agent_id != agent.id
+            {
+                return Ok(Err(refuse(
+                    ErrorCode::Conflict,
+                    format!("{name} on {alias} is already published for another agent"),
+                )));
+            }
+            let op = BoardOp {
+                op_id: new_ulid(),
+                board: alias.clone(),
+                kind: BoardOpKind::Rename,
+                agent_id: Some(agent.id.clone()),
+                request: serde_json::to_value(RenameBody {
+                    mailbox_id,
+                    expected_generation: generation,
+                    name: name.clone(),
+                })
+                .unwrap_or_default(),
+                state: BoardOpState::Pending,
+                result: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            tx.insert_op(&op)?;
+            Ok(Ok(op))
+        })
+        .map_err(internal)??;
+    tracing::info!(
+        board = alias,
+        agent = agent.name,
+        name,
+        op = op.op_id,
+        by = caller(core, req),
+        "rename"
+    );
+    let outcome = board::send_op(&conn, &op, wait(core)).await;
+    let state = board::finish_op(core, &conn, &op, outcome)?;
+    let p = board::publication_of(core, &alias, &agent.id);
+    Ok(
+        json!({"board": alias, "agent": agent.name, "name": name, "state": state, "op_id": op.op_id,
+              "owner": conn.owner(),
+              "mailbox_id": p.as_ref().and_then(|p| p.mailbox_id.clone()),
+              "route_generation": p.as_ref().and_then(|p| p.route_generation)}),
+    )
 }
 
 /// `board.list {}`: the local board and every enrolled board with its live state.

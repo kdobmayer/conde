@@ -94,6 +94,7 @@ pub static OPS: &[OpSpec] = &[
     op!("board.info", mailbox::board_info, query),
     op!("mailbox.publish", mailbox::publish, mutation),
     op!("mailbox.unpublish", mailbox::unpublish, mutation),
+    op!("mailbox.rename", mailbox::rename, mutation),
     op!("mailbox.mine", mailbox::mine, query),
     op!("host.migrate_preview", migrate::preview, query),
     op!("host.migrate_v2", migrate::migrate, mutation),

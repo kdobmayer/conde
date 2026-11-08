@@ -601,6 +601,7 @@ fn settled(op: &BoardOp) -> Result<String, (ErrorCode, String)> {
         (BoardOpKind::Publish, _) => Ok("published".into()),
         (BoardOpKind::Unpublish, _) => Ok("unpublished".into()),
         (BoardOpKind::Migrate, _) => Ok("migrated".into()),
+        (BoardOpKind::Rename, _) => Ok("renamed".into()),
     }
 }
 
@@ -654,6 +655,7 @@ pub fn finish_op(
                 BoardOpKind::Publish => "publishing",
                 BoardOpKind::Unpublish => "unpublishing",
                 BoardOpKind::Migrate => "pending",
+                BoardOpKind::Rename => "renaming",
             }
             .into())
         }
@@ -746,6 +748,34 @@ pub fn finish_op(
             }
             Ok("published".into())
         }
+        // The publication takes the new name and generation in the op's own commit, once: only
+        // while it is still published at the renamed mailbox (a takeover or an unpublish since
+        // owns the row then).
+        (BoardOpKind::Rename, OpOutcome::Done(result, _)) => {
+            let renamed: Option<Published> = serde_json::from_value(result.clone()).ok();
+            let duplicate = core
+                .local_tx(|tx| {
+                    if let Some(done) = stored(tx)? {
+                        return Ok(Some(done));
+                    }
+                    if let Some(r) = &renamed
+                        && tx.publication(alias, &agent)?.is_some_and(|p| {
+                            p.state == PublicationState::Published
+                                && p.mailbox_id.as_deref() == Some(r.mailbox_id.as_str())
+                        })
+                    {
+                        tx.rename_publication(alias, &agent, &r.name, r.route_generation, &now)?;
+                        advance(r.revision);
+                    }
+                    tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
+                    Ok(None)
+                })
+                .map_err(internal)?;
+            match duplicate {
+                Some(done) => done,
+                None => Ok("renamed".into()),
+            }
+        }
         (BoardOpKind::Unpublish, OpOutcome::Done(result, _)) => {
             let mailbox = op.request["mailbox_id"]
                 .as_str()
@@ -820,7 +850,8 @@ pub fn finish_op(
                             }
                             tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&error), &now)?;
                         }
-                        BoardOpKind::Migrate => {
+                        // a refused rename changed nothing on the board, so nothing here either
+                        BoardOpKind::Migrate | BoardOpKind::Rename => {
                             tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&error), &now)?;
                         }
                     }

@@ -78,6 +78,8 @@ fi
 token=$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null)
 unset body
 [ -n "$token" ] || { log "connect: 201 without a token"; exit 1; }
+# it goes into an argument: one plain word or nothing
+[[ $token =~ ^[A-Za-z0-9_.-]+$ ]] || { log "connect: the token is not one plain word; not installed"; exit 1; }
 
 # --- 5
 claude mcp remove --scope user praxia >/dev/null 2>&1

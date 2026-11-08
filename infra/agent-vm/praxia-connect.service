@@ -2,10 +2,10 @@
 # and by `praxia-connect --again`. Root-owned in /etc/systemd/user, enabled for the agent user by first boot.
 [Unit]
 Description=Agent VM: connect the agent to Praxia (its agent token as the praxia MCP entry)
-After=network-online.target
 
 [Service]
 Type=oneshot
+UMask=0077
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/lib/agentvm/praxia-connect --run
 TimeoutStartSec=5min

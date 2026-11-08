@@ -54,6 +54,12 @@ jobs:
         with:
           version: 1.11.2
 
+      - name: the Praxia connect audience
+        run: |
+          if [ -z "$PKR_VAR_connect_resource" ]; then
+            echo "::warning::PRAXIA_CONNECT_RESOURCE is not set on the agent-image environment: the VMs of this image never connect to Praxia"
+          fi
+
       - name: packer init and validate
         run: |
           packer init infra/agent-vm/image

@@ -53,6 +53,9 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.send(401, {"error": "not_a_machine"})
         mode = open(f"{T}/mode").read().strip()
         if mode == "hang": time.sleep(120)
+        if mode == "bad":
+            state["mints"] += 1; state["live"] = 'pxm bad" --header x'; save()
+            return self.send(201, {"token": state["live"], "name": "vm-agent-test", "id": "x"})
         if mode != "ok": return self.send(int(mode), {"error": "fake"})
         state["mints"] += 1; state["live"] = f"pxm_test_{state['mints']}"; save()
         self.send(201, {"token": state["live"], "name": "vm-agent-test", "id": "00000000-0000-4000-8000-000000000001"})
@@ -92,7 +95,11 @@ while sleep 0.2; do
 done
 EOF
 chmod +x "$T/bin/claude" "$T/bin/agent-loop"
+# restarted more often than a real agent is, so no start limit
 cat > "$U/claude-agent.service" <<EOF
+[Unit]
+StartLimitIntervalSec=0
+
 [Service]
 Environment=HOME=$T/home
 ExecStartPre=/bin/sh -c '! test -e $T/fail-agent'
@@ -107,10 +114,12 @@ ExecStart=$here/praxia-connect --run
 Environment=HOME=$T/home PATH=$T/bin:/usr/local/bin:/usr/bin:/bin AGENTVM_CONF=$T/agentvm.conf AGENTVM_IMDS=http://127.0.0.1:$PORT/metadata
 EOF
 # the timer as shipped, but retrying every 3 s instead of 10 min, to the second (systemd's default accuracy is a
-# minute, which the shipped 10-minute retry does not mind)
+# minute, which the shipped 10-minute retry does not mind). An empty On*Sec= resets every timer value of the unit,
+# so the shipped OnBootSec is set again after it.
 cat > "$U/praxia-connect.timer.d/test.conf" <<'EOF'
 [Timer]
-OnUnitInactiveSec=
+OnBootSec=
+OnBootSec=1min
 OnUnitInactiveSec=3s
 AccuracySec=1s
 EOF
@@ -150,6 +159,7 @@ check "1 the run succeeds" run
 check "1 the installed token is Praxia's live one" installed_is_live
 check "1 .claude.json is 0600" mode0600
 check "1 the marker is written" test -e "$M"
+check "1 the service's files are 0600 (UMask)" test "$(stat -c %a "$M")" = 600
 check "1 the journal holds no token" journal_clean
 
 echo "== 5. connected, no request: nothing is minted"
@@ -158,9 +168,14 @@ check "5 the run succeeds" run
 check "5 no new mint" test "$(mints)" = "$before"
 
 echo "== 8. not signed in: the restart is skipped, and the next run mints nothing"
-systemctl --user start claude-agent.service; inv=$(agent_inv)
-"$here/praxia-connect" --again; wait_for 15 test ! -e "$R"; wait_for 15 test -e "$M"
+systemctl --user start claude-agent.service; inv=$(agent_inv); before=$(mints); since=$(date +%s)
+HOME="$H" "$here/praxia-connect" --again
+minted_once() { [ "$(mints)" = $((before + 1)) ]; }
+check "8 the request was served: one new mint" wait_for 15 minted_once
+wait_for 15 test -e "$M"
 check "8 connected again" installed_is_live
+skipped() { journalctl --user -u praxia-connect.service --since "@$since" --no-pager -o cat | grep -q 'not running or not signed in'; }
+check "8 the journal says the restart was skipped" skipped
 check "8 the session was not restarted" test "$(agent_inv)" = "$inv"
 before=$(mints); run
 check "8 the next run mints nothing" test "$(mints)" = "$before"
@@ -209,10 +224,36 @@ check "2d installed is live" installed_is_live
 
 echo "== 4. a timer run and a reconnect at once"
 # --no-block returns at once: the run and the request race
-systemctl --user start --no-block praxia-connect.service; "$here/praxia-connect" --again
+before=$(mints)
+systemctl --user start --no-block praxia-connect.service; HOME="$H" "$here/praxia-connect" --again
 wait_for 30 sh -c "! systemctl --user is-active --quiet praxia-connect.service && test ! -e '$R' && test -e '$M'"
 sleep 1
+check "4 exactly one new mint" minted_once
 check "4 one installed token, the live one" installed_is_live
+
+echo "== 9. a minted token that is not one plain word never reaches the arguments"
+before=$(mints); cp "$H/.claude.json" "$T/before.json"; echo bad > "$T/mode"; touch "$R"; : > "$T/claude-calls"
+run
+check "9 the run fails with no marker" no_marker
+check "9 claude mcp add was never called" sh -c "! grep -q 'mcp add' '$T/claude-calls'"
+check "9 the config is untouched" cmp -s "$T/before.json" "$H/.claude.json"
+echo ok > "$T/mode"; run
+
+echo "== 10. the timer already running: its own first run fails, and it re-arms"
+rm -f "$M"; echo 503 > "$T/mode"; since=$(date +%s)
+systemctl --user start praxia-connect.timer
+failed_by_timer() { journalctl --user -u praxia-connect.service --since "@$since" --no-pager -o cat | grep -q 'connect: HTTP 503'; }
+check "10 the timer's first run fails" wait_for 30 failed_by_timer
+if ! failed_by_timer; then
+  systemctl --user status praxia-connect.timer --no-pager 2>&1 | sed 's/^/     /'
+  systemctl --user cat praxia-connect.timer --no-pager 2>&1 | sed 's/^/     /'
+  systemctl --user list-timers praxia-connect.timer --all --no-pager | sed 's/^/     /'
+  journalctl --user -u praxia-connect.service -u praxia-connect.timer --since "@$since" --no-pager -o short-precise | sed 's/^/     /'
+fi
+check "10 no marker" no_marker
+echo ok > "$T/mode"
+check "10 a later run of the same timer connects" wait_for 30 test -e "$M"
+systemctl --user stop praxia-connect.timer
 
 echo "== 6. start-up: a failed first attempt is recovered by the started timer, in the same boot"
 rm -f "$M"; echo 503 > "$T/mode"; inv=$(agent_inv)

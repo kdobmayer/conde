@@ -33,8 +33,12 @@ GITHUB_OAUTH_SCOPES="repo read:org workflow"
 PRAXIA_URL=https://praxia.nativeai.space
 CONF
 # The application id is not secret; the build passes it (agent-image.yml, the environment's PRAXIA_CONNECT_RESOURCE).
+# First boot sources this file as root: only an application id's shape gets in.
 if [ -n "${CONNECT_RESOURCE:-}" ]; then
+  [[ $CONNECT_RESOURCE =~ ^[0-9a-f-]{36}$ ]] || { echo "CONNECT_RESOURCE is not an application id"; exit 1; }
   printf 'CONNECT_RESOURCE=%s\n' "$CONNECT_RESOURCE" >> /etc/agentvm.conf
+else
+  echo "warning: no CONNECT_RESOURCE: the VMs of this image never connect to Praxia"
 fi
 
 bash /usr/local/lib/agentvm/bootstrap.sh image

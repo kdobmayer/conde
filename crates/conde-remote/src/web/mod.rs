@@ -44,8 +44,8 @@ pub use invite::{InviteConfig, KeycloakAdmin, Resend, SignIn};
 pub use join::{JOIN_TTL, JoinRecord};
 pub use keys::new_host_key;
 pub use machines::{
-    ARM_URL, Azure, AzureError, DEFAULT_VM_SIZE, Deployment, LOGIN_URL, MachinesConfig,
-    ManagedIdentity, POLL_EVERY,
+    ARM_URL, Azure, AzureError, DEFAULT_VM_SIZE, Deployment, KEYS_FLOOR, KEYS_MAX_AGE, LOGIN_URL,
+    MachinesConfig, ManagedIdentity, POLL_EVERY,
 };
 pub use ratelimit::RateLimits;
 
@@ -109,6 +109,10 @@ pub enum ConfigError {
         "OIDC_ISSUER '{0}' names no Keycloak realm (https://<host>/realms/<realm>), which CONDE_JOIN_SIGN_IN=password needs"
     )]
     Realm(String),
+    #[error(
+        "CONDE_MACHINES_CONNECT_AUDIENCE must differ from CONDE_MACHINES_AUDIENCE: a connect proof shown to a service could enrol"
+    )]
+    ConnectAudience,
     #[error(transparent)]
     Secret(#[from] crate::SecretError),
 }

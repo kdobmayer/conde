@@ -61,7 +61,7 @@ const POLLS: u32 = 40;
 /// Entra's sign-in origin; a tenant's v1 signing keys are at `<origin>/<tenant>/discovery/keys`.
 pub const LOGIN_URL: &str = "https://login.microsoftonline.com";
 /// The tenant's signing keys are read again after this long, and at once for an unknown `kid`.
-const KEYS_MAX_AGE: Duration = Duration::from_secs(3600);
+pub const KEYS_MAX_AGE: Duration = Duration::from_secs(3600);
 /// The tenant's signing keys are fetched at most this often, whatever asks and whether the last
 /// fetch failed: a flood of forged tokens never turns into a flood of fetches.
 pub const KEYS_FLOOR: Duration = Duration::from_secs(60);
@@ -104,6 +104,8 @@ pub struct MachinesConfig {
     /// The least time between two fetches of the tenant's keys ([`KEYS_FLOOR`]; a test's own
     /// otherwise).
     pub keys_floor: Duration,
+    /// How long a fetched key set serves ([`KEYS_MAX_AGE`]; a test's own otherwise).
+    pub keys_max_age: Duration,
 }
 
 /// The server's user-assigned identity as the Container Apps identity endpoint serves it.
@@ -171,6 +173,10 @@ impl MachinesConfig {
             )?,
             client_id,
         };
+        let connect_audience = var("CONDE_MACHINES_CONNECT_AUDIENCE");
+        if connect_audience.as_deref() == Some(audience.as_str()) {
+            return Err(ConfigError::ConnectAudience);
+        }
         Ok(Some(MachinesConfig {
             subscription,
             resource_group,
@@ -181,8 +187,9 @@ impl MachinesConfig {
             arm_url: ARM_URL.into(),
             login_url: LOGIN_URL.into(),
             poll_every: POLL_EVERY,
-            connect_audience: var("CONDE_MACHINES_CONNECT_AUDIENCE"),
+            connect_audience,
             keys_floor: KEYS_FLOOR,
+            keys_max_age: KEYS_MAX_AGE,
         }))
     }
 }
@@ -772,8 +779,9 @@ fn invalid(why: impl Into<String>) -> TokenError {
     TokenError::Invalid(why.into())
 }
 
-/// The check of an agent VM's Entra token: a v1 access token of the tenant for the
-/// conde-machines audience, signed with one of the tenant's v1 signing keys (RS256).
+/// The check of an agent VM's Entra token: a v1 access token of the tenant for one audience
+/// (conde-machines for enrol, the connect audience for whois), signed with one of the tenant's v1
+/// signing keys (RS256).
 pub(crate) struct VmTokens {
     http: reqwest::Client,
     keys_url: String,
@@ -783,10 +791,17 @@ pub(crate) struct VmTokens {
     keys: tokio::sync::Mutex<KeyCache>,
     /// The least time between two fetches of the key set, whatever asks.
     floor: Duration,
+    max_age: Duration,
 }
 
 impl VmTokens {
-    pub fn new(login_url: &str, tenant: &str, audience: &str, floor: Duration) -> VmTokens {
+    pub fn new(
+        login_url: &str,
+        tenant: &str,
+        audience: &str,
+        floor: Duration,
+        max_age: Duration,
+    ) -> VmTokens {
         VmTokens {
             http: super::auth::http_client(HTTP_TIMEOUT),
             keys_url: format!(
@@ -798,6 +813,7 @@ impl VmTokens {
             audience: audience.to_string(),
             keys: tokio::sync::Mutex::new(KeyCache::default()),
             floor,
+            max_age,
         }
     }
 
@@ -808,7 +824,7 @@ impl VmTokens {
         let mut cache = self.keys.lock().await;
         if let Some((set, at)) = cache.set.as_ref()
             && !refresh
-            && at.elapsed() < KEYS_MAX_AGE
+            && at.elapsed() < self.max_age
         {
             return Ok(set.clone());
         }
@@ -898,7 +914,10 @@ impl VmTokens {
             _ => false,
         };
         if !audience {
-            return Err(invalid("the audience is not conde-machines"));
+            return Err(invalid(format!(
+                "the audience is not this route's ({})",
+                self.audience
+            )));
         }
         let exp = claims["exp"]
             .as_i64()
@@ -926,18 +945,21 @@ pub(crate) struct Machines {
     /// The check of a VM's connect proof (`whois`), when a connect audience is configured; its
     /// own key cache and floor.
     pub connect_tokens: Option<VmTokens>,
+    /// Held by the one adopted pass that may run at a time ([`bind_adopted`]).
+    adopted_pass: tokio::sync::Mutex<()>,
 }
 
 impl Machines {
     pub fn new(config: MachinesConfig, tenant: &str) -> Machines {
-        let floor = config.keys_floor;
+        let (floor, max_age) = (config.keys_floor, config.keys_max_age);
         Machines {
             azure: Azure::new(config.identity.clone()),
-            tokens: VmTokens::new(&config.login_url, tenant, &config.audience, floor),
+            tokens: VmTokens::new(&config.login_url, tenant, &config.audience, floor, max_age),
             connect_tokens: config
                 .connect_audience
                 .as_deref()
-                .map(|aud| VmTokens::new(&config.login_url, tenant, aud, floor)),
+                .map(|aud| VmTokens::new(&config.login_url, tenant, aud, floor, max_age)),
+            adopted_pass: tokio::sync::Mutex::new(()),
             config,
         }
     }
@@ -1141,8 +1163,14 @@ pub(crate) async fn enrol(
 
 /// One pass over the minted records without a VM identity (hosts joined by hand and adopted):
 /// each record's VM is read, and the one whose identity is `oid` is bound, on exactly the record
-/// selected before the read. Whether one was bound.
+/// selected before the read. One pass at a time: any tenant identity can get a connect proof,
+/// so a miss that finds a pass running returns at once (`false`) instead of reading every
+/// pilot's VM again. Whether a pass ran.
 async fn bind_adopted(state: &WebState, machines: &Machines, oid: &str) -> bool {
+    let Ok(_pass) = machines.adopted_pass.try_lock() else {
+        tracing::info!(%oid, "an adopted pass is running: none started");
+        return false;
+    };
     let adopted = match state.store(|s| s.machines_minted_without_principal()).await {
         Ok(adopted) => adopted,
         Err(e) => {
@@ -1151,6 +1179,13 @@ async fn bind_adopted(state: &WebState, machines: &Machines, oid: &str) -> bool 
         }
     };
     for (user_id, host, minted_at) in adopted {
+        if !plain_name(&host) {
+            tracing::warn!(
+                user_id,
+                "an adopted host is not a plain name: its VM is not read"
+            );
+            continue;
+        }
         match machines.azure.vm_principal(&machines.config, &host).await {
             Ok(Some(principal)) if principal == oid => {
                 let (h, o) = (host.clone(), oid.to_string());
@@ -1160,7 +1195,8 @@ async fn bind_adopted(state: &WebState, machines: &Machines, oid: &str) -> bool 
                 {
                     Ok(true) => return true,
                     Ok(false) => {
-                        tracing::info!(%host, %oid, "the record was replaced during the VM read: not bound");
+                        tracing::info!(%host, %oid, "not bound here: the record was replaced or bound meanwhile");
+                        return true;
                     }
                     Err(e) => tracing::error!(%host, error = %e, "the VM identity was not stored"),
                 }
@@ -1169,7 +1205,7 @@ async fn bind_adopted(state: &WebState, machines: &Machines, oid: &str) -> bool 
             Err(e) => tracing::warn!(%host, error = %e, "the VM was not read"),
         }
     }
-    false
+    true
 }
 
 /// `POST /v1/machines/whois` with a VM's connect proof as the bearer: a token of its identity
@@ -1234,6 +1270,7 @@ pub(crate) async fn whois(State(state): State<WebState>, headers: HeaderMap) -> 
         state.store(move |s| s.machine_whois(&oid))
     };
     let mut found = lookup().await;
+    // after a pass, whoever bound the record (this pass or a concurrent one), it is the answer
     if matches!(found, Ok(None)) && bind_adopted(&state, &machines, &oid).await {
         found = lookup().await;
     }
@@ -1403,6 +1440,26 @@ mod tests {
         assert!(
             only.is_none(),
             "the connect audience alone sets up no machines"
+        );
+    }
+
+    /// The connect audience is never conde-machines: a proof shown to a service could then enrol.
+    #[test]
+    fn a_connect_audience_equal_to_conde_machines_is_refused() {
+        let e = super::MachinesConfig::from_vars(|k: &str| match k {
+            "CONDE_MACHINES_CONNECT_AUDIENCE" | "CONDE_MACHINES_AUDIENCE" => {
+                Some("same-app".into())
+            }
+            "IDENTITY_ENDPOINT" | "IDENTITY_HEADER" => Some("x".into()),
+            k if k.starts_with("CONDE_MACHINES_") && k != "CONDE_MACHINES_VM_SIZE" => {
+                Some(format!("{k}-value"))
+            }
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("CONDE_MACHINES_CONNECT_AUDIENCE"),
+            "{e}"
         );
     }
 

@@ -179,6 +179,10 @@ on_both!(
     a_failed_refresh_keeps_the_cached_keys_and_fetches_once_per_floor,
     after_a_forged_kid_a_real_rollover_verifies_once_the_floor_passed,
     whois_never_binds_a_record_replaced_during_the_vm_read,
+    whois_answers_the_record_another_call_bound_during_its_pass,
+    a_miss_during_a_running_adopted_pass_answers_404_without_its_own,
+    whois_never_reads_an_adopted_host_that_is_not_a_plain_name,
+    an_expired_key_cache_is_never_used_while_a_fetch_is_held_or_failing,
     a_relay_start_reaches_the_bridge_and_its_events_reach_the_page,
     a_relay_code_is_sent_once_and_cleared,
     a_start_committed_between_read_and_send_survives_the_clear,
@@ -3617,6 +3621,7 @@ async fn ui_machines_with(
         poll_every: Duration::from_millis(20),
         connect_audience: Some(CONNECT_AUDIENCE.into()),
         keys_floor: Duration::ZERO,
+        keys_max_age: web::KEYS_MAX_AGE,
     };
     (
         ui_full(d, ServerConfig::default(), Some(machines), tweak).await,
@@ -3626,6 +3631,15 @@ async fn ui_machines_with(
 
 /// As [`ui_machines`], with the tenant keys fetched at most once per `floor`.
 async fn ui_machines_floor(d: &Arc<Dispatcher>, floor: Duration) -> (Ui, Arc<Arm>) {
+    ui_machines_keys(d, floor, web::KEYS_MAX_AGE).await
+}
+
+/// As [`ui_machines`], with the tenant keys fetched at most once per `floor` and serving `max_age`.
+async fn ui_machines_keys(
+    d: &Arc<Dispatcher>,
+    floor: Duration,
+    max_age: Duration,
+) -> (Ui, Arc<Arm>) {
     let arm = fake_arm().await;
     let (identity, _) = identity_endpoint(200, 3600).await;
     let machines = web::MachinesConfig {
@@ -3644,6 +3658,7 @@ async fn ui_machines_floor(d: &Arc<Dispatcher>, floor: Duration) -> (Ui, Arc<Arm
         poll_every: Duration::from_millis(20),
         connect_audience: Some(CONNECT_AUDIENCE.into()),
         keys_floor: floor,
+        keys_max_age: max_age,
     };
     (
         ui_full(d, ServerConfig::default(), Some(machines), |_| {}).await,
@@ -6749,7 +6764,8 @@ async fn whois_never_binds_a_record_replaced_during_the_vm_read(d: Arc<Dispatche
                 (r.status(), r.json::<Value>().await.unwrap_or(Value::Null))
             })
         };
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let reads = arm.vm_reads().len();
+        wait_until(|| arm.vm_reads().len() > reads).await;
         let h = host.clone();
         ui.write(move |t| {
             t.machine_set_deleting(uid, "2026-11-08T09:00:00.000Z")?;
@@ -6795,5 +6811,118 @@ async fn whois_never_binds_a_record_replaced_during_the_vm_read(d: Arc<Dispatche
     ui.machine(USER, &host, "owner-oid").await;
     let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-vm-p"))).await;
     assert_eq!(status, StatusCode::OK, "an ordinary pilot still binds: {v}");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// Waits up to 10 s for `ready`.
+async fn wait_until(ready: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if ready() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("not ready after 10 s");
+}
+
+/// `POST /v1/machines/whois` with `token`, in its own task.
+fn whois_task(ui: &Ui, token: String) -> tokio::task::JoinHandle<(StatusCode, Value)> {
+    let url = ui.env.url("/v1/machines/whois");
+    tokio::spawn(async move {
+        let r = reqwest::Client::new()
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        (r.status(), r.json::<Value>().await.unwrap_or(Value::Null))
+    })
+}
+
+/// Another call bound the pilot while this one's VM read was out: its own conditional write
+/// changes nothing, and the record bound to its `oid` is the answer (200, not 404).
+async fn whois_answers_the_record_another_call_bound_during_its_pass(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    ui.machine(USER, &host, "owner-oid").await;
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-p"))]);
+    arm.delay("GET", &vm_path(&host), Duration::from_millis(1500));
+    let call = whois_task(&ui, ui.connect_token("oid-vm-p"));
+    wait_until(|| !arm.vm_reads().is_empty()).await;
+    let uid = ui.user_id(USER).await;
+    ui.write(move |t| Ok(t.machine_set_principal(uid, "oid-vm-p")?))
+        .await;
+    let (status, v) = call.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["principal_id"], "oid-vm-p");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// One adopted pass at a time: a miss while a pass runs answers 404 at once and reads no VM of
+/// its own; the running pass still binds its pilot.
+async fn a_miss_during_a_running_adopted_pass_answers_404_without_its_own(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    let host = format!("vm-agent-{USER}");
+    ui.machine(USER, &host, "owner-oid").await;
+    arm.vm(&host, vec![(200, vm_with_identity("oid-vm-p"))]);
+    arm.delay("GET", &vm_path(&host), Duration::from_millis(1500));
+    let first = whois_task(&ui, ui.connect_token("oid-vm-p"));
+    wait_until(|| arm.vm_reads().len() == 1).await;
+    let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-stranger"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("unknown_machine")),
+        "{v}"
+    );
+    assert_eq!(arm.vm_reads().len(), 1, "no second pass");
+    let (status, v) = first.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{v}");
+    ui.server.shutdown().await.unwrap();
+}
+
+/// An adopted record whose host is not one plain path segment is never put into a VM read's URL.
+async fn whois_never_reads_an_adopted_host_that_is_not_a_plain_name(d: Arc<Dispatcher>) {
+    let (ui, arm) = ui_machines(&d).await;
+    ui.machine(USER, "a/../b", "owner-oid").await;
+    let (status, _, v) = ui.whois(Some(&ui.connect_token("oid-vm-p"))).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("unknown_machine")),
+        "{v}"
+    );
+    assert!(
+        arm.calls("GET").is_empty(),
+        "no Azure read: {:?}",
+        arm.calls("GET")
+    );
+    ui.server.shutdown().await.unwrap();
+}
+
+/// A key set past its age is never used while its refresh fails or the floor holds one back:
+/// 503 both times, and the first request after a fetch succeeds verifies again.
+async fn an_expired_key_cache_is_never_used_while_a_fetch_is_held_or_failing(d: Arc<Dispatcher>) {
+    let (ui, _arm) = ui_machines_keys(&d, FLOOR, Duration::from_secs(3)).await;
+    ui.machine_with_principal(USER, &format!("vm-agent-{USER}"), "oid-vm-k")
+        .await;
+    let idp = &ui.env.idp;
+    let reads = || idp.v1_keys_reads.load(Ordering::SeqCst);
+    let proof = ui.connect_token("oid-vm-k");
+    assert_eq!(ui.whois(Some(&proof)).await.0, StatusCode::OK);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    idp.v1_keys_status.store(503, Ordering::SeqCst);
+    let (status, _, v) = ui.whois(Some(&proof)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "failing: {v}");
+    assert_eq!(reads(), 2);
+    let (status, _, v) = ui.whois(Some(&proof)).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "held by the floor: {v}"
+    );
+    assert_eq!(reads(), 2);
+    idp.v1_keys_status.store(0, Ordering::SeqCst);
+    tokio::time::sleep(FLOOR).await;
+    assert_eq!(ui.whois(Some(&proof)).await.0, StatusCode::OK);
+    assert_eq!(reads(), 3);
     ui.server.shutdown().await.unwrap();
 }

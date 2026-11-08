@@ -221,7 +221,9 @@ variables, all set or none (some set: the server refuses to start and names the 
 
 `CONDE_MACHINES_VM_SIZE` is optional (default `Standard_B2as_v2`). `CONDE_MACHINES_CONNECT_AUDIENCE` is optional: the
 application id of a service's Entra app (on dakai, Praxia's `praxia-agent-connect`; Terraform variable
-`connect_audience`) whose audience the VMs' connect proofs carry; without it there is no `POST /v1/machines/whois`. The server gets its Azure token from the
+`connect_audience`) whose audience the VMs' connect proofs carry; without it there is no `POST /v1/machines/whois`.
+It must differ from `CONDE_MACHINES_AUDIENCE` (the server refuses to start, and the Terraform refuses to plan,
+otherwise): a proof shown to the service could then enrol. The server gets its Azure token from the
 managed identity endpoint Container Apps provides (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`); without it the machines
 variables are refused. The Terraform sets all five on ca-conde (`machines_env` in infra/terraform/main.tf). The
 startup log line `web surface enabled` shows the configuration, without the identity header.
@@ -258,7 +260,9 @@ checked as above, then counted against 30 calls a minute per VM identity (invali
 (the owner disabled or the record deleting), 429 `rate_limited`, 503 `unavailable`. Nothing is minted. A record that
 was joined by hand and adopted (minted, without its VM identity) is bound on a whois miss: its VM is read, and only
 when that VM's identity is the token's `oid` is it written, on exactly the record read before the VM (a record
-replaced meanwhile is not). A record that has its identity never gets another. `service.presence` carries the
+replaced meanwhile is not); then the identity is looked up once more, whoever bound it. One such pass runs at a
+time, since any identity of the tenant can get a connect proof: a miss while one runs is 404 at once. A host that
+is not one plain name is never read. A record that has its identity never gets another. `service.presence` carries the
 record's `principal_id` (null until known), so the service can tell a replaced machine.
 
 The sign-ins run on the VM from the Machine page (Claude, GitHub, Codex): the page's step is stored in the machine

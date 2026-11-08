@@ -324,6 +324,13 @@ resource "azurerm_container_app" "server" {
   workload_profile_name        = "Consumption"
   tags                         = local.tags
 
+  lifecycle {
+    precondition {
+      condition     = var.connect_audience != azuread_application.machines.client_id
+      error_message = "connect_audience must not be conde-machines: a connect proof shown to a service could enrol."
+    }
+  }
+
   identity {
     type         = "UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.app.id]

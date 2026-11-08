@@ -7,6 +7,8 @@ export interface Session {
 	csrf_header: string;
 	/** The board sets up agent machines (the Machine section shows). */
 	machines?: boolean;
+	/** With machines: the name of each person's agent on its machine (`praxy`). */
+	agent?: string;
 }
 
 /** A DM conversation of one of the owner's agents. */

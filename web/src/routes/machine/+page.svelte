@@ -6,7 +6,7 @@
 	import { onMount } from 'svelte';
 	import { mutate, rpc, RpcError } from '#lib/api.ts';
 	import { board, onBoard } from '#lib/board.svelte.ts';
-	import { UNKNOWN, machineView, settle, signInView, skew, type Flow, type Load, type Machine } from '#lib/machine.ts';
+	import { UNKNOWN, agentName, machineView, settle, signInView, skew, type Flow, type Load, type Machine } from '#lib/machine.ts';
 	import Disclosure from '#lib/ui/Disclosure.svelte';
 	import ErrorLine from '#lib/ui/ErrorLine.svelte';
 	import SkeletonRows from '#lib/ui/SkeletonRows.svelte';
@@ -90,14 +90,17 @@
 	const lastSeen = $derived(
 		board.fleet?.hosts.find((h) => h.owner === board.session?.user && h.host === machine?.host_id)?.last_seen ?? null
 	);
-	const view = $derived(load.known ? machineView(machine, now, lastSeen) : null);
+	// the session names the agent, the board's one constant; read on every visit, with or without a record
+	const agent = $derived(board.session?.agent ?? 'agent');
+	const name = $derived(agentName(agent));
+	const view = $derived(load.known ? machineView(machine, now, lastSeen, agent) : null);
 	const signIn = $derived(signInView(machine, now));
 </script>
 
 <section class="machine">
 	<header class="head">
 		<h1>Machine</h1>
-		<p class="deck">Your agent’s own machine: where it runs, always on, signed in as you.</p>
+		<p class="deck">{name}’s own machine: where it runs, always on, signed in as you.</p>
 	</header>
 
 	<div class="body">
@@ -115,7 +118,7 @@
 			<p class="detail">{view.detail}</p>
 			{#if machine}<p class="host">{machine.host_id}</p>{/if}
 			{#if view.claude && !signIn.running}
-				<p class="line">Sign in to Claude so your agent can start.</p>
+				<p class="line">Sign in to Claude so {name} can start.</p>
 			{/if}
 			{#if signIn.running}
 				{@const r = signIn.running}
@@ -170,7 +173,7 @@
 						<p>Over the hub VPN, with your Entra account:</p>
 						<pre>az ssh vm -g conde-vm -n {machine.host_id}
 sudo -u agent tmux -L agent attach -t agent</pre>
-						<p>The second line attaches to your agent’s own session; Ctrl-b d detaches. <code>journalctl -u agentvm-firstboot</code> shows how the machine joined the board.</p>
+						<p>The second line attaches to {name}’s own session; Ctrl-b d detaches. <code>journalctl -u agentvm-firstboot</code> shows how the machine joined the board.</p>
 					</Disclosure>
 				</div>
 			{/if}

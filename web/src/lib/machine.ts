@@ -100,13 +100,20 @@ function names(list: string[]): string {
 	return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
 }
 
-/** What the page says for `m` (null: no record yet); `lastSeen` is the host's last bridge activity. */
-export function machineView(m: Machine | null, now: number, lastSeen: string | null = null): MachineView {
+/** The agent's name as the page says it: the session's name with a capital, `Praxy`. */
+export function agentName(agent: string): string {
+	return agent.charAt(0).toUpperCase() + agent.slice(1);
+}
+
+/** What the page says for `m` (null: no record yet); `lastSeen` is the host's last bridge
+ * activity, `agent` the session's name of the agent. */
+export function machineView(m: Machine | null, now: number, lastSeen: string | null, agent: string): MachineView {
+	const a = agentName(agent);
 	if (!m) {
 		return {
-			headline: 'Your agent has no machine yet.',
-			detail: 'Set it up and the board creates a machine for your agent; it takes a few minutes.',
-			setup: 'Set up my agent',
+			headline: `${a} has no machine yet.`,
+			detail: `Set it up and the board creates a machine for ${a}; it takes a few minutes.`,
+			setup: `Set up ${a}`,
 			signIn: [],
 			claude: false
 		};
@@ -119,28 +126,28 @@ export function machineView(m: Machine | null, now: number, lastSeen: string | n
 	const view = (headline: string, detail: string, setup: string | null = null): MachineView => ({ headline, detail, setup, signIn, claude });
 	switch (m.state) {
 		case 'requested':
-			if (!m.requested_at) return view('Your agent’s machine is being set up.', 'The request has not reached Azure yet.', 'Try again');
+			if (!m.requested_at) return view(`${a}’s machine is being set up.`, 'The request has not reached Azure yet.', 'Try again');
 			return view(
-				'Your agent’s machine is being set up.',
+				`${a}’s machine is being set up.`,
 				`Requested ${elapsed(m.requested_at, now)} ago${m.deploy_state ? ` · Azure: ${m.deploy_state.toLowerCase()}` : ''}.`
 			);
 		case 'failed':
-			return view('Setting up your agent’s machine failed.', m.deploy_error ?? 'Azure gave no reason.', 'Try again');
+			return view(`Setting up ${a}’s machine failed.`, m.deploy_error ?? 'Azure gave no reason.', 'Try again');
 		case 'not_connected': {
 			const since = m.requested_at ? ` It was requested ${elapsed(m.requested_at, now)} ago.` : '';
 			const who = m.admins.length > 0 ? `Ask ${names(m.admins)} to look at it.` : 'Ask your board admin to look at it.';
-			return view('Your agent’s machine has not connected.', `It did not join the board within 30 minutes.${since} ${who}`);
+			return view(`${a}’s machine has not connected.`, `It did not join the board within 30 minutes.${since} ${who}`);
 		}
 		case 'up':
-			return view('Your agent’s machine is up.', 'It has not connected your agent to the board yet.');
+			return view(`${a}’s machine is up.`, `It has not connected ${a} to the board yet.`);
 		case 'connected':
-			return view('Your agent’s machine is connected.', 'The agent is not up yet.');
+			return view(`${a}’s machine is connected.`, `${a} is not up yet.`);
 		case 'ready':
-			return view('Your agent is online.', m.ready_at ? `It answered the board ${elapsed(m.ready_at, now)} ago.` : 'It answered the board.');
+			return view(`${a} is online.`, m.ready_at ? `It answered the board ${elapsed(m.ready_at, now)} ago.` : 'It answered the board.');
 		case 'disconnected':
-			return view('Your agent’s machine is offline.', lastSeen ? `Last heard from ${elapsed(lastSeen, now)} ago.` : 'Its bridge stopped answering.');
+			return view(`${a}’s machine is offline.`, lastSeen ? `Last heard from ${elapsed(lastSeen, now)} ago.` : 'Its bridge stopped answering.');
 		case 'deleting':
-			return view('Your agent’s machine is being removed.', 'Set it up again once it is gone.');
+			return view(`${a}’s machine is being removed.`, 'Set it up again once it is gone.');
 	}
 }
 

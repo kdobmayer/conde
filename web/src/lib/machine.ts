@@ -1,7 +1,7 @@
 /**
  * The Machine page's words (`machine.status`): one headline and one detail line per state, whether
- * the setup button shows and what it says, the sign-in flows that need the person, and the sign-in
- * relay's step. Times come from the browser clock corrected by the server's skew.
+ * the setup button shows and what it says, the sign-in flows that need the person, the sign-in
+ * relay's step, and the setup as steps. Times come from the browser clock corrected by the server's skew.
  */
 
 export type MachineState =

@@ -143,6 +143,12 @@ Owner's own steps, at his pace, none blocking the above:
   three rendered directions, plan); implementation items appear here after
   the owner picks a direction.
 
+- W5. Secret sharing (owner, 2026-11-09: design approved, build not now). A read-once,
+  expiring secret sent through conde outside messages: age encryption to the recipient's host
+  keys, ciphertext in its own table, `conde secret send/take/reveal/revoke`, the value never in an
+  agent's context. Design in docs/secret-share-design.md. Before any build: a security review of
+  the design at desk (the reveal guard, browser-only recipients, a failed take losing the secret).
+
 ## Web UI v2 (owner 2026-10-14: skins A Console and B Editorial over one skeleton, per-browser switch, dark only; C not built; pick or mix after real traffic)
 
 Design: docs/web-ui-v2/ (audit.md, ia.md, options/, plan.md). Each item below

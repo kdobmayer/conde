@@ -24,7 +24,7 @@ page and the relay) is in conde itself.
 
 | file | runs | does |
 |---|---|---|
-| `bootstrap.sh` | root; Packer (`image`) or cloud-init | installs from current releases: Ubuntu updates, git (git-core PPA), gh, Claude Code, uv, conde; the agent user with linger and umask 077 (`umask=077` in its GECOS field, for pam_umask); `~/work` trusted, onboarding and bypass-mode prompt pre-answered, the SessionStart hook. Without `image` it also runs `conde setup` |
+| `bootstrap.sh` | root; Packer (`image`) or cloud-init | installs from current releases: Ubuntu updates, git (git-core PPA), gh, Claude Code, uv, conde; the agent user with linger and umask 077 (`umask=077` in its GECOS field, for pam_umask); `~/work` trusted, onboarding and bypass-mode prompt pre-answered, the SessionStart hook, the sharing rule in `~/.claude/CLAUDE.md` (600, only if absent). Without `image` it also runs `conde setup` |
 | `image/agent-vm.pkr.hcl` | Packer | the image: Ubuntu 24.04 server, `bootstrap.sh image` + `image/provision.sh`, generalized, into `galNativeLanes/agent-vm` |
 | `image/provision.sh` | Packer, root | headless Chrome (Google's apt repository, key fingerprint-checked), unattended-upgrades for Ubuntu, the git PPA, gh and Chrome (no automatic reboot), a daily `conde update` user timer, `agentvm-firstboot.service`, clean-up of this build machine's identity |
 | `agentvm-firstboot` (+ `.service`) | image VM, first boot, root | identity token from the metadata service; `POST /v1/machines/enrol`; `conde enroll --key-stdin` (retried while the key is held); then `conde update` (a failure only logs) and `conde setup`; agent.env with a pinned session id and the board; `claude-agent.service` enabled |
@@ -236,6 +236,13 @@ sudo -u agent -H env XDG_RUNTIME_DIR=/run/user/$(id -u agent) PATH=/home/agent/.
 ```
 
 It prints `active`; `journalctl --user -u praxia-connect` (as the agent) says whether it connected.
+
+## Existing VMs: the sharing rule (once per VM)
+
+A VM made before the image carried the rule gets it by `az vm run-command invoke` (root): the lines between
+`# BEGIN sharing-rule` and `# END sharing-rule` in `bootstrap.sh`, with `AGENT_USER=agent` set first. It writes
+`/home/agent/.claude/CLAUDE.md` (600) only if the file is absent, and restarts nothing: Claude Code reads the
+file at its next session start.
 
 ## Watching and steering the agent (power users)
 

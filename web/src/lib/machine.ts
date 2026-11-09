@@ -282,18 +282,21 @@ export function setupSteps(m: Machine | null, now: number, agent: string, sendin
 	const running = m.relay && RUNNING.includes(m.relay.state) ? m.relay.flow : null;
 	const signIn = (flow: Flow, name: string): [StepState, string | null] => {
 		if (!joined) return ['pending', null];
+		// a sign-in running again spins even over a signed-in report
+		if (running === flow) return ['active', null];
 		const said = reported(m, flow);
 		if (said === 'ok' || said === 'expiring' || (flow === 'claude' && m.state === 'ready')) return ['done', null];
-		if (running === flow) return ['active', null];
 		if (m.relay?.flow === flow && m.relay.state === 'failed') return ['failed', failure(flow, m.relay.reason)];
 		return ['turn', running ? 'Your turn, once the running sign-in ends.' : `Your turn: use “Sign in to ${name}” below.`];
 	};
 	const claude = signIn('claude', 'Claude');
+	// `requested_at` is set when Azure accepted the PUT; a refused PUT leaves it null with the error
+	const accepted = Boolean(m.requested_at || m.deploy_state) || joined;
 	const steps: Record<StepId, [StepState, string | null]> = {
 		request: adopted ? ['skipped', 'Not needed'] : ['done', null],
 		accept: adopted
 			? ['skipped', 'Not needed']
-			: m.deploy_state || joined
+			: accepted
 				? ['done', null]
 				: failed
 					? ['failed', why]
@@ -302,11 +305,11 @@ export function setupSteps(m: Machine | null, now: number, agent: string, sendin
 			? ['skipped', 'Not needed']
 			: deployed
 				? ['done', null]
-				: m.deploy_state
-					? failed
+				: !accepted
+					? ['pending', null]
+					: failed
 						? ['failed', why]
-						: ['active', since]
-					: ['pending', null],
+						: ['active', since],
 		join: joined
 			? ['done', null]
 			: m.state === 'not_connected'
@@ -320,7 +323,8 @@ export function setupSteps(m: Machine | null, now: number, agent: string, sendin
 	};
 	const list = labels.map(([id, label]) => {
 		const [state, note] = steps[id];
-		return step(id, id === 'accept' && state === 'active' ? 'Waiting for Azure to accept the request' : label, state, note);
+		const waiting = state !== 'active' ? null : id === 'accept' ? 'Waiting for Azure to accept the request' : id === 'build' && !m.deploy_state ? 'Waiting for deployment status' : null;
+		return step(id, waiting ?? label, state, note);
 	});
 	return list.every((s) => s.state === 'done' || s.state === 'skipped') ? [] : list;
 }

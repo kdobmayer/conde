@@ -260,15 +260,19 @@ test('no record shows no steps until Set up is pressed; then the request is bein
 	assert.equal(stateOf(machine('failed', { deploy_error: 'SkuNotAvailable' }), 'request', true).state, 'active', 'a retry is being sent');
 });
 
-test('Azure accepting the request is the active step until a deployment state is read', () => {
+test('Azure accepting the request is the active step until the request is accepted, then the deployment status is awaited', () => {
 	const unsent = stateOf(fresh(), 'accept');
 	assert.deepEqual([unsent.state, unsent.label, unsent.note], ['active', 'Waiting for Azure to accept the request', null]);
 	assert.equal(stateOf(fresh(), 'request').state, 'done');
-	assert.deepEqual(steps(fresh({ requested_at: at(420) })).slice(0, 3), [
+	// requested_at is set when Azure accepted the PUT; the deployment's state comes with the next read
+	assert.deepEqual(steps(fresh({ requested_at: at(420) })).slice(0, 4), [
 		['request', 'done', null],
-		['accept', 'active', '7 min since requested'],
-		['build', 'pending', null]
+		['accept', 'done', null],
+		['build', 'active', '7 min since requested'],
+		['join', 'pending', null]
 	]);
+	assert.equal(stateOf(fresh({ requested_at: at(420) }), 'build').label, 'Waiting for deployment status');
+	assert.equal(stateOf(fresh({ requested_at: at(420) }), 'accept').label, 'Azure accepts the request');
 });
 
 test('Azure builds while the deployment is accepted or running; the time is the total since the request', () => {
@@ -278,7 +282,13 @@ test('Azure builds while the deployment is accepted or running; the time is the 
 			['build', 'active', '7 min since requested'],
 			['join', 'pending', null]
 		], deploy_state);
+		assert.equal(stateOf(fresh({ requested_at: at(420), deploy_state }), 'build').label, 'Azure builds the machine');
 	}
+});
+
+test('any other deployment state without an error keeps Azure building', () => {
+	const b = stateOf(fresh({ requested_at: at(420), deploy_state: 'Created' }), 'build');
+	assert.deepEqual([b.state, b.label, b.note], ['active', 'Azure builds the machine', '7 min since requested']);
 });
 
 test('a succeeded deployment waits for the machine to join the board', () => {
@@ -346,6 +356,14 @@ test('a running sign-in spins its own row; the other row waits for it to end', (
 		['online', 'pending', null],
 		['github', 'turn', 'Your turn, once the running sign-in ends.']
 	]);
+});
+
+test('signing in again to a signed-in flow spins its row and keeps the list', () => {
+	const m = machine('ready', { sign_in: { claude: 'ok', github: 'ok' }, relay: relay('github', 'url', { url: 'https://github.com/login/device' }) });
+	assert.equal(stateOf(m, 'github').state, 'active');
+	assert.equal(stateOf(m, 'claude').state, 'done');
+	assert.equal(stateOf(machine('ready', { sign_in: { claude: 'ok', github: 'ok' }, relay: relay('claude', 'waiting') }), 'claude').state, 'active', 'online does not mask a running Claude sign-in');
+	assert.equal(stateOf(machine('connected', { sign_in: { claude: 'expiring' }, relay: relay('claude', 'starting') }), 'claude').state, 'active');
 });
 
 test('a sign-in row reads the flow\'s own state: a newer expired report beats an older done relay', () => {

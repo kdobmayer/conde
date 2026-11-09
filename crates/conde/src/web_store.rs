@@ -354,6 +354,12 @@ impl WebStore for WebBoard {
             let at = iso(now);
             let replaced = t.revoke_host_credentials(host_id, &at)?;
             t.insert_credential(token_digest, user_id, host_id, label, &at)?;
+            // a live key of the record's host joins the machine: `requested` reads `up`
+            if t.machine_of_user(user_id)?
+                .is_some_and(|m| m.host_id == host_id)
+            {
+                t.announce(topics::MACHINE);
+            }
             Ok(Minted::Stored { replaced, new_host })
         })
     }

@@ -1,8 +1,8 @@
 // The Machine page's words per state of `machine.status`, the elapsed line, the setup button, the
-// sign-in lines, the sign-in relay's buttons and lines per state, and the server clock's skew.
+// sign-in lines, the sign-in relay's buttons and lines per state, the setup steps, and the server clock's skew.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { UNKNOWN, agentName, elapsed, machineView, settle, signInView, skew } from '../src/lib/machine.ts';
+import { UNKNOWN, agentName, elapsed, machineView, settle, setupSteps, signInView, skew } from '../src/lib/machine.ts';
 
 // the session's agent name, the board's one constant
 const AGENT = 'praxy';
@@ -222,4 +222,180 @@ test('a finished sign-in reads signed in at once; a later report that it needs t
 	assert.equal(row(done('github', null), 'claude').status, null, 'only its own flow');
 	assert.equal(row(done('claude', { claude: 'expired' }), 'claude').status, 'Sign-in expired');
 	assert.equal(row(signedIn(null, { relay: relay('claude', 'failed', { reason: 'timeout' }) }), 'claude').status, null);
+});
+
+// the setup steps as [id, state, note] rows; `sending` is the page's own "Set up pressed, no answer yet"
+const steps = (m, sending = false) => setupSteps(m, NOW, AGENT, sending).map((s) => [s.id, s.state, s.note]);
+const stateOf = (m, id, sending = false) => setupSteps(m, NOW, AGENT, sending).find((s) => s.id === id);
+const fresh = (o = {}) => machine('requested', { requested_at: null, ...o });
+
+test('the steps run request, accept, build, join, Claude, online, GitHub, with their labels', () => {
+	const list = setupSteps(fresh({ requested_at: at(420), deploy_state: 'Running' }), NOW, AGENT, false);
+	assert.deepEqual(
+		list.map((s) => [s.id, s.label]),
+		[
+			['request', 'Request sent'],
+			['accept', 'Azure accepts the request'],
+			['build', 'Azure builds the machine'],
+			['join', 'The machine joins the board'],
+			['claude', 'Claude sign-in'],
+			['online', 'Praxy is online'],
+			['github', 'GitHub sign-in']
+		]
+	);
+});
+
+test('no record shows no steps until Set up is pressed; then the request is being sent', () => {
+	assert.deepEqual(setupSteps(null, NOW, AGENT, false), []);
+	assert.deepEqual(steps(null, true), [
+		['request', 'active', null],
+		['accept', 'pending', null],
+		['build', 'pending', null],
+		['join', 'pending', null],
+		['claude', 'pending', null],
+		['online', 'pending', null],
+		['github', 'pending', null]
+	]);
+	assert.equal(stateOf(null, 'request', true).label, 'Sending the request');
+	assert.equal(stateOf(machine('failed', { deploy_error: 'SkuNotAvailable' }), 'request', true).state, 'active', 'a retry is being sent');
+});
+
+test('Azure accepting the request is the active step until the request is accepted, then the deployment status is awaited', () => {
+	const unsent = stateOf(fresh(), 'accept');
+	assert.deepEqual([unsent.state, unsent.label, unsent.note], ['active', 'Waiting for Azure to accept the request', null]);
+	assert.equal(stateOf(fresh(), 'request').state, 'done');
+	// requested_at is set when Azure accepted the PUT; the deployment's state comes with the next read
+	assert.deepEqual(steps(fresh({ requested_at: at(420) })).slice(0, 4), [
+		['request', 'done', null],
+		['accept', 'done', null],
+		['build', 'active', '7 min since requested'],
+		['join', 'pending', null]
+	]);
+	assert.equal(stateOf(fresh({ requested_at: at(420) }), 'build').label, 'Waiting for deployment status');
+	assert.equal(stateOf(fresh({ requested_at: at(420) }), 'accept').label, 'Azure accepts the request');
+});
+
+test('Azure builds while the deployment is accepted or running; the time is the total since the request', () => {
+	for (const deploy_state of ['Accepted', 'Running']) {
+		assert.deepEqual(steps(fresh({ requested_at: at(420), deploy_state })).slice(1, 4), [
+			['accept', 'done', null],
+			['build', 'active', '7 min since requested'],
+			['join', 'pending', null]
+		], deploy_state);
+		assert.equal(stateOf(fresh({ requested_at: at(420), deploy_state }), 'build').label, 'Azure builds the machine');
+	}
+});
+
+test('any other deployment state without an error keeps Azure building', () => {
+	const b = stateOf(fresh({ requested_at: at(420), deploy_state: 'Created' }), 'build');
+	assert.deepEqual([b.state, b.label, b.note], ['active', 'Azure builds the machine', '7 min since requested']);
+});
+
+test('a succeeded deployment waits for the machine to join the board', () => {
+	assert.deepEqual(steps(fresh({ requested_at: at(900), deploy_state: 'Succeeded' })).slice(2, 5), [
+		['build', 'done', null],
+		['join', 'active', '15 min since requested'],
+		['claude', 'pending', null]
+	]);
+});
+
+test('a refused request fails the accept step, a failed deployment the build step, each with Azure\'s words', () => {
+	assert.deepEqual(steps(machine('failed', { requested_at: null, deploy_error: 'QuotaExceeded' })).slice(0, 3), [
+		['request', 'done', null],
+		['accept', 'failed', 'QuotaExceeded'],
+		['build', 'pending', null]
+	]);
+	assert.deepEqual(steps(machine('failed', { deploy_state: 'Failed', deploy_error: 'SkuNotAvailable' })).slice(1, 4), [
+		['accept', 'done', null],
+		['build', 'failed', 'SkuNotAvailable'],
+		['join', 'pending', null]
+	]);
+	assert.equal(stateOf(machine('failed', { deploy_state: 'Canceled' }), 'build').note, 'Azure gave no reason.');
+});
+
+test('a machine that did not join in time fails the join step', () => {
+	assert.deepEqual(stateOf(machine('not_connected', { requested_at: at(1900), deploy_state: 'Succeeded' }), 'join').state, 'failed');
+	assert.equal(stateOf(machine('not_connected', { requested_at: at(1900), deploy_state: 'Succeeded' }), 'join').note, 'It did not join the board within 30 minutes.');
+});
+
+test('a joined machine asks for the Claude sign-in before Praxy can be online, and GitHub alongside', () => {
+	const deployed = { requested_at: at(1200), deploy_state: 'Succeeded' };
+	assert.deepEqual(steps(machine('up', deployed)), [
+		['request', 'done', null],
+		['accept', 'done', null],
+		['build', 'done', null],
+		['join', 'done', null],
+		['claude', 'turn', 'Your turn: use “Sign in to Claude” below.'],
+		['online', 'pending', null],
+		['github', 'turn', 'Your turn: use “Sign in to GitHub” below.']
+	]);
+	assert.deepEqual(steps(machine('connected', { ...deployed, sign_in: { claude: 'ok' } })).slice(4), [
+		['claude', 'done', null],
+		['online', 'active', '20 min since requested'],
+		['github', 'turn', 'Your turn: use “Sign in to GitHub” below.']
+	]);
+	assert.deepEqual(steps(machine('ready', { ...deployed, sign_in: { claude: 'ok' } })).slice(4), [
+		['claude', 'done', null],
+		['online', 'done', null],
+		['github', 'turn', 'Your turn: use “Sign in to GitHub” below.']
+	]);
+	assert.equal(stateOf(machine('ready', deployed), 'claude').state, 'done', 'online means the machine signed in to Claude');
+	assert.equal(stateOf(machine('connected', { ...deployed, sign_in: { claude: 'expiring' } }), 'claude').state, 'done', 'expiring is still signed in');
+});
+
+test('a running sign-in spins its own row; the other row waits for it to end', () => {
+	const m = machine('connected', { sign_in: { claude: 'ok' }, relay: relay('github', 'waiting') });
+	assert.deepEqual(steps(m).slice(4), [
+		['claude', 'done', null],
+		['online', 'active', '7 min since requested'],
+		['github', 'active', null]
+	]);
+	const c = machine('up', { relay: relay('claude', 'url', { url: CLAUDE_URL }) });
+	assert.deepEqual(steps(c).slice(4), [
+		['claude', 'active', null],
+		['online', 'pending', null],
+		['github', 'turn', 'Your turn, once the running sign-in ends.']
+	]);
+});
+
+test('signing in again to a signed-in flow spins its row and keeps the list', () => {
+	const m = machine('ready', { sign_in: { claude: 'ok', github: 'ok' }, relay: relay('github', 'url', { url: 'https://github.com/login/device' }) });
+	assert.equal(stateOf(m, 'github').state, 'active');
+	assert.equal(stateOf(m, 'claude').state, 'done');
+	assert.equal(stateOf(machine('ready', { sign_in: { claude: 'ok', github: 'ok' }, relay: relay('claude', 'waiting') }), 'claude').state, 'active', 'online does not mask a running Claude sign-in');
+	assert.equal(stateOf(machine('connected', { sign_in: { claude: 'expiring' }, relay: relay('claude', 'starting') }), 'claude').state, 'active');
+});
+
+test('a sign-in row reads the flow\'s own state: a newer expired report beats an older done relay', () => {
+	assert.equal(stateOf(machine('connected', { sign_in: { claude: 'expired' }, relay: relay('claude', 'done') }), 'claude').state, 'turn');
+	assert.equal(stateOf(machine('connected', { relay: relay('claude', 'done') }), 'claude').state, 'done', 'done before any report');
+	assert.equal(stateOf(machine('connected', { sign_in: { claude: 'unknown' } }), 'claude').state, 'turn', 'unknown is not signed in');
+	const failed = stateOf(machine('up', { relay: relay('claude', 'failed', { reason: 'bad_code' }) }), 'claude');
+	assert.deepEqual([failed.state, failed.note], ['failed', 'Claude did not take that code. Start again for a new link.']);
+	assert.equal(stateOf(machine('up', { sign_in: { claude: 'ok' }, relay: relay('claude', 'failed') }), 'claude').state, 'done', 'a later ok report wins');
+});
+
+test('an adopted machine skips the deployment steps, never pending and never claimed done', () => {
+	const adopted = machine('up', { requested_at: null, minted_at: at(60), deploy_state: null });
+	assert.deepEqual(steps(adopted).slice(0, 4), [
+		['request', 'skipped', 'Not needed'],
+		['accept', 'skipped', 'Not needed'],
+		['build', 'skipped', 'Not needed'],
+		['join', 'done', null]
+	]);
+	assert.deepEqual(setupSteps(machine('ready', { requested_at: null, minted_at: at(60), sign_in: { claude: 'ok', github: 'ok' } }), NOW, AGENT, false), []);
+});
+
+test('the steps hide once all is done, and while the machine is offline or being removed', () => {
+	assert.deepEqual(setupSteps(machine('ready', { deploy_state: 'Succeeded', sign_in: { claude: 'ok', github: 'ok' } }), NOW, AGENT, false), []);
+	assert.deepEqual(setupSteps(machine('ready', { relay: relay('github', 'done') }), NOW, AGENT, false), [], 'GitHub just signed in, Claude by being online');
+	assert.deepEqual(setupSteps(machine('disconnected'), NOW, AGENT, false), []);
+	assert.deepEqual(setupSteps(machine('deleting'), NOW, AGENT, false), []);
+});
+
+test('a failed status read shows the last answer\'s steps, nothing newer', () => {
+	const m = fresh({ requested_at: at(420), deploy_state: 'Running' });
+	const before = setupSteps(settle(UNKNOWN, { machine: m }).machine, NOW, AGENT, false);
+	const after = settle(settle(UNKNOWN, { machine: m }), { error: { code: 'network', message: 'The server could not be reached' } });
+	assert.deepEqual(setupSteps(after.machine, NOW, AGENT, false), before);
 });

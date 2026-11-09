@@ -182,6 +182,7 @@ on_both!(
     a_password_invite_opens_its_join_page_with_the_password_step_first,
     a_join_link_expires_and_an_unknown_one_says_so,
     machine_record_round_trip,
+    a_key_for_the_machine_host_announces_the_machine,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -3578,4 +3579,71 @@ async fn machine_record_round_trip(d: Arc<Dispatcher>) {
     assert_eq!(m.ready_at.as_deref(), Some("2026-11-05T22:00:00.000Z"));
     assert_eq!(m.sign_in.as_deref(), Some(r#"{"claude":"expired"}"#));
     assert_eq!(m.deleting_at.as_deref(), Some("2026-11-05T23:30:00.000Z"));
+}
+
+/// A key minted for the host of a person's machine record joins the machine by hand (`requested`
+/// becomes `up`): the Machine page hears it once on the machine topic. A key for another host, a
+/// disabled user's refused mint and a mint whose transaction rolls back announce nothing.
+async fn a_key_for_the_machine_host_announces_the_machine(d: Arc<Dispatcher>) {
+    let board = Arc::new(WebBoard::new(d.clone()));
+    let d2 = d.clone();
+    let (uid, gone) = blocking(move || {
+        d2.with_tx(|t| {
+            let mut ids = Vec::new();
+            for user in ["krisztian-dobmayer", "former-member"] {
+                let uid = t.ensure_user(user)?;
+                t.machine_request(&conde::store::NewMachine {
+                    user_id: uid,
+                    host_id: &format!("vm-agent-{user}"),
+                    owner_object_id: "oid",
+                    vm_size: "Standard_B2as_v2",
+                    minted_at: None,
+                })?;
+                ids.push(uid);
+            }
+            t.set_user_disabled(ids[1], true)?;
+            Ok((ids[0], ids[1]))
+        })
+        .unwrap()
+    })
+    .await;
+    let mut events = d.store().pending().events();
+    let mint = |user: i64, host: &'static str, digest: &'static str| {
+        let b = board.clone();
+        blocking(move || b.mint_host_key(user, host, "key", digest, 0))
+    };
+    assert!(
+        mint(uid, "laptop", "digest-1").await.is_ok(),
+        "another host"
+    );
+    assert!(
+        matches!(
+            mint(gone, "vm-agent-former-member", "digest-2").await,
+            Ok(web::Minted::Disabled)
+        ),
+        "a disabled user"
+    );
+    assert!(
+        mint(uid, "vm-agent-krisztian-dobmayer", "digest-1")
+            .await
+            .is_err(),
+        "a taken digest rolls the mint back"
+    );
+    assert!(
+        mint(uid, "vm-agent-krisztian-dobmayer", "digest-3")
+            .await
+            .is_ok()
+    );
+    let mut machine = 0;
+    let mut wait = Duration::from_secs(5);
+    while let Ok(Ok(wake)) = tokio::time::timeout(wait, events.recv()).await {
+        if let Wake::Board(t) = wake
+            && t & conde::store::topics::MACHINE != 0
+        {
+            machine += 1;
+            // after the first, only a late duplicate would still arrive
+            wait = Duration::from_millis(500);
+        }
+    }
+    assert_eq!(machine, 1, "one machine wake, for the owner's own host");
 }

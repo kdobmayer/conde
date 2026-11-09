@@ -68,6 +68,9 @@ pub struct BoardConn {
     relay: super::relay::Relay,
     /// The host's sign-in check.
     signin: super::relay::SignInCheck,
+    /// Held while a rename is sent and settled and while a kind sync rereads and sends, so a
+    /// sync never publishes a name a rename is moving away from.
+    pub(crate) renames: tokio::sync::Mutex<()>,
 }
 
 impl BoardConn {
@@ -91,6 +94,7 @@ impl BoardConn {
             forgotten: AtomicBool::new(false),
             relay: super::relay::Relay::default(),
             signin: super::relay::SignInCheck::default(),
+            renames: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -354,6 +358,11 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
                 let core = core.clone();
                 let conn = conn.clone();
                 tokio::spawn(async move {
+                    let _held = if op.kind == BoardOpKind::Rename {
+                        Some(conn.renames.lock().await)
+                    } else {
+                        None
+                    };
                     let outcome = send_op(&conn, &op, core.mux.tuning.call_timeout).await;
                     if let Err((_, why)) = finish_op(&core, &conn, &op, outcome) {
                         tracing::warn!(
@@ -758,13 +767,16 @@ pub fn finish_op(
                     if let Some(done) = stored(tx)? {
                         return Ok(Some(done));
                     }
-                    if let Some(r) = &renamed
-                        && tx.publication(alias, &agent)?.is_some_and(|p| {
-                            p.state == PublicationState::Published
-                                && p.mailbox_id.as_deref() == Some(r.mailbox_id.as_str())
-                        })
-                    {
-                        tx.rename_publication(alias, &agent, &r.name, r.route_generation, &now)?;
+                    let current = tx.publication(alias, &agent)?.filter(|p| {
+                        p.state == PublicationState::Published
+                            && renamed.as_ref().is_some_and(|r| {
+                                p.mailbox_id.as_deref() == Some(r.mailbox_id.as_str())
+                            })
+                    });
+                    if let (Some(r), Some(p)) = (&renamed, current) {
+                        // a replayed answer is older than routes reconciled since: keep theirs
+                        let generation = p.route_generation.unwrap_or(0).max(r.route_generation);
+                        tx.rename_publication(alias, &agent, &r.name, generation, &now)?;
                         advance(r.revision);
                     }
                     tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;

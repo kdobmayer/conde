@@ -1047,7 +1047,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             skip_agents.as_deref(),
         );
     }
-    // register, unregister, rename, pin and unpin act on the local registry only (§3 rule 3)
+    // register, unregister, rename, pin and unpin act on the local registry only (§3 rule 3), except
+    // `rename <agent> <new> --board <alias>`, which renames that agent's publication there
     let local_only = match (&cli.cmd, cli.board.as_deref()) {
         (_, None | Some(LOCAL_BOARD)) => None,
         (Cmd::Register { name, .. }, Some(b)) => Some(surface::local_only("register", name, b)),

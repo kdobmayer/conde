@@ -162,6 +162,12 @@ fn a_board_ops_table_from_before_rename_accepts_rename_after_open() {
     )
     .unwrap();
     op(&c, "op1", "publish", Some("a1"), "pending").unwrap();
+    c.execute(
+        "INSERT INTO board_ops(op_id, board, kind, agent_id, request_json, state, result_json, created_at, updated_at)
+         VALUES ('m1', 'dakai', 'migrate', NULL, '{\"publish\":[\"a1\"]}', 'done', '{\"bindings\":[]}', 't1', 't2')",
+        [],
+    )
+    .unwrap();
     assert!(
         op(&c, "op0", "rename", Some("a0"), "done").is_err(),
         "the old CHECK"
@@ -175,9 +181,29 @@ fn a_board_ops_table_from_before_rename_accepts_rename_after_open() {
         })
         .unwrap();
     assert_eq!(kept, "publish");
+    let migrate: (String, String, String, String) = c
+        .query_row(
+            "SELECT request_json, result_json, created_at, updated_at FROM board_ops WHERE op_id = 'm1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        migrate,
+        (
+            r#"{"publish":["a1"]}"#.to_string(),
+            r#"{"bindings":[]}"#.to_string(),
+            "t1".to_string(),
+            "t2".to_string()
+        )
+    );
     op(&c, "op2", "rename", Some("a2"), "pending").unwrap();
     assert!(
         op(&c, "op3", "rename", Some("a1"), "pending").is_err(),
         "one pending op per agent"
+    );
+    assert!(
+        op(&c, "m2", "migrate", None, "pending").is_err(),
+        "one live migrate per board"
     );
 }

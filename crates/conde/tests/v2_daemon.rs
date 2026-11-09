@@ -4477,3 +4477,169 @@ fn a_rename_whose_answer_is_lost_completes_after_a_restart() {
         .unwrap();
     assert_eq!(op_state, "done");
 }
+
+/// A pending rename reserves its destination on this host: while `vm.agent -> praxy` waits for
+/// its lost answer, another agent may neither publish as `praxy` nor rename to it; once the
+/// rename completes, one publication holds `praxy` at the original mailbox.
+#[test]
+fn a_pending_rename_reserves_its_new_name_on_this_host() {
+    let tuning = Tuning {
+        call_timeout: Duration::from_secs(1),
+        ..fast()
+    };
+    let board = FakeBoard::start();
+    let (mut a, _) = published_host(&board, "kdobmayer", "homepc", "vm.agent", "s-vm", tuning);
+    a.claude("other", "s-other");
+    assert_eq!(a.publish("other")["state"], "published");
+    a.claude("third", "s-third");
+    let before = board.mailbox_named("kdobmayer", "vm.agent").unwrap();
+
+    board.silence("mailbox.rename");
+    let pending = a
+        .request(
+            &a.human(),
+            "mailbox.rename",
+            json!({"agent": "vm.agent", "name": "praxy"}),
+            Some("dakai"),
+        )
+        .unwrap();
+    assert_eq!(pending["state"], "renaming", "{pending}");
+    let op_id = pending["op_id"].as_str().unwrap().to_string();
+    for (op, body) in [
+        (
+            "mailbox.publish",
+            json!({"agent": "third", "name": "praxy"}),
+        ),
+        ("mailbox.rename", json!({"agent": "other", "name": "praxy"})),
+    ] {
+        let refused = a.request(&a.human(), op, body, Some("dakai")).unwrap_err();
+        assert_eq!(refused.0, ErrorCode::Conflict, "{op}: {refused:?}");
+        assert!(
+            refused.1.contains(&op_id) && refused.1.contains("praxy"),
+            "{op}: {refused:?}"
+        );
+    }
+
+    a.kill();
+    board.answer("mailbox.rename");
+    a.start();
+    let names = || -> Vec<(String, String)> {
+        let c = sql(&a);
+        let mut st = c
+            .prepare("SELECT shared_name, mailbox_id FROM publications WHERE board = 'dakai' ORDER BY shared_name")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    wait_for("renamed after the resume", || {
+        names().iter().any(|(n, _)| n == "praxy").then_some(())
+    });
+    let other = board.mailbox_named("kdobmayer", "other").unwrap().id;
+    assert_eq!(
+        names(),
+        vec![
+            ("other".to_string(), other),
+            ("praxy".to_string(), before.id.clone())
+        ]
+    );
+    let pending: i64 = sql(&a)
+        .query_row(
+            "SELECT count(*) FROM board_ops WHERE state = 'pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+}
+
+/// A rename answer replayed after newer routes reconciled keeps the newer generation: the board
+/// moved the mailbox away and back (generation 4) before the stored answer (generation 2) arrived.
+#[test]
+fn a_replayed_rename_never_lowers_a_reconciled_generation() {
+    let tuning = Tuning {
+        call_timeout: Duration::from_secs(1),
+        ..fast()
+    };
+    let board = FakeBoard::start();
+    let (a, _) = published_host(&board, "kdobmayer", "homepc", "vm.agent", "s-vm", tuning);
+    let before = board.mailbox_named("kdobmayer", "vm.agent").unwrap();
+    board.silence("mailbox.rename");
+    let pending = a
+        .request(
+            &a.human(),
+            "mailbox.rename",
+            json!({"agent": "vm.agent", "name": "praxy"}),
+            Some("dakai"),
+        )
+        .unwrap();
+    assert_eq!(pending["state"], "renaming", "{pending}");
+    board.take("kdobmayer", "praxy", "homepc");
+    let newest = board.take("kdobmayer", "praxy", "homepc");
+    assert_eq!(newest, before.generation + 3);
+    let generation = || -> (String, i64) {
+        sql(&a)
+            .query_row(
+                "SELECT shared_name, route_generation FROM publications WHERE board = 'dakai'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    wait_for("the newer routes reconciled", || {
+        (generation().1 == newest as i64).then_some(())
+    });
+    board.answer("mailbox.rename");
+    board.drop_connection("homepc");
+    wait_for("renamed after the replay", || {
+        (generation().0 == "praxy").then_some(())
+    });
+    assert_eq!(generation(), ("praxy".to_string(), newest as i64));
+}
+
+/// Reconnect's kind sync never republishes a name a pending rename is moving away from: with an
+/// unacknowledged kind and the rename's answer lost, the recovery leaves the original mailbox
+/// named `praxy` and no new `vm.agent` mailbox on the board.
+#[test]
+fn kind_sync_after_a_lost_rename_answer_never_recreates_the_old_name() {
+    let tuning = Tuning {
+        call_timeout: Duration::from_secs(1),
+        ..fast()
+    };
+    let board = FakeBoard::start();
+    let (mut a, _) = published_host(&board, "kdobmayer", "homepc", "vm.agent", "s-vm", tuning);
+    let before = board.mailbox_named("kdobmayer", "vm.agent").unwrap();
+    sql(&a)
+        .execute("UPDATE publications SET kind = NULL", [])
+        .unwrap();
+    board.silence("mailbox.rename");
+    let pending = a
+        .request(
+            &a.human(),
+            "mailbox.rename",
+            json!({"agent": "vm.agent", "name": "praxy"}),
+            Some("dakai"),
+        )
+        .unwrap();
+    assert_eq!(pending["state"], "renaming", "{pending}");
+    a.kill();
+    board.answer("mailbox.rename");
+    a.start();
+    wait_for("renamed after the resume", || {
+        let name: String = sql(&a)
+            .query_row("SELECT shared_name FROM publications", [], |r| r.get(0))
+            .unwrap();
+        (name == "praxy").then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        board.mailbox_named("kdobmayer", "praxy").map(|m| m.id),
+        Some(before.id.clone())
+    );
+    assert!(
+        board.mailbox_named("kdobmayer", "vm.agent").is_none(),
+        "{:?}",
+        board.mailboxes()
+    );
+}

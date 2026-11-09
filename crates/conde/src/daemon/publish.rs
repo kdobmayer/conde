@@ -116,6 +116,31 @@ fn agent_named(core: &Core, name: &str) -> Result<crate::store::Agent, Refusal> 
         })
 }
 
+/// A pending rename on `alias` to `name` by another agent than `agent_id`: its destination is
+/// reserved until it settles (the board may already hold the mailbox under that name).
+fn reserved_by_rename(
+    tx: &crate::store::sqlite::SqliteTx,
+    alias: &str,
+    name: &str,
+    agent_id: &str,
+) -> anyhow::Result<Option<BoardOp>> {
+    Ok(tx.pending_ops(Some(alias))?.into_iter().find(|o| {
+        o.kind == BoardOpKind::Rename
+            && o.request["name"].as_str() == Some(name)
+            && o.agent_id.as_deref() != Some(agent_id)
+    }))
+}
+
+fn reserved_refusal(name: &str, alias: &str, op: &BoardOp) -> Refusal {
+    refuse(
+        ErrorCode::Conflict,
+        format!(
+            "{name} on {alias} is reserved by a pending rename (op {}); it completes when {alias} is reachable",
+            op.op_id
+        ),
+    )
+}
+
 fn pending_refusal(name: &str, alias: &str, op: &BoardOp) -> Refusal {
     refuse(
         ErrorCode::Conflict,
@@ -216,6 +241,9 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
                     format!("{shared} on {alias} is already published for {holder}"),
                 )));
             }
+            if let Some(rename) = reserved_by_rename(tx, &alias, &shared, &agent.id)? {
+                return Ok(Err(reserved_refusal(&shared, &alias, &rename)));
+            }
             tx.insert_op(&op)?;
             tx.insert_publication(&Publication {
                 board: alias.clone(),
@@ -297,6 +325,25 @@ fn local_kind(agent: &crate::store::Agent) -> Option<PublishedKind> {
 /// answers without a binding change; recorded when the answer carries it, else the next publish
 /// sends it again.
 async fn sync_kind(core: &Core, conn: &BoardConn, p: &Publication, kind: PublishedKind) {
+    // under the rename lock and from a fresh read: a name a rename settled or still moves away
+    // from is never published again
+    let _held = conn.renames.lock().await;
+    let current = core.local_tx(|tx| {
+        let pending = tx.pending_op_for(&p.board, &p.agent_id)?.is_some();
+        Ok(tx
+            .publication(&p.board, &p.agent_id)?
+            .filter(|now| !pending && now.state == PublicationState::Published)
+            .filter(|now| now.shared_name == p.shared_name && now.mailbox_id == p.mailbox_id))
+    });
+    let p = match current {
+        Ok(Some(now)) => now,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(board = conn.alias, "kind not synced: {e:#}");
+            return;
+        }
+    };
+    let p = &p;
     let body = PublishBody {
         name: p.shared_name.clone(),
         human: false,
@@ -429,6 +476,7 @@ pub async fn rename(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
     let name = raw.rsplit('/').next().unwrap_or(raw);
     let name = normalize_name(name)
         .ok_or_else(|| refuse(ErrorCode::BadRequest, format!("invalid name '{name}'")))?;
+    let _held = conn.renames.lock().await;
     let now = iso_from_ms(now_ms());
     let op = core
         .local_tx(|tx| {
@@ -456,6 +504,9 @@ pub async fn rename(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
                     ErrorCode::Conflict,
                     format!("{name} on {alias} is already published for another agent"),
                 )));
+            }
+            if let Some(rename) = reserved_by_rename(tx, &alias, &name, &agent.id)? {
+                return Ok(Err(reserved_refusal(&name, &alias, &rename)));
             }
             let op = BoardOp {
                 op_id: new_ulid(),

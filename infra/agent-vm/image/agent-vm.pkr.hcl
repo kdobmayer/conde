@@ -130,8 +130,6 @@ build {
       "${path.root}/../relay-github",
       "${path.root}/../relay-codex",
       "${path.root}/../agentvm-signin-check",
-      "${path.root}/../agentvm-signin-check.service",
-      "${path.root}/../agentvm-signin-check.timer",
       "${path.root}/../praxia-connect",
       "${path.root}/../praxia-connect.service",
       "${path.root}/../praxia-connect.timer",

@@ -20,8 +20,7 @@ install -d -m 0755 /usr/local/lib/agentvm
 install -m 0755 "$SRC/bootstrap.sh" "$SRC/run-agent" "$SRC/conde-register-hook" "$SRC/agentvm-firstboot" \
   "$SRC/relay-claude" "$SRC/relay-github" "$SRC/relay-codex" "$SRC/agentvm-signin-check" "$SRC/praxia-connect" \
   /usr/local/lib/agentvm/
-install -m 0644 "$SRC/claude-agent.service" "$SRC/agentvm-signin-check.service" "$SRC/agentvm-signin-check.timer" \
-  "$SRC/praxia-connect.service" "$SRC/praxia-connect.timer" /etc/systemd/user/
+install -m 0644 "$SRC/claude-agent.service" "$SRC/praxia-connect.service" "$SRC/praxia-connect.timer" /etc/systemd/user/
 install -m 0755 "$SRC/agentvm" /usr/local/bin/agentvm
 # GITHUB_*: the relay's GitHub device flow. The pilot uses the gh CLI's public OAuth client id until the
 # Dakai OAuth app exists (Krisztián, 5 Nov); switching is this one value.
@@ -86,6 +85,7 @@ Description=Update conde to the latest release
 
 [Service]
 Type=oneshot
+UMask=0077
 ExecStart=%h/.local/bin/conde update
 UNIT
 cat > /etc/systemd/user/conde-update.timer <<'UNIT'

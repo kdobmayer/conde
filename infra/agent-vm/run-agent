@@ -4,6 +4,7 @@
 # Never --continue: that loads the folder's most recent conversation, which may be a power user's own.
 # The conde name is registered by the SessionStart hook (conde-register-hook), not by the agent.
 set -euo pipefail
+umask 077
 . "$HOME/.config/agentvm/agent.env"
 export PATH="$HOME/.local/bin:$PATH"
 cd "$WORK_DIR"

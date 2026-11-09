@@ -5,14 +5,11 @@
 #   github ok|expired
 #   codex ok|expired         (ok: a cached credential, ~/.codex/auth.json; that it still refreshes is not proven)
 #
-# With --notify (the pilot's hourly timer, agentvm-signin-check.timer) it pages the human through conde when the
-# Claude sign-in is expiring or expired: once per day per condition, so "expired" still pages after an "expiring"
-# page the same day. A page that failed, or was stored but not sent to Slack, leaves no stamp and is tried again
-# next hour. When the bridge's machine_event exists, the bridge runs this script without --notify and the timer goes.
+# conde's bridge runs it (when it connects, every hour, and after a sign-in on the Machine page ends) and reports
+# the lines to the board: the Machine page's needs-sign-in line.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 WARN_DAYS=3
-STATE="$HOME/.local/state/agentvm"
 
 claude_state() {  # prints "<state> <loginExpiresAt or ->"
   local js exp end now
@@ -32,20 +29,3 @@ if gh auth status --hostname github.com >/dev/null 2>&1; then g_state=ok; else g
 echo "claude $c_state $c_exp"
 echo "github $g_state"
 if codex login status >/dev/null 2>&1; then echo "codex ok"; else echo "codex expired"; fi
-
-[ "${1:-}" = --notify ] || exit 0
-case "$c_state" in expiring|expired) ;; *) exit 0 ;; esac
-stamp="$STATE/paged-claude-$c_state-$(date -u +%F)"
-[ -e "$stamp" ] && exit 0
-
-# conde page from a timer: as the agent's own registered session (a plain timer would be the human, and refused).
-[ -f "$HOME/.config/agentvm/agent.env" ] || { echo "no agent.env yet: not paged" >&2; exit 0; }
-. "$HOME/.config/agentvm/agent.env"
-if [ "$c_state" = expired ]; then text="Your agent VM's Claude sign-in has expired: sign in again on the onboarding page"
-else text="Your agent VM's Claude sign-in ends $(date -u -d "$c_exp" '+%a %d %b %H:%M UTC'): sign in again on the onboarding page"; fi
-out=$(CLAUDE_CODE_SESSION_ID="$SESSION_ID" conde page --board dakai "$text" 2>&1); rc=$?
-echo "$out" >&2
-if [ "$rc" -eq 0 ] && grep -q 'paged' <<<"$out" && ! grep -q 'not paged' <<<"$out"; then
-  mkdir -p "$STATE" && touch "$stamp"
-fi
-exit 0

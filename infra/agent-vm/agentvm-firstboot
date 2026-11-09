@@ -10,7 +10,8 @@
 #   4. conde enroll with that key on stdin, retried while the key is held (the mint has no replay); the key is
 #      never in an argument, a file or the log
 #   5. conde update (the image's conde may predate the board's current release; a failure is only logged), then
-#      conde setup, after the enrollment, so the skill names the board and the bridge starts on the new key
+#      conde setup, after the enrollment, so the skill names the board and the bridge starts on the new key; then
+#      the agent's home closed to group and others once (files the image made before umask 077)
 #   6. agent.env with a pinned session id and the board the hook publishes on; one Praxia connect attempt
 #      (praxia-connect.service, bounded by its requests) and its retry timer started; claude-agent.service enabled
 #      (it waits for the Claude sign-in, and does not wait for Praxia)
@@ -138,6 +139,7 @@ fi
 # would catch up only within a day), then the bridge service, skill and MCP entries naming the board
 as_agent 'timeout 300 conde update' || log "conde update failed; setting up with the image's $(as_agent 'conde --version')"
 as_agent 'conde setup' || die "conde setup"
+as_agent 'chmod -R go-rwx ~' || log "chmod of the agent's home failed"
 date -u +%FT%TZ > "$STATE/bootstrap-done"
 
 # --- 6. the agent: pinned session id (kept if this runs again), the unit enabled; it waits for the sign-in.
@@ -155,7 +157,7 @@ as_agent 'systemctl --user daemon-reload'
 # is retried by the timer, which `enable` alone would not start until a reboot.
 as_agent 'systemctl --user start praxia-connect.service' || log "the first Praxia connect failed; its timer retries"
 as_agent 'systemctl --user enable --now praxia-connect.timer' || log "the Praxia connect timer did not start"
-as_agent 'systemctl --user enable --now claude-agent agentvm-signin-check.timer conde-update.timer'
+as_agent 'systemctl --user enable --now claude-agent conde-update.timer'
 
 date -u +%FT%TZ > "$DONE"
 log "done; the agent starts when the person has signed in to Claude"

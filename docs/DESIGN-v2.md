@@ -84,7 +84,10 @@ decides where a message goes. The resolver makes the board a property of the req
    daemon sends no frame to any server for a request resolved to local, lookups included.
    `register`, `unregister`, `rename` and `pin` act on the local registry only. The default board does
    not apply to them, and an explicit `--board` naming a shared board is rejected
-   (`register is local; a shared address is conde publish <name> --board dakai`).
+   (`register is local; a shared address is conde publish <name> --board dakai`). One exception:
+   `rename <agent> <new name> --board <alias>` names two names and renames that local agent's publication
+   on the board in place (`mailbox.rename`: same mailbox id, inbox, history and channels), a durable board
+   op like publish; with one name and `--board` it is refused with that form.
 4. Sending, reading or reacting on a shared board acts as the caller's mailbox there. A local agent
    without a publication on that board gets: `worker is not published on dakai. Publication is set by
    your human: conde publish worker --board dakai`. A publication that is `publishing` or

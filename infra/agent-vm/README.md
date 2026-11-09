@@ -162,36 +162,36 @@ joined.
    then `./pilot-join.sh <owner>` (the person signs in to conde), `./pilot-join.sh <owner> CODE`.
    Everyone else: the person's first sign-in to the board, or "Set up Praxy" on its Machine page; the server
    deploys `vm-agent-<owner>` and the VM joins the board by itself at first boot (the enrol call).
-3. **Sign-ins** on the person's Machine page: Claude (they open the link, sign in, and paste the code Claude shows),
+3. **Stop the old agent first**, before the new VM's Claude sign-in: that sign-in starts the new session, whose
+   hook publishes `<owner>/praxy` with `--take` at once. On the old VM, as its user, note the mailbox's evidence as
+   the agent: the newest message id from `conde sent --board dakai` and its channels (`conde channels --board
+   dakai`, `conde members <#channel> --board dakai`); then `systemctl --user disable --now claude-agent`, so no
+   later start there can take the name back. The name stays bound to the old host, its agent stopped.
+4. **Sign-ins** on the person's Machine page: Claude (they open the link, sign in, and paste the code Claude shows),
    then GitHub and, if they use it, Codex (they type the code the page shows on GitHub's or OpenAI's page). The
-   session that starts after the Claude sign-in registers the name and publishes it (the hook, step 4).
-4. **Move the name**. The person's agent is `<owner>/praxy`, published from the old VM. First stop and disable
-   the old VM's agent (`systemctl --user disable --now claude-agent` as its user), so no later start there can take
-   the name back, and note its mailbox's evidence there as the agent: the newest message id from
-   `conde sent --board dakai` and its channels (`conde channels --board dakai`, `conde members <#channel> --board
-   dakai`). Then the new VM's session start takes the same mailbox (the hook publishes with `--take`). Without
-   restarting a session that is already running, run the hook's publish line once on the new VM as the agent user
-   (over SSH, or the same text through `az vm run-command invoke`):
+   session that starts after the Claude sign-in registers the name and takes it (the hook). That automatic take is a
+   board op; read its outcome on the new VM (`conde boards`, `conde doctor`) and from the board's binding (`conde
+   agents --board dakai`):
+   - **done**: `<owner>/praxy` is bound to the new host, `conde boards` there shows `published: praxy`, and as the
+     agent `conde show <the noted id>` prints that message and the channels match;
+   - **pending** (no answer; the daemon replays it on connect and `conde doctor` lists it): wait; nothing starts,
+     restarts, takes or publishes the name on either VM until it settles;
+   - **refused**: the binding stayed on the old host. Re-enabling the old agent (`systemctl --user enable --now
+     claude-agent` there) restores the state before step 3; or fix the cause and publish once by hand on the new VM:
 
-   ```sh
-   sudo -u agent -H env XDG_RUNTIME_DIR=/run/user/$(id -u agent) PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin \
-     bash -c '. ~/.config/agentvm/agent.env && conde publish "$AGENT_NAME" --board "$BOARD" --take && conde boards'
-   ```
+     ```sh
+     sudo -u agent -H env XDG_RUNTIME_DIR=/run/user/$(id -u agent) PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin \
+       bash -c '. ~/.config/agentvm/agent.env && conde publish "$AGENT_NAME" --board "$BOARD" --take && conde boards'
+     ```
 
-   It prints `published praxy on dakai as <owner>/praxy`, also when the VM held the name already. The take is a
-   board op: done, pending (no answer; the daemon replays it on connect and `conde doctor` lists it) or refused.
-   While it is pending, nothing starts, restarts, takes or publishes the name on either VM. Done: `conde agents
-   --board dakai` shows `<owner>/praxy` on the new host, and on the new VM, as the agent, `conde show <the noted
-   id>` prints that message and the channels match. Refused: the row stayed on the old host (check with `conde
-   agents --board dakai`), and re-enabling the old agent restores the state before this step. A take that
-   committed leaves the name on the new host; to go back, stop the new agent, then `conde publish praxy --board
-   dakai --take` on the old VM and re-enable its agent. A hand-joined replacement must hold a live key before
-   "Set up Praxy" is pressed, since setup adopts a hand-joined host only while the person has no machine record.
+   A take that committed leaves the name on the new host; to go back, stop the new agent, then `conde publish praxy
+   --board dakai --take` on the old VM and re-enable its agent. A hand-joined replacement must hold a live key
+   before "Set up Praxy" is pressed, since setup adopts a hand-joined host only while the person has no machine
+   record.
 5. **Check with a real request**: another host's agent sends `<owner>/praxy` a question on dakai and gets the
    answer.
-6. **Retire the old VM**, on Krisztián's go: stop its agent (`systemctl --user disable --now claude-agent` as its
-   user); ask desk to revoke the old host's keys (`vm-agent-<short>`; the admin API, which also disconnects its
-   bridge); check its delete settings
+6. **Retire the old VM**, on Krisztián's go: its agent is already stopped (step 3); ask desk to revoke the old
+   host's keys (`vm-agent-<short>`; the admin API, which also disconnects its bridge); check its delete settings
    (`az vm show -g conde-vm -n vm-agent-<short> --query "[networkProfile.networkInterfaces[0].deleteOption, storageProfile.osDisk.deleteOption]"`:
    the test flow's VMs keep NIC and disk on delete); then `AGENTVM_RG=conde-vm ./agentvm.sh delete <short>`, which
    deletes VM, NIC and disk.

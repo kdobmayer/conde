@@ -263,10 +263,10 @@ pub enum FenceResult {
     Fenced,
 }
 
-/// The bridge protocol a hello declares: 1 (harness endpoints) when `proto` is absent.
 /// The name of each person's public agent, the agent on their machine (`<owner>/praxy`).
 pub const PUBLIC_AGENT: &str = "praxy";
 
+/// The bridge protocol a hello declares: 1 (harness endpoints) when `proto` is absent.
 pub const PROTO_V1: u32 = 1;
 /// Mailbox endpoints, an admission window and structured notifies (DESIGN-v2.md §4, §5).
 pub const PROTO_V2: u32 = 2;

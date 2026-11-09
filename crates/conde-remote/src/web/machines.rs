@@ -1480,17 +1480,13 @@ mod tests {
         }
     }
 
-    /// The hand deployment and the template name a person's deployment as the server does
-    /// (`vm-agent-<owner>`, the VM's own name), so both write one deployment record.
+    /// The README and the template name a person's deployment as the server does (`vm-agent-<owner>`, the
+    /// VM's own name), so there is one deployment record per person.
     #[test]
-    fn a_hand_deployment_and_the_server_share_one_deployment_name() {
+    fn the_readme_and_the_template_name_one_deployment_per_person() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../infra/agent-vm/");
         let read = |f: &str| std::fs::read_to_string(format!("{root}{f}")).unwrap();
         let (readme, template) = (read("README.md"), read("template/agent-vm.bicep"));
-        assert!(
-            readme.contains("az deployment group create -g conde-vm -n vm-agent-<owner>"),
-            "the README's hand deployment"
-        );
         for (file, text) in [("README.md", &readme), ("agent-vm.bicep", &template)] {
             assert!(
                 !text.contains("agent-vm-<owner>"),

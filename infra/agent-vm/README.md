@@ -35,7 +35,6 @@ page and the relay) is in conde itself.
 | `conde-register-hook` | Claude SessionStart hook | registers the conde name for the agent's own session id only (a power user's own `claude` runs the hook too and is skipped), then publishes it on agent.env's `BOARD` with `--take` |
 | `agentvm` | VM, root | the test flow's steps, and `status`, `agent-log` |
 | `agentvm.sh` | operator, locally | the test flow: `create`, `run`, `delete` |
-| `pilot-join.sh` | operator, locally, pilot migration only | the manual join of Levente's and Oliver's replacement VMs (`conde login` on the VM, then first boot without the mint); deleted after those two joins |
 | `template/agent-vm.bicep` | conde server (template spec) | one VM: NIC, Standard SSD OS disk, system-assigned identity, Entra SSH extension, Virtual Machine Administrator Login for the person, userData (conde server and token resource). A fixed admin SSH public key whose private half was destroyed. Parameters: owner, ownerObjectId, condeResource (required: the conde-machines application id), vmSize (B2as_v2 by default, D2as_v5 for the pilot). Output `principalId` = the `oid` the mint call checks |
 | `azure/gallery.bicep` | once, RG-NATIVE-LANES | image definition `agent-vm` (generalized, Gen2); the image workflow writes versions, id-conde reads them |
 | `azure/agent-rg.bicep` | once, conde-vm | id-conde: the custom role Agent VM Deployer (VMs, extensions, NICs, OS disks, subnet join, deployments, template spec read; no run-command, no disk export, no network writes) and RBAC Administrator conditioned to Virtual Machine Administrator Login for users; Azure Policy: only the AADSSHLoginForLinux extension (Deny), since RBAC cannot narrow extension writes. Accepted residual: the identity could create its own VM in the subnet with a copy of a person's OS disk |
@@ -83,8 +82,8 @@ default.
    4xx is final), `conde enroll` with the key on stdin, then `conde update` (a failure only logs) and `conde setup`.
    The key is never in an argument, a file of ours or the log. The key is minted once per VM identity: if the 200 is lost (the response, or first boot
    dying before it saved the key and the enrolled marker), every retry gets 409 `already_minted`, which is final.
-   The recovery is a hand join of that VM (`conde login` on it as the agent user, then first boot without the mint,
-   the steps `pilot-join.sh` runs); it never means clearing the live record or deleting the VM.
+   The recovery is a hand join of that VM (`conde login` on it as the agent user, then first boot without the mint);
+   it never means clearing the live record or deleting the VM.
 3. Before the agent starts, one Praxia connect (`praxia-connect.service`, each request bounded by
    `--connect-timeout 10 --max-time 60`) and its retry timer, enabled and started. A connect that succeeded gives
    the first session the Praxia tools; one that failed (Praxia down, no Praxia person yet) is retried every ten
@@ -117,12 +116,13 @@ keeps paging until a later image rebuild drops it.
 
 ## Rebuilding a person's VM (pilot: Levente, Oliver)
 
-Moves a person from a test-flow VM (`vm-agent-<short>`, user = their short name) onto an image VM
-(`vm-agent-<owner>`, user `agent`). The names differ, so the new VM is staged first. What cannot carry over: the
-old agent's conversation history, and files on the old VM nobody copied out. Each old VM is deleted only on
-Krisztián's go, per VM. Step 3 is the person's Machine page. Step 2's manual join (`pilot-join.sh`) is the pilot
-migration's own path: the script and the join commands below go once Levente's and Oliver's replacements are
-joined.
+Both pilot moves are done (Oliver 6 Nov, Levente 9 Nov 2026); the manual join script of that migration is removed.
+A person gets a machine only through "Set up Praxy" on the Machine page (or their first sign-in to the board):
+the server deploys `vm-agent-<owner>` and the VM joins the board by itself at first boot. Nobody pre-builds or
+hand-joins a VM for a person. What follows is the record of the move, kept for the next move of the same kind:
+from a test-flow VM (`vm-agent-<short>`, user = their short name) onto an image VM (`vm-agent-<owner>`, user
+`agent`). What cannot carry over: the old agent's conversation history, and files on the old VM nobody copied out.
+Each old VM is deleted only on Krisztián's go, per VM.
 
 1. **Inventory**, and the person copies out what they keep. Read-only, as the old VM's user: save this as
    `inventory.sh` with `U` set to the short name, then
@@ -146,22 +146,9 @@ joined.
    EOS
    ```
 
-2. **Stage the new VM.** Levente and Oliver (their published agent and live keys are still on the old
-   short-name host): join the replacement `vm-agent-<owner>` by hand with a live key **before** the release that
-   enables "Set up Praxy" on dakai. Setup adopts a live `vm-agent-<owner>` first; while the old published host
-   is the only live one, it adopts that host instead, the record is minted, and the replacement can no longer join
-   through the enrol call. The pilot migration's path, removed after both joins (the deployment only for a
-   replacement that does not exist yet):
-
-   ```sh
-   az deployment group create -g conde-vm -n vm-agent-<owner> \
-     --template-spec "$(az ts show -g conde-vm -n agent-vm -v <version> --query id -o tsv)" \
-     -p owner=<owner> ownerObjectId=<Entra object id> condeResource=<CONDE_MACHINES_AUDIENCE> vmSize=Standard_D2as_v5
-   ```
-
-   then `./pilot-join.sh <owner>` (the person signs in to conde), `./pilot-join.sh <owner> CODE`.
-   Everyone else: the person's first sign-in to the board, or "Set up Praxy" on its Machine page; the server
-   deploys `vm-agent-<owner>` and the VM joins the board by itself at first boot (the enrol call).
+2. **The new VM.** The person presses "Set up Praxy" on the Machine page: the server deploys `vm-agent-<owner>`,
+   the VM joins at first boot, and the page shows the steps. (A live `vm-agent-<owner>` that already exists is adopted
+   by that same press instead of deployed.)
 3. **Stop the old agent first**, before the new VM's Claude sign-in: that sign-in starts the new session, whose
    hook publishes `<owner>/praxy` with `--take` at once. On the old VM, as its user, note the mailbox's evidence as
    the agent: the newest message id from `conde sent --board dakai` and its channels (`conde channels --board

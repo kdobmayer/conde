@@ -2,7 +2,10 @@
 // sign-in lines, the sign-in relay's buttons and lines per state, and the server clock's skew.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { UNKNOWN, elapsed, machineView, settle, signInView, skew } from '../src/lib/machine.ts';
+import { UNKNOWN, agentName, elapsed, machineView, settle, signInView, skew } from '../src/lib/machine.ts';
+
+// the session's agent name, the board's one constant
+const AGENT = 'praxy';
 
 const NOW = Date.parse('2026-11-05T22:30:00Z');
 const at = (s) => new Date(NOW - s * 1000).toISOString();
@@ -23,52 +26,64 @@ const machine = (state, o = {}) => ({
 	...o
 });
 
-test('no record offers the setup step', () => {
-	const v = machineView(null, NOW);
-	assert.equal(v.headline, 'Your agent has no machine yet.');
-	assert.equal(v.setup, 'Set up my agent');
+test('no record offers the setup step, naming the agent from the session', () => {
+	const v = machineView(null, NOW, null, AGENT);
+	assert.equal(v.headline, 'Praxy has no machine yet.');
+	assert.equal(v.detail, 'Set it up and the board creates a machine for Praxy; it takes a few minutes.');
+	assert.equal(v.setup, 'Set up Praxy');
+	assert.equal(agentName(AGENT), 'Praxy');
+	assert.equal(machineView(null, NOW, null, 'helper').headline, 'Helper has no machine yet.', 'the name is the passed one');
+});
+
+test('no view says "your agent"', () => {
+	const states = ['requested', 'failed', 'not_connected', 'up', 'connected', 'ready', 'disconnected', 'deleting'];
+	const views = [machineView(null, NOW, null, AGENT), ...states.map((s) => machineView(machine(s), NOW, at(200), AGENT))];
+	for (const v of views) {
+		const text = `${v.headline} ${v.detail} ${v.setup ?? ''}`;
+		assert.ok(!/your agent/i.test(text), text);
+	}
 });
 
 test('every state has its words, and only a failed or unsent request offers the retry', () => {
 	const words = (state, o) => {
-		const v = machineView(machine(state, o), NOW, at(200));
+		const v = machineView(machine(state, o), NOW, at(200), AGENT);
 		return [v.headline, v.detail, v.setup];
 	};
 	assert.deepEqual(words('requested', { deploy_state: 'Running' }), [
-		'Your agent’s machine is being set up.',
+		'Praxy’s machine is being set up.',
 		'Requested 7 min ago · Azure: running.',
 		null
 	]);
 	assert.deepEqual(words('requested', { requested_at: null }), [
-		'Your agent’s machine is being set up.',
+		'Praxy’s machine is being set up.',
 		'The request has not reached Azure yet.',
 		'Try again'
 	]);
 	assert.deepEqual(words('failed', { deploy_error: 'SkuNotAvailable' }), [
-		'Setting up your agent’s machine failed.',
+		'Setting up Praxy’s machine failed.',
 		'SkuNotAvailable',
 		'Try again'
 	]);
 	assert.deepEqual(words('not_connected', { requested_at: at(1900), admins: ['desk', 'krisztian-dobmayer'] }), [
-		'Your agent’s machine has not connected.',
+		'Praxy’s machine has not connected.',
 		'It did not join the board within 30 minutes. It was requested 31 min ago. Ask desk and krisztian-dobmayer to look at it.',
 		null
 	]);
-	assert.equal(words('up')[0], 'Your agent’s machine is up.');
-	assert.deepEqual(words('connected').slice(0, 2), ['Your agent’s machine is connected.', 'The agent is not up yet.']);
-	assert.deepEqual(words('ready', { ready_at: at(65) }).slice(0, 2), ['Your agent is online.', 'It answered the board 1 min ago.']);
-	assert.deepEqual(words('disconnected').slice(0, 2), ['Your agent’s machine is offline.', 'Last heard from 3 min ago.']);
-	assert.equal(words('deleting')[0], 'Your agent’s machine is being removed.');
+	assert.equal(words('up')[0], 'Praxy’s machine is up.');
+	assert.deepEqual(words('connected').slice(0, 2), ['Praxy’s machine is connected.', 'Praxy is not up yet.']);
+	assert.deepEqual(words('ready', { ready_at: at(65) }).slice(0, 2), ['Praxy is online.', 'It answered the board 1 min ago.']);
+	assert.deepEqual(words('disconnected').slice(0, 2), ['Praxy’s machine is offline.', 'Last heard from 3 min ago.']);
+	assert.equal(words('deleting')[0], 'Praxy’s machine is being removed.');
 });
 
 test('the Claude sign-in shows while connected and not known ok; expiring and expired flows are named', () => {
-	assert.equal(machineView(machine('connected'), NOW).claude, true, 'unknown');
-	assert.equal(machineView(machine('connected', { sign_in: { claude: 'ok' } }), NOW).claude, false);
-	assert.equal(machineView(machine('ready'), NOW).claude, false);
+	assert.equal(machineView(machine('connected'), NOW, null, AGENT).claude, true, 'unknown');
+	assert.equal(machineView(machine('connected', { sign_in: { claude: 'ok' } }), NOW, null, AGENT).claude, false);
+	assert.equal(machineView(machine('ready'), NOW, null, AGENT).claude, false);
 	const done = { relay_id: 'r1', flow: 'claude', state: 'done', url: null, user_code: null, expires_at: null, reason: null, at: at(5) };
-	assert.equal(machineView(machine('connected', { relay: done }), NOW).claude, false, 'just signed in through the page');
-	assert.equal(machineView(machine('connected', { relay: { ...done, flow: 'github' } }), NOW).claude, true);
-	const v = machineView(machine('ready', { sign_in: { claude: 'expiring', github: 'expired', codex: 'ok' } }), NOW);
+	assert.equal(machineView(machine('connected', { relay: done }), NOW, null, AGENT).claude, false, 'just signed in through the page');
+	assert.equal(machineView(machine('connected', { relay: { ...done, flow: 'github' } }), NOW, null, AGENT).claude, true);
+	const v = machineView(machine('ready', { sign_in: { claude: 'expiring', github: 'expired', codex: 'ok' } }), NOW, null, AGENT);
 	assert.deepEqual(v.signIn, ['Claude', 'GitHub']);
 });
 

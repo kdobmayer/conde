@@ -228,21 +228,24 @@ pub(crate) async fn rpc(app: &AppState, headers: HeaderMap, body: Bytes) -> Resp
     ([no_store()], axum::Json(response)).into_response()
 }
 
-/// `GET /v1/session`: who is signed in and the CSRF token for `/v1/rpc` and sign-out.
+/// `GET /v1/session`: who is signed in and the CSRF token for `/v1/rpc` and sign-out; with agent
+/// machines, the public agent's name (`agent`).
 async fn session_info(State(app): State<AppState>, headers: HeaderMap) -> Response {
     let session = match signed_in(&app, &headers).await {
         Ok(s) => s,
         Err(refused) => return *refused,
     };
     let r = &session.record;
-    (
-        [no_store()],
-        axum::Json(json!({
-            "user": r.user_name, "display": r.display, "csrf": r.csrf, "csrf_header": CSRF_HEADER,
-            "machines": app.web.machines().is_some(),
-        })),
-    )
-        .into_response()
+    let machines = app.web.machines().is_some();
+    let mut body = json!({
+        "user": r.user_name, "display": r.display, "csrf": r.csrf, "csrf_header": CSRF_HEADER,
+        "machines": machines,
+    });
+    // the Machine page's name for the agent, read with or without a machine record
+    if machines {
+        body["agent"] = json!(crate::PUBLIC_AGENT);
+    }
+    ([no_store()], axum::Json(body)).into_response()
 }
 
 /// `GET /v1/attachments/{id}`: the bytes as a download, if one of the user's agents can read

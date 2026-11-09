@@ -134,7 +134,8 @@ enum Cmd {
     /// shared board, brings it back.
     Retire { name: String },
     /// Rename this session's name in place, keeping its messages: `rename <new>`
-    /// (the human owner may also run `rename <old> <new>`).
+    /// (the human owner may also run `rename <old> <new>`). With `--board <alias>`,
+    /// `rename <agent> <new>` renames that local agent's publication there in place.
     Rename {
         #[arg(value_name = "OLD_OR_NEW")]
         first: String,
@@ -1046,16 +1047,26 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             skip_agents.as_deref(),
         );
     }
-    // register, unregister, rename, pin and unpin act on the local registry only (§3 rule 3)
+    // register, unregister, rename, pin and unpin act on the local registry only (§3 rule 3), except
+    // `rename <agent> <new> --board <alias>`, which renames that agent's publication there
     let local_only = match (&cli.cmd, cli.board.as_deref()) {
         (_, None | Some(LOCAL_BOARD)) => None,
         (Cmd::Register { name, .. }, Some(b)) => Some(surface::local_only("register", name, b)),
         (Cmd::Unregister { name, .. }, Some(b)) => Some(surface::local_only("unregister", name, b)),
-        (Cmd::Rename { first, second }, Some(b)) => Some(surface::local_only(
-            "rename",
-            second.as_deref().unwrap_or(first),
-            b,
-        )),
+        // with a shared board, rename renames the local agent's publication there
+        (
+            Cmd::Rename {
+                second: Some(_), ..
+            },
+            Some(_),
+        ) => None,
+        (
+            Cmd::Rename {
+                first,
+                second: None,
+            },
+            Some(b),
+        ) => Some(surface::rename_needs_both(first, b)),
         (Cmd::Pin { name, .. }, Some(b)) => Some(surface::local_only("pin", name, b)),
         (Cmd::Unpin { name }, Some(b)) => Some(surface::local_only("unpin", name, b)),
         _ => None,
@@ -1279,6 +1290,17 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             } else {
                 println!("{} was not registered", s(&r["name"]));
             }
+        }
+        Cmd::Rename {
+            first,
+            second: Some(second),
+        } if flag.as_deref().is_some_and(|b| b != LOCAL_BOARD) => {
+            let board = flag.as_deref().unwrap_or_default();
+            let r = sx.call(op::MAILBOX_RENAME, json!({"agent": first, "name": second}))?;
+            println!(
+                "{}",
+                surface::renamed_publication(&r, &first, board, &second).map_err(|e| anyhow!(e))?
+            );
         }
         Cmd::Rename { first, second } => {
             let (old, new) = match second {

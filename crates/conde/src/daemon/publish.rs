@@ -12,7 +12,7 @@ use crate::address::{Address, Kind, normalize_name};
 use crate::boards;
 use crate::protocol::v2::{
     LOCAL_BOARD, Manifest, ManifestRow, MigrateBody, PublishBody, Published, PublishedKind,
-    UnpublishBody, op,
+    RenameBody, UnpublishBody, op,
 };
 use crate::protocol::{ErrorCode, Request};
 use crate::store::Tx;
@@ -116,6 +116,31 @@ fn agent_named(core: &Core, name: &str) -> Result<crate::store::Agent, Refusal> 
         })
 }
 
+/// A pending rename on `alias` to `name` by another agent than `agent_id`: its destination is
+/// reserved until it settles (the board may already hold the mailbox under that name).
+fn reserved_by_rename(
+    tx: &crate::store::sqlite::SqliteTx,
+    alias: &str,
+    name: &str,
+    agent_id: &str,
+) -> anyhow::Result<Option<BoardOp>> {
+    Ok(tx.pending_ops(Some(alias))?.into_iter().find(|o| {
+        o.kind == BoardOpKind::Rename
+            && o.request["name"].as_str() == Some(name)
+            && o.agent_id.as_deref() != Some(agent_id)
+    }))
+}
+
+fn reserved_refusal(name: &str, alias: &str, op: &BoardOp) -> Refusal {
+    refuse(
+        ErrorCode::Conflict,
+        format!(
+            "{name} on {alias} is reserved by a pending rename (op {}); it completes when {alias} is reachable",
+            op.op_id
+        ),
+    )
+}
+
 fn pending_refusal(name: &str, alias: &str, op: &BoardOp) -> Refusal {
     refuse(
         ErrorCode::Conflict,
@@ -216,6 +241,9 @@ pub async fn publish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> 
                     format!("{shared} on {alias} is already published for {holder}"),
                 )));
             }
+            if let Some(rename) = reserved_by_rename(tx, &alias, &shared, &agent.id)? {
+                return Ok(Err(reserved_refusal(&shared, &alias, &rename)));
+            }
             tx.insert_op(&op)?;
             tx.insert_publication(&Publication {
                 board: alias.clone(),
@@ -297,6 +325,25 @@ fn local_kind(agent: &crate::store::Agent) -> Option<PublishedKind> {
 /// answers without a binding change; recorded when the answer carries it, else the next publish
 /// sends it again.
 async fn sync_kind(core: &Core, conn: &BoardConn, p: &Publication, kind: PublishedKind) {
+    // under the rename lock and from a fresh read: a name a rename settled or still moves away
+    // from is never published again
+    let _held = conn.renames.lock().await;
+    let current = core.local_tx(|tx| {
+        let pending = tx.pending_op_for(&p.board, &p.agent_id)?.is_some();
+        Ok(tx
+            .publication(&p.board, &p.agent_id)?
+            .filter(|now| !pending && now.state == PublicationState::Published)
+            .filter(|now| now.shared_name == p.shared_name && now.mailbox_id == p.mailbox_id))
+    });
+    let p = match current {
+        Ok(Some(now)) => now,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(board = conn.alias, "kind not synced: {e:#}");
+            return;
+        }
+    };
+    let p = &p;
     let body = PublishBody {
         name: p.shared_name.clone(),
         human: false,
@@ -408,6 +455,96 @@ pub async fn unpublish(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal
     let outcome = board::send_op(&conn, &op, wait(core)).await;
     let state = board::finish_op(core, &conn, &op, outcome)?;
     Ok(json!({"board": alias, "agent": agent.name, "state": state, "op_id": op.op_id}))
+}
+
+/// `daemon.rename {agent, name, board}`: renames the local agent's publication on the board in
+/// place (`mailbox.rename`), so its mailbox keeps its id, inbox, history and channels. The agent
+/// is named by its current local name and its publication found by the agent's id. Recorded as a
+/// board op before the first call and resumed with the same key; logged like publish.
+pub async fn rename(core: &Arc<Core>, req: &Request) -> Result<Value, Refusal> {
+    let conn = board_of(core, req)?;
+    usable(&conn)?;
+    let alias = conn.alias.clone();
+    let field = |k: &str| {
+        req.body
+            .get(k)
+            .and_then(Value::as_str)
+            .ok_or_else(|| refuse(ErrorCode::BadRequest, format!("missing string field '{k}'")))
+    };
+    let agent = agent_named(core, field("agent")?)?;
+    let raw = field("name")?;
+    let name = raw.rsplit('/').next().unwrap_or(raw);
+    let name = normalize_name(name)
+        .ok_or_else(|| refuse(ErrorCode::BadRequest, format!("invalid name '{name}'")))?;
+    let _held = conn.renames.lock().await;
+    let now = iso_from_ms(now_ms());
+    let op = core
+        .local_tx(|tx| {
+            if let Some(pending) = tx.pending_op_for(&alias, &agent.id)? {
+                return Ok(Err(pending_refusal(&agent.name, &alias, &pending)));
+            }
+            let Some(p) = tx.publication(&alias, &agent.id)? else {
+                return Ok(Err(refuse(
+                    ErrorCode::NotFound,
+                    format!("{} is not published on {alias}", agent.name),
+                )));
+            };
+            let (Some(mailbox_id), Some(generation), PublicationState::Published) =
+                (p.mailbox_id.clone(), p.route_generation, p.state)
+            else {
+                return Ok(Err(refuse(
+                    ErrorCode::Conflict,
+                    format!("{} is still {} on {alias}", agent.name, p.state.as_str()),
+                )));
+            };
+            if let Some(other) = tx.publication_by_name(&alias, &name)?
+                && other.agent_id != agent.id
+            {
+                return Ok(Err(refuse(
+                    ErrorCode::Conflict,
+                    format!("{name} on {alias} is already published for another agent"),
+                )));
+            }
+            if let Some(rename) = reserved_by_rename(tx, &alias, &name, &agent.id)? {
+                return Ok(Err(reserved_refusal(&name, &alias, &rename)));
+            }
+            let op = BoardOp {
+                op_id: new_ulid(),
+                board: alias.clone(),
+                kind: BoardOpKind::Rename,
+                agent_id: Some(agent.id.clone()),
+                request: serde_json::to_value(RenameBody {
+                    mailbox_id,
+                    expected_generation: generation,
+                    name: name.clone(),
+                })
+                .unwrap_or_default(),
+                state: BoardOpState::Pending,
+                result: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            tx.insert_op(&op)?;
+            Ok(Ok(op))
+        })
+        .map_err(internal)??;
+    tracing::info!(
+        board = alias,
+        agent = agent.name,
+        name,
+        op = op.op_id,
+        by = caller(core, req),
+        "rename"
+    );
+    let outcome = board::send_op(&conn, &op, wait(core)).await;
+    let state = board::finish_op(core, &conn, &op, outcome)?;
+    let p = board::publication_of(core, &alias, &agent.id);
+    Ok(
+        json!({"board": alias, "agent": agent.name, "name": name, "state": state, "op_id": op.op_id,
+              "owner": conn.owner(),
+              "mailbox_id": p.as_ref().and_then(|p| p.mailbox_id.clone()),
+              "route_generation": p.as_ref().and_then(|p| p.route_generation)}),
+    )
 }
 
 /// `board.list {}`: the local board and every enrolled board with its live state.

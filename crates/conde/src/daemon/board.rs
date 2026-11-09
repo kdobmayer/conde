@@ -68,6 +68,9 @@ pub struct BoardConn {
     relay: super::relay::Relay,
     /// The host's sign-in check.
     signin: super::relay::SignInCheck,
+    /// Held while a rename is sent and settled and while a kind sync rereads and sends, so a
+    /// sync never publishes a name a rename is moving away from.
+    pub(crate) renames: tokio::sync::Mutex<()>,
 }
 
 impl BoardConn {
@@ -91,6 +94,7 @@ impl BoardConn {
             forgotten: AtomicBool::new(false),
             relay: super::relay::Relay::default(),
             signin: super::relay::SignInCheck::default(),
+            renames: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -354,6 +358,11 @@ async fn run(core: Weak<Core>, conn: Arc<BoardConn>, client: BridgeClient) {
                 let core = core.clone();
                 let conn = conn.clone();
                 tokio::spawn(async move {
+                    let _held = if op.kind == BoardOpKind::Rename {
+                        Some(conn.renames.lock().await)
+                    } else {
+                        None
+                    };
                     let outcome = send_op(&conn, &op, core.mux.tuning.call_timeout).await;
                     if let Err((_, why)) = finish_op(&core, &conn, &op, outcome) {
                         tracing::warn!(
@@ -601,6 +610,7 @@ fn settled(op: &BoardOp) -> Result<String, (ErrorCode, String)> {
         (BoardOpKind::Publish, _) => Ok("published".into()),
         (BoardOpKind::Unpublish, _) => Ok("unpublished".into()),
         (BoardOpKind::Migrate, _) => Ok("migrated".into()),
+        (BoardOpKind::Rename, _) => Ok("renamed".into()),
     }
 }
 
@@ -654,6 +664,7 @@ pub fn finish_op(
                 BoardOpKind::Publish => "publishing",
                 BoardOpKind::Unpublish => "unpublishing",
                 BoardOpKind::Migrate => "pending",
+                BoardOpKind::Rename => "renaming",
             }
             .into())
         }
@@ -746,6 +757,37 @@ pub fn finish_op(
             }
             Ok("published".into())
         }
+        // The publication takes the new name and generation in the op's own commit, once: only
+        // while it is still published at the renamed mailbox (a takeover or an unpublish since
+        // owns the row then).
+        (BoardOpKind::Rename, OpOutcome::Done(result, _)) => {
+            let renamed: Option<Published> = serde_json::from_value(result.clone()).ok();
+            let duplicate = core
+                .local_tx(|tx| {
+                    if let Some(done) = stored(tx)? {
+                        return Ok(Some(done));
+                    }
+                    let current = tx.publication(alias, &agent)?.filter(|p| {
+                        p.state == PublicationState::Published
+                            && renamed.as_ref().is_some_and(|r| {
+                                p.mailbox_id.as_deref() == Some(r.mailbox_id.as_str())
+                            })
+                    });
+                    if let (Some(r), Some(p)) = (&renamed, current) {
+                        // a replayed answer is older than routes reconciled since: keep theirs
+                        let generation = p.route_generation.unwrap_or(0).max(r.route_generation);
+                        tx.rename_publication(alias, &agent, &r.name, generation, &now)?;
+                        advance(r.revision);
+                    }
+                    tx.finish_op(&op.op_id, BoardOpState::Done, Some(&result), &now)?;
+                    Ok(None)
+                })
+                .map_err(internal)?;
+            match duplicate {
+                Some(done) => done,
+                None => Ok("renamed".into()),
+            }
+        }
         (BoardOpKind::Unpublish, OpOutcome::Done(result, _)) => {
             let mailbox = op.request["mailbox_id"]
                 .as_str()
@@ -820,7 +862,8 @@ pub fn finish_op(
                             }
                             tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&error), &now)?;
                         }
-                        BoardOpKind::Migrate => {
+                        // a refused rename changed nothing on the board, so nothing here either
+                        BoardOpKind::Migrate | BoardOpKind::Rename => {
                             tx.finish_op(&op.op_id, BoardOpState::Failed, Some(&error), &now)?;
                         }
                     }

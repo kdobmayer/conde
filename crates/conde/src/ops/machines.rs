@@ -2,7 +2,7 @@
 //! adopts a host the person joined by hand, or clears a failed deployment for a retry; its answer
 //! says `deploy` when a deployment PUT is due, which conde-remote issues (the Azure client lives
 //! there). `machine.status` reads the owner's own record with the agent's state. The startup exchange: the
-//! first live endpoint of the person's `vm.agent` on the machine's host gets one DM from the
+//! first live endpoint of the person's `praxy` on the machine's host gets one DM from the
 //! person's human row, and the agent's reply to it marks the machine ready. The sign-in relay: the
 //! page starts a flow, sends the pasted Claude code or cancels; the command waits in the record
 //! until the bridge connection of the machine's host sends it.
@@ -46,14 +46,14 @@ fn live_hosts(db: &dyn Tx, user: &str) -> OpResult<Vec<String>> {
         .collect())
 }
 
-/// The user's published `vm.agent`.
+/// The user's published `praxy`.
 fn public_agent(db: &dyn Tx, user_id: i64) -> OpResult<Option<Agent>> {
     Ok(agents::by_name(db, user_id, PUBLIC_AGENT)?
         .filter(|a| a.address.as_ref().is_some_and(|x| x.kind == Kind::Mailbox)))
 }
 
 /// A host joined by hand that the record adopts: `vm-agent-<owner>` with a live key, else the
-/// host of the published `vm.agent` with a live key (the pilot VMs joined under a short name).
+/// host of the published `praxy` with a live key (the pilot VMs joined under a short name).
 fn adoptable(ctx: &Ctx) -> OpResult<Option<String>> {
     let live = live_hosts(ctx.db, &ctx.p.user)?;
     let named = format!("{HOST_PREFIX}{}", ctx.p.user);
@@ -66,7 +66,7 @@ fn adoptable(ctx: &Ctx) -> OpResult<Option<String>> {
         .filter(|h| live.contains(h)))
 }
 
-/// `machine.setup {}`: the browser's "Set up my agent". No record: adopts a hand-joined host
+/// `machine.setup {}`: the browser's "Set up Praxy". No record: adopts a hand-joined host
 /// (minted, no deployment) or creates the record for `vm-agent-<owner>` with the owner's Entra
 /// object id; a record never issued or failed is cleared for a retry; otherwise nothing changes.
 /// The answer is `machine.status`'s plus `deploy` (the PUT's parameters) when a PUT is due.
@@ -309,7 +309,7 @@ pub fn relay_signed_in(db: &dyn Tx, host: &str) -> StoreResult<bool> {
     })
 }
 
-/// The machine's `online`: the `vm.agent` session went live. Whether a record took it.
+/// The machine's `online`: the `praxy` session went live. Whether a record took it.
 pub fn session_online(db: &dyn Tx, host: &str, at: &str) -> StoreResult<bool> {
     let Some(m) = db.machine_of_host(host)? else {
         return Ok(false);
@@ -334,7 +334,7 @@ fn joined(db: &dyn Tx, m: &MachineRow) -> OpResult<bool> {
 /// `deleting`; before the machine joined: `failed` (a terminal deployment error),
 /// `not_connected` (accepted over [`JOIN_DEADLINE_MS`] ago), else `requested`; after: `ready`
 /// (reachable and the startup exchange answered), `connected` (heartbeat within the TTL and
-/// `vm.agent` published on the host), `disconnected` (a bridge was seen, no heartbeat within the
+/// `praxy` published on the host), `disconnected` (a bridge was seen, no heartbeat within the
 /// TTL), else `up`.
 pub fn state_of(db: &dyn Tx, m: &MachineRow, now_ms: i64) -> OpResult<&'static str> {
     if m.deleting_at.is_some() {
@@ -390,7 +390,7 @@ pub fn probe(ctx: &Ctx, live: &[(&str, &str)]) -> OpResult<()> {
 }
 
 /// The startup probe, once per record: when `live` (the endpoints of `host`) carries the mailbox
-/// of the owner's `vm.agent` published on `host`, the record's host.
+/// of the owner's `praxy` published on `host`, the record's host.
 fn probe_host(ctx: &Ctx, owner_id: i64, host: &str, live: &[(&str, &str)]) -> OpResult<()> {
     let Some(m) = ctx.db.machine_of_user(owner_id)? else {
         return Ok(());
@@ -429,7 +429,7 @@ fn probe_host(ctx: &Ctx, owner_id: i64, host: &str, live: &[(&str, &str)]) -> Op
 }
 
 /// Whether a DM from `me` replying to `reply_to` answers the startup probe: `me` is the owner's
-/// `vm.agent` on the record's host, sending from that host, and `reply_to` is the probe.
+/// `praxy` on the record's host, sending from that host, and `reply_to` is the probe.
 pub fn is_probe_reply(ctx: &Ctx, me: &Agent, reply_to: Option<&str>) -> OpResult<bool> {
     let Some(reply_to) = reply_to else {
         return Ok(false);

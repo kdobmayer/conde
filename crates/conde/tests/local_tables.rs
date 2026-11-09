@@ -128,11 +128,82 @@ fn one_pending_op_per_agent_and_one_live_migrate_per_board() {
         "migrate with an agent"
     );
     assert!(
-        op(&c, "op7", "rename", Some("a3"), "pending").is_err(),
+        op(&c, "op7", "resend", Some("a3"), "pending").is_err(),
         "unknown kind"
     );
     assert!(
         op(&c, "op8", "publish", Some("a3"), "running").is_err(),
         "unknown state"
+    );
+}
+
+/// A file whose `board_ops` predates rename ops gets the table rebuilt on open: its rows and its
+/// one-pending-per-agent index stay, and a rename op is accepted.
+#[test]
+fn a_board_ops_table_from_before_rename_accepts_rename_after_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conde.db");
+    drop(SqliteStore::open(&path).unwrap());
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "DROP TABLE board_ops;
+         CREATE TABLE board_ops(
+             op_id TEXT PRIMARY KEY,
+             board TEXT NOT NULL,
+             kind TEXT NOT NULL CHECK (kind IN ('publish', 'unpublish', 'migrate')),
+             agent_id TEXT,
+             request_json TEXT NOT NULL,
+             state TEXT NOT NULL CHECK (state IN ('pending', 'done', 'failed')),
+             result_json TEXT,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             CHECK ((agent_id IS NULL) = (kind = 'migrate'))
+         );",
+    )
+    .unwrap();
+    op(&c, "op1", "publish", Some("a1"), "pending").unwrap();
+    c.execute(
+        "INSERT INTO board_ops(op_id, board, kind, agent_id, request_json, state, result_json, created_at, updated_at)
+         VALUES ('m1', 'dakai', 'migrate', NULL, '{\"publish\":[\"a1\"]}', 'done', '{\"bindings\":[]}', 't1', 't2')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        op(&c, "op0", "rename", Some("a0"), "done").is_err(),
+        "the old CHECK"
+    );
+    drop(c);
+    drop(SqliteStore::open(&path).unwrap());
+    let c = Connection::open(&path).unwrap();
+    let kept: String = c
+        .query_row("SELECT kind FROM board_ops WHERE op_id = 'op1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, "publish");
+    let migrate: (String, String, String, String) = c
+        .query_row(
+            "SELECT request_json, result_json, created_at, updated_at FROM board_ops WHERE op_id = 'm1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        migrate,
+        (
+            r#"{"publish":["a1"]}"#.to_string(),
+            r#"{"bindings":[]}"#.to_string(),
+            "t1".to_string(),
+            "t2".to_string()
+        )
+    );
+    op(&c, "op2", "rename", Some("a2"), "pending").unwrap();
+    assert!(
+        op(&c, "op3", "rename", Some("a1"), "pending").is_err(),
+        "one pending op per agent"
+    );
+    assert!(
+        op(&c, "m2", "migrate", None, "pending").is_err(),
+        "one live migrate per board"
     );
 }

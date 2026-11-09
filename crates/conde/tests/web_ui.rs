@@ -868,6 +868,7 @@ async fn browser_rpc_needs_the_session_its_csrf_token_and_this_origin(d: Arc<Dis
     let s = ui.session(&b).await;
     assert_eq!(s["user"], USER);
     assert_eq!(s["csrf_header"], "x-csrf-token");
+    assert!(s.get("agent").is_none(), "no machines, no agent name: {s}");
 
     let r = b.step.post(&rpc).json(&request).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "no CSRF token");
@@ -3866,6 +3867,8 @@ async fn the_first_sign_in_of_an_invited_person_requests_a_machine_and_lands_on_
     );
     let session = ui.session(&b).await;
     assert_eq!(session["machines"], true, "{session}");
+    // the Machine page's name for the agent, with or without a record, from the one constant
+    assert_eq!(session["agent"], "praxy", "{session}");
     let status = ui
         .ok(
             &b,
@@ -3897,7 +3900,7 @@ async fn the_first_sign_in_of_an_invited_person_requests_a_machine_and_lands_on_
     ui.server.shutdown().await.unwrap();
 }
 
-/// A member bound before machines existed gets no machine at sign-in; "Set up my agent" records
+/// A member bound before machines existed gets no machine at sign-in; "Set up Praxy" records
 /// it with the stored identity's subject and PUTs; a second click while it is pending PUTs nothing.
 async fn a_returning_member_gets_a_machine_only_from_the_setup_step_with_its_stored_subject(
     d: Arc<Dispatcher>,
@@ -4041,7 +4044,7 @@ async fn a_failed_deployment_is_read_on_demand_throttled_and_retried_by_setup(d:
 }
 
 /// A member who joined a VM by hand (a live key of `vm-agent-<owner>`, or the host of their
-/// published vm.agent) gets the record as joined, with no deployment.
+/// published praxy) gets the record as joined, with no deployment.
 async fn a_hand_joined_host_is_adopted_without_a_deploy(d: Arc<Dispatcher>) {
     let (ui, arm) = ui_machines(&d).await;
     ui.bound(USER, "oid-krisztian", INVITED.1).await;
@@ -4065,7 +4068,7 @@ async fn a_hand_joined_host_is_adopted_without_a_deploy(d: Arc<Dispatcher>) {
         "{r}"
     );
     assert!(r["minted_at"].is_string(), "{r}");
-    // a pilot VM under a short name: the published vm.agent's host
+    // a pilot VM under a short name: the published praxy's host
     let lev = "levente-szabo";
     ui.env.invite(lev, "levente.szabo@dakai.example").await;
     ui.bound(lev, "oid-levente", "levente.szabo@dakai.example")
@@ -4085,7 +4088,7 @@ async fn a_hand_joined_host_is_adopted_without_a_deploy(d: Arc<Dispatcher>) {
     })
     .await;
     ui.write(move |t| {
-        t.insert_agent("agent-lev", lid, "vm.agent")?;
+        t.insert_agent("agent-lev", lid, "praxy")?;
         t.set_binding(
             "agent-lev",
             Some(&conde::address::Address::parse("mailbox:mbx-lev@vm-agent-levente", "-").unwrap()),
@@ -4123,7 +4126,7 @@ async fn setup_is_refused_while_deleting(d: Arc<Dispatcher>) {
 
 /// Every state the page shows, from what the store holds: accepted (`requested`), a terminal
 /// error (`failed`), 30 minutes without joining (`not_connected`), joined (`up`), a heartbeat and
-/// the published vm.agent (`connected`), a live endpoint with the startup exchange answered
+/// the published praxy (`connected`), a live endpoint with the startup exchange answered
 /// (`ready`), the heartbeat past the TTL (`disconnected`). The browser reads only its own.
 async fn machine_status_says_requested_failed_not_connected_up_connected_disconnected_and_ready(
     d: Arc<Dispatcher>,
@@ -4206,11 +4209,11 @@ async fn machine_status_says_requested_failed_not_connected_up_connected_disconn
     assert_eq!(
         state().await["state"],
         "up",
-        "a heartbeat without the published vm.agent"
+        "a heartbeat without the published praxy"
     );
     let h = host.clone();
     ui.write(move |t| {
-        t.insert_agent("agent-k", uid, "vm.agent")?;
+        t.insert_agent("agent-k", uid, "praxy")?;
         let address = format!("mailbox:mbx-k@{h}");
         t.set_binding(
             "agent-k",
@@ -4258,7 +4261,7 @@ impl Ui {
 }
 
 /// A pilot VM already running when its owner adopts it: its bridge announced the published
-/// vm.agent's live endpoint before the record existed and announces nothing new after. Setup
+/// praxy's live endpoint before the record existed and announces nothing new after. Setup
 /// sends the probe at adoption, once, from the endpoints on record, and the running bridge gets it
 /// without a reconnect; the agent's reply marks the machine ready; a repeated setup and a repeated
 /// endpoints frame send no second probe.
@@ -4278,11 +4281,11 @@ async fn an_adopted_running_machine_is_probed_at_setup_and_its_reply_marks_it_re
         conde_remote::token_digest(&key),
     );
     blocking(move || store.mint_host_key(uid, &h, "vm", &digest, START).unwrap()).await;
-    // published: vm.agent bound to its mailbox on the migrated host
+    // published: praxy bound to its mailbox on the migrated host
     let h = host.clone();
     ui.write(move |t| {
         t.set_host_mailbox_only(&h)?;
-        t.insert_agent("agent-k", uid, "vm.agent")?;
+        t.insert_agent("agent-k", uid, "praxy")?;
         let address = format!("mailbox:mbx-k@{h}");
         t.set_binding(
             "agent-k",
@@ -4502,7 +4505,7 @@ async fn enrol_mints_once_per_oid_and_answers_the_contract(d: Arc<Dispatcher>) {
         body,
         json!({"v": 1, "server": ui.env.base, "board": "dakai", "user": USER, "host_id": host,
                "label": host, "key_id": &conde_remote::token_digest(&key)[..12], "key": key,
-               "name": format!("{USER}/vm.agent")})
+               "name": format!("{USER}/praxy")})
     );
     // the hand-joined key is revoked and its bridge closed
     let closed = tokio::time::timeout(Duration::from_secs(10), async {
@@ -6085,7 +6088,7 @@ async fn after_a_removal_an_enable_and_setup_deploy_a_new_machine_and_the_old_vm
 }
 
 /// An adopted host name is not proof of the Azure VM. A member adopts, by a key and the
-/// published vm.agent, a host named as another person's unjoined VM: its deployment is that
+/// published praxy, a host named as another person's unjoined VM: its deployment is that
 /// person's and still running, and the disable cancels nothing, deletes nothing and records why.
 /// A deployment with the owner's own object id that made another VM proves nothing for this
 /// host either. A pilot adopted under its hand deployment (the older `agent-vm-<x>` name, another
@@ -6112,7 +6115,7 @@ async fn an_adopted_host_name_is_removed_only_when_azure_shows_it_is_the_owners_
     })
     .await;
     ui.write(move |t| {
-        t.insert_agent("agent-k", uid, "vm.agent")?;
+        t.insert_agent("agent-k", uid, "praxy")?;
         t.set_binding(
             "agent-k",
             Some(

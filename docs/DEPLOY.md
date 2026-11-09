@@ -230,8 +230,8 @@ startup log line `web surface enabled` shows the configuration, without the iden
 
 With the variables set and an Entra sign-in, an invited person's first browser sign-in records their machine,
 starts the named deployment `vm-agent-<owner>` and lands on the web app's Machine page; a member who signed in
-before uses the page's "Set up my agent". A member with a VM joined by hand (a live key of `vm-agent-<owner>`, or
-of the host their `vm.agent` is published on) gets the record without a deployment, and a running agent gets the
+before uses the page's "Set up Praxy". A member with a VM joined by hand (a live key of `vm-agent-<owner>`, or
+of the host their `praxy` is published on) gets the record without a deployment, and a running agent gets the
 startup message at once. The page reads the deployment from Azure when it is shown, at most every 30 s; a refused
 or failed deployment shows its error and a retry. Limits: each Azure call has a 10 s timeout, and a page read whose
 token has expired waits for the token request and then the deployment read, one after the other; a PUT that timed
@@ -277,7 +277,7 @@ the person, one `signed_in` whenever the flows differ from what that connection 
 sends it); each carries every flow's state. The record keeps them as its sign-in flows, so a sign-in renewed outside
 the page also clears an earlier report; a `done` marks its flow signed in at once; the Machine page and
 `service.presence` show them. A check still running after 60 s is stopped with its processes and reports
-nothing that round; the next one runs as usual. When the agent's `vm.agent` session goes live (and again on a new connection
+nothing that round; the next one runs as usual. When the agent's `praxy` session goes live (and again on a new connection
 while it is), the bridge sends `online`, which the record keeps as `session_online_at`.
 
 Disabling a person who has a machine (`POST /v1/admin/users/<name>/disable`) also removes the machine; nothing else

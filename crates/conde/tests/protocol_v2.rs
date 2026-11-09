@@ -28,6 +28,7 @@ fn op_names() {
             op::BOARD_INFO,
             op::MAILBOX_PUBLISH,
             op::MAILBOX_UNPUBLISH,
+            op::MAILBOX_RENAME,
             op::MAILBOX_MINE,
             op::HOST_MIGRATE_PREVIEW,
             op::HOST_MIGRATE_V2
@@ -36,6 +37,7 @@ fn op_names() {
             "board.info",
             "mailbox.publish",
             "mailbox.unpublish",
+            "mailbox.rename",
             "mailbox.mine",
             "host.migrate_preview",
             "host.migrate_v2"
@@ -253,7 +255,7 @@ fn local_record_states_match_the_schema() {
     );
     assert_eq!(
         BoardOpKind::ALL.map(BoardOpKind::as_str),
-        ["publish", "unpublish", "migrate"]
+        ["publish", "unpublish", "migrate", "rename"]
     );
     assert_eq!(
         BoardOpState::ALL.map(BoardOpState::as_str),
@@ -303,6 +305,7 @@ fn a_board_op_is_sent_with_its_op_id_as_idempotency_key() {
         BoardOpKind::Publish,
         BoardOpKind::Unpublish,
         BoardOpKind::Migrate,
+        BoardOpKind::Rename,
     ]
     .map(BoardOpKind::op_name);
     assert_eq!(
@@ -310,7 +313,8 @@ fn a_board_op_is_sent_with_its_op_id_as_idempotency_key() {
         [
             op::MAILBOX_PUBLISH,
             op::MAILBOX_UNPUBLISH,
-            op::HOST_MIGRATE_V2
+            op::HOST_MIGRATE_V2,
+            op::MAILBOX_RENAME
         ]
     );
 }

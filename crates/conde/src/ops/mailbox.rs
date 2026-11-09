@@ -10,7 +10,8 @@ use super::agents::{self, Agent};
 use crate::address::{Address, Kind};
 use crate::dispatch::{Ctx, OpResult, bad_request, conflict, forbidden, not_found};
 use crate::protocol::v2::{
-    BoardInfo, Mine, MineMailbox, PublishBody, Published, PublishedKind, UnpublishBody, Unpublished,
+    BoardInfo, Mine, MineMailbox, PublishBody, Published, PublishedKind, RenameBody, UnpublishBody,
+    Unpublished,
 };
 
 pub(crate) fn parse<T: DeserializeOwned>(body: &Value) -> OpResult<T> {
@@ -148,6 +149,49 @@ pub fn unpublish(ctx: &Ctx, body: &Value) -> OpResult<Value> {
         route_generation: b.expected_generation + 1,
         revision: Some(revision(ctx)?),
     })
+}
+
+/// `mailbox.rename {mailbox_id, expected_generation, name}`: gives the calling host's own mailbox
+/// a new name in place, so it keeps its id, binding, messages and memberships. Guarded as
+/// `mailbox.unpublish` is (else `conflict`: it moved); the new name must be free in the
+/// namespace. The binding is set again unchanged in the same commit, which raises the generation
+/// and the host's route revision and wakes the host.
+pub fn rename(ctx: &Ctx, body: &Value) -> OpResult<Value> {
+    ctx.migrated()?;
+    let b: RenameBody = parse(body)?;
+    let name = ctx.own_name(&b.name)?;
+    if name == "everybody" {
+        return Err(bad_request(
+            "'everybody' is reserved (channel-wide mention)",
+        ));
+    }
+    let moved = || {
+        conflict(format!(
+            "mailbox {} is not routed to host '{}' at generation {}",
+            b.mailbox_id, ctx.p.host, b.expected_generation
+        ))
+    };
+    let row = agents::by_id(ctx.db, &b.mailbox_id)?
+        .filter(|a| a.owner_id == ctx.p.user_id)
+        .ok_or_else(moved)?;
+    agents::unprotected(ctx, &row)?;
+    if !routed(&row, &ctx.p.host) || generation(&row) != b.expected_generation {
+        return Err(moved());
+    }
+    if row.name != name {
+        agents::not_reserved(ctx, &name)?;
+        if let Some(taken) = agents::by_name(ctx.db, ctx.p.user_id, &name)? {
+            return Err(conflict(format!(
+                "cannot rename {} to {}: that name is taken",
+                row.canonical(),
+                taken.canonical()
+            )));
+        }
+        ctx.db.rename_agent(&row.id, &name)?;
+    }
+    ctx.db.set_binding(&row.id, row.address.as_ref())?;
+    let row = agents::by_id(ctx.db, &row.id)?.ok_or_else(moved)?;
+    published(ctx, &row, None)
 }
 
 /// `mailbox.mine`: the mailboxes routed to the calling host, with their generations.

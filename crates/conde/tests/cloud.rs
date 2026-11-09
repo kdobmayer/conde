@@ -1152,7 +1152,7 @@ fn a_connecting_daemon_syncs_the_kind_of_its_existing_publications() {
 }
 
 /// A VM's SessionStart hook (`infra/agent-vm/conde-register-hook`, beneath a fake Claude Code with
-/// the session's JSON on stdin and first boot's `agent.env`) registers `vm.agent` and publishes it,
+/// the session's JSON on stdin and first boot's `agent.env`) registers `praxy` and publishes it,
 /// taking it from the person's old host; the owner's machine then reads `connected` while its
 /// bridge heartbeats. A second session start publishes nothing new; an `agent.env` without
 /// `BOARD` publishes nothing and the hook still succeeds.
@@ -1168,9 +1168,9 @@ fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
     old.ok(
         Some("claude"),
         &[("CLAUDE_CODE_SESSION_ID", "s-old")],
-        &["register", "vm.agent"],
+        &["register", "praxy"],
     );
-    cloud.publish(&old, &so, "vm.agent");
+    cloud.publish(&old, &so, "praxy");
     let mut vm = Host::new("x", "vm-agent-x");
     cloud.enroll(&vm);
     let sock = vm.sock();
@@ -1207,19 +1207,11 @@ fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
             .unwrap_or_default()
             .to_string()
     };
-    assert_eq!(
-        state(),
-        "up",
-        "the bridge is up, vm.agent is on the old host"
-    );
+    assert_eq!(state(), "up", "the bridge is up, praxy is on the old host");
 
     let env = vm.root.join(".config/agentvm");
     std::fs::create_dir_all(&env).unwrap();
-    std::fs::write(
-        env.join("agent.env"),
-        "AGENT_NAME=vm.agent\nSESSION_ID=s-vm\n",
-    )
-    .unwrap();
+    std::fs::write(env.join("agent.env"), "AGENT_NAME=praxy\nSESSION_ID=s-vm\n").unwrap();
     let bin = vm.root.join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(BIN, bin.join("conde")).unwrap();
@@ -1255,16 +1247,16 @@ fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
 
     std::fs::write(
         env.join("agent.env"),
-        "AGENT_NAME=vm.agent\nSESSION_ID=s-vm\nBOARD=shared\n",
+        "AGENT_NAME=praxy\nSESSION_ID=s-vm\nBOARD=shared\n",
     )
     .unwrap();
     let log = session_start();
     assert!(
-        log.contains("published vm.agent on shared as x/vm.agent"),
+        log.contains("published praxy on shared as x/praxy"),
         "{log}"
     );
     assert_eq!(
-        cloud.fleet_kind("x", "vm-agent-x", "vm.agent"),
+        cloud.fleet_kind("x", "vm-agent-x", "praxy"),
         ("claude".into(), "vm-agent-x".into())
     );
     assert_eq!(state(), "connected", "{log}");
@@ -1282,10 +1274,108 @@ fn a_vm_hook_publishes_the_agent_name_and_the_machine_is_connected() {
 
     let log = session_start();
     assert_eq!(
-        log.matches("published vm.agent on shared").count(),
+        log.matches("published praxy on shared").count(),
         2,
         "the next start publishes again, unchanged: {log}"
     );
     assert_eq!(route(), first, "no second publication");
     assert_eq!(state(), "connected");
+}
+
+/// The live move's pair on a real board: the shared rename named by the local agent, then the
+/// local rename; and the other order, the shared rename named by the already renamed local
+/// agent. Each ends with one mailbox under the new name: the board row and the publication keep
+/// their id, the publication names `praxy`, the local name is `praxy`, and a publish of it
+/// afterwards is a no-op.
+#[cfg(unix)]
+#[test]
+fn the_runbook_pair_renames_the_published_agent_in_place_in_either_order() {
+    let cloud = Cloud::start(test_config());
+    for (host, shared_first) in [("vm-agent-x", true), ("vm-agent-y", false)] {
+        let user = if shared_first { "x" } else { "y" };
+        let mut vm = Host::new(user, host);
+        cloud.enroll(&vm);
+        let sock = vm.sock();
+        cloud.join(&mut vm, "daemon.log", &sock, &[]);
+        vm.ok(
+            Some("claude"),
+            &[("CLAUDE_CODE_SESSION_ID", "s-vm")],
+            &["register", "vm.agent"],
+        );
+        cloud.publish(&vm, &sock, "vm.agent");
+        let row = |name: &str| {
+            let p = cloud.d.principal(user, host, false).unwrap();
+            cloud
+                .d
+                .with_conn(|t| t.agent_by_name(p.user_id, name))
+                .unwrap()
+        };
+        let id = row("vm.agent").unwrap().id;
+        let publication = || -> (String, String) {
+            rusqlite::Connection::open(vm.root.join("data/conde.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT shared_name, mailbox_id FROM publications",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        let shared = |agent: &str| {
+            let r = human_call(
+                &vm,
+                &sock,
+                "mailbox.rename",
+                json!({"agent": agent, "name": "praxy"}),
+            );
+            assert_eq!(
+                (r["state"].as_str(), r["name"].as_str()),
+                (Some("renamed"), Some("praxy")),
+                "{r}"
+            );
+        };
+        // the local rename, as the human on the local board
+        let local = || {
+            let mut req = conde::protocol::Request::new(
+                conde::util::new_ulid(),
+                "agent.rename",
+                json!({"old": "vm.agent", "new": "praxy"}),
+            );
+            req.actor = Some(format!("human:{user}"));
+            req.idempotency_key = Some(conde::util::new_ulid());
+            let resp = conde::client::Client::connect(&sock)
+                .unwrap()
+                .call(&req)
+                .unwrap();
+            assert!(resp.ok, "agent.rename: {:?}", resp.error);
+            assert_eq!(resp.result.unwrap()["name"], format!("{user}/praxy"));
+        };
+        if shared_first {
+            shared("vm.agent");
+            local();
+        } else {
+            local();
+            shared("praxy");
+        }
+        assert_eq!(publication(), ("praxy".to_string(), id.clone()), "{host}");
+        assert_eq!(row("praxy").map(|a| a.id), Some(id.clone()), "{host}");
+        assert!(row("vm.agent").is_none(), "{host}: the old name is free");
+        let whoami = vm.ok(
+            Some("claude"),
+            &[("CLAUDE_CODE_SESSION_ID", "s-vm")],
+            &["whoami"],
+        );
+        assert!(
+            whoami.contains(&format!("{user}/praxy")) && whoami.contains("published: shared as"),
+            "{whoami}"
+        );
+        let again = human_call(
+            &vm,
+            &sock,
+            "mailbox.publish",
+            json!({"agent": "praxy", "name": "praxy"}),
+        );
+        assert_eq!(again["unchanged"], true, "{again}");
+        assert_eq!(publication(), ("praxy".to_string(), id.clone()));
+    }
 }

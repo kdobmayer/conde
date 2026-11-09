@@ -183,7 +183,7 @@ struct Origin {
     reconciled: bool,
     stopped: Option<String>,
     client: Option<BridgeClient>,
-    /// The published `vm.agent`'s session was live at the last endpoint scan of this connection.
+    /// The published `praxy`'s session was live at the last endpoint scan of this connection.
     public_live: bool,
 }
 
@@ -277,7 +277,7 @@ impl Mux {
         }
     }
 
-    /// Records whether the published `vm.agent`'s session is live; true when it just went live.
+    /// Records whether the published `praxy`'s session is live; true when it just went live.
     fn public_went_live(&self, alias: &str, live: bool) -> bool {
         self.lock()
             .origins

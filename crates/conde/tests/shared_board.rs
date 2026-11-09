@@ -97,6 +97,10 @@ on_both!(
     a_refused_publish_leaves_the_kind_as_it_was,
     a_notice_reaches_the_reachable_public_agent,
     a_notice_pages_the_human_when_the_agent_is_not_reachable,
+    a_live_vm_agent_is_no_longer_the_public_agent,
+    a_published_mailbox_is_renamed_in_place,
+    a_mailbox_rename_is_refused_for_what_it_may_not_rename,
+    a_renamed_mailbox_is_taken_over_and_unpublished_as_itself,
     service_notify_refuses_a_bad_person_text_or_link,
     the_same_event_id_is_answered_once_without_a_second_message,
     a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired,
@@ -2132,13 +2136,13 @@ const NOTICE: &str = "New question on the Acme workspace: where is the signed SO
 const LINK: &str = "https://praxia.example/w/acme/q/123";
 
 /// praxia, a service with its sender row praxia/praxy and a key on host praxy; levente-szabo
-/// (levente.szabo@dakai.io, Slack member U0LEV) with `levente-szabo/vm.agent` published on host
-/// vm-agent-levente (migrated, no bridge yet); oliver with no vm.agent.
+/// (levente.szabo@dakai.io, Slack member U0LEV) with `levente-szabo/praxy` published on host
+/// vm-agent-levente (migrated, no bridge yet); oliver with no praxy.
 struct Notices {
     s: Srv,
     praxia: Key,
     lev: Key,
-    /// The vm.agent's mailbox id.
+    /// The praxy's mailbox id.
     mailbox: String,
 }
 
@@ -2171,9 +2175,9 @@ async fn notices(d: &Arc<Dispatcher>) -> Notices {
     })
     .await;
     s.migrate(&lev, &[], &conde::util::new_ulid()).await;
-    s.ok(&lev, None, "mailbox.publish", json!({"name": "vm.agent"}))
+    s.ok(&lev, None, "mailbox.publish", json!({"name": "praxy"}))
         .await;
-    let mailbox = s.agent("levente-szabo", "vm.agent").await.id;
+    let mailbox = s.agent("levente-szabo", "praxy").await.id;
     Notices {
         s,
         praxia,
@@ -2242,7 +2246,7 @@ impl Notices {
     }
 }
 
-/// A published vm.agent whose bridge heartbeats and lists its mailbox live gets the notice as a
+/// A published praxy whose bridge heartbeats and lists its mailbox live gets the notice as a
 /// DM from the service row, the line and the link, and its bridge the notify; nothing for the
 /// human, nothing for Slack.
 async fn a_notice_reaches_the_reachable_public_agent(d: Arc<Dispatcher>) {
@@ -2251,7 +2255,7 @@ async fn a_notice_reaches_the_reachable_public_agent(d: Arc<Dispatcher>) {
     let r = n.ok("levente.szabo@dakai.io").await;
     assert_eq!(
         (r["to"].as_str(), r["via"].as_str()),
-        (Some("levente-szabo/vm.agent"), Some("agent")),
+        (Some("levente-szabo/praxy"), Some("agent")),
         "{r}"
     );
     let mid = r["message_id"].as_str().unwrap();
@@ -2271,7 +2275,7 @@ async fn a_notice_reaches_the_reachable_public_agent(d: Arc<Dispatcher>) {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(
         (rows[0].0.as_str(), rows[0].1.as_str()),
-        ("levente-szabo/vm.agent", "dm")
+        ("levente-szabo/praxy", "dm")
     );
     assert!(n.slack_due().await.is_empty());
     // the owner name reaches the same agent
@@ -2280,7 +2284,7 @@ async fn a_notice_reaches_the_reachable_public_agent(d: Arc<Dispatcher>) {
 }
 
 /// Connected is not reachable: a heartbeat without the mailbox's endpoint, an endpoint whose
-/// bridge stopped heartbeating, and a person with no vm.agent each get a `blocked` page to their
+/// bridge stopped heartbeating, and a person with no praxy each get a `blocked` page to their
 /// human, which the Slack worker sends.
 async fn a_notice_pages_the_human_when_the_agent_is_not_reachable(d: Arc<Dispatcher>) {
     let n = notices(&d).await;
@@ -2313,7 +2317,25 @@ async fn a_notice_pages_the_human_when_the_agent_is_not_reachable(d: Arc<Dispatc
     }
     let due = n.slack_due().await;
     assert!(due.contains(&first) && due.contains(&second), "{due:?}");
-    // no vm.agent at all
+    // no praxy at all
+    let r = n.ok("oliver").await;
+    assert_eq!(
+        (r["to"].as_str(), r["via"].as_str()),
+        (Some("oliver/human"), Some("human")),
+        "{r}"
+    );
+}
+
+/// A live mailbox under the old default name is not the person's public agent: the notice goes
+/// to the human, so nothing addressed by the old name is mistaken for the person's agent.
+async fn a_live_vm_agent_is_no_longer_the_public_agent(d: Arc<Dispatcher>) {
+    let n = notices(&d).await;
+    let ol = n.s.key("oliver", "vm-agent-oliver").await;
+    n.s.migrate(&ol, &[], &conde::util::new_ulid()).await;
+    n.s.ok(&ol, None, "mailbox.publish", json!({"name": "vm.agent"}))
+        .await;
+    let old = n.s.agent("oliver", "vm.agent").await.id;
+    let _ws = n.s.v2(&ol, "v2-ol", 4, &[&old]).await;
     let r = n.ok("oliver").await;
     assert_eq!(
         (r["to"].as_str(), r["via"].as_str()),
@@ -2448,7 +2470,7 @@ async fn a_notice_pages_the_human_when_the_claude_sign_in_is_known_expired(d: Ar
     }
 }
 
-/// The startup exchange: the first endpoints listing that has the person's published vm.agent
+/// The startup exchange: the first endpoints listing that has the person's published praxy
 /// live on the record's host sends one DM from the person's human row to the agent; a later
 /// listing sends none; the agent's reply to it (allowed to the human for this one message) marks
 /// the machine ready; another agent's reply and another DM to the human do not.
@@ -2688,4 +2710,249 @@ async fn the_relay_ops_take_no_bearer_key_a_services_included(d: Arc<Dispatcher>
             assert_eq!(r["error"]["code"], "forbidden", "{op}: {r}");
         }
     }
+}
+
+// --- mailbox.rename -----------------------------------------------------------------------------
+
+/// The channel members of `#dev` as ben sees them.
+async fn dev_members(s: &Srv, ben: &Key) -> Vec<String> {
+    let r = s
+        .ok(
+            ben,
+            Some(RELAY),
+            "channel.members",
+            json!({"channel": "#dev"}),
+        )
+        .await;
+    let mut names: Vec<String> = r["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A published mailbox renamed in place keeps its id, its messages (an undelivered one stays
+/// undelivered), its channel memberships and its binding; the generation and the host's
+/// revision go up in the same commit and the host is woken with its routes; the new name is
+/// delivered to the same mailbox, the old one is free; a replay with the same key answers the
+/// same and changes nothing more.
+async fn a_published_mailbox_is_renamed_in_place(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (mut home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    let g1 = s.agent("kd", "desk").await.binding_version as u64;
+    let r0 = home.next("routes").await["revision"].as_u64().unwrap();
+    // the DM from before the migration: pushed, never settled
+    let pre = home.next("notify").await;
+    let pre_id = pre["message_id"].as_str().unwrap().to_string();
+    let members_before = dev_members(s, &fx.ben).await;
+    assert!(
+        members_before.contains(&"kd/desk".to_string()),
+        "{members_before:?}"
+    );
+
+    let key = conde::util::new_ulid();
+    let body = json!({"mailbox_id": desk, "expected_generation": g1, "name": "praxy"});
+    let first = s
+        .rpc(&fx.kd, None, "mailbox.rename", body.clone(), Some(&key))
+        .await;
+    assert_eq!(first["ok"], true, "{first}");
+    let r = first["result"].clone();
+    assert_eq!(
+        unrevised(r.clone()),
+        json!({"name": "praxy", "mailbox_id": desk, "route_generation": g1 + 1})
+    );
+    let r1 = r["revision"].as_u64().unwrap();
+    assert!(r1 > r0, "{r1} > {r0}");
+    // the pushed routes: the same mailbox at the new generation under the raised revision (a
+    // route carries no name)
+    let routes = home.next("routes").await;
+    assert_eq!(routes_of(&routes), [(desk.clone(), g1 + 1)]);
+    assert_eq!(routes["revision"].as_u64(), Some(r1));
+    let mine = s.ok(&fx.kd, None, "mailbox.mine", json!({})).await;
+    assert_eq!(
+        unrevised(mine),
+        json!({"mailboxes": [{"name": "praxy", "mailbox_id": desk, "route_generation": g1 + 1}]})
+    );
+    let renamed = s.agent("kd", "praxy").await;
+    assert_eq!(renamed.id, desk);
+
+    // the replay: the same answer, nothing raised again
+    let again = s
+        .rpc(&fx.kd, None, "mailbox.rename", body, Some(&key))
+        .await;
+    assert_eq!(again["result"], first["result"]);
+    assert_eq!(s.agent("kd", "praxy").await.binding_version as u64, g1 + 1);
+    home.none("routes", Duration::from_millis(300)).await;
+
+    // the undelivered DM is still the mailbox's, under the new name
+    let (d2, id) = (d.clone(), pre_id.clone());
+    let m = blocking(move || d2.with_conn(|t| t.message_by_id(&id)).unwrap().unwrap()).await;
+    assert_eq!(m.recipient_id.as_deref(), Some(desk.as_str()));
+    assert_eq!(m.recipient.as_deref(), Some("kd/praxy"));
+    let (d2, id) = (d.clone(), pre_id.clone());
+    let status: Vec<String> = blocking(move || d2.with_conn(|t| t.notifications()).unwrap())
+        .await
+        .into_iter()
+        .filter(|n| n.message_id == id)
+        .map(|n| n.status)
+        .collect();
+    assert!(
+        !status.is_empty() && status.iter().all(|s| s != "delivered"),
+        "{status:?}"
+    );
+    // the channel membership moved with the row
+    let members_after = dev_members(s, &fx.ben).await;
+    assert!(
+        members_after.contains(&"kd/praxy".to_string()),
+        "{members_after:?}"
+    );
+    assert!(
+        !members_after.contains(&"kd/desk".to_string()),
+        "{members_after:?}"
+    );
+    assert_eq!(members_after.len(), members_before.len());
+
+    // the new name reaches the same mailbox at the new generation; the old name is free
+    let id = s.send(&fx.ben, RELAY, "kd/praxy", "after the rename").await;
+    // the undelivered DM is attempted again at the new generation, beside the new one
+    let mut seen = Vec::new();
+    while !seen.iter().any(|(m, _)| *m == id) {
+        let n = home.next("notify").await;
+        seen.push((
+            n["message_id"].as_str().unwrap().to_string(),
+            n["binding_version"].as_u64(),
+        ));
+    }
+    assert!(
+        seen.iter().all(|(_, g)| *g == Some(g1 + 1)),
+        "every push at the new generation: {seen:?}"
+    );
+    let refused = s
+        .err(
+            &fx.ben,
+            Some(RELAY),
+            "message.send",
+            json!({"to": {"agent": "kd/desk"}, "text": "x"}),
+        )
+        .await;
+    assert_eq!(
+        refused,
+        ("not_found".into(), "recipient unavailable: kd/desk".into())
+    );
+    // the same host's publish of the new name is a no-op on the same row
+    let p = s
+        .ok(&fx.kd, None, "mailbox.publish", json!({"name": "praxy"}))
+        .await;
+    assert_eq!(
+        unrevised(p),
+        json!({"name": "praxy", "mailbox_id": desk, "route_generation": g1 + 1})
+    );
+}
+
+/// What a rename may not touch: another owner's mailbox, a mailbox routed to another host of the
+/// same owner, a stale generation, the owner's human row, a name taken in the namespace,
+/// `everybody` and the reserved human name. Each refusal changes nothing.
+async fn a_mailbox_rename_is_refused_for_what_it_may_not_rename(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (_home, ids) = migrated(&fx, &["desk", "worker"], 8).await;
+    let desk = ids[0].clone();
+    let g = s.agent("kd", "desk").await.binding_version as u64;
+    let rename = |name: &str, generation: u64| json!({"mailbox_id": desk, "expected_generation": generation, "name": name});
+    // another owner
+    s.migrate(&fx.ben, &[], &conde::util::new_ulid()).await;
+    let (code, _) = s
+        .err(&fx.ben, None, "mailbox.rename", rename("praxy", g))
+        .await;
+    assert_eq!(code, "conflict");
+    // another host of the same owner
+    let laptop = s.key("kd", "laptop").await;
+    s.migrate(&laptop, &[], &conde::util::new_ulid()).await;
+    let (code, _) = s
+        .err(&laptop, None, "mailbox.rename", rename("praxy", g))
+        .await;
+    assert_eq!(code, "conflict");
+    // a stale generation
+    let (code, _) = s
+        .err(&fx.kd, None, "mailbox.rename", rename("praxy", g - 1))
+        .await;
+    assert_eq!(code, "conflict");
+    // a taken name, everybody, the reserved human name
+    let (code, message) = s
+        .err(&fx.kd, None, "mailbox.rename", rename("worker", g))
+        .await;
+    assert_eq!(code, "conflict", "{message}");
+    let (code, _) = s
+        .err(&fx.kd, None, "mailbox.rename", rename("everybody", g))
+        .await;
+    assert_eq!(code, "bad_request");
+    let (code, _) = s
+        .err(&fx.kd, None, "mailbox.rename", rename("human", g))
+        .await;
+    assert_eq!(code, "bad_request");
+    // the owner's human row
+    let human = s.agent("kd", "human").await;
+    let (code, message) = s
+        .err(
+            &fx.kd,
+            None,
+            "mailbox.rename",
+            json!({"mailbox_id": human.id, "expected_generation": human.binding_version, "name": "praxy"}),
+        )
+        .await;
+    assert_eq!(code, "forbidden", "{message}");
+    // nothing changed
+    let after = s.agent("kd", "desk").await;
+    assert_eq!(
+        (after.id.as_str(), after.binding_version as u64),
+        (desk.as_str(), g)
+    );
+}
+
+/// A renamed row is the same row for a takeover from another host of the owner (it moves, with
+/// its id, under its new name) and for an unpublish at its new generation.
+async fn a_renamed_mailbox_is_taken_over_and_unpublished_as_itself(d: Arc<Dispatcher>) {
+    let fx = fixture(&d, config()).await;
+    let s = &fx.s;
+    let (_home, ids) = migrated(&fx, &["desk"], 8).await;
+    let desk = ids[0].clone();
+    let g = s.agent("kd", "desk").await.binding_version as u64;
+    s.ok(
+        &fx.kd,
+        None,
+        "mailbox.rename",
+        json!({"mailbox_id": desk, "expected_generation": g, "name": "praxy"}),
+    )
+    .await;
+    let laptop = s.key("kd", "laptop").await;
+    s.migrate(&laptop, &[], &conde::util::new_ulid()).await;
+    let t = s
+        .ok(
+            &laptop,
+            None,
+            "mailbox.publish",
+            json!({"name": "praxy", "take": true}),
+        )
+        .await;
+    assert_eq!(
+        unrevised(t),
+        json!({"name": "praxy", "mailbox_id": desk, "route_generation": g + 2})
+    );
+    let u = s
+        .ok(
+            &laptop,
+            None,
+            "mailbox.unpublish",
+            json!({"mailbox_id": desk, "expected_generation": g + 2}),
+        )
+        .await;
+    assert_eq!(
+        unrevised(u),
+        json!({"mailbox_id": desk, "route_generation": g + 3})
+    );
 }

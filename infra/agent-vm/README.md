@@ -242,7 +242,7 @@ It prints `active`; `journalctl --user -u praxia-connect` (as the agent) says wh
 A VM made before the image carried the rule gets it by `az vm run-command invoke` (root): the lines between
 `# BEGIN sharing-rule` and `# END sharing-rule` in `bootstrap.sh`, with `AGENT_USER=agent` set first. It writes
 `/home/agent/.claude/CLAUDE.md` (600) only if the file is absent, and restarts nothing: Claude Code reads the
-file at its next session start.
+file at its next session start. run-command runs the script with `/bin/sh`, so pipe the block through bash.
 
 ## Watching and steering the agent (power users)
 

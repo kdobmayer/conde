@@ -182,6 +182,7 @@ on_both!(
     a_password_invite_opens_its_join_page_with_the_password_step_first,
     a_join_link_expires_and_an_unknown_one_says_so,
     machine_record_round_trip,
+    a_key_for_the_machine_host_announces_the_machine,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -3578,4 +3579,44 @@ async fn machine_record_round_trip(d: Arc<Dispatcher>) {
     assert_eq!(m.ready_at.as_deref(), Some("2026-11-05T22:00:00.000Z"));
     assert_eq!(m.sign_in.as_deref(), Some(r#"{"claude":"expired"}"#));
     assert_eq!(m.deleting_at.as_deref(), Some("2026-11-05T23:30:00.000Z"));
+}
+
+/// A key minted for the host of a person's machine record joins the machine by hand (`requested`
+/// becomes `up`): the Machine page hears it on the machine topic.
+async fn a_key_for_the_machine_host_announces_the_machine(d: Arc<Dispatcher>) {
+    let board = Arc::new(WebBoard::new(d.clone()));
+    let d2 = d.clone();
+    let uid = blocking(move || {
+        d2.with_tx(|t| {
+            let uid = t.ensure_user("krisztian-dobmayer")?;
+            t.machine_request(&conde::store::NewMachine {
+                user_id: uid,
+                host_id: "vm-agent-krisztian-dobmayer",
+                owner_object_id: "oid-k",
+                vm_size: "Standard_B2as_v2",
+                minted_at: None,
+            })?;
+            Ok(uid)
+        })
+        .unwrap()
+    })
+    .await;
+    let mut events = d.store().pending().events();
+    let b = board.clone();
+    blocking(move || {
+        b.mint_host_key(uid, "vm-agent-krisztian-dobmayer", "vm", "digest-1", 0)
+            .unwrap()
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Wake::Board(t) = events.recv().await.unwrap()
+                && t & conde::store::topics::MACHINE != 0
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("a machine wake");
 }

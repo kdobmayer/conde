@@ -13,6 +13,7 @@ After=conde.service network-online.target
 Type=forking
 ExecStart=/usr/bin/tmux -L agent new-session -d -s agent -x 220 -y 50 /usr/local/lib/agentvm/run-agent
 ExecStop=/usr/bin/tmux -L agent kill-server
+UMask=0077
 Restart=always
 RestartSec=10
 

@@ -39,8 +39,11 @@ apt-get update
 apt-get -y install git gh
 
 # --- The agent's own user. Linger starts its systemd user manager at boot, so the conde bridge and the
-# agent run without anyone logged in.
+# agent run without anyone logged in. umask 077 for every process of the user: pam_umask takes `umask=` from the
+# GECOS field over Ubuntu's usergroups 002, in logins, sudo and the user manager that starts every user unit
+# (set before linger, so the manager starts with it).
 id "$AGENT_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$AGENT_USER"
+usermod -c umask=077 "$AGENT_USER"
 loginctl enable-linger "$AGENT_USER"
 uid=$(id -u "$AGENT_USER")
 for _ in $(seq 60); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done

@@ -6,7 +6,7 @@
 	import { onMount } from 'svelte';
 	import { mutate, rpc, RpcError } from '#lib/api.ts';
 	import { board, onBoard } from '#lib/board.svelte.ts';
-	import { UNKNOWN, agentName, machineView, settle, signInView, skew, type Flow, type Load, type Machine } from '#lib/machine.ts';
+	import { UNKNOWN, agentName, machineView, settle, setupSteps, signInView, skew, type Flow, type Load, type Machine, type StepState } from '#lib/machine.ts';
 	import Disclosure from '#lib/ui/Disclosure.svelte';
 	import ErrorLine from '#lib/ui/ErrorLine.svelte';
 	import SkeletonRows from '#lib/ui/SkeletonRows.svelte';
@@ -16,6 +16,7 @@
 	const error = $derived(load.error);
 	let failedSetup = $state('');
 	let busy = $state(false);
+	let sending = $state(false);
 	let code = $state('');
 	let relayError = $state('');
 
@@ -33,6 +34,7 @@
 
 	async function setup(): Promise<void> {
 		busy = true;
+		sending = true;
 		try {
 			load = settle(load, { machine: await mutate<Machine>('machine.setup') });
 			failedSetup = '';
@@ -40,6 +42,7 @@
 			failedSetup = (e as Error).message;
 		} finally {
 			busy = false;
+			sending = false;
 		}
 	}
 
@@ -95,6 +98,8 @@
 	const name = $derived(agentName(agent));
 	const view = $derived(load.known ? machineView(machine, now, lastSeen, agent) : null);
 	const signIn = $derived(signInView(machine, now));
+	const steps = $derived(load.known ? setupSteps(machine, now, agent, sending) : []);
+	const said: Record<StepState, string> = { done: 'Done', active: 'In progress', failed: 'Failed', turn: 'Your turn', pending: 'Not yet', skipped: 'Not needed' };
 </script>
 
 <section class="machine">
@@ -117,6 +122,19 @@
 			<p class="state" data-state={machine?.state ?? 'none'}>{view.headline}</p>
 			<p class="detail">{view.detail}</p>
 			{#if machine}<p class="host">{machine.host_id}</p>{/if}
+			{#if steps.length > 0}
+				<ol class="steps" aria-label="Setup">
+					{#each steps as s (s.id)}
+						<li data-step={s.id} data-state={s.state}>
+							<span class="mark" aria-hidden="true"></span>
+							<span class="text">
+								<span class="label">{s.label}<span class="sr-only"> ({said[s.state]})</span></span>
+								{#if s.note}<span class="note">{s.note}</span>{/if}
+							</span>
+						</li>
+					{/each}
+				</ol>
+			{/if}
 			{#if view.claude && !signIn.running}
 				<p class="line">Sign in to Claude so {name} can start.</p>
 			{/if}
@@ -222,8 +240,98 @@ sudo -u agent tmux -L agent attach -t agent</pre>
 		margin-top: 18px;
 	}
 	.relay,
-	.flows {
+	.flows,
+	.steps {
 		margin-top: 18px;
+	}
+	.steps {
+		max-width: 560px;
+		margin-bottom: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.steps li {
+		display: flex;
+		gap: 12px;
+		padding: 5px 0;
+		font-size: 15px;
+		line-height: 1.4;
+	}
+	.steps .text {
+		display: flex;
+		flex: 1 1 auto;
+		flex-wrap: wrap;
+		align-items: baseline;
+		justify-content: space-between;
+		column-gap: 12px;
+		min-width: 0;
+	}
+	.steps .mark {
+		flex: none;
+		margin-top: 3px;
+		width: 14px;
+		height: 14px;
+		box-sizing: border-box;
+		font: 600 13px/14px var(--sans);
+		text-align: center;
+	}
+	.steps .note {
+		flex: 0 1 auto;
+		color: var(--muted);
+		font-size: 13.5px;
+		overflow-wrap: anywhere;
+	}
+	.steps [data-state='done'] .mark::before {
+		content: '✓';
+		color: var(--ok);
+	}
+	.steps [data-state='active'] .label {
+		font-weight: 600;
+	}
+	.steps [data-state='active'] .mark {
+		border: 2px solid var(--line);
+		border-top-color: var(--fg);
+		border-radius: 50%;
+		animation: spin 0.9s linear infinite;
+	}
+	.steps [data-state='failed'] .mark::before {
+		content: '✕';
+		color: var(--danger);
+	}
+	.steps [data-state='failed'] .note,
+	.steps [data-state='turn'] .note {
+		color: var(--warn);
+	}
+	.steps [data-state='turn'] .mark::before {
+		content: '→';
+		color: var(--warn);
+	}
+	.steps [data-state='pending'] .mark::before {
+		content: '•';
+		color: var(--faint);
+	}
+	.steps [data-state='pending'] .label,
+	.steps [data-state='skipped'] .label {
+		color: var(--faint);
+	}
+	.steps [data-state='skipped'] .mark::before {
+		content: '–';
+		color: var(--faint);
+	}
+	.steps [data-state='skipped'] .note {
+		color: var(--faint);
+	}
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.steps [data-state='active'] .mark {
+			animation: none;
+			border-color: var(--fg);
+			border-top-color: var(--line);
+		}
 	}
 	.flows {
 		max-width: 560px;

@@ -240,3 +240,87 @@ function row(flow: Flow, state: string | undefined): SignInView['start'][number]
 			return start;
 	}
 }
+
+export type StepId = 'request' | 'accept' | 'build' | 'join' | 'claude' | 'online' | 'github';
+/** `turn`: the person acts (a sign-in); `skipped`: an adopted machine had no deployment. */
+export type StepState = 'done' | 'active' | 'failed' | 'turn' | 'pending' | 'skipped';
+export interface Step {
+	id: StepId;
+	label: string;
+	state: StepState;
+	note: string | null;
+}
+
+/** The machine reached the board and its bridge can run a sign-in. */
+const JOINED: MachineState[] = ['up', 'connected', 'ready'];
+const RUNNING: Relay['state'][] = ['starting', 'url', 'waiting'];
+
+/** The setup as steps for `m` at `now`; `sending` while the page's Set up has no answer yet.
+ * Empty when nothing is to show: no record and nothing sent, offline, being removed, or all done. */
+export function setupSteps(m: Machine | null, now: number, agent: string, sending: boolean): Step[] {
+	const a = agentName(agent);
+	const step = (id: StepId, label: string, state: StepState = 'pending', note: string | null = null): Step => ({ id, label, state, note });
+	const labels: [StepId, string][] = [
+		['request', 'Request sent'],
+		['accept', 'Azure accepts the request'],
+		['build', 'Azure builds the machine'],
+		['join', 'The machine joins the board'],
+		['claude', 'Claude sign-in'],
+		['online', `${a} is online`],
+		['github', 'GitHub sign-in']
+	];
+	if (sending) {
+		return labels.map(([id, label]) => (id === 'request' ? step(id, 'Sending the request', 'active') : step(id, label)));
+	}
+	if (!m || m.state === 'disconnected' || m.state === 'deleting') return [];
+	const since = m.requested_at ? `${elapsed(m.requested_at, now)} since requested` : null;
+	const joined = JOINED.includes(m.state);
+	const adopted = joined && !m.requested_at;
+	const deployed = m.deploy_state === 'Succeeded' || joined;
+	const failed = m.state === 'failed';
+	const why = m.deploy_error ?? 'Azure gave no reason.';
+	const running = m.relay && RUNNING.includes(m.relay.state) ? m.relay.flow : null;
+	const signIn = (flow: Flow, name: string): [StepState, string | null] => {
+		if (!joined) return ['pending', null];
+		const said = reported(m, flow);
+		if (said === 'ok' || said === 'expiring' || (flow === 'claude' && m.state === 'ready')) return ['done', null];
+		if (running === flow) return ['active', null];
+		if (m.relay?.flow === flow && m.relay.state === 'failed') return ['failed', failure(flow, m.relay.reason)];
+		return ['turn', running ? 'Your turn, once the running sign-in ends.' : `Your turn: use “Sign in to ${name}” below.`];
+	};
+	const claude = signIn('claude', 'Claude');
+	const steps: Record<StepId, [StepState, string | null]> = {
+		request: adopted ? ['skipped', 'Not needed'] : ['done', null],
+		accept: adopted
+			? ['skipped', 'Not needed']
+			: m.deploy_state || joined
+				? ['done', null]
+				: failed
+					? ['failed', why]
+					: ['active', since],
+		build: adopted
+			? ['skipped', 'Not needed']
+			: deployed
+				? ['done', null]
+				: m.deploy_state
+					? failed
+						? ['failed', why]
+						: ['active', since]
+					: ['pending', null],
+		join: joined
+			? ['done', null]
+			: m.state === 'not_connected'
+				? ['failed', 'It did not join the board within 30 minutes.']
+				: deployed && m.state === 'requested'
+					? ['active', since]
+					: ['pending', null],
+		claude,
+		online: m.state === 'ready' ? ['done', null] : joined && claude[0] === 'done' ? ['active', since] : ['pending', null],
+		github: signIn('github', 'GitHub')
+	};
+	const list = labels.map(([id, label]) => {
+		const [state, note] = steps[id];
+		return step(id, id === 'accept' && state === 'active' ? 'Waiting for Azure to accept the request' : label, state, note);
+	});
+	return list.every((s) => s.state === 'done' || s.state === 'skipped') ? [] : list;
+}

@@ -504,3 +504,61 @@ fn a_humans_post_is_one_post_push_for_an_opted_in_member() {
         ]
     );
 }
+
+/// The fleet's delivery health, read on every board event of an open browser, never sorts a notification's retries.
+#[test]
+fn fleet_health_reads_no_retry_history() {
+    let Some(url) = pg::fresh_database() else {
+        return pg::skip("the retry history on Postgres");
+    };
+    let open = || {
+        let d = std::sync::Arc::new(
+            conde::dispatch::Dispatcher::connect(&url, conde::store::postgres::PgOpen::COMMAND)
+                .unwrap(),
+        );
+        let p = d.principal("krisz", "box", true).unwrap();
+        Board { d, p }
+    };
+    let b = open();
+    b.register(ALICE, "alice");
+    b.register(BOB, "bob");
+    b.send(ALICE, "bob", "x");
+    let mut br = b.bridge(FakeNotifier {
+        outcomes: [NotifyOutcome::Failed("socket gone".into())].into(),
+        ..Default::default()
+    });
+    br.pass().unwrap();
+    drop((br, b));
+    // days of retries every 30 s; a sort of them all spills past work_mem, and the limit makes that an error
+    let db = url.rsplit("dbname=").next().unwrap();
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO attempts(attempt_id, notification_id, bridge_instance, target_binding_version, status)
+                 SELECT 'retry' || g, notification_id, bridge_instance, target_binding_version, 'failed'
+                 FROM attempts, generate_series(1, 50000) g;
+             ALTER DATABASE {db} SET work_mem = '64kB';
+             ALTER DATABASE {db} SET temp_file_limit = '1MB';"
+        ))
+        .unwrap();
+    let b = open();
+    let browser = conde::dispatch::Principal {
+        host: "browser".into(),
+        local: false,
+        browser: true,
+        ..b.p.clone()
+    };
+    let resp = b.d.dispatch(
+        &browser,
+        &conde::protocol::Request::new(conde::util::new_ulid(), "fleet.list", json!({})),
+    );
+    assert!(resp.ok, "fleet.list: {:?}", resp.error);
+    let fleet = resp.result.unwrap();
+    let bob = fleet["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "krisz/bob")
+        .unwrap();
+    assert_eq!(bob["ever_reached"], false, "{bob}");
+}

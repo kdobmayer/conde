@@ -150,6 +150,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("migrations/0021_actor_kind.sql"),
     ),
     (22, "machines", include_str!("migrations/0022_machines.sql")),
+    (
+        23,
+        "attempts_reached",
+        include_str!("migrations/0023_attempts_reached.sql"),
+    ),
 ];
 
 /// Session lock held while migrating.
@@ -3207,6 +3212,7 @@ impl Tx for PgTx {
                  FROM notifications n JOIN agents a ON a.agent_id = n.recipient_agent_id
                  JOIN messages m ON m.message_id = n.message_id
                  LEFT JOIN attempts t ON t.notification_id = n.notification_id AND t.bridge_instance <> 'slack'
+                     AND t.status IN ('delivered', 'accepted')
                  WHERE a.owner_id = $1 GROUP BY n.recipient_agent_id ORDER BY n.recipient_agent_id",
                 &[&owner_id, &stuck_before],
             )?

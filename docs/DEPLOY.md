@@ -78,7 +78,11 @@ Admission has no expiry (decision, 2026-10-28): the invite gate admits the invit
 user is disabled; disable a user whose invite should no longer stand.
 Disable is reversible: the user's bridges retry and every unrevoked key of the user works again after
 an enable, so a key suspected stolen is revoked (`POST /v1/admin/keys/<key id>/revoke`), not just its
-user disabled.
+user disabled. A revoke that leaves a host with no live key (the admin's, the keys page's, `conde admin key
+revoke`, or a machine removal) unbinds every name bound on that host in the same transaction, since the host can
+no longer unpublish them: history, inbox and channel seats stay, and the owner retires or publishes them again.
+The human name is never unbound. Each server start releases the names still bound on a host whose keys are all
+revoked (those stranded before this rule), logging each at warn; once they are released a start finds none.
 Never enable Keycloak's "Trust Email" on a brokered identity provider: conde matches invites on the
 email Keycloak marks verified, so trusting a provider's unverified address lets it claim an invite.
 Migration 0017 renames the identities columns, so this version is not rolling-safe beside an older
@@ -290,8 +294,8 @@ any other failed proof stops the removal before any change in Azure. Then it can
 `Accepted` or `Running` and reads it until it ended; deletes the template's one role assignment on the VM (Virtual
 Machine Administrator Login to the person's object id, at the VM's own scope; every other assignment stays); deletes
 the VM, whose NIC and OS disk go with it; reads the VM every 15 s until Azure answers 404; and then deletes the
-record and revokes the VM host's keys, so an enable and the setup that follows deploy a new machine. Each step is
-skipped when Azure shows it done, and each wait ends after 10 minutes. The first failure stops the removal and is
+record and revokes the VM host's keys, releasing the names bound there, so an enable and the setup that follows
+deploy a new machine. Each step is skipped when Azure shows it done, and each wait ends after 10 minutes. The first failure stops the removal and is
 kept on the record; the next disable of the same person answers it as `machine_error` and runs the removal again
 from where it stopped. While the record is being removed, the person's setup is refused. Before each change in Azure
 the removal reads the record again, and it ends without one once the record is no longer the one it started for

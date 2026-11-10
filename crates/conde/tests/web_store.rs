@@ -183,6 +183,10 @@ on_both!(
     a_join_link_expires_and_an_unknown_one_says_so,
     machine_record_round_trip,
     a_key_for_the_machine_host_announces_the_machine,
+    a_deleted_machine_releases_the_names_on_its_host,
+    revoking_a_hosts_last_key_releases_its_names,
+    a_host_with_another_live_key_keeps_its_names,
+    a_name_stranded_before_releases_is_released_once_at_the_server_start,
 );
 
 async fn env(d: &Arc<Dispatcher>) -> Env<WebBoard> {
@@ -3646,4 +3650,213 @@ async fn a_key_for_the_machine_host_announces_the_machine(d: Arc<Dispatcher>) {
         }
     }
     assert_eq!(machine, 1, "one machine wake, for the owner's own host");
+}
+
+// --- names on a host with no live key ---------------------------------------------------------
+
+async fn agent_row(d: &Arc<Dispatcher>, id: &str) -> conde::store::Agent {
+    let (d, id) = (d.clone(), id.to_string());
+    blocking(move || d.with_conn(|t| t.agent_by_id(&id)).unwrap().unwrap()).await
+}
+
+async fn human_row(d: &Arc<Dispatcher>, owner: &str) -> conde::store::Agent {
+    let (d, owner) = (d.clone(), owner.to_string());
+    blocking(move || {
+        d.with_conn(|t| conde::humans::of_owner(t, t.user_id(&owner)?.unwrap()))
+            .unwrap()
+            .unwrap()
+    })
+    .await
+}
+
+/// The key id (`conde admin key revoke --id`) of a key.
+fn id_of(key: &str) -> String {
+    conde::ops::hosts::key_id(&conde_remote::token_digest(key))
+}
+
+/// Whether the browsers hear a fleet change within a few seconds.
+async fn hears_fleet(events: &mut tokio::sync::broadcast::Receiver<Wake>) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Wake::Board(t) = events.recv().await.unwrap()
+                && t & conde::store::topics::FLEET != 0
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// A deleted machine's host has no live key, so nothing can unpublish its names: they are
+/// released (unbound, not retired) with the deletion and the owner's page hears it. The owner's
+/// human name and a name on a host that keeps its key stay bound.
+async fn a_deleted_machine_releases_the_names_on_its_host(d: Arc<Dispatcher>) {
+    const OWNER: &str = "konstantin-laveczky";
+    const VM: &str = "vm-agent-konstantin-laveczky";
+    let board = Arc::new(WebBoard::new(d.clone()));
+    admin_cli_key(&d, OWNER, VM).await;
+    admin_cli_key(&d, OWNER, "laptop").await;
+    let praxy = published(&d, OWNER, "praxy", VM).await;
+    let notes = published(&d, OWNER, "notes", "laptop").await;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            let uid = t.user_id(OWNER)?.unwrap();
+            t.machine_request(&conde::store::NewMachine {
+                user_id: uid,
+                host_id: VM,
+                owner_object_id: "oid",
+                vm_size: "Standard_B2as_v2",
+                minted_at: None,
+            })?;
+            Ok(t.set_user_disabled(uid, true)?)
+        })
+        .unwrap()
+    })
+    .await;
+    let mut events = d.store().pending().events();
+    let b = board.clone();
+    blocking(move || {
+        let m = b
+            .machine_deleting(OWNER)
+            .unwrap()
+            .expect("a record to delete");
+        b.machine_deleted(&m).unwrap();
+    })
+    .await;
+    assert!(hears_fleet(&mut events).await, "the owner's page refreshes");
+    let released = agent_row(&d, &praxy).await;
+    assert_eq!(
+        (released.address, released.retired),
+        (None, false),
+        "unbound, retiring stays the owner's"
+    );
+    assert!(agent_row(&d, &notes).await.address.is_some());
+    assert!(human_row(&d, OWNER).await.is_human());
+    let d2 = d.clone();
+    let retired = blocking(move || {
+        d2.with_tx(|t| Ok(t.retire_agent(&praxy, "2026-11-10T00:00:00.000Z")?))
+            .unwrap()
+    })
+    .await;
+    assert!(retired, "the owner can retire it now");
+}
+
+/// The last live key of a host revoked, by the admin, on the keys page or at the CLI: the names
+/// bound on the host are released in the same transaction and the owner's page hears it.
+async fn revoking_a_hosts_last_key_releases_its_names(d: Arc<Dispatcher>) {
+    let board = Arc::new(WebBoard::new(d.clone()));
+    let key = admin_cli_key(&d, "krisz", "nuc").await;
+    admin_cli_key(&d, "krisz", "desk").await;
+    admin_cli_key(&d, "krisz", "lab").await;
+    let names = [
+        published(&d, "krisz", "praxy", "nuc").await,
+        published(&d, "krisz", "planner", "desk").await,
+        published(&d, "krisz", "builder", "lab").await,
+    ];
+    let mut events = d.store().pending().events();
+    let b = board.clone();
+    let host = blocking(move || b.revoke_key(&id_of(&key), START).unwrap()).await;
+    assert_eq!(host.as_deref(), Some("nuc"));
+    assert!(hears_fleet(&mut events).await, "the owner's page refreshes");
+    assert_eq!(agent_row(&d, &names[0]).await.address, None);
+    assert!(agent_row(&d, &names[1]).await.address.is_some());
+
+    let b = board.clone();
+    let d2 = d.clone();
+    blocking(move || {
+        let uid = d2.with_conn(|t| t.user_id("krisz")).unwrap().unwrap();
+        assert_eq!(b.revoke_host(uid, "desk", START).unwrap(), 1);
+        d2.with_tx(|t| conde::ops::hosts::revoke(t, Some("lab"), None, "2026-11-10T00:00:00.000Z"))
+            .unwrap();
+    })
+    .await;
+    assert_eq!(agent_row(&d, &names[1]).await.address, None, "keys page");
+    assert_eq!(agent_row(&d, &names[2]).await.address, None, "admin CLI");
+    assert!(human_row(&d, "krisz").await.is_human());
+}
+
+/// A host that keeps a live key keeps its names: one of two keys revoked, and a rotation (the
+/// old keys revoked and a new one stored in one transaction).
+async fn a_host_with_another_live_key_keeps_its_names(d: Arc<Dispatcher>) {
+    let board = Arc::new(WebBoard::new(d.clone()));
+    let first = admin_cli_key(&d, "krisz", "nuc").await;
+    admin_cli_key(&d, "krisz", "nuc").await;
+    let praxy = published(&d, "krisz", "praxy", "nuc").await;
+    let b = board.clone();
+    let host = blocking(move || b.revoke_key(&id_of(&first), START).unwrap()).await;
+    assert_eq!(host.as_deref(), Some("nuc"));
+    let bound = agent_row(&d, &praxy).await;
+    assert!(bound.address.is_some(), "another key is live");
+
+    let b = board.clone();
+    let d2 = d.clone();
+    let minted = blocking(move || {
+        let uid = d2.with_conn(|t| t.user_id("krisz")).unwrap().unwrap();
+        b.mint_host_key(uid, "nuc", "rotated", "digest-rotated", START)
+            .unwrap()
+    })
+    .await;
+    assert!(
+        matches!(minted, web::Minted::Stored { replaced: 1, .. }),
+        "{minted:?}"
+    );
+    let after = agent_row(&d, &praxy).await;
+    assert_eq!(
+        (after.address, after.binding_version),
+        (bound.address, bound.binding_version),
+        "a rotation keeps the binding"
+    );
+}
+
+/// A name left bound on a host whose keys were all revoked before releases existed is released
+/// by the next server start, once; the human name and a name on a host that never had a key
+/// stay bound.
+async fn a_name_stranded_before_releases_is_released_once_at_the_server_start(d: Arc<Dispatcher>) {
+    admin_cli_key(&d, "konstantin-laveczky", "vm-agent-konstantin-laveczky").await;
+    let stranded = published(
+        &d,
+        "konstantin-laveczky",
+        "praxy",
+        "vm-agent-konstantin-laveczky",
+    )
+    .await;
+    let keyless = published(&d, "konstantin-laveczky", "local", "never-keyed").await;
+    let d2 = d.clone();
+    blocking(move || {
+        d2.with_tx(|t| {
+            Ok(t.revoke_host_credentials(
+                "vm-agent-konstantin-laveczky",
+                "2026-11-06T00:00:00.000Z",
+            )?)
+        })
+        .unwrap()
+    })
+    .await;
+    assert!(
+        agent_row(&d, &stranded).await.address.is_some(),
+        "a bare revoke leaves the name stranded, as before releases"
+    );
+    let start = || async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        conde::cloud::start_on(d.clone(), listener, conde_remote::ServerConfig::default())
+            .await
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    };
+    start().await;
+    let released = agent_row(&d, &stranded).await;
+    assert_eq!((released.address.as_ref(), released.retired), (None, false));
+    let kept = agent_row(&d, &keyless).await;
+    assert!(kept.address.is_some(), "a host that never had a key");
+    let human = human_row(&d, "konstantin-laveczky").await;
+    assert!(human.is_human());
+    start().await;
+    assert_eq!(agent_row(&d, &stranded).await, released, "once");
+    assert_eq!(agent_row(&d, &keyless).await, kept);
+    assert_eq!(human_row(&d, "konstantin-laveczky").await, human);
 }

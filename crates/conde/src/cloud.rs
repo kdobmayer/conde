@@ -780,9 +780,10 @@ pub async fn start_on(
             vm_size: m.vm_size.clone(),
         });
     }
-    // Every owner has exactly one human name before the board answers anyone, and every user
-    // who signed in before emails were stored has one for the Slack worker's first lookups; a
-    // board that moved serves nobody, so it writes nothing.
+    // Every owner has exactly one human name before the board answers anyone, no name stays
+    // bound to a host whose keys are all revoked, and every user who signed in before emails
+    // were stored has one for the Slack worker's first lookups; a board that moved serves
+    // nobody, so it writes nothing.
     let d2 = d.clone();
     let moved = config.moved_to.is_some();
     tokio::task::spawn_blocking(move || {
@@ -791,6 +792,7 @@ pub async fn start_on(
         }
         d2.with_tx(|tx| {
             crate::humans::ensure_all(tx)?;
+            crate::ops::hosts::release_stranded(tx)?;
             let filled = tx.backfill_emails()?;
             if filled > 0 {
                 tracing::info!(filled, "emails filled from sign-in identities");

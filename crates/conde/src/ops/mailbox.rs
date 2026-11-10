@@ -165,6 +165,7 @@ pub fn rename(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             "'everybody' is reserved (channel-wide mention)",
         ));
     }
+    agents::machine_host_may_bind(ctx, &name)?;
     let moved = || {
         conflict(format!(
             "mailbox {} is not routed to host '{}' at generation {}",

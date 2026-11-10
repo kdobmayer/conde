@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use conde_remote::Route;
 use serde_json::Value;
 
+use super::agents;
 use super::mailbox::{json, parse};
 use crate::address::{Address, Kind};
 use crate::dispatch::{Ctx, OpResult, bad_request, conflict};
@@ -99,6 +100,9 @@ pub fn migrate(ctx: &Ctx, body: &Value) -> OpResult<Value> {
             "agent {stray} is not one of your names bound on host '{}'",
             ctx.p.host
         )));
+    }
+    for a in rows.iter().filter(|a| publish.contains(a.id.as_str())) {
+        agents::machine_host_may_bind(ctx, &a.name)?;
     }
     let now = ctx.now_iso();
     let fenced = ctx.db.fence_host(&ctx.p.host, &now)?;

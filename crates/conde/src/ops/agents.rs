@@ -97,11 +97,29 @@ pub(crate) fn unprotected(ctx: &Ctx, a: &Agent) -> OpResult<()> {
 }
 
 /// A name taken on a shared board: an existing row must not be the human row, a new one must
-/// not be the reserved name.
+/// not be the reserved name, and an agent machine binds only its public agent.
 pub(crate) fn may_bind(ctx: &Ctx, name: &str) -> OpResult<()> {
     match by_name(ctx.db, ctx.p.user_id, name)? {
-        Some(existing) => unprotected(ctx, &existing),
-        None => not_reserved(ctx, name),
+        Some(existing) => unprotected(ctx, &existing)?,
+        None => not_reserved(ctx, name)?,
+    }
+    machine_host_may_bind(ctx, name)
+}
+
+/// On a shared board, the host of the caller's machine record binds only [`PUBLIC_AGENT`]:
+/// every other name from that host is refused, whatever the local agent is called. The board
+/// decides, so nothing on the machine (its daemon, its config, its sessions) can lift it.
+pub(crate) fn machine_host_may_bind(ctx: &Ctx, name: &str) -> OpResult<()> {
+    if ctx.board.is_none() || name == PUBLIC_AGENT {
+        return Ok(());
+    }
+    match ctx.db.machine_of_user(ctx.p.user_id)? {
+        Some(m) if m.host_id == ctx.p.host => Err(forbidden(format!(
+            "{} is {}'s agent machine: it publishes only {}/{PUBLIC_AGENT} on this board; \
+             other names on it stay on its local board",
+            ctx.p.host, ctx.p.user, ctx.p.user
+        ))),
+        _ => Ok(()),
     }
 }
 

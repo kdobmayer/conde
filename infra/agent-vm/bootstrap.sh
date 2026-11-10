@@ -107,6 +107,34 @@ EOF
 fi
 # END sharing-rule
 
+# --- Containers: rootless Podman for the agent user, nothing rootful: no daemon, no docker group, and the
+# system-level podman units that the package enables are switched off. podman-docker gives the `docker` command;
+# Ubuntu's docker-compose-v2 is the compose provider behind `docker compose`, talking to the agent's own
+# podman.socket. No recommends, the needed ones named: podman-docker's would add the old Python docker-compose
+# 1.29, which podman picks first, and docker-compose-v2's would add docker.io, the rootful daemon. Ubuntu ships
+# the AppArmor profiles that let podman, crun and slirp4netns use user namespaces. The agent's podman-restart
+# starts its containers with restart: always at boot. Existing VMs get this block by run-command (README,
+# "Existing VMs: containers").
+# BEGIN containers
+apt-get update
+apt-get -y install --no-install-recommends podman uidmap slirp4netns passt catatonit dbus-user-session \
+  netavark aardvark-dns podman-docker docker-compose-v2
+systemctl disable --now podman.socket podman.service podman-restart.service podman-auto-update.timer \
+  podman-clean-transient.service
+touch /etc/containers/nodocker   # podman-docker's "Emulate Docker CLI" notice
+grep -q "^$AGENT_USER:" /etc/subuid || usermod --add-subuids 165536-231071 "$AGENT_USER"
+grep -q "^$AGENT_USER:" /etc/subgid || usermod --add-subgids 165536-231071 "$AGENT_USER"
+cuid=$(id -u "$AGENT_USER")
+sudo -u "$AGENT_USER" -H env XDG_RUNTIME_DIR="/run/user/$cuid" bash -c 'set -euo pipefail
+  mkdir -p ~/.config/environment.d
+  f=~/.config/environment.d/docker-host.conf
+  [ -e "$f" ] || echo "DOCKER_HOST=unix://\${XDG_RUNTIME_DIR}/podman/podman.sock" > "$f"
+  grep -q "^export DOCKER_HOST=" ~/.profile || echo "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/podman/podman.sock" >> ~/.profile
+  systemctl --user daemon-reload
+  systemctl --user enable --now podman.socket
+  systemctl --user enable podman-restart.service'
+# END containers
+
 # --- conde: the bridge as a user service, the skill and MCP entry for Claude Code, receiver policy accept.
 # Joining the shared board (dakai) comes later: `agentvm conde-login-*` (test flow) or the mint call at first
 # boot (image VMs). The image build stops before this, because `conde setup` records the host.

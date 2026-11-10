@@ -24,15 +24,19 @@
 
 ## Build and roll the server image
 
-    az acr build --subscription 60df47fc-ce8f-4f52-a970-43a412d78007 -r crnative --platform linux/amd64 -t conde:<short-sha> -f Dockerfile .
+A `v*` tag's release builds the image once and pushes it to Artifact Registry and to
+crnative.azurecr.io/conde:<version> with the same digest, the one deploy/image.yaml names; no gcloud
+login and no `az acr import` are needed. The image job runs in the GitHub environment `image` (v* tags
+only) and signs in to Azure through the Entra app conde-github-image (GitHub OIDC, AcrPush on crnative
+only); the environment's variables AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID are the
+infra/terraform output `github_image`. A missing variable fails the image job.
 
 The image carries the web app: the Dockerfile's `web` stage (node 22) runs `npm ci` and
 `npm run build` in web/, and the Rust stage embeds the result. Signed-in browsers get it at
 https://conde.nativeai.space/ (the keys page stays at /keys).
 
-Then tell dakai-helper the tag; it runs
-`terraform apply -var image=crnative.azurecr.io/conde:<tag> -var target_port=8080`
-(one revision switch, about a minute). Logs:
+Then set `image = "crnative.azurecr.io/conde@<digest>"` in infra/terraform/conde.auto.tfvars and apply
+`azurerm_container_app.server` (one revision switch, about a minute). Logs:
 `az containerapp logs show -g rg-conde -n ca-conde --type console --tail 100`.
 Image contract: linux/amd64, non-root, ca-certificates, 0.0.0.0:$PORT, GET /healthz (answered only
 once SIGTERM is handled: a stop from then on closes the connections within 50 s).

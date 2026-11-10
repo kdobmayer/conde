@@ -13,9 +13,10 @@ secrets are write-only into the vault, the Entra client secret is created by han
 | database | psql-conde, db `conde` | Flexible Server PG 18 B1ms, private endpoint only, 7-day backups |
 | vault | kv-conde | database-url, db-password (Terraform's own, never by hand), admin-key, entra-client-secret |
 | identity | id-conde | AcrPull on crnative, Key Vault Secrets User |
-| images | crnative.azurecr.io/conde | built locally with ACR Tasks |
+| images | crnative.azurecr.io/conde | pushed by the release workflow (docs/DEPLOY.md) |
 | dist | stconde / container dist | anonymous blob read; release binaries; https://stconde.blob.core.windows.net/dist |
 | release identity | Entra app conde-github-release | GitHub OIDC, subject `repo:DakaiGroup@65165889/conde@1411036719:environment:release`, Storage Blob Data Contributor on dist |
+| image identity | Entra app conde-github-image | GitHub OIDC, environment `image` of kdobmayer/conde, AcrPush on crnative |
 | SSO | Entra app `conde` (client d87a5254-…) | OIDC code+PKCE, redirect https://conde.nativeai.space/auth/callback and http://localhost/auth/cli; assignment required; users in entra.tf |
 | machines | Entra app `conde-machines` | the agent VMs' token audience (CONDE_MACHINES_AUDIENCE); no sign-in, assignment not required |
 
@@ -34,10 +35,12 @@ channel post) becomes one Slack DM from the bot, never about the owner's own pos
 read or older than an hour are not sent. Senders' receipts and the web views are unchanged by it. The names `slack`
 (bridge instance, host) are reserved for it.
 
-## Release (by hand, from the repo root)
+## Release
 
-    az acr build --subscription 60df47fc-ce8f-4f52-a970-43a412d78007 -r crnative -t conde:$(git rev-parse --short HEAD) -f Dockerfile .
-    cd infra/terraform && terraform apply -var image=crnative.azurecr.io/conde:<tag> -var target_port=8080
+A `v*` tag pushes the image to crnative (docs/DEPLOY.md). Set `image = "crnative.azurecr.io/conde@<digest>"` in
+`conde.auto.tfvars`, then:
+
+    cd infra/terraform && terraform apply -target=azurerm_container_app.server
 
 Keep the two values in `conde.auto.tfvars` afterwards so a plain apply does not roll back to the quickstart. Until
 the first conde image the app runs Microsoft's quickstart on port 80 (placeholder page on the URL).

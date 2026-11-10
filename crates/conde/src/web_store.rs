@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::dispatch::Dispatcher;
-use crate::ops::hosts::key_id;
+use crate::ops::hosts::{self, key_id};
 use crate::store::{CredentialRow, MachineDeploy, StoreError, Tx, UserRow, WebSessionRow, topics};
 use crate::util::iso_from_ms;
 
@@ -367,7 +367,9 @@ impl WebStore for WebBoard {
     fn revoke_host(&self, user_id: i64, host_id: &str, now: i64) -> WebResult<u64> {
         self.write(|t| match t.host_owner(host_id)? {
             Some((owner, _)) if owner == user_id => {
-                Ok(t.revoke_host_credentials(host_id, &iso(now))?)
+                let n = t.revoke_host_credentials(host_id, &iso(now))?;
+                hosts::release_names(t, host_id)?;
+                Ok(n)
             }
             _ => Ok(0),
         })
@@ -485,6 +487,7 @@ impl WebStore for WebBoard {
                 .collect();
             let [one] = &live[..] else { return Ok(None) };
             t.revoke_credential(key, &iso(now))?;
+            hosts::release_names(t, &one.host)?;
             Ok(Some(one.host.clone()))
         })
     }
@@ -783,6 +786,7 @@ impl WebStore for WebBoard {
                 // setup deploys anew instead of adopting; another user's host of that name stays
                 if matches!(t.host_owner(host_id)?, Some((owner, _)) if owner == user_id) {
                     t.revoke_host_credentials(host_id, &at)?;
+                    hosts::release_names(t, host_id)?;
                 }
                 t.announce(topics::MACHINE);
             }

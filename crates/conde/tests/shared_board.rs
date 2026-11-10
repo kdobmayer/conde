@@ -117,6 +117,8 @@ on_both!(
     a_takeover_abandons_only_open_attempts,
     a_read_hold_is_kept_when_the_mailbox_leaves_the_endpoints,
     a_late_outcome_at_a_moved_generation_keeps_a_read_notification_read,
+    an_agent_machine_publishes_only_its_public_agent,
+    an_agent_machine_registers_pins_and_migrates_only_its_public_agent,
 );
 
 // --- harness -----------------------------------------------------------------------------------
@@ -2478,6 +2480,9 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
     d: Arc<Dispatcher>,
 ) {
     let n = notices(&d).await;
+    // another agent of the person on the host, published before the host had its record
+    n.s.ok(&n.lev, None, "mailbox.publish", json!({"name": "desk"}))
+        .await;
     let uid = machine_record(&d, "levente-szabo", "vm-agent-levente").await;
     let mut ws = n.s.v2(&n.lev, "v2-a", 4, &[]).await;
     // the first routes frame follows the hello's endpoints
@@ -2525,8 +2530,6 @@ async fn the_startup_probe_is_sent_once_on_the_first_live_endpoint_and_the_reply
         .await;
     assert_eq!(r["error"]["code"], "forbidden", "{r}");
     // another agent of the person cannot answer it
-    n.s.ok(&n.lev, None, "mailbox.publish", json!({"name": "desk"}))
-        .await;
     let desk = n.s.agent("levente-szabo", "desk").await.id;
     let r =
         n.s.rpc(
@@ -2955,4 +2958,166 @@ async fn a_renamed_mailbox_is_taken_over_and_unpublished_as_itself(d: Arc<Dispat
         unrevised(u),
         json!({"mailbox_id": desk, "route_generation": g + 3})
     );
+}
+
+// --- an agent machine binds only its public agent ---------------------------------------------
+
+/// Whether `owner/name` has a row on the board.
+async fn has_row(d: &Arc<Dispatcher>, owner: &str, name: &str) -> bool {
+    let (d, owner, name) = (d.clone(), owner.to_string(), name.to_string());
+    blocking(move || {
+        d.with_conn(|t| {
+            let uid = t.user_id(&owner)?.unwrap();
+            t.agent_by_name(uid, &name)
+        })
+        .unwrap()
+        .is_some()
+    })
+    .await
+}
+
+/// A host with a machine record publishes and renames into `praxy` only; any other name from
+/// it is refused with nothing left behind, unpublishing stays open, and the owner's other host
+/// and an owner without a record publish dotted names as before.
+async fn an_agent_machine_publishes_only_its_public_agent(d: Arc<Dispatcher>) {
+    let s = srv(&d, config()).await;
+    let vm = s.key("kd", "vm-agent-kd").await;
+    s.migrate(&vm, &[], &conde::util::new_ulid()).await;
+    // published before the host had its record, as a VM from before the rename did
+    s.ok(&vm, None, "mailbox.publish", json!({"name": "vm.agent"}))
+        .await;
+    machine_record(&d, "kd", "vm-agent-kd").await;
+    let old = s.agent("kd", "vm.agent").await;
+    let rename = |id: &str, generation: i64, name: &str| json!({"mailbox_id": id, "expected_generation": generation, "name": name});
+    let (code, message) = s
+        .err(
+            &vm,
+            None,
+            "mailbox.rename",
+            rename(&old.id, old.binding_version, "other"),
+        )
+        .await;
+    assert_eq!(code, "forbidden", "{message}");
+    assert!(
+        message.contains("vm-agent-kd is kd's agent machine"),
+        "{message}"
+    );
+    s.ok(
+        &vm,
+        None,
+        "mailbox.rename",
+        rename(&old.id, old.binding_version, "praxy"),
+    )
+    .await;
+    s.ok(&vm, None, "mailbox.publish", json!({"name": "praxy"}))
+        .await;
+    s.ok(
+        &vm,
+        None,
+        "mailbox.publish",
+        json!({"name": "praxy", "take": true}),
+    )
+    .await;
+    let praxy = s.agent("kd", "praxy").await;
+    // a worker's name, and any other shared name (the daemon's `as` reaches the board as `name`)
+    for name in ["praxy.w1", "helper"] {
+        let (code, message) = s
+            .err(&vm, None, "mailbox.publish", json!({"name": name}))
+            .await;
+        assert_eq!(code, "forbidden", "{name}: {message}");
+        assert!(!has_row(&d, "kd", name).await, "{name} left a row");
+    }
+    let (code, message) = s
+        .err(
+            &vm,
+            None,
+            "mailbox.rename",
+            rename(&praxy.id, praxy.binding_version, "other"),
+        )
+        .await;
+    assert_eq!(code, "forbidden", "{message}");
+    let after = s.agent("kd", "praxy").await;
+    assert_eq!(
+        (after.name.as_str(), after.binding_version),
+        ("praxy", praxy.binding_version)
+    );
+    // the owner's other host, and an owner without a record
+    let laptop = s.key("kd", "laptop").await;
+    s.migrate(&laptop, &[], &conde::util::new_ulid()).await;
+    s.ok(&laptop, None, "mailbox.publish", json!({"name": "x.y"}))
+        .await;
+    let ben = s.key("ben", "benbox").await;
+    s.migrate(&ben, &[], &conde::util::new_ulid()).await;
+    s.ok(&ben, None, "mailbox.publish", json!({"name": "relay.two"}))
+        .await;
+    // unpublishing is not a bind
+    s.ok(
+        &vm,
+        None,
+        "mailbox.unpublish",
+        json!({"mailbox_id": praxy.id, "expected_generation": praxy.binding_version}),
+    )
+    .await;
+}
+
+/// The v1 paths onto the board from a machine host: a register or pin of another name is
+/// refused, and a migration that would publish one is refused whole, with nothing converted.
+async fn an_agent_machine_registers_pins_and_migrates_only_its_public_agent(d: Arc<Dispatcher>) {
+    let s = srv(&d, config()).await;
+    let vm = s.key("kd", "vm-agent-kd").await;
+    s.ok(
+        &vm,
+        Some("claude:s-vm-praxy"),
+        "agent.register",
+        json!({"name": "praxy"}),
+    )
+    .await;
+    // bound before the host had its record
+    s.ok(
+        &vm,
+        Some("claude:s-vm-helper"),
+        "agent.register",
+        json!({"name": "helper"}),
+    )
+    .await;
+    machine_record(&d, "kd", "vm-agent-kd").await;
+    let (code, message) = s
+        .err(
+            &vm,
+            Some("claude:s-vm-w2"),
+            "agent.register",
+            json!({"name": "praxy.w2"}),
+        )
+        .await;
+    assert_eq!(code, "forbidden", "{message}");
+    assert!(!has_row(&d, "kd", "praxy.w2").await);
+    let (code, message) = s
+        .err(
+            &vm,
+            Some("human:kd"),
+            "agent.pin",
+            json!({"name": "helper", "address": "claude:s-vm-helper"}),
+        )
+        .await;
+    assert_eq!(code, "forbidden", "{message}");
+    let (praxy, helper) = (s.agent("kd", "praxy").await, s.agent("kd", "helper").await);
+    let r = s
+        .rpc(
+            &vm,
+            None,
+            "host.migrate_v2",
+            json!({"publish": [praxy.id, helper.id]}),
+            Some(&conde::util::new_ulid()),
+        )
+        .await;
+    assert_eq!(r["error"]["code"], "forbidden", "{r}");
+    assert_eq!(s.agent("kd", "helper").await.address, helper.address);
+    assert_eq!(s.agent("kd", "praxy").await.address, praxy.address);
+    s.migrate(&vm, &[&praxy.id], &conde::util::new_ulid()).await;
+    let after = s.agent("kd", "praxy").await;
+    assert_eq!(
+        after.address.map(|a| a.kind),
+        Some(conde::address::Kind::Mailbox)
+    );
+    assert_eq!(s.agent("kd", "helper").await.address, None);
 }
